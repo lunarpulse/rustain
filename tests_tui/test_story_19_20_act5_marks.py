@@ -14,6 +14,7 @@ import pytest
 import harness
 from harness import RustainTUI
 from fixtures.scene_provider import SceneStub
+from decision_frame_helpers import open_decision
 from test_story_19_19_act2_consultation import _command, _events, _stop, _wait
 from test_story_19_20a_authorship_marks import _sha256
 
@@ -134,6 +135,7 @@ def _exercise(binary, root, evidence):
                 text = sender.get_screen_text()
                 recipient_text = recipient.get_screen_text()
                 if "[y] Allow once" in recipient_text:
+                    open_decision(recipient, "Peer consent", ("[y] Allow once",), timeout=60)
                     screen(recipient, marker + "-sender-consent")
                     recipient.send("y")
                 return marker in text
@@ -144,7 +146,7 @@ def _exercise(binary, root, evidence):
         # multi-turn requests instead of waiting for an operator.
         received_ws = worlds["recipient"][0]
         _command(sender, "/team send recipient consent-setup")
-        assert recipient.wait_for_screen("[a] Always allow", timeout=60), screen(recipient, "consent-failure")
+        open_decision(recipient, "Peer consent", ("[a] Always allow",), timeout=60)
         screen(recipient, "sender-consent")
         recipient.send("a")
         _wait(lambda: any(row["content"] == "consent-setup"
@@ -156,7 +158,7 @@ def _exercise(binary, root, evidence):
                     if row["content"] != "consent-setup"]
 
         _command(sender, "FIRST-DELEGATION")
-        assert sender.wait_for_screen("[r] Review", timeout=60), screen(sender, "approval-failure")
+        open_decision(sender, "Permission", ("[r] Review", "[s] Session"), timeout=60)
         screen(sender, "operator-approval")
         sender.send("s")
         finish("FIRST-COMPLETE")
@@ -170,6 +172,7 @@ def _exercise(binary, root, evidence):
         _command(sender, "/team send --type bug_report recipient Session token not refreshed on OAuth→password switch")
         def bug_arrived():
             if "[y] Allow once" in recipient.get_screen_text():
+                open_decision(recipient, "Peer consent", ("[y] Allow once",), timeout=60)
                 recipient.send("y")
             return len(received_items()) == 3
         _wait(bug_arrived, lambda: screen(sender, "typed-send-waiting"), timeout=60)

@@ -1881,6 +1881,9 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "a2a")]
     let mut a2a_send_runtime: Option<Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>> =
         None;
+    #[cfg(feature = "mcp")]
+    let mut mcp_task_runtimes: Vec<Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>> =
+        Vec::new();
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -2031,33 +2034,34 @@ pub async fn run() -> Result<()> {
             // `RoomJournal`); the MCP adapter never holds a concrete
             // `NodeTree`/`NodeJournal` (ADR-17-5-01 D2).
             #[cfg(feature = "mcp")]
-            let mcp_task_runtimes: Vec<
-                Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>,
-            > = {
-                let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
-                    subagent_registry.clone();
-                let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
-                    subagent_registry.clone();
-                let room: Arc<dyn crate::domain::ports::RoomJournal> =
-                    Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
-                        node_journal.clone(),
-                        Some(domain_tx.clone()),
-                    ));
-                let task_clock: Arc<dyn crate::domain::clock::Clock> =
-                    Arc::new(crate::domain::clock::SystemClock::default());
-                let mut runtimes = Vec::new();
-                for client in composite.mcp_clients() {
-                    let runtime = Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
-                        task_nodes.clone(),
-                        supervised.clone(),
-                        room.clone(),
-                        task_clock.clone(),
-                    ));
-                    client.set_task_runtime(Arc::clone(&runtime));
-                    runtimes.push(runtime);
-                }
-                runtimes
-            };
+            {
+                mcp_task_runtimes = {
+                    let task_nodes: Arc<dyn crate::domain::ports::TaskNodes> =
+                        subagent_registry.clone();
+                    let supervised: Arc<dyn crate::domain::ports::SupervisedNodes> =
+                        subagent_registry.clone();
+                    let room: Arc<dyn crate::domain::ports::RoomJournal> =
+                        Arc::new(crate::infrastructure::subagent::NodeRoomJournal::new(
+                            node_journal.clone(),
+                            Some(domain_tx.clone()),
+                        ));
+                    let task_clock: Arc<dyn crate::domain::clock::Clock> =
+                        Arc::new(crate::domain::clock::SystemClock::default());
+                    let mut runtimes = Vec::new();
+                    for client in composite.mcp_clients() {
+                        let runtime =
+                            Arc::new(crate::adapters::mcp::task_driver::McpTaskRuntime::new(
+                                task_nodes.clone(),
+                                supervised.clone(),
+                                room.clone(),
+                                task_clock.clone(),
+                            ));
+                        client.set_task_runtime(Arc::clone(&runtime));
+                        runtimes.push(runtime);
+                    }
+                    runtimes
+                };
+            }
             let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
                 crate::adapters::authority::InProcessAuthorityProvider::new(
                     authority_ledger.clone(),
@@ -2682,6 +2686,8 @@ pub async fn run() -> Result<()> {
         progress_rx,
         Some(refresh_tracker),
         live,
+        #[cfg(feature = "mcp")]
+        mcp_task_runtimes,
     )
     .await;
 

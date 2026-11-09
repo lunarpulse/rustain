@@ -401,8 +401,12 @@ pub const VERB_HINT: &str = "/artifact show <id> · /artifact review <id> approv
 
 /// Stated once, in the chrome, so an `InputRequest` row needs no affordance of
 /// its own to explain itself.
-pub const INPUT_REQUEST_NOTE: &str =
-    "input requests are listed as inventory — answering them arrives with the operator inbox";
+pub fn input_request_note() -> String {
+    format!(
+        "answer it from the Needs-you queue ({})",
+        crate::adapters::tui::decision_queue::queue_key_hint()
+    )
+}
 
 pub fn render(
     area: Rect,
@@ -523,7 +527,7 @@ pub fn render(
     });
     if has_input_requests {
         chrome.push(Line::from(Span::styled(
-            truncate_to_width(INPUT_REQUEST_NOTE, inner.width as usize),
+            truncate_to_width(&input_request_note(), inner.width as usize),
             muted,
         )));
     }

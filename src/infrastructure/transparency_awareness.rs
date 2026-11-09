@@ -372,6 +372,68 @@ impl UiLock {
     }
 }
 
+/// Ticket assignments and their first resolution, projected from the same journal
+/// snapshot as the transparency reminder. Bodies remain in the artifact store.
+#[derive(Clone, Debug)]
+pub struct ObservedTicket {
+    pub node: crate::domain::models::AgentId,
+    pub artifact: crate::domain::models::ArtifactId,
+    pub producer: crate::domain::models::AgentId,
+    pub seq: u64,
+    pub recorded_at_ms: i64,
+    pub outcome: Option<crate::domain::models::TicketResolution>,
+}
+
+fn fold_tickets(entries: &[crate::domain::models::JournalEntry]) -> Vec<ObservedTicket> {
+    use crate::domain::models::{ArtifactKind, JournalRecord, RoomEvent};
+    let mut artifacts = std::collections::HashMap::new();
+    let mut tickets: Vec<ObservedTicket> = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    for entry in entries {
+        match &entry.record {
+            JournalRecord::Room(RoomEvent::ArtifactCreated { artifact })
+                if artifact.kind == ArtifactKind::InputRequest =>
+            {
+                artifacts.insert(artifact.id.clone(), artifact.producer.clone());
+            }
+            JournalRecord::Room(RoomEvent::TicketAssigned { node, artifact, .. }) => {
+                let key = (node.clone(), artifact.clone());
+                if let Some(producer) = artifacts.get(artifact) {
+                    let ticket = ObservedTicket {
+                        node: node.clone(),
+                        artifact: artifact.clone(),
+                        producer: producer.clone(),
+                        seq: entry.seq,
+                        recorded_at_ms: entry.recorded_at_ms,
+                        outcome: None,
+                    };
+                    if let Some(&index) = positions.get(&key) {
+                        tickets[index] = ticket;
+                    } else {
+                        positions.insert(key, tickets.len());
+                        tickets.push(ticket);
+                    }
+                }
+            }
+            JournalRecord::Room(RoomEvent::TicketResolved {
+                node,
+                artifact,
+                outcome,
+            }) => {
+                if let Some(&index) = positions.get(&(node.clone(), artifact.clone()))
+                    && let Some(ticket) = tickets.get_mut(index)
+                    && ticket.outcome.is_none()
+                {
+                    ticket.outcome = Some(outcome.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    tickets.sort_by_key(|ticket| ticket.seq);
+    tickets
+}
+
 /// The last completed, successful fold: row sequences only (never the rows),
 /// with the head and stamp of the read that produced them.
 #[derive(Clone, Debug)]
@@ -380,6 +442,8 @@ struct ObservedRows {
     stamp: Option<JournalFileStamp>,
     /// Ascending; equal values for rows of one atomic batch.
     row_seqs: Vec<u64>,
+    reply_counts: std::collections::HashMap<(String, String), u64>,
+    tickets: Vec<ObservedTicket>,
 }
 
 struct JobInput {
@@ -443,10 +507,27 @@ fn observe_rows(
             .map(|row| row.seq)
             .collect();
     row_seqs.sort_unstable();
+    let mut reply_counts = std::collections::HashMap::new();
+    for entry in &snapshot.entries {
+        if let crate::domain::models::JournalRecord::Room(
+            crate::domain::models::RoomEvent::PeerReplyObserved {
+                peer,
+                answers: Some(item),
+                ..
+            },
+        ) = &entry.record
+        {
+            *reply_counts
+                .entry((peer.as_str().to_owned(), item.clone()))
+                .or_insert(0) += 1;
+        }
+    }
     Ok(Some(ObservedRows {
         head: snapshot.head,
         stamp: snapshot.stamp,
         row_seqs,
+        tickets: fold_tickets(&snapshot.entries),
+        reply_counts,
     }))
 }
 
@@ -561,6 +642,24 @@ impl LogAwarenessObserver {
     #[must_use]
     pub fn full_reads(&self) -> u64 {
         self.active.as_ref().map_or(0, |active| active.full_reads)
+    }
+    /// Counts of distinct journaled reply turns for each peer and answered item.
+    #[must_use]
+    pub fn reply_counts(&self) -> Option<&std::collections::HashMap<(String, String), u64>> {
+        self.active
+            .as_ref()?
+            .rows
+            .as_ref()
+            .map(|rows| &rows.reply_counts)
+    }
+
+    /// Ticket projection from the last successful fold, without another journal read.
+    #[must_use]
+    pub fn tickets(&self) -> &[ObservedTicket] {
+        self.active
+            .as_ref()
+            .and_then(|active| active.rows.as_ref())
+            .map_or(&[], |rows| rows.tickets.as_slice())
     }
 
     /// Whether a job is outstanding.
@@ -799,6 +898,54 @@ mod tests {
         view.display
     }
 
+    #[tokio::test]
+    async fn story21_6_reply_counts_reuse_the_existing_changed_head_fold() {
+        let workspace = tempfile::tempdir().unwrap();
+        let peer = PeerId::from_public_key(&[7; 32]).unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let mut observer = LogAwarenessObserver::for_workspace(workspace.path());
+        let mut view = LogAwarenessView::default();
+        let now = Instant::now();
+        observe(&mut observer, &mut view, now).await;
+        let initial = observer.full_reads();
+        let mut state = crate::adapters::tui::state::TuiState::new(80, 24);
+        crate::adapters::tui::decision_queue::reply::observe(
+            &mut state,
+            peer.as_str(),
+            "Alice",
+            "ri_1",
+            1,
+        );
+        assert_eq!(crate::adapters::tui::decision_queue::waiting(&state), 1);
+        journal
+            .append_batch(vec![JournalRecord::Room(RoomEvent::PeerReplyObserved {
+                peer: peer.clone(),
+                endpoint: None,
+                turn: "turn-1".into(),
+                answers: Some("ri_1".into()),
+                content: None,
+                content_hash: None,
+            })])
+            .await
+            .unwrap();
+        observe(&mut observer, &mut view, now + OBSERVATION_INTERVAL).await;
+        assert_eq!(observer.full_reads(), initial + 1);
+        assert_eq!(
+            observer
+                .reply_counts()
+                .unwrap()
+                .get(&(peer.as_str().to_owned(), "ri_1".into())),
+            Some(&1)
+        );
+        crate::adapters::tui::decision_queue::reply::journal_counts(
+            &mut state,
+            observer.reply_counts().unwrap(),
+        );
+        assert_eq!(crate::adapters::tui::decision_queue::waiting(&state), 0);
+        observe(&mut observer, &mut view, now + OBSERVATION_INTERVAL * 2).await;
+        assert_eq!(observer.full_reads(), initial + 1);
+    }
+
     /// Present one visit the way a completed draw does, and persist it.
     async fn present(
         observer: &mut LogAwarenessObserver,
@@ -820,6 +967,86 @@ mod tests {
 
     fn stored(workspace: &Path) -> SeenLoad {
         SeenStore::for_workspace(workspace).load()
+    }
+
+    #[tokio::test]
+    async fn story21_6_ticket_projection_reuses_each_existing_fold() {
+        use crate::domain::models::{
+            ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, EvidenceArtifact,
+            HostBinding, TicketResolution,
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let node = AgentId::parse("ticket-node").unwrap();
+        let hash = ContentHash::parse_hex(&"a".repeat(64)).unwrap();
+        let artifact = EvidenceArtifact {
+            id: ArtifactId::from(hash),
+            kind: ArtifactKind::InputRequest,
+            producer: node.clone(),
+            content_hash: hash,
+            authority: CapabilityTokenId::default(),
+            provenance: vec![],
+            depends_on: vec![],
+            review: None,
+            host: HostBinding::new("host", "workspace"),
+        };
+        journal
+            .append_room(RoomEvent::ArtifactCreated {
+                artifact: artifact.clone(),
+            })
+            .await
+            .unwrap();
+        journal
+            .append_room(RoomEvent::TicketAssigned {
+                node: node.clone(),
+                artifact: artifact.id.clone(),
+                to: None,
+            })
+            .await
+            .unwrap();
+        let t0 = Instant::now();
+        let mut observer = LogAwarenessObserver::for_workspace(workspace.path());
+        let mut view = LogAwarenessView::default();
+        observe(&mut observer, &mut view, t0).await;
+        assert_eq!(observer.tickets().len(), 1);
+        assert_eq!(observer.tickets()[0].producer, node);
+        assert!(observer.tickets()[0].outcome.is_none());
+        assert_eq!(observer.full_reads(), 1);
+        for second in 1..=3 {
+            journal.append_room(rejection(second as u8)).await.unwrap();
+            observe(&mut observer, &mut view, at(t0, second)).await;
+            assert_eq!(observer.full_reads(), second + 1);
+            assert_eq!(observer.tickets().len(), 1);
+        }
+        journal
+            .append_room(RoomEvent::TicketResolved {
+                node: node.clone(),
+                artifact: artifact.id.clone(),
+                outcome: TicketResolution::ExpiredUnanswered {
+                    reason: "ttl".into(),
+                },
+            })
+            .await
+            .unwrap();
+        observe(&mut observer, &mut view, at(t0, 4)).await;
+        assert!(matches!(
+            observer.tickets()[0].outcome,
+            Some(TicketResolution::ExpiredUnanswered { .. })
+        ));
+        assert_eq!(observer.full_reads(), 5);
+        let old_seq = observer.tickets()[0].seq;
+        journal
+            .append_room(RoomEvent::TicketAssigned {
+                node,
+                artifact: artifact.id,
+                to: None,
+            })
+            .await
+            .unwrap();
+        observe(&mut observer, &mut view, at(t0, 5)).await;
+        assert_eq!(observer.tickets().len(), 1);
+        assert!(observer.tickets()[0].outcome.is_none());
+        assert!(observer.tickets()[0].seq > old_seq);
     }
 
     #[tokio::test]

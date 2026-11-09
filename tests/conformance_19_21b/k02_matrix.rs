@@ -9,10 +9,7 @@ pub(crate) async fn assert_pending_without_egress(
     hosts: &[&ObservedHost],
 ) {
     assert!(
-        fixture
-            .state
-            .pending_team_proposals
-            .contains_key(&fixture.conversation.id),
+        fixture.proposal(&fixture.conversation.id).is_some(),
         "proposal remains pending until a human Send key"
     );
     for host in hosts {
@@ -39,10 +36,7 @@ pub(crate) async fn approve_once(fixture: &mut ProposalFixture, hosts: &[&Observ
     fixture.key(DomainInputEvent::KeyPress('y')).await;
     fixture.settle(hosts.len()).await;
     assert!(
-        !fixture
-            .state
-            .pending_team_proposals
-            .contains_key(&fixture.conversation.id),
+        fixture.proposal(&fixture.conversation.id).is_none(),
         "human Send consumes the pending proposal"
     );
     for host in hosts {

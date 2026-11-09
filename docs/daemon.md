@@ -342,14 +342,14 @@ Since 12.2b the daemon is a **headless turn-processing agent**, not just a memor
 process. It holds one per-process conversation and drives turns over a framed,
 versioned wire protocol on its Unix socket.
 
-The [agent-proposed message card](a2a.md#agent-proposed-messages-standalone-and-attached-tui)
+The [agent-proposed message decision](a2a.md#agent-proposed-messages-standalone-and-attached-tui)
 uses the daemon's own A2A egress and a construction-owned, in-memory proposal
 registry. Raising returns immediately without holding the turn lock. Only the
 authenticated TrustedLocal read-write writer that opts in to proposal decisions
 receives the exact snapshot and can choose Send or Dismiss. The rich TUI opts in
-after `AttachAck`; `--plain` does not. Review is local and sends nothing; it
-closes any received-item overlay and returns a scrolled transcript to the current
-proposal. A generic `ApprovalRequest`, YOLO, grants, subagent policy, peer context
+after `AttachAck`; `--plain` does not. Review is owned by the decision frame and
+sends nothing. `Esc` defers the decision; `Ctrl+X q` opens the Needs-you list
+to return to it. A generic `ApprovalRequest`, YOLO, grants, subagent policy, peer context
 or elapsed time never authorizes a proposal. No capable writer (including plain,
 read-only or Peer-only attachments) means refusal at raise, not a retained
 invisible proposal.
@@ -367,11 +367,10 @@ An accepted Send retains its deciding response endpoint across connection EOF;
 writer-replacement and decision-identity fences still apply. Disconnecting is not
 a second authorization and cannot retarget a later proposal.
 
-Received-item cards prefer a configured policy label, then the durable bound-ingress
+Received-item decisions prefer a configured policy label, then the durable bound-ingress
 alias when present, then the original principal label. The alias is display-only:
 it changes neither the policy principal nor consent and does not assert a person's
-identity. When an inline card reduces the transcript area, PageUp/PageDown use the
-remaining painted height so Review text is not skipped between pages.
+identity. **View item** opens the associated item from its decision frame.
 
 ### Attaching a client
 

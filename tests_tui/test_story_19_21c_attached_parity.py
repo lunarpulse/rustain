@@ -28,6 +28,33 @@ def _wait_screen(tui, predicate, label, timeout=45):
             return screen
         assert time.monotonic() < deadline, f"{label}:\n{screen}"
 
+def _stable_decision(tui, title, rail, timeout=45):
+    """Observe an intact frame without depending on toast or Stage changes."""
+    deadline = time.monotonic() + timeout
+    previous, since = None, None
+    while time.monotonic() < deadline:
+        screen = tui.get_screen_text()
+        rows, frame = screen.splitlines(), None
+        for index, row in enumerate(rows):
+            if title not in row or "┌" not in row or "┐" not in row:
+                continue
+            left = row.rfind("┌", 0, row.index(title))
+            right = row.find("┐", row.index(title))
+            for end in range(index + 1, len(rows)):
+                if len(rows[end]) > right and rows[end][left] == "└" and rows[end][right] == "┘":
+                    candidate = tuple(line[left:right + 1] for line in rows[index:end + 1])
+                    if any((content := line[1:-1].strip().removeprefix("▶ ").lstrip()).startswith("[")
+                           and rail in content for line in candidate[1:-1]):
+                        frame = candidate
+                    break
+            break
+        now = time.monotonic()
+        if frame != previous:
+            previous, since = frame, now
+        elif frame is not None and now - since >= 0.6:
+            return screen
+    pytest.fail(f"Decision frame did not settle: {title}\n{screen}")
+
 
 def _exercise(binary, evidence, root, monkeypatch):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
@@ -106,6 +133,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         tui.child.logfile_read = terminal_log
         _command(tui, "/team send B consent-setup")
         _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "recipient sender consent")
+        _stable_decision(recipient, "Decision: Peer consent", "[a] Always allow")
         recipient.send("a")
         _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
                      "recipient accepted setup")
@@ -134,16 +162,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         screen = _wait_screen(tui, lambda screen: "Retract on B's host" in screen and "[y] Retract" in screen,
                               "armed retract card")
         (evidence / "05-card.screen.txt").write_text(screen)
-        # The decision frame ignores keys for its first 500 ms: wait for a settled frame.
-        import time as _time
-        last, since, deadline = None, None, _time.monotonic() + 30
-        while True:
-            now, current = _time.monotonic(), tui.get_screen_text()
-            if current != last:
-                last, since = current, now
-            elif now - since >= 0.7:
-                break
-            assert now < deadline, current
+        _stable_decision(tui, "Decision: Retract", "[y] Retract")
         tui.send("y")
         screen = _wait_screen(tui, lambda screen: "Retracted on B's host." in screen, "landed retract")
         (evidence / "06-landed.screen.txt").write_text(screen)

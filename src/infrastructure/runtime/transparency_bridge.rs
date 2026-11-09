@@ -109,6 +109,35 @@ pub(crate) fn log_awareness_observer(
     }
 }
 
+/// Replay tickets once when there is no composed transparency observer.
+/// The temporary observer is dropped after its first completed fold.
+pub(crate) async fn replay_uncomposed_tickets(
+    workspace: &std::path::Path,
+    state: &mut TuiState,
+    bridge: &mut super::ticket_bridge::TicketBridge,
+    #[cfg(feature = "mcp")] runtimes: &[std::sync::Arc<
+        crate::adapters::mcp::task_driver::McpTaskRuntime,
+    >],
+) {
+    let mut observer =
+        crate::infrastructure::transparency_awareness::LogAwarenessObserver::for_workspace(
+            workspace,
+        );
+    let mut view = crate::adapters::tui::state::LogAwarenessView::default();
+    observer.tick(&mut view);
+    observer.settle(&mut view).await;
+    bridge
+        .observe(
+            state,
+            &observer,
+            crate::adapters::tui::decision_queue::Responder::Local,
+            false,
+            #[cfg(feature = "mcp")]
+            runtimes,
+        )
+        .await;
+}
+
 /// Write exactly one already-read transparency report to the regenerable
 /// export. Keeping the report argument explicit prevents a panel export from
 /// racing a fresh journal read and claiming a different snapshot.
@@ -506,11 +535,16 @@ pub async fn team_command(
                 // ⛔ never a stacked dismissible notice, ⛔ never a
                 // turn-fatal Warning.
                 tokio::spawn(async move {
-                    let message = tokio::select! {
+                    let (message, observations) = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return,
-                        message = team_board_message(&runtime, &selector) => message,
+                        result = team_board_result_at(&runtime, &selector, std::time::Instant::now(), true) => result,
                     };
+                    if !observations.is_empty() {
+                        let _ = event_bus.emit_domain(
+                            crate::domain::events::AppEvent::TeamBoardObserved(observations),
+                        );
+                    }
                     let _ =
                         event_bus.emit_domain(crate::domain::events::AppEvent::TeamBoardReady {
                             conversation_id,
@@ -625,42 +659,7 @@ pub async fn team_command(
         // inline; the answer arrives as `TeamThreadReady` and replaces the
         // stable `team-thread` block in place.
         TeamCommandArgs::Thread { peer, item_id } => {
-            use crate::adapters::tui::handlers::team_command::{
-                TEAM_THREAD_READING, show_team_thread,
-            };
-            #[cfg(feature = "a2a")]
-            {
-                let Some(runtime) = app_state.a2a_send.clone() else {
-                    show_team_thread(
-                        state,
-                        "· no A2A send runtime is configured for this session, so there is no \
-                         peer to read a thread from."
-                            .to_owned(),
-                    );
-                    return;
-                };
-                show_team_thread(state, TEAM_THREAD_READING.to_owned());
-                // Detached, like every rail-3 spawn: the session token owns
-                // its lifetime; the handle exists for the `K11` keystone.
-                drop(spawn_team_thread(
-                    runtime,
-                    app_state.event_bus.clone(),
-                    conversation_id.to_owned(),
-                    peer,
-                    item_id,
-                    app_state.session_cancel.child_token(),
-                ));
-            }
-            #[cfg(not(feature = "a2a"))]
-            {
-                let _ = (peer, item_id, TEAM_THREAD_READING);
-                show_team_thread(
-                    state,
-                    "· `/team thread` needs the `a2a` feature; this build was compiled without \
-                     it."
-                    .to_owned(),
-                );
-            }
+            read_team_thread(state, conversation_id, peer, item_id, app_state);
         }
         TeamCommandArgs::View { item_id } => {
             if let Err(error) = super::recipient_surface::open_received_surface(
@@ -744,6 +743,48 @@ pub async fn team_command(
             Ok(message) => handler::show_team_status(state, message),
             Err(message) => emit_team_warning(state, conversation_id, app_state, message),
         },
+    }
+}
+
+/// Execute the same thread reader used by `/team thread`, without reparsing identifiers.
+pub fn read_team_thread(
+    state: &mut TuiState,
+    conversation_id: &str,
+    peer: String,
+    item_id: String,
+    app_state: &AppState,
+) {
+    use crate::adapters::tui::handlers::team_command::{TEAM_THREAD_READING, show_team_thread};
+    #[cfg(feature = "a2a")]
+    {
+        let Some(runtime) = app_state.a2a_send.clone() else {
+            show_team_thread(state, "· no A2A send runtime is configured for this session, so there is no peer to read a thread from.".to_owned());
+            return;
+        };
+        show_team_thread(state, TEAM_THREAD_READING.to_owned());
+        drop(spawn_team_thread(
+            runtime,
+            app_state.event_bus.clone(),
+            conversation_id.to_owned(),
+            peer,
+            item_id,
+            app_state.session_cancel.child_token(),
+        ));
+    }
+    #[cfg(not(feature = "a2a"))]
+    {
+        let _ = (
+            peer,
+            item_id,
+            conversation_id,
+            app_state,
+            TEAM_THREAD_READING,
+        );
+        show_team_thread(
+            state,
+            "· `/team thread` needs the `a2a` feature; this build was compiled without it."
+                .to_owned(),
+        );
     }
 }
 
@@ -1097,32 +1138,56 @@ pub async fn team_board_message_at(
     selector: &crate::adapters::tui::handlers::team_command::TeamBoardSelector,
     now: std::time::Instant,
 ) -> String {
+    team_board_result_at(runtime, selector, now, false).await.0
+}
+
+#[cfg(feature = "a2a")]
+async fn team_board_result_at(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    selector: &crate::adapters::tui::handlers::team_command::TeamBoardSelector,
+    now: std::time::Instant,
+    observe: bool,
+) -> (String, Vec<(String, String, String, u64)>) {
     use crate::adapters::a2a::board::{self, ActionSelector};
     use crate::adapters::tui::handlers::team_command::TeamBoardSelector;
 
-    // The injected `now` an action board's age is measured against.
     let wall = runtime.wall_now_unix_secs();
+    let render_inventory = |view: board::BoardView| {
+        let observations = if observe {
+            board::reply_observations(&view, |alias| {
+                runtime
+                    .peer_binding(alias)
+                    .map(|(spec, _)| spec.resolved_identity().to_string())
+            })
+        } else {
+            Vec::new()
+        };
+        (board::render_board(&view), observations)
+    };
     match selector {
         TeamBoardSelector::Inventory => match board::collect_board(runtime, now).await {
-            Ok(view) => board::render_board(&view),
-            Err(refusal) => board::render_refresh_refusal(refusal),
+            Ok(view) => render_inventory(view),
+            Err(refusal) => (board::render_refresh_refusal(refusal), Vec::new()),
         },
         TeamBoardSelector::Peer(peer) => {
             match board::collect_peer_board(runtime, peer, now).await {
-                Ok(view) => board::render_board(&view),
-                Err(refusal) => board::render_peer_board_refusal(&refusal),
+                Ok(view) => render_inventory(view),
+                Err(refusal) => (board::render_peer_board_refusal(&refusal), Vec::new()),
             }
         }
         TeamBoardSelector::Last => {
-            action_board_message(runtime, &ActionSelector::Last, now, wall).await
+            action_board_message(runtime, &ActionSelector::Last, now, wall, observe).await
         }
         TeamBoardSelector::Action(id) => {
-            action_board_message(runtime, &ActionSelector::Id(id.clone()), now, wall).await
+            action_board_message(runtime, &ActionSelector::Id(id.clone()), now, wall, observe).await
         }
-        TeamBoardSelector::Actions => match board::collect_action_list(runtime).await {
-            Ok(actions) => board::render_action_list(&actions, wall),
-            Err(refusal) => board::render_action_board_refusal(&refusal),
-        },
+        TeamBoardSelector::Actions => (
+            match board::collect_action_list(runtime).await {
+                Ok(actions) => board::render_action_list(&actions, wall),
+                Err(refusal) => board::render_action_board_refusal(&refusal),
+            },
+            Vec::new(),
+        ),
     }
 }
 
@@ -1132,12 +1197,24 @@ async fn action_board_message(
     selector: &crate::adapters::a2a::board::ActionSelector,
     now: std::time::Instant,
     wall: i64,
-) -> String {
+    observe: bool,
+) -> (String, Vec<(String, String, String, u64)>) {
     use crate::adapters::a2a::board;
 
     match board::collect_action_board(runtime, selector, now).await {
-        Ok(view) => board::render_action_board(&view, wall),
-        Err(refusal) => board::render_action_board_refusal(&refusal),
+        Ok(view) => {
+            let observations = if observe {
+                board::action_reply_observations(&view, |alias| {
+                    runtime
+                        .peer_binding(alias)
+                        .map(|(spec, _)| spec.resolved_identity().to_string())
+                })
+            } else {
+                Vec::new()
+            };
+            (board::render_action_board(&view, wall), observations)
+        }
+        Err(refusal) => (board::render_action_board_refusal(&refusal), Vec::new()),
     }
 }
 
@@ -1280,6 +1357,9 @@ pub async fn team_retract_preview(
     };
     TeamRetractPreview::Card(TeamRetractCard {
         peer: peer.to_owned(),
+        principal: runtime
+            .peer_binding(peer)
+            .map(|(spec, _)| spec.resolved_identity().to_string()),
         item_id: item.to_owned(),
         task,
         body: format!(
@@ -2247,6 +2327,7 @@ mod tests {
             origin.clone(),
             TeamRetractPreview::Card(TeamRetractCard {
                 peer: "jun-dev".to_owned(),
+                principal: None,
                 item_id: "ri_x".to_owned(),
                 task: Some("task-x".to_owned()),
                 body: "card".to_owned(),
@@ -3639,6 +3720,7 @@ mod credential_tests {
                 peer: peer.to_owned(),
                 item: "ri_x".to_owned(),
             },
+            principal: None,
             task: Some("task-x".to_owned()),
             card: "Retract on scripted's host".to_owned(),
             armed,
@@ -3849,6 +3931,26 @@ mod log_awareness_tests {
     use crate::infrastructure::transparency_awareness::{
         LogAwarenessObserver, SeenBoundary, SeenLoad, SeenStore,
     };
+
+    #[tokio::test]
+    async fn story21_6_uncomposed_host_keeps_recurring_observer_disabled() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (mut app_state, _rx) = super::tests::bridge_app_state(workspace.path());
+        app_state.transparency = None;
+        let mut observer = log_awareness_observer(&app_state);
+        let mut view = LogAwarenessView::default();
+        let start = Instant::now();
+        append_rows(workspace.path(), 1).await;
+        for seconds in [0, 2, 60] {
+            observer.tick_at(start + Duration::from_secs(seconds), &mut view);
+            observer.settle(&mut view).await;
+        }
+        assert_eq!((observer.jobs_started(), observer.full_reads()), (0, 0));
+        let host = include_str!("event_loop.rs");
+        assert!(host.contains("transparency_bridge::log_awareness_observer(&app_state)"));
+        assert!(host.contains("transparency_bridge::replay_uncomposed_tickets("));
+        assert!(!host.contains("ticket_only_awareness"));
+    }
 
     struct Client {
         app_state: AppState,

@@ -1,21 +1,11 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::app::InputAction;
-use rustain::adapters::tui::decision_queue::{
-    DecisionKind, PaneOutcome, handle_domain_event, note_painted, raise_large_image,
-};
-use rustain::adapters::tui::notification_log::LogFacts;
-use rustain::adapters::tui::notifications::NotificationStore;
-use rustain::adapters::tui::state::TuiState;
-use rustain::domain::clock::MockClock;
-use rustain::domain::events::DomainInputEvent;
-use rustain::domain::models::NotificationsConfig;
+use rustain::adapters::tui::decision_queue::{self, DecisionEffect, DecisionKey, DecisionKind};
+use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::domain::models::{
-    FocusState, ImageAttachment, JournalRecord, PermissionMode, ResponseMode, RoomEvent,
-    TeamProposalDecision,
+    FocusState, ImageAttachment, InvocationStatus, JournalRecord, MessageRole, PermissionMode,
+    ResponseMode, RoomEvent, StopReason,
 };
 use serde_json::json;
 
@@ -27,10 +17,10 @@ use super::proposal_harness::ProposalFixture;
 mod stage;
 
 async fn fixture(host: &ObservedHost) -> ProposalFixture {
-    let mut fixture = ProposalFixture::start(vec![host.peer("lena-po")]).await;
-    fixture.set_mode(PermissionMode::Yolo);
+    let mut f = ProposalFixture::start(vec![host.peer("lena-po")]).await;
+    f.set_mode(PermissionMode::Yolo);
     host.reset_counts();
-    let result = fixture
+    let result = f
         .submit(json!({
             "recipients": ["lena-po"],
             "type": "architecture_update",
@@ -38,316 +28,317 @@ async fn fixture(host: &ObservedHost) -> ProposalFixture {
         }))
         .await;
     assert!(result.starts_with("Proposal shown to the operator."));
-    fixture.state.focus = FocusState::Chat;
-    fixture.paint(60, 16);
-    assert!(fixture.state.team_proposal_visible.is_some());
-    fixture
+    assert!(f.proposal(&f.conversation.id).is_some());
+    f
+}
+
+fn proposal_key(f: &ProposalFixture) -> DecisionKey {
+    DecisionKey {
+        kind: DecisionKind::TeamProposal,
+        source: f.proposal(&f.conversation.id).unwrap().id.clone(),
+        conversation_id: Some(f.conversation.id.clone()),
+    }
+}
+
+fn open_proposal(f: &mut ProposalFixture) {
+    let key = proposal_key(f);
+    assert!(decision_queue::open(&mut f.state, &key));
 }
 
 fn press(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
 
-async fn assert_not_sent(fixture: &ProposalFixture, host: &ObservedHost) {
-    assert!(
-        fixture
-            .state
-            .pending_team_proposals
-            .contains_key(&fixture.conversation.id)
-    );
-    assert!(fixture.state.team_send_blocks.is_empty());
+async fn assert_not_sent(f: &ProposalFixture, host: &ObservedHost) {
+    assert!(f.proposal(&f.conversation.id).is_some());
+    assert!(f.state.team_send_blocks.is_empty());
     assert_eq!(host.counts(), HttpCounts { get: 0, post: 0 });
-    assert!(!fixture.sender.rows().await.iter().any(|row| matches!(
+    assert!(!f.sender.rows().await.iter().any(|row| matches!(
         row.record,
         JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { .. })
     )));
 }
 
-async fn send_once(fixture: &mut ProposalFixture, host: &ObservedHost) {
-    fixture.paint(60, 16);
+async fn send_once(f: &mut ProposalFixture, host: &ObservedHost) {
+    open_proposal(f);
+    f.paint(60, 16);
     assert!(matches!(
-        fixture
-            .raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
+        f.raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
             .await,
-        Some(InputAction::TeamProposal {
-            decision: Some(TeamProposalDecision::Send),
-            ..
-        })
+        Some(InputAction::Decision(DecisionEffect::TeamProposalSend))
     ));
-    fixture.settle(1).await;
+    f.settle(1).await;
     assert_eq!(host.counts(), HttpCounts { get: 0, post: 1 });
-    let dispatches = fixture
-        .sender
-        .rows()
-        .await
-        .iter()
-        .filter(|row| {
-            matches!(
+    assert_eq!(
+        f.sender
+            .rows()
+            .await
+            .iter()
+            .filter(|row| matches!(
                 row.record,
                 JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { .. })
-            )
-        })
-        .count();
-    assert_eq!(dispatches, 1);
+            ))
+            .count(),
+        1
+    );
 }
 
-/// The event loop's pane dispatch, as the loop calls it: `Some` when the pane owned the key.
-fn pane_key(state: &mut TuiState, key: char) -> Option<InputAction> {
-    match handle_domain_event(
-        state,
-        &DomainInputEvent::KeyPress(key),
-        &LogFacts::default(),
-        rustain::adapters::tui::keymap::Host::Local,
-    )? {
-        PaneOutcome::Effect(effect) => Some(effect.into_action()),
-        _ => Some(InputAction::Consumed),
+#[tokio::test]
+async fn k03_proposal_keys_are_dropped_during_first_paint_window() {
+    let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
+    let mut f = fixture(&host).await;
+    open_proposal(&mut f);
+    f.paint_unready(60, 16);
+    for key in ['y', 'r', 'n'] {
+        assert!(matches!(
+            f.raw_key(press(KeyCode::Char(key), KeyModifiers::NONE))
+                .await,
+            Some(InputAction::Consumed)
+        ));
+        assert_not_sent(&f, &host).await;
     }
+    f.raw_key(press(KeyCode::Char('c'), KeyModifiers::NONE))
+        .await;
+    assert_eq!(&*f.copies.lock(), &["Exact proposed body.".to_string()]);
+    assert_not_sent(&f, &host).await;
+    f.clock.advance(decision_queue::INERT_AFTER_PAINT);
+    assert!(matches!(
+        f.raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await,
+        Some(InputAction::Decision(DecisionEffect::TeamProposalSend))
+    ));
+    f.settle(1).await;
+    assert_eq!(host.counts(), HttpCounts { get: 0, post: 1 });
+    host.stop().await;
 }
 
 #[tokio::test]
 async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
-    let mut fixture = fixture(&host).await;
-
-    // Old (19.21b): `handle_input` mapped `y`/`n` to ImageConfirmAttach/Cancel. New
-    // (21.1 S2, AC9/AC12): the confirmation is a decision-pane item and the event
-    // loop's pane dispatch owns its keys before any proposal action, inert for 500 ms.
-    // Old -> new (21.6 6-A): the TuiState large-image slot is gone; the queued image
-    // item IS the confirmation (and the gate that hides the proposal while it waits).
-    let clock = Arc::new(MockClock::new(Instant::now()));
-    fixture.state.notifications =
-        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
-    let ask = |state: &mut TuiState| {
-        raise_large_image(
-            state,
+    let mut f = fixture(&host).await;
+    for (key, attach) in [('y', true), ('n', false)] {
+        decision_queue::raise_large_image(
+            &mut f.state,
             ImageAttachment {
                 media_type: "image/png".into(),
                 data: "large-base64-image".into(),
             },
             "Large image. Attach it?",
         );
-        note_painted(state);
-    };
-    ask(&mut fixture.state);
-    // Even a proposal visibility marker from the preceding paint cannot own y; the
-    // inert window swallows it first, so nothing is attached or sent.
-    assert!(matches!(
-        pane_key(&mut fixture.state, 'y'),
-        Some(InputAction::Consumed)
-    ));
-    // Old -> new: the slot outlived the answer, so the hidden-proposal check ran after
-    // `y`; an answered item now leaves the queue, so it runs while the item still waits.
-    let rows = fixture.paint(60, 16);
-    assert!(fixture.state.team_proposal_visible.is_none());
-    assert!(!rows.iter().any(|row| row.contains("[y] Send")));
-    clock.advance(Duration::from_millis(501));
-    assert!(matches!(
-        pane_key(&mut fixture.state, 'y'),
-        Some(InputAction::ImageConfirmAttach)
-    ));
-    assert!(!fixture.state.decisions.holds(DecisionKind::LargeImage));
-    ask(&mut fixture.state);
-    clock.advance(Duration::from_millis(501));
-    assert!(matches!(
-        pane_key(&mut fixture.state, 'n'),
-        Some(InputAction::ImageConfirmCancel)
-    ));
-    assert_not_sent(&fixture, &host).await;
-
-    // The fixture dispatches proposal actions only; each answer already removed its
-    // image confirmation (as the real attach/cancel dispatcher consumes it), so the
-    // same proposal can now be authorized.
-    assert!(!fixture.state.decisions.holds(DecisionKind::LargeImage));
-    send_once(&mut fixture, &host).await;
+        let rows = f.paint_unready(60, 16);
+        assert!(!rows.iter().any(|row| row.contains("[y] Send")));
+        assert!(matches!(
+            f.raw_key(press(KeyCode::Char(key), KeyModifiers::NONE))
+                .await,
+            Some(InputAction::Consumed)
+        ));
+        assert_not_sent(&f, &host).await;
+        f.clock.advance(decision_queue::INERT_AFTER_PAINT);
+        let action = f
+            .raw_key(press(KeyCode::Char(key), KeyModifiers::NONE))
+            .await;
+        if attach {
+            assert!(matches!(action, Some(InputAction::ImageConfirmAttach)));
+        } else {
+            assert!(matches!(action, Some(InputAction::ImageConfirmCancel)));
+        }
+        assert!(!f.state.decisions.holds(DecisionKind::LargeImage));
+        assert_not_sent(&f, &host).await;
+    }
+    send_once(&mut f, &host).await;
     host.stop().await;
 }
 
-fn paint_owned_frame(fixture: &mut ProposalFixture) -> Vec<String> {
-    fixture.tabs.active_tab_mut().conversation = fixture.conversation.clone();
-    fixture.state.terminal_width = 60;
-    fixture.state.terminal_height = 16;
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
-    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
-    let count = fixture.tabs.tab_count();
-    rustain::infrastructure::runtime::event_loop::render(
-        &mut terminal,
-        &mut fixture.state,
-        &fixture.conversation,
-        &Default::default(),
-        "fixture-model",
-        "fixture-provider",
-        &*fixture.security,
-        count,
-        0,
-        Some(&mut fixture.tabs),
-        &rustain::domain::services::session_index::SessionIndex::new(),
-        128_000,
-        &core,
-    )
-    .unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .content
-        .chunks(60)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect()
-}
-
-fn assert_tool_covers_proposal(fixture: &ProposalFixture, rows: &[String]) {
-    // Shared frames keep the underlay metadata, but it cannot authorize a key.
-    assert!(fixture.state.team_proposal_visible.is_some());
-    assert!(rows.iter().any(|row| row.contains("Tool · Read #1")));
-    assert!(!rows.iter().any(|row| row.contains("[y] Send")));
-}
-
 #[tokio::test]
-async fn k03_tool_inspector_owns_y_without_sending_with_stale_or_fresh_paint() {
-    use rustain::adapters::tui::presentation::Surface;
-    use rustain::domain::models::{InvocationStatus, MessageRole, StopReason};
-
+async fn k03_proposal_frame_restores_help_and_tool_inspector_exactly() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
-    let mut fixture = fixture(&host).await;
-    // The ownership witness uses a real, renderable invocation, not the old
-    // wire-id-only peek marker. The pending proposal remains the send target.
-    fixture
-        .conversation
+    let mut f = fixture(&host).await;
+    // Defer the automatic frame so each explicitly opened owner is underneath it.
+    open_proposal(&mut f);
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    presentation::reducer::open(&mut f.state, Surface::Help);
+    let help = f.state.modal_stack.top().unwrap().clone();
+    open_proposal(&mut f);
+    f.paint(60, 16);
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    assert_eq!(f.state.modal_stack.top(), Some(&help));
+    assert_not_sent(&f, &host).await;
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+
+    f.conversation
         .messages
         .push(stage::make_msg("inspected-tool", MessageRole::Assistant));
-    fixture.conversation.turns.push(stage::make_turn(
+    f.conversation.turns.push(stage::make_turn(
         "inspected-tool",
         vec![stage::tool("Read", InvocationStatus::Success)],
         Some(StopReason::EndTurn),
     ));
+    stage::inspect_stage_tool(&mut f.state, &f.conversation, None);
+    let owner = f.state.modal_stack.top().unwrap().clone();
+    assert!(matches!(owner.surface, Surface::ToolInspector(_)));
     for repaint in [false, true] {
-        stage::inspect_stage_tool(&mut fixture.state, &fixture.conversation, None);
-        let owner = fixture.state.modal_stack.top().unwrap().clone();
-        assert!(matches!(owner.surface, Surface::ToolInspector(_)));
         if repaint {
-            let rows = paint_owned_frame(&mut fixture);
-            assert_tool_covers_proposal(&fixture, &rows);
+            f.paint(60, 16);
         }
-        assert!(matches!(
-            fixture
-                .raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
-                .await,
-            Some(InputAction::Consumed)
-        ));
-        assert_not_sent(&fixture, &host).await;
-        if !repaint {
-            let rows = paint_owned_frame(&mut fixture);
-            assert_tool_covers_proposal(&fixture, &rows);
-        }
-        assert_eq!(fixture.state.modal_stack.top(), Some(&owner));
-        assert!(matches!(
-            fixture
-                .raw_key(press(KeyCode::Esc, KeyModifiers::NONE))
-                .await,
-            Some(InputAction::Consumed)
-        ));
-        assert!(fixture.state.modal_stack.is_empty());
-        assert!(fixture.state.tool_inspectors.is_empty());
-        assert_not_sent(&fixture, &host).await;
-        fixture.paint(60, 16);
+        f.raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(f.state.modal_stack.top(), Some(&owner));
+        assert_not_sent(&f, &host).await;
     }
-    send_once(&mut fixture, &host).await;
+    open_proposal(&mut f);
+    f.paint(60, 16);
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    assert_eq!(f.state.modal_stack.top(), Some(&owner));
+    assert_not_sent(&f, &host).await;
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    send_once(&mut f, &host).await;
     host.stop().await;
 }
 
 #[tokio::test]
-async fn k03_ctrl_r_keeps_reverse_search_but_modified_and_repeat_decisions_do_not_authorize() {
-    let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
-    let mut fixture = fixture(&host).await;
-    fixture.state.focus = FocusState::Input;
-    assert!(matches!(
-        fixture
-            .raw_key(press(KeyCode::Char('r'), KeyModifiers::CONTROL))
-            .await,
-        Some(InputAction::Consumed)
-    ));
-    assert!(fixture.state.reverse_search.is_open());
-    assert_eq!(fixture.state.focus, FocusState::Input);
-    assert!(fixture.state.modal_stack.is_empty());
-    assert_not_sent(&fixture, &host).await;
-    assert!(matches!(
-        fixture
-            .raw_key(press(KeyCode::Esc, KeyModifiers::NONE))
-            .await,
-        Some(InputAction::Consumed)
-    ));
-    assert!(!fixture.state.reverse_search.is_open());
-    assert_eq!(fixture.state.focus, FocusState::Input);
-    assert!(fixture.state.modal_stack.is_empty());
-    fixture.paint(60, 16);
-
-    for key in ['y', 'r', 'n'] {
-        for modifiers in [
-            KeyModifiers::CONTROL,
-            KeyModifiers::ALT,
-            KeyModifiers::SHIFT,
-        ] {
-            if key == 'r' && modifiers == KeyModifiers::CONTROL {
-                continue; // This exact press is the dedicated reverse-search shortcut.
-            }
-            assert!(
-                fixture
-                    .raw_key(press(KeyCode::Char(key), modifiers))
-                    .await
-                    .is_none(),
-                "modified proposal character must not authorize: {key} {modifiers:?}"
-            );
-        }
-        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
-            assert!(
-                fixture
-                    .raw_key(Event::Key(KeyEvent::new_with_kind(
-                        KeyCode::Char(key),
-                        KeyModifiers::NONE,
-                        kind,
-                    )))
-                    .await
-                    .is_none(),
-                "non-press proposal character must not authorize: {key} {kind:?}"
-            );
-        }
-    }
-    assert!(
-        fixture
-            .raw_key(Event::Key(KeyEvent::new_with_kind(
-                KeyCode::Char('r'),
-                KeyModifiers::CONTROL,
-                KeyEventKind::Repeat,
-            )))
-            .await
-            .is_none()
-    );
-    assert!(!fixture.state.reverse_search.is_open());
-    assert_not_sent(&fixture, &host).await;
-    send_once(&mut fixture, &host).await;
-    host.stop().await;
-}
-
-#[tokio::test]
-async fn k03_clearing_a_draft_requires_a_fresh_decision_footer_paint() {
+async fn k03_raw_guards_and_composer_readline_keep_their_owners() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let mut f = fixture(&host).await;
-    f.state.focus = FocusState::Input;
-    f.state.input_buffer = "d".into();
-    f.state.cursor_position = 1;
+    open_proposal(&mut f);
+    f.paint(60, 16);
+    for key in ['y', 'r', 'n'] {
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            for modifiers in [
+                KeyModifiers::NONE,
+                KeyModifiers::SHIFT,
+                KeyModifiers::ALT,
+                KeyModifiers::CONTROL,
+            ] {
+                if kind == KeyEventKind::Press && modifiers == KeyModifiers::NONE {
+                    continue;
+                }
+                let event =
+                    Event::Key(KeyEvent::new_with_kind(KeyCode::Char(key), modifiers, kind));
+                assert!(
+                    f.raw_key(event).await.is_none(),
+                    "{key} {kind:?} {modifiers:?}"
+                );
+            }
+        }
+    }
+    assert_not_sent(&f, &host).await;
+    // Plain r is a positive control: it opens Review, not a send.
+    f.raw_key(press(KeyCode::Char('r'), KeyModifiers::NONE))
+        .await;
+    let rows = f.paint(60, 16);
+    assert!(rows.iter().any(|row| row.contains("Exact proposed body.")));
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    presentation::reducer::set_base(&mut f.state, FocusState::Input);
+    f.raw_key(press(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        .await;
+    assert!(f.state.reverse_search.is_open());
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    assert!(!f.state.reverse_search.is_open());
+    f.raw_key(press(KeyCode::Char('Y'), KeyModifiers::SHIFT))
+        .await;
+    assert_eq!(f.state.input_buffer, "Y");
+    f.raw_key(press(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        .await;
+    f.raw_key(press(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await;
+    assert_eq!(f.state.input_buffer, "xY");
+    assert_not_sent(&f, &host).await;
+    f.state.input_buffer.clear();
+    f.state.cursor_position = 0;
+    send_once(&mut f, &host).await;
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn k03_proposal_cannot_be_decided_from_another_tab() {
+    let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
+    let mut f = fixture(&host).await;
+    let origin = f.conversation.id.clone();
+    let key = proposal_key(&f);
+    f.tabs.create_tab();
+    f.conversation = f.tabs.active_tab().conversation.clone();
+    f.state.active_tab_id = f.tabs.active_tab_id();
+    rustain::infrastructure::runtime::team_proposal_bridge::synchronize_surface(
+        &mut f.state,
+        &f.sender.app_state,
+        &f.tabs,
+        &f.conversation,
+    )
+    .await;
+    decision_queue::prune_closed(
+        &mut f.state,
+        &rustain::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(f.conversation.id.clone()),
+            ..Default::default()
+        },
+    );
+    assert!(!decision_queue::open(&mut f.state, &key));
+    f.raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await;
+    assert!(f.proposal(&origin).is_some());
+    assert_eq!(host.counts(), HttpCounts { get: 0, post: 0 });
+    assert!(!f.sender.rows().await.iter().any(|row| matches!(
+        row.record,
+        JournalRecord::Room(RoomEvent::RemoteEnvelopeDispatched { .. })
+    )));
+    f.tabs.switch_to_prev();
+    f.conversation = f.tabs.active_tab().conversation.clone();
+    f.state.active_tab_id = f.tabs.active_tab_id();
+    rustain::infrastructure::runtime::team_proposal_bridge::synchronize_surface(
+        &mut f.state,
+        &f.sender.app_state,
+        &f.tabs,
+        &f.conversation,
+    )
+    .await;
+    decision_queue::prune_closed(
+        &mut f.state,
+        &rustain::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(origin),
+            ..Default::default()
+        },
+    );
+    f.state.input_buffer.clear();
+    f.state.cursor_position = 0;
+    send_once(&mut f, &host).await;
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn k03_composer_gate_preserves_draft_and_clearing_unblocks_decision() {
+    let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
+    let mut f = fixture(&host).await;
+    open_proposal(&mut f);
+    f.state.input_buffer = "draft".into();
+    f.state.cursor_position = 2;
     let rows = f.paint(60, 16);
     assert!(
         rows.iter()
             .any(|row| row.contains("Finish or clear your draft"))
     );
-    f.raw_key(press(KeyCode::Backspace, KeyModifiers::NONE))
+    for key in ['y', 'r', 'n'] {
+        assert!(matches!(
+            f.raw_key(press(KeyCode::Char(key), KeyModifiers::NONE))
+                .await,
+            Some(InputAction::Consumed)
+        ));
+        assert_eq!(f.state.input_buffer, "draft");
+        assert_eq!(f.state.cursor_position, 2);
+        assert_not_sent(&f, &host).await;
+    }
+    // The frame does not edit the shared composer: defer it to clear the draft.
+    f.raw_key(press(KeyCode::Esc, KeyModifiers::NONE)).await;
+    presentation::reducer::set_base(&mut f.state, FocusState::Input);
+    f.raw_key(press(KeyCode::Char('u'), KeyModifiers::CONTROL))
+        .await;
+    f.raw_key(press(KeyCode::Char('k'), KeyModifiers::CONTROL))
         .await;
     assert!(f.state.input_buffer.is_empty());
-    assert!(matches!(
-        f.raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
-            .await,
-        Some(InputAction::Consumed)
-    ));
-    assert_not_sent(&f, &host).await;
     send_once(&mut f, &host).await;
     host.stop().await;
 }

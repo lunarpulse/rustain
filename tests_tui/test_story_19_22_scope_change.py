@@ -21,6 +21,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
+from decision_frame_helpers import has_row, open_recipient, view_recipient, wait_frame
 
 
 def _exercise(binary, evidence, root, monkeypatch):
@@ -120,29 +121,30 @@ def _exercise(binary, evidence, root, monkeypatch):
             clients[alias] = tui
         sender, recipient = clients["A"], clients["B"]
         _command(sender, "/team send B consent-setup")
-        _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "standing sender consent")
+        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
         recipient.send("a")
-        _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
-                     "recipient accepted setup")
+        open_recipient(recipient)
         setup = [row for row in _events(worlds["B"][0], "recipient_item_received") if row["content"] == "consent-setup"]
         assert len(setup) == 1, setup
         setup_item = setup[0]["address"]["item"]
+        recipient.send("\x1b")
         _command(recipient, f"/team reply {setup_item} setup-complete")
-        _wait_screen(recipient, lambda screen: "reply recorded" in screen.lower() and "[Tab] Item actions" not in screen,
-                     "setup item resolved before assignment card")
+        _wait_screen(recipient, lambda screen: has_row(screen.lower(), "reply recorded") and not has_row(screen, "Needs you ("),
+                     "setup item resolved before assignment decision")
 
         _command(sender, "/team send --type story_assignment --stories S7-09=B B S7-09: Fix payment timeout")
-        screen = _wait_screen(recipient, lambda screen: "story_assignment · A" in screen and "1 story, 1 assigned to you" in screen,
-                              "assignment arrival summary")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "story_assignment · A") and has_row(screen, "1 story, 1 assigned to you"), screen
         (evidence / "01-assignment-card.screen.txt").write_text(screen)
-        recipient.send("\t")
-        screen = _wait_screen(recipient, lambda screen: "[y] Accept" in screen and "[d] Discuss concerns" in screen,
+        view_recipient(recipient)
+        screen = _wait_screen(recipient, lambda screen: has_row(screen, "[y] Accept") and has_row(screen, "[d] Discuss concerns"),
                               "typed verdict keys on Item surface")
         (evidence / "02-verdict-actions.screen.txt").write_text(screen)
         recipient.send("y")
         recipient.send("\x1b")
-        screen = _wait_screen(recipient, lambda screen: "Accepted." in screen and "[Tab] Item actions" not in screen,
-                              "Accept settles the pending card")
+        screen = _wait_screen(recipient, lambda screen: has_row(screen, "Accepted.") and not has_row(screen, "[y] Accept")
+                              and not has_row(screen, "Needs you ("),
+                              "Accept settles the pending decision")
         (evidence / "03-accepted.screen.txt").write_text(screen)
         turns = [row for row in _events(worlds["B"][0], "recipient_item_replied")
                  if row.get("kind", {}).get("type") == "accept"]
@@ -151,10 +153,10 @@ def _exercise(binary, evidence, root, monkeypatch):
         assert turns[0]["send_authorization"] == "human-decided", turns
 
         _command(sender, "/team send --type scope_change --stories S7-09=B,S7-07 B Sprint 7 scope change")
-        _wait_screen(recipient, lambda screen: "scope_change · A" in screen and "2 stories, 1 assigned to you" in screen,
-                     "scope-change arrival summary")
-        recipient.send("\t")
-        screen = _wait_screen(recipient, lambda screen: "S7-07  assigned to no one" in screen and "[a] Acknowledge" in screen,
+        screen = open_recipient(recipient)
+        assert has_row(screen, "scope_change · A") and has_row(screen, "2 stories, 1 assigned to you"), screen
+        view_recipient(recipient)
+        screen = _wait_screen(recipient, lambda screen: has_row(screen, "S7-07  assigned to no one") and has_row(screen, "[a] Acknowledge"),
                               "release text and receipt-only action")
         (evidence / "04-scope-release.screen.txt").write_text(screen)
 
@@ -178,7 +180,7 @@ def _exercise(binary, evidence, root, monkeypatch):
             (evidence / (alias + ".journal.json")).write_text(json.dumps(rows, indent=2) + "\n")
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, 80x24, two real daemons and attached writers; standing pinned sender consent.\n"
-            "PASS: setup card settled; story summary; native [y] Accept and [d] Discuss concerns; one durable human-decided Accept.\n"
+            "PASS: setup decision settled; story summary; native [y] Accept and [d] Discuss concerns; one durable human-decided Accept.\n"
             "PASS: scope_change release View S7-07  assigned to no one; [a] Acknowledge remains receipt only.\n"
             "PASS: assignment root discovered on sender board; /team thread shows [verdict: accept]; zero provider turns.\n")
 

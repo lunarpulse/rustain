@@ -1222,6 +1222,7 @@ pub fn open_team_retract_card(
                 peer: card.peer,
                 item: card.item_id,
             },
+            principal: card.principal,
             task: card.task,
             card: card.body,
             armed: card.armed,
@@ -2156,6 +2157,7 @@ mod tests {
             "conv",
             TeamRetractPreview::Card(TeamRetractCard {
                 peer: "jun-dev".into(),
+                principal: Some("principal".into()),
                 item_id: "ri_x".into(),
                 task: Some("task-x".into()),
                 body: "retract the selected item".into(),
@@ -2201,6 +2203,7 @@ mod tests {
             "conv",
             TeamRetractPreview::Card(TeamRetractCard {
                 peer: "jun-dev".to_owned(),
+                principal: None,
                 item_id: "ri_x".to_owned(),
                 task: Some("task-x".to_owned()),
                 body: "card".to_owned(),

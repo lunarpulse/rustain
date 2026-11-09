@@ -246,6 +246,13 @@ pub fn route(
         Surface::DecisionQueue => match decision_queue::handle_list_key(state, host, key, facts) {
             ListOutcome::Quit => RouteEffect::QuitRequest,
             ListOutcome::Consumed => RouteEffect::Consumed,
+            ListOutcome::OpenTab {
+                conversation_id,
+                key,
+            } => RouteEffect::Action(InputAction::OpenDecisionTab {
+                conversation_id,
+                key,
+            }),
         },
         Surface::NotificationLog => match notification_log::handle_key(state, host, key, facts) {
             LogOutcome::Consumed | LogOutcome::Closed => RouteEffect::Consumed,

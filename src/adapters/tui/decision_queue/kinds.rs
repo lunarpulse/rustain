@@ -78,6 +78,14 @@ pub enum DecisionKind {
     Rewind,
     /// An export whose target exists waits for the overwrite decision.
     ExportOverwrite,
+    /// An agent's proposed message waits for Send / Review / Dismiss (own tab only).
+    TeamProposal,
+    /// A peer's pending response (a draft to approve, or a request to answer) waits (attached).
+    RecipientDraftApproval,
+    /// An MCP task's input-request ticket waits for the operator's answer (Accumulate).
+    Ticket,
+    /// A peer's reply was observed (Accumulate).
+    ReplyArrived,
 }
 
 /// What `Esc` does on a kind (RU-5, LR-3, A7).
@@ -116,6 +124,10 @@ impl DecisionKind {
             Self::ExportOverwrite => Context::ExportOverwrite,
             Self::Delegation => Context::Delegation,
             Self::SpawnGate => Context::SpawnGate,
+            Self::TeamProposal => Context::TeamProposal,
+            Self::RecipientDraftApproval => Context::RecipientDraft,
+            Self::Ticket => Context::Ticket,
+            Self::ReplyArrived => Context::ReplyArrived,
             _ => Context::Decision,
         }
     }
@@ -151,6 +163,10 @@ impl DecisionKind {
             Self::Fork => "Fork",
             Self::Rewind => "Rewind",
             Self::ExportOverwrite => "Export overwrite",
+            Self::TeamProposal => "Team proposal",
+            Self::RecipientDraftApproval => "Recipient draft",
+            Self::Ticket => "Ticket",
+            Self::ReplyArrived => "Reply arrived",
         }
     }
 
@@ -185,6 +201,10 @@ impl DecisionKind {
             Self::Fork => "Decision: Fork",
             Self::Rewind => "Decision: Rewind",
             Self::ExportOverwrite => "Decision: Export overwrite",
+            Self::TeamProposal => "Decision: Team proposal",
+            Self::RecipientDraftApproval => "Decision: Recipient draft",
+            Self::Ticket => "Decision: Ticket",
+            Self::ReplyArrived => "Decision: Reply arrived",
         }
     }
 
@@ -454,6 +474,44 @@ impl DecisionKind {
                     (key(OverlayCmd::PaneEsc), "Later"),
                 ]
             }
+            Self::TeamProposal => {
+                let proposal =
+                    |command: CardCmd| keymap::render::rail(Context::TeamProposal, command);
+                vec![
+                    (proposal(CardCmd::Yes), "Send"),
+                    (proposal(CardCmd::Review), "Review first"),
+                    (proposal(CardCmd::No), "Dismiss"),
+                ]
+            }
+            Self::RecipientDraftApproval => {
+                let recipient =
+                    |command: CardCmd| keymap::render::rail(Context::RecipientDraft, command);
+                vec![
+                    (recipient(CardCmd::Yes), "Approve"),
+                    (recipient(CardCmd::Edit), "Edit"),
+                    (recipient(CardCmd::No), "Reject"),
+                    (recipient(CardCmd::WriteOwn), "My own"),
+                    (recipient(CardCmd::ViewItem), "View item"),
+                ]
+            }
+            Self::Ticket => {
+                let ticket = |command: CardCmd| keymap::render::rail(Context::Ticket, command);
+                vec![
+                    (ticket(CardCmd::Confirm), "Accept"),
+                    (ticket(CardCmd::Delegate), "Decline"),
+                    (ticket(CardCmd::CancelPlan), "Cancel task"),
+                    (ticket(CardCmd::Edit), "Edit"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::ReplyArrived => {
+                let reply = |command: CardCmd| keymap::render::rail(Context::ReplyArrived, command);
+                vec![
+                    (reply(CardCmd::Confirm), "Read thread"),
+                    (reply(CardCmd::CancelPlan), "Dismiss"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
         }
     }
 }
@@ -464,6 +522,26 @@ impl DecisionKind {
 pub fn rail_of(item: &DecisionItem) -> Vec<(String, &'static str)> {
     // `Question` is the field-open context; the field-closed one is the kind's default.
     match keys::context_of(item) {
+        Context::DecisionCompose if item.kind == DecisionKind::Ticket => vec![
+            (
+                keymap::render::rail(Context::DecisionCompose, CardCmd::Send),
+                "Accept",
+            ),
+            (
+                keymap::render::rail(Context::DecisionCompose, CardCmd::Back),
+                "Back",
+            ),
+        ],
+        Context::DecisionCompose => vec![
+            (
+                keymap::render::rail(Context::DecisionCompose, CardCmd::Send),
+                "Send",
+            ),
+            (
+                keymap::render::rail(Context::DecisionCompose, CardCmd::Back),
+                "Back",
+            ),
+        ],
         Context::Question => vec![
             (
                 keymap::render::rail(Context::DecisionCompose, CardCmd::Send),
@@ -498,6 +576,20 @@ pub fn rail_of(item: &DecisionItem) -> Vec<(String, &'static str)> {
         // A disarmed retract (the confirm-time read did not resolve, or the item is already
         // removed) answers `[n]` only: `[y]` is never painted, never a confirm.
         _ => match &item.subject {
+            DecisionSubject::RecipientDraft(payload)
+                if matches!(
+                    payload.stage,
+                    super::recipient::RecipientDraftStage::AwaitingOperator
+                ) =>
+            {
+                let recipient =
+                    |command: CardCmd| keymap::render::rail(Context::RecipientDraft, command);
+                vec![
+                    (recipient(CardCmd::WriteOwn), "My own"),
+                    (recipient(CardCmd::No), "Decline"),
+                    (recipient(CardCmd::ViewItem), "View item"),
+                ]
+            }
             DecisionSubject::TeamRetract(payload) if !payload.armed => item
                 .kind
                 .rail()
@@ -613,6 +705,17 @@ pub enum DecisionEffect {
     /// Mark the item retracted.
     TeamRetractConfirm,
     TeamRetractDecline,
+    TicketAccept,
+    TicketDecline,
+    TicketCancel,
+    ReplyRead,
+    ReplyDismiss,
+    TeamProposalSend,
+    TeamProposalDismiss,
+    RecipientApprove,
+    RecipientReject,
+    RecipientSend,
+    RecipientView,
     ForkConfirm,
     ForkCancel,
     RewindConfirm,
@@ -679,7 +782,10 @@ impl DecisionEffect {
     /// True when the effect leaves its item queued (a sub-context opens, nothing is decided).
     #[must_use]
     pub fn keeps_item(self) -> bool {
-        matches!(self, Self::SkillTrustInspect | Self::PlanRevise)
+        matches!(
+            self,
+            Self::SkillTrustInspect | Self::PlanRevise | Self::RecipientView
+        )
     }
 }
 
@@ -714,6 +820,10 @@ pub enum DecisionSubject {
     Fork(Box<ForkPayload>),
     Rewind(Box<RewindPayload>),
     ExportOverwrite(Box<ExportOverwritePayload>),
+    TeamProposal(Box<super::proposal::TeamProposalPayload>),
+    RecipientDraft(Box<super::recipient::RecipientDraftPayload>),
+    Ticket(Box<super::ticket::TicketPayload>),
+    ReplyArrived(Box<super::reply::ReplyPayload>),
 }
 
 /// The copy a decision paints once its source settled elsewhere (A7).

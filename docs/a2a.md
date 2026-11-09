@@ -395,16 +395,16 @@ and the body must contain 1–131,072 UTF-8 bytes. Control and directional-forma
 characters that could disguise the reviewed text are refused; tabs and newlines
 remain literal. A refusal performs no peer I/O and records no send action.
 
-Raising a proposal returns immediately. It displays the frozen aliases, type and
-body in a separate approval card; it does not send, start a timer, create a generic
+Raising a proposal returns immediately. It queues the frozen aliases, type and
+body for a decision frame; it does not send, start a timer, create a generic
 tool-approval request or insert text into the composer. There is one pending proposal per
 conversation. A second raise cannot replace it. Without an interactive approval
 surface, the tool refuses rather than parking a draft for later delivery.
 
-With an empty composer, **y** sends exactly that snapshot once its decision footer
-has been painted, **r** opens its full, delimited Review, and **n** dismisses it.
-Enter and Escape never send. With text in the composer, y/r/n remain text input;
-higher-priority approval prompts and large-image confirmations keep their keys.
+Open a proposal from the Needs-you list with `Ctrl+X q` if its frame did not
+take focus. With an empty composer, **y** sends exactly that snapshot after the
+frame's inert window, **r** opens frame-owned Review, and **n** dismisses it.
+Enter never sends; Escape defers without deciding. A nonempty composer blocks Send.
 In local Chat, Enter inspects the focused tool call without expanding the Stage;
 `▸` marks that header and Tab reaches the calls in its expanded multi-tool turn.
 The inspector supports `/` search, `n`/`N` matches, `w` wrap (on by default) and
@@ -418,14 +418,10 @@ Clearing or closing the conversation withdraws its draft without peer I/O.
 Switching conversations never approves or retargets it.
 
 Long recipient lists remain complete and scrollable, including at 60×16. Use
-**PgUp/PgDn** to page an overflowing card; Send stays disabled until the decision
-footer is in view. In Review, paging at a card boundary continues through the
-full transcript body. Review selects the current proposal even when older Review
-blocks remain, returns from task/agent detail to the conversation, and preserves
-the tab bar and readable transcript space. Attached Review also closes an open
-received-item view and returns the transcript from history scrolling to the
-current proposal. It sends nothing. After reviewing in standalone Chat focus,
-**i** returns to the composer.
+**PgUp/PgDn** to page the frame. Review is contained in the decision frame and
+sends nothing; return from Review to the proposal before deciding. Switching
+conversations never approves or retargets the proposal: the Needs-you list can
+switch back to its originating conversation and open its frame.
 
 YOLO, AutoEdit, session or saved tool grants, subagent auto-approval and selected
 peer context never authorize this Send decision. Plan mode and carried agent or
@@ -580,7 +576,7 @@ An unresolved `sending…` row remains visible when a recorded action's settleme
 
 `/team followup <peer> <turn-id> <text…>` requires a trusted-local writer. It sends to exactly one peer with the reply link, human-written authorship and human-decided authorization; it creates no new send action, and its pending row settles without a `TeamSendStarted` frame. It shares the writer FIFO and the eight-send in-flight limit.
 
-`/team retract <peer> <item-id>` also requires a trusted-local writer. Its FIFO-admitted preview raises the same armed/disarmed confirmation card as standalone. Only an armed `y` confirms; `n` declines without detaching; `Esc` and `Ctrl+C` never decide the card (they post a reminder of `y` and `n`); the card consumes all other keys. The daemon retains the target and task privately: decisions name only the preview request and take that connection's current slot once. Stale, replaced, disarmed or saturated decisions never POST. Confirmation requires the current writer and one send permit. An accepted dispatch survives detach — including a confirmation still queued in the writer's FIFO when it detaches; the target is dropped once that queue drains, or at once when another writer attaches. It journals before the single retract POST, re-renders any remembered board without another list, then returns the standalone sentence to the origin connection only.
+`/team retract <peer> <item-id>` also requires a trusted-local writer. Its FIFO-admitted preview raises the same armed/disarmed decision frame as standalone. Only an armed `y` confirms; `n` declines without detaching; `Esc` defers without deciding and `Ctrl+C` goes back. Reopen it from the Needs-you list with `Ctrl+X q`. The daemon retains the target and task privately: decisions name only the preview request and take that connection's current slot once. Stale, replaced, disarmed or saturated decisions never POST. Confirmation requires the current writer and one send permit. An accepted dispatch survives detach — including a confirmation still queued in the writer's FIFO when it detaches; the target is dropped once that queue drains, or at once when another writer attaches. It journals before the single retract POST, re-renders any remembered board without another list, then returns the standalone sentence to the origin connection only.
 
 Thread reads and retract previews consume no send permit; threads remain readable while all eight sends are held. Thread views, retract cards and answers are never broadcast and never invoke a provider/model turn. All spawned work is daemon-owned and joined at shutdown. No board or thread is pushed or refreshed by a timer. Builds without an A2A runtime return a request-keyed refusal after the tier/write gates, before any retract target lookup.
 
@@ -590,7 +586,8 @@ Thread reads and retract previews consume no send permit; threads remain readabl
 workspace journal, not the remote asker's journal or model history. It works in
 attached writer/read-only sessions and standalone offline sessions. A
 notify-and-auto arrival includes `Open: /team view <item-id>` when the response
-has a journal-backed item; a pending card opens with Tab.
+has a journal-backed item. An attached recipient decision's **View item** action
+opens its associated item; use `Ctrl+X q` to open a queued decision first.
 
 The Info reader pins the explicitly opened item. Its canonical type, current
 principal label, raw body-byte manifest and full available body are scrollable;

@@ -1,5 +1,6 @@
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_queue::DecisionEffect;
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::{JournalRecord, ResponseMode, RoomEvent};
 use serde_json::{Value, json};
@@ -57,7 +58,10 @@ async fn k06_approved_proposal_preserves_boundary_payload_bytes() {
 
     let decision = fixture.key(DomainInputEvent::KeyPress('y')).await;
     assert!(
-        matches!(decision, InputAction::TeamProposal { .. }),
+        matches!(
+            decision,
+            InputAction::Decision(DecisionEffect::TeamProposalSend)
+        ),
         "{decision:?}"
     );
     let proposal_block = fixture
@@ -179,7 +183,10 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
 
     let decision = fixture.key(DomainInputEvent::KeyPress('y')).await;
     assert!(
-        matches!(decision, InputAction::TeamProposal { .. }),
+        matches!(
+            decision,
+            InputAction::Decision(DecisionEffect::TeamProposalSend)
+        ),
         "{decision:?}"
     );
     let proposal_block = fixture

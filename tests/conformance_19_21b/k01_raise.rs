@@ -43,9 +43,7 @@ async fn k01_valid_raise_returns_r1_for_aliases_type_and_exact_body() {
         "the proposal invocation must not park the turn"
     );
     let snapshot = fixture
-        .state
-        .pending_team_proposals
-        .get(&fixture.conversation.id)
+        .proposal(&fixture.conversation.id)
         .expect("production ready event must retain a proposal");
     assert_eq!(snapshot.recipients, ["lena-po", "jun-dev"]);
     assert_eq!(
@@ -161,7 +159,7 @@ async fn k01_invalid_alias_type_recipient_body_and_unicode_fields_are_refused() 
             "K01 {label}: R4 must be an error, not a successful refusal string"
         );
         assert!(
-            fixture.state.pending_team_proposals.is_empty(),
+            fixture.proposal_count() == 0,
             "K01 {label}: malformed input left a card"
         );
         assert!(
@@ -182,9 +180,7 @@ async fn k01_second_raise_returns_r3_without_replacing_first_pending() {
     let (mut fixture, lena, jun) = fixture().await;
     assert_eq!(fixture.submit(valid_input()).await, R1);
     let original = fixture
-        .state
-        .pending_team_proposals
-        .get(&fixture.conversation.id)
+        .proposal(&fixture.conversation.id)
         .expect("first proposal")
         .clone();
     assert_eq!(
@@ -197,9 +193,7 @@ async fn k01_second_raise_returns_r3_without_replacing_first_pending() {
         "K01 second raise must not supersede"
     );
     let retained = fixture
-        .state
-        .pending_team_proposals
-        .get(&fixture.conversation.id)
+        .proposal(&fixture.conversation.id)
         .expect("pending original");
     assert!(
         std::sync::Arc::ptr_eq(&original, retained),
@@ -276,19 +270,14 @@ async fn k01_real_skill_allowlist_binds_in_every_mode_with_allowed_positive_cont
                     "explicit skill allowlist must permit a valid raise in {mode:?}"
                 );
                 assert_eq!(fixture.last_tool_errors, [false]);
-                assert!(
-                    fixture
-                        .state
-                        .pending_team_proposals
-                        .contains_key(&fixture.conversation.id)
-                );
+                assert!(fixture.proposal(&fixture.conversation.id).is_some());
             } else {
                 assert_eq!(
                     fixture.last_tool_errors,
                     [true],
                     "skill restriction or Plan must deny in {mode:?}: {result}"
                 );
-                assert!(fixture.state.pending_team_proposals.is_empty());
+                assert_eq!(fixture.proposal_count(), 0);
                 assert!(
                     result.contains("skill") || result.contains("Plan mode"),
                     "expected policy denial, not a missing tool: {result}"

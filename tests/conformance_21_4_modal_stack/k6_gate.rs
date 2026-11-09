@@ -233,7 +233,7 @@ const PINS: &[Pin<'_>] = &[
         r###"prior|RecipientSurface|pub prior_focus: FocusState,"###,
     ]),
     ("src/infrastructure/runtime/attach_loop.rs", "21-8", &[
-        r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###, r###"prior|attached_proposal_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###,
+        r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###,
     ]),
     ("src/infrastructure/runtime/recipient_surface.rs", "21-8", &[
         r###"prior|open_received_surface|let (prior_focus, results) = match old {"###, r###"prior|open_received_surface|surface.prior_focus,"###, r###"prior|open_received_surface|prior_focus,"###,
@@ -302,6 +302,14 @@ const RULES: &[(&str, &str)] = &[
     (
         "decision-21-6-d",
         r"\bFocusState\s*::\s*Overlay\b|\b(?:OverlayType|ConfirmationType|AttachedPresentation|InlineCard)\b|\b(?:mod|use)\s+attached_presentation\b|\b(?:raise_confirmation|settle_legacy|settle_legacy_inner|restore_focus_after_modal|take_chat_focus_for_card|settle_borrowed_card_focus|card_focus_blocked|current_confirmation_pending|inline_card|card_context|card_special_key)\s*\(|\bfn\s+confirmation_pending\b|\breducer\s*::\s*confirmation_pending\b|\.\s*(?:card_focus_borrowed_from|pending_confirmation|pending_consolidation_card|pending_forget_card|pending_artifact_card|pending_peer_add|pending_team_retract|pending_fork_index|pending_rewind_index|rewind_preview|pending_export|retract_confirm|consolidation_token)\b|\b(?:card_focus_borrowed_from|pending_confirmation|pending_consolidation_card|pending_forget_card|pending_artifact_card|pending_peer_add|pending_team_retract|pending_fork_index|pending_rewind_index|rewind_preview|pending_export|retract_confirm|consolidation_token)\s*:",
+    ),
+    // Story 21.6 slice 6-E (A20, final): the proposal card slots, the attached pending peer
+    // card, the bottom-anchored card painter and the shared Card/Cue contexts are gone.
+    // Field/type/fn accesses, never module paths: `widgets::team_proposal_card::` body
+    // builders and `decision_queue::` stay legal.
+    (
+        "decision-21-6-e",
+        r"\b(?:pending_team_proposals|team_proposal_visible|team_proposal_reviews|team_proposal_scroll(?:_max)?|team_proposal_footer_visible|team_proposal_viewport_rows|pending_peer_card|peer_response_card_lines|render_bottom_anchored_decision_card|proposal_higher_confirmation_active|visible_team_proposal|card_cue)\b|\bContext\s*::\s*Card\b|\bCardCmd\s*::\s*Cue\b",
     ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
@@ -554,6 +562,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "decision-21-6-b",
                     "decision-21-6-c",
                     "decision-21-6-d",
+                    "decision-21-6-e",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -739,7 +748,7 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
     );
     assert_eq!(
         PINS.iter().map(|(_, _, sites)| sites.len()).sum::<usize>(),
-        10
+        9
     );
     assert!(PINS.iter().all(|(_, owner, sites)| {
         *owner == "21-8" && sites.iter().all(|site| site.starts_with("prior|"))
@@ -2287,5 +2296,72 @@ fn k11d_legacy_card_symbols_are_unpinnable_and_reused_apis_pass() {
         scan(&[("src/x.rs".into(), test_only.into())], &[])
             .iter()
             .all(|s| !s.contains("decision-21-6-d|"))
+    );
+}
+
+/// 6-E (final, K11e): the proposal card slots, the attached pending peer card, the bottom
+/// anchored card painter and the shared `Card`/`Cue` contexts cannot be revived or pinned;
+/// the reused body builders and queue APIs pass, and the 21-6 pin list is empty.
+#[test]
+fn k11e_proposal_and_peer_card_symbols_are_unpinnable_and_reused_apis_pass() {
+    for text in [
+        "s.pending_team_proposals.insert(a, b);",
+        "s.team_proposal_visible = None;",
+        "tab.team_proposal_reviews.clear();",
+        "s.team_proposal_scroll = 0;",
+        "s.team_proposal_scroll_max = 0;",
+        "s.team_proposal_footer_visible = true;",
+        "s.team_proposal_viewport_rows = 4;",
+        "let c = pending_peer_card(conv, left_out);",
+        "peer_response_card_lines(&p, false, 60);",
+        "render_bottom_anchored_decision_card(f, a, b);",
+        "proposal_higher_confirmation_active(s);",
+        "visible_team_proposal(s);",
+        "keymap::render::card_cue(Context::Card, h);",
+        "let c = Context::Card;",
+        "let c = CardCmd::Cue;",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("decision-21-6-e|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-6", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("decision-21-6-e|")),
+            "{text}: {errors:?}"
+        );
+    }
+    let legal = "fn real() { decision_queue::raise_team_proposal(s, p, r); \
+        let _ = DecisionKind::TeamProposal; widgets::team_proposal_card::lines(p, theme); \
+        state.decisions.presenting(DecisionKind::TeamProposal); \
+        let _ = Context::TeamProposal; let _ = CardCmd::Review; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("decision-21-6-e|")),
+        "{errors:?}"
+    );
+    let test_only =
+        "#[cfg(test)] mod tests { fn t(s: &mut S) { s.pending_team_proposals.clear(); } }";
+    assert!(
+        scan(&[("src/x.rs".into(), test_only.into())], &[])
+            .iter()
+            .all(|s| !s.contains("decision-21-6-e|"))
+    );
+    // Every remaining pin belongs to 21-8: the 21-6 allowlist is empty.
+    assert!(
+        PINS.iter().all(|(_, owner, _)| *owner == "21-8"),
+        "a 21-6 pin survives"
     );
 }

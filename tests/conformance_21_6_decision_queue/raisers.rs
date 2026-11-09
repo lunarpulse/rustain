@@ -120,6 +120,7 @@ pub fn retract(text: &str, armed: bool) -> decision_queue::TeamRetractPayload {
             item: "item".into(),
         },
         conversation_id: "c1".into(),
+        principal: None,
         task: None,
         card: text.into(),
         armed,
@@ -136,6 +137,7 @@ pub fn raise_retract(state: &mut TuiState, text: &str, armed: bool) -> Raised {
             "c1",
             TeamRetractPreview::Card(TeamRetractCard {
                 peer: "peer".into(),
+                principal: None,
                 item_id: "item".into(),
                 task: None,
                 body: text.into(),

@@ -173,6 +173,10 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         message: String,
     },
+    /// Structured observations from the same local board pull, never a wire event.
+    /// Tuples contain resolved peer identity, roster alias, item ID and reply count.
+    #[cfg(feature = "a2a")]
+    TeamBoardObserved(Vec<(String, String, String, u64)>),
     /// Story 19.18 `AC6` — a `/team thread` read finished: replace the issuing
     /// tab's stable `team-thread` block in place (even when that tab is
     /// inactive). A view event, like `TeamBoardReady` — ⛔ never a
@@ -533,6 +537,8 @@ pub enum TeamRetractPreview {
 pub struct TeamRetractCard {
     /// The roster alias (`A2aPeerSpec::id`) — ⛔ never a person-shaped name.
     pub peer: String,
+    /// Host-resolved identity for this roster binding, when available.
+    pub principal: Option<String>,
     /// The id the operator typed; the dispatch addresses exactly this.
     pub item_id: String,
     /// The item's `task` as the peer listed it, for the sender's ledger rows.

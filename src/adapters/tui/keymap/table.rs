@@ -135,6 +135,13 @@ pub fn pane_effect_availability(
         | DecisionEffect::PeerAddDecline
         | DecisionEffect::TeamRetractConfirm
         | DecisionEffect::TeamRetractDecline
+        | DecisionEffect::TicketAccept
+        | DecisionEffect::TicketDecline
+        | DecisionEffect::TicketCancel
+        | DecisionEffect::ReplyRead
+        | DecisionEffect::ReplyDismiss
+        | DecisionEffect::TeamProposalSend
+        | DecisionEffect::TeamProposalDismiss
         | DecisionEffect::ForkConfirm
         | DecisionEffect::ForkCancel
         | DecisionEffect::RewindConfirm
@@ -142,6 +149,10 @@ pub fn pane_effect_availability(
         | DecisionEffect::RewindCancel
         | DecisionEffect::ExportOverwriteConfirm
         | DecisionEffect::ExportOverwriteCancel
+        | DecisionEffect::RecipientApprove
+        | DecisionEffect::RecipientReject
+        | DecisionEffect::RecipientSend
+        | DecisionEffect::RecipientView
         | DecisionEffect::CancelDelete => Availability::Available,
     }
 }

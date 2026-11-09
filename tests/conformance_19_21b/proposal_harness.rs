@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use rustain::adapters::approval_persistence_toml::ApprovalPersistenceToml;
@@ -30,6 +30,8 @@ const SETTLE: Duration = Duration::from_secs(45);
 pub(crate) struct ProposalFixture {
     pub(crate) sender: Sender,
     pub(crate) state: TuiState,
+    pub(crate) clock: Arc<rustain::domain::clock::MockClock>,
+    pub(crate) copies: Arc<parking_lot::Mutex<Vec<String>>>,
     pub(crate) conversation: Conversation,
     pub(crate) tabs: rustain::domain::models::tab::TabManager,
     pub(crate) tools: Arc<CompositeToolsetAdapter>,
@@ -156,10 +158,29 @@ impl ProposalFixture {
         let scheduler = ToolScheduler::new(security_port, tools_port, approval.clone(), 64);
         let transitions = scheduler.subscribe();
         let mut state = TuiState::new(120, 24);
-        state.team_proposal_conversation_id = Some(conversation.id.clone());
+        let clock = Arc::new(rustain::domain::clock::MockClock::new(Instant::now()));
+        let copies = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let copy_sink = copies.clone();
+        state.clipboard_copier = Some(Arc::new(move |text: &str| {
+            copy_sink.lock().push(text.to_owned());
+            rustain::adapters::tui::clipboard::ClipboardResult::Osc52Success
+        }));
+        state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+            &Default::default(),
+            clock.clone(),
+        );
+        rustain::adapters::tui::decision_queue::prune_closed(
+            &mut state,
+            &rustain::adapters::tui::notification_log::LogFacts {
+                active_conversation_id: Some(conversation.id.clone()),
+                ..Default::default()
+            },
+        );
         Self {
             sender,
             state,
+            clock,
+            copies,
             conversation,
             tabs,
             proposal_sink,
@@ -183,9 +204,69 @@ impl ProposalFixture {
         }
     }
 
+    pub(crate) fn proposal(
+        &self,
+        conversation_id: &str,
+    ) -> Option<&Arc<rustain::domain::models::TeamProposal>> {
+        use rustain::adapters::tui::decision_queue::DecisionSubject;
+        self.state
+            .decisions
+            .items()
+            .find_map(|item| match &item.subject {
+                DecisionSubject::TeamProposal(payload)
+                    if !item.is_stale()
+                        && item.conversation_id.as_deref() == Some(conversation_id) =>
+                {
+                    Some(&payload.proposal)
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn proposal_count(&self) -> usize {
+        self.state
+            .decisions
+            .count(rustain::adapters::tui::decision_queue::DecisionKind::TeamProposal)
+    }
+
     pub(crate) fn paint(&mut self, width: u16, height: u16) -> Vec<String> {
+        self.paint_streaming(
+            width,
+            height,
+            &rustain::domain::models::StreamingState::default(),
+        )
+    }
+
+    pub(crate) fn paint_streaming(
+        &mut self,
+        width: u16,
+        height: u16,
+        streaming: &rustain::domain::models::StreamingState,
+    ) -> Vec<String> {
+        let rows = self.paint_streaming_unready(width, height, streaming);
+        self.clock
+            .advance(rustain::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+        rows
+    }
+
+    pub(crate) fn paint_unready(&mut self, width: u16, height: u16) -> Vec<String> {
+        self.paint_streaming_unready(
+            width,
+            height,
+            &rustain::domain::models::StreamingState::default(),
+        )
+    }
+
+    fn paint_streaming_unready(
+        &mut self,
+        width: u16,
+        height: u16,
+        streaming: &rustain::domain::models::StreamingState,
+    ) -> Vec<String> {
+        self.state.terminal_width = width;
+        self.state.terminal_height = height;
         let area = ratatui::layout::Rect::new(0, 0, width, height);
-        let mut layout = rustain::adapters::tui::layout::compute_layout(
+        let layout = rustain::adapters::tui::layout::compute_layout(
             area,
             &self.state.theme,
             &self.state.input_buffer,
@@ -194,25 +275,61 @@ impl ProposalFixture {
             self.state.density_mode,
         )
         .expect("fixture viewport meets the TUI minimum");
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        let paint =
-            rustain::adapters::tui::widgets::team_proposal_card::CardView::from_state(&self.state)
-                .prepare(&mut layout, area, &self.state.theme);
-        self.state.team_proposal_scroll_max = paint.as_ref().map_or(0, |card| card.scroll_max());
-        self.state.team_proposal_scroll = self
-            .state
-            .team_proposal_scroll
-            .min(self.state.team_proposal_scroll_max);
-        self.state.team_proposal_viewport_rows =
-            paint.as_ref().map_or(0, |card| card.viewport_rows());
-        self.state.team_proposal_footer_visible =
-            paint.as_ref().is_some_and(|card| card.footer_visible());
-        self.state.team_proposal_visible =
-            rustain::adapters::tui::widgets::team_proposal_card::render(
-                paint,
-                &mut buffer,
-                &self.state.theme,
-            );
+        let facts = rustain::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(self.conversation.id.clone()),
+            decisions_supported: true,
+            ..Default::default()
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        let mut painted = false;
+        terminal
+            .draw(|frame| {
+                let render = self
+                    .state
+                    .tab_render_states
+                    .entry(self.state.active_tab_id)
+                    .or_default();
+                rustain::adapters::tui::widgets::chat_pane::render_with_search(
+                    frame,
+                    layout.chat_pane,
+                    &self.conversation,
+                    None,
+                    streaming,
+                    &rustain::domain::models::ViewState::default(),
+                    self.clock.as_ref(),
+                    0,
+                    true,
+                    &self.state.theme,
+                    render,
+                    &self.state.feedback_blocks,
+                    None,
+                    None,
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                );
+                let shell = rustain::adapters::tui::presentation::Shell::new(frame.area(), &layout);
+                painted = rustain::adapters::tui::presentation::compose(
+                    frame,
+                    &self.state,
+                    &shell,
+                    rustain::adapters::tui::keymap::Host::Local,
+                    &facts,
+                    &mut rustain::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                        shell.chat_pane,
+                    ),
+                    |_| {},
+                );
+            })
+            .unwrap();
+        if painted {
+            rustain::adapters::tui::decision_queue::note_painted(&mut self.state);
+        }
+        let buffer = terminal.backend().buffer();
         buffer
             .content
             .chunks(width as usize)
@@ -224,7 +341,21 @@ impl ProposalFixture {
         &mut self,
         event: rustain::domain::events::DomainInputEvent,
     ) -> rustain::adapters::tui::app::InputAction {
-        let action = rustain::adapters::tui::app::handle_input(&mut self.state, &event);
+        let facts = rustain::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(self.conversation.id.clone()),
+            decisions_supported: true,
+            ..Default::default()
+        };
+        let action = match rustain::adapters::tui::presentation::route(
+            &mut self.state,
+            &event,
+            rustain::adapters::tui::keymap::Host::Local,
+            &facts,
+        ) {
+            Some(rustain::adapters::tui::presentation::RouteEffect::Action(action)) => action,
+            Some(_) => rustain::adapters::tui::app::InputAction::Consumed,
+            None => rustain::adapters::tui::app::handle_input(&mut self.state, &event),
+        };
         self.dispatch_proposal_key(&action).await;
         action
     }
@@ -233,31 +364,37 @@ impl ProposalFixture {
         &mut self,
         event: crossterm::event::Event,
     ) -> Option<rustain::adapters::tui::app::InputAction> {
+        if rustain::adapters::tui::app::recipient_surface_ignores_raw_key(&self.state, &event) {
+            return None;
+        }
         let domain =
             rustain::adapters::tui::app::convert_crossterm_event(&event, &Default::default())?;
-        let action =
-            rustain::adapters::tui::app::handle_operator_input(&mut self.state, &event, &domain)?;
-        self.dispatch_proposal_key(&action).await;
-        Some(action)
+        Some(self.key(domain).await)
     }
 
     async fn dispatch_proposal_key(&mut self, action: &rustain::adapters::tui::app::InputAction) {
-        if let rustain::adapters::tui::app::InputAction::TeamProposal {
-            conversation_id,
-            proposal_id,
+        use rustain::adapters::tui::app::InputAction;
+        use rustain::adapters::tui::decision_queue::{DecisionEffect, DecisionSubject};
+        use rustain::domain::models::TeamProposalDecision;
+        let decision = match action {
+            InputAction::Decision(DecisionEffect::TeamProposalSend) => TeamProposalDecision::Send,
+            InputAction::Decision(DecisionEffect::TeamProposalDismiss) => {
+                TeamProposalDecision::Dismiss
+            }
+            _ => return,
+        };
+        let Some(DecisionSubject::TeamProposal(payload)) = self.state.decisions.take_resolved()
+        else {
+            panic!("proposal decision must carry its resolved snapshot");
+        };
+        rustain::infrastructure::runtime::team_proposal_bridge::proposal_action(
+            &mut self.state,
+            &self.sender.app_state,
+            &self.conversation.id,
+            payload.proposal,
             decision,
-        } = action
-        {
-            rustain::infrastructure::runtime::team_proposal_bridge::proposal_action(
-                &mut self.state,
-                &self.sender.app_state,
-                &self.conversation.id,
-                conversation_id,
-                proposal_id,
-                *decision,
-            )
-            .await;
-        }
+        )
+        .await;
     }
 
     pub(crate) async fn typed(&mut self, line: &str) {

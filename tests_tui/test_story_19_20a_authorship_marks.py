@@ -23,6 +23,34 @@ EVIDENCE_ROOT = Path(__file__).resolve().parents[2] / "_bmad-output/implementati
 AUTO = "Received. Reviewing."
 APPROVED = "Consultation reviewed: preserve publication ordering."
 
+def _stable_decision(tui, title, rail, timeout=60):
+    """Wait for the complete painted frame, unchanged beyond its inert window."""
+    deadline = time.monotonic() + timeout
+    previous, since = None, None
+    while time.monotonic() < deadline:
+        screen = tui.get_screen_text()
+        rows = screen.splitlines()
+        frame = None
+        for index, row in enumerate(rows):
+            if title not in row or "┌" not in row or "┐" not in row:
+                continue
+            left = row.rfind("┌", 0, row.index(title))
+            right = row.find("┐", row.index(title))
+            for end in range(index + 1, len(rows)):
+                if len(rows[end]) > right and rows[end][left] == "└" and rows[end][right] == "┘":
+                    candidate = tuple(line[left:right + 1] for line in rows[index:end + 1])
+                    if any((content := line[1:-1].strip().removeprefix("▶ ").lstrip()).startswith("[")
+                           and rail in content for line in candidate[1:-1]):
+                        frame = candidate
+                    break
+            break
+        now = time.monotonic()
+        if frame != previous:
+            previous, since = frame, now
+        elif frame is not None and now - since >= 0.6:
+            return screen
+    pytest.fail(f"Decision frame did not settle: {title}\n{screen}")
+
 
 def _sha256(path):
     digest = hashlib.sha256()
@@ -181,6 +209,7 @@ def _exercise_authorship_marks(binary, evidence, tmp_path, monkeypatch):
               lambda: save("status-arrival-failure"), timeout=60)
         if "[y] Allow once" in answerer.get_screen_text():
             save("sender-consent")
+            _stable_decision(answerer, "Decision: Peer consent", "[y] Allow once")
             answerer.send("y")
         wait("[auto-sent]", "older-auto")
         auto_before = span(AUTO, "auto-before")
@@ -188,18 +217,25 @@ def _exercise_authorship_marks(binary, evidence, tmp_path, monkeypatch):
         assert "[auto-sent]" in auto_before and "[✗] Retract" in auto_before, auto_before
         _command(sender, "/team send --type consultation answerer CONSULTATION-19-20A")
         _wait(lambda: any(label in answerer.get_screen_text()
-                         for label in ("[y] Allow once", "[y] Approve")),
+                         for label in ("[y] Allow once", "Decision: Recipient draft", "Needs you (")),
               lambda: save("consultation-arrival-failure"), timeout=60)
         if "[y] Allow once" in answerer.get_screen_text():
             save("consultation-consent")
+            _stable_decision(answerer, "Decision: Peer consent", "[y] Allow once")
             answerer.send("y")
-        wait("Peer draft:", "draft-ready")
-        answerer.send("\t")
-        wait("[y] Approve", "draft-card")
+        _wait(lambda: "Decision: Recipient draft" in answerer.get_screen_text()
+              or "Needs you (" in answerer.get_screen_text(), answerer.get_screen_text, 60)
+        if "Decision: Recipient draft" not in answerer.get_screen_text():
+            answerer.send("\x18q")
+            _wait(lambda: "Needs you" in answerer.get_screen_text()
+                  and "Recipient draft" in answerer.get_screen_text(), answerer.get_screen_text)
+            answerer.send("\r")
+        draft = _stable_decision(answerer, "Decision: Recipient draft", "[y] Approve")
+        assert "Peer draft:" in draft and APPROVED in draft, draft
+        save("draft-frame")
         answerer.send("y")
         _wait(lambda: "[y] Approve" not in answerer.get_screen_text(), answerer.get_screen_text)
-        wait("[Esc] Close", "approved-item-actions")
-        answerer.send("\x1b")
+        # Approval closes the decision; the reader is no longer opened implicitly.
         save("approved-newer")
         approved_before = span(APPROVED, "approved-before")
         assert approved_before.count("[agent-composed]") == 1, approved_before
@@ -231,6 +267,7 @@ def _exercise_authorship_marks(binary, evidence, tmp_path, monkeypatch):
         assert AUTO in preview and APPROVED not in preview.split("Retract this auto-sent message?", 1)[1], preview
         for card in ("[y] Approve", "[y] Allow", "[r] Review", "sender consent", "[y] Send"):
             assert card not in preview, preview
+        _stable_decision(answerer, "Decision: Retract", "[y] Retract")
         answerer.send("y")
         wait("Retracted. Marked in your log", "retracted")
         auto_after = span(AUTO, "auto-after")

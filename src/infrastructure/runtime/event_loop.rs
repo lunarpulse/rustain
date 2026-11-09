@@ -51,7 +51,7 @@ use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
-    autocomplete_popup, chat_pane, input_box, sidebar, status_bar, team_proposal_card, toast_layer,
+    autocomplete_popup, chat_pane, input_box, sidebar, status_bar, toast_layer,
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
@@ -436,6 +436,9 @@ pub async fn run(
     progress_rx: Option<mpsc::UnboundedReceiver<crate::domain::events::ToolProgressEvent>>,
     refresh_tracker: Option<Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>>,
     live: Arc<crate::infrastructure::live_providers::LiveProviders>,
+    #[cfg(feature = "mcp")] mcp_task_runtimes: Vec<
+        Arc<crate::adapters::mcp::task_driver::McpTaskRuntime>,
+    >,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
     let mut config_arc = app_state.app_config.load_full(); // Story 8.1 AC-7 — live ArcSwap snapshot
@@ -543,6 +546,17 @@ pub async fn run(
     let mut pending_health_check: Option<PendingHealthCheck> = None;
     // Story 19.16g: single-flight transparency-log observer; dropped (aborted) on exit.
     let mut log_awareness = transparency_bridge::log_awareness_observer(&app_state);
+    let mut ticket_bridge = super::ticket_bridge::TicketBridge::new(&workspace_path);
+    if app_state.transparency.is_none() {
+        transparency_bridge::replay_uncomposed_tickets(
+            &workspace_path,
+            &mut state,
+            &mut ticket_bridge,
+            #[cfg(feature = "mcp")]
+            &mcp_task_runtimes,
+        )
+        .await;
+    }
 
     // Tab manager — owns all per-tab state; standalone proxies stay in sync with the active tab
     let mut tab_manager = if let Some(conv) = restored_conversation {
@@ -1365,7 +1379,19 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     }
                                 }
-                                #[cfg(feature = "a2a")] InputAction::TeamProposal { conversation_id, proposal_id, decision } => crate::infrastructure::runtime::team_proposal_bridge::proposal_action(&mut state, &app_state, &conversation.id, &conversation_id, &proposal_id, decision).await,
+                                #[cfg(feature = "a2a")]
+                                InputAction::Decision(effect @ (dq::DecisionEffect::TeamProposalSend | dq::DecisionEffect::TeamProposalDismiss)) => {
+                                    if let Some(DS::TeamProposal(payload)) = state.decisions.take_resolved() {
+                                        let decision = if effect == dq::DecisionEffect::TeamProposalSend {
+                                            crate::domain::models::TeamProposalDecision::Send
+                                        } else {
+                                            crate::domain::models::TeamProposalDecision::Dismiss
+                                        };
+                                        crate::infrastructure::runtime::team_proposal_bridge::proposal_action(
+                                            &mut state, &app_state, &conversation.id, payload.proposal, decision,
+                                        ).await;
+                                    }
+                                }
                                 // PlanCard key handlers (Story 6-1a AC7): the answered item is already gone
                                 action @ (InputAction::PlanCardApprove | InputAction::PlanCardReject | InputAction::PlanCardEdit) => {
                                     if let Some(DS::PlanCard(card)) = state.decisions.take_resolved() {
@@ -1766,6 +1792,16 @@ pub async fn run(
                                     // second key can never run it twice.
                                     state.needs_redraw = true;
                                     match effect {
+                                        DecisionEffect::TicketAccept | DecisionEffect::TicketDecline | DecisionEffect::TicketCancel => {
+                                            super::ticket_bridge::send_local(&mut state, &facts,
+                                                #[cfg(feature = "mcp")] &mcp_task_runtimes).await;
+                                        }
+                                        DecisionEffect::ReplyRead => {
+                                            if let Some(DS::ReplyArrived(payload)) = state.decisions.take_resolved() {
+                                                crate::infrastructure::runtime::transparency_bridge::read_team_thread(&mut state, &conversation.id, payload.alias, payload.item, &app_state);
+                                            }
+                                        }
+                                        DecisionEffect::ReplyDismiss => { drop(state.decisions.take_resolved()); }
                                         DecisionEffect::RecoveryContinue => {
                                             crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect));
                                         }
@@ -1868,7 +1904,10 @@ pub async fn run(
                                         | DecisionEffect::TeamRetractConfirm | DecisionEffect::TeamRetractDecline
                                         | DecisionEffect::ForkConfirm | DecisionEffect::ForkCancel
                                         | DecisionEffect::RewindConfirm | DecisionEffect::RewindForkInstead | DecisionEffect::RewindCancel
-                                        | DecisionEffect::ExportOverwriteConfirm | DecisionEffect::ExportOverwriteCancel => {
+                                        | DecisionEffect::ExportOverwriteConfirm | DecisionEffect::ExportOverwriteCancel
+                                        | DecisionEffect::TeamProposalSend | DecisionEffect::TeamProposalDismiss
+                                        | DecisionEffect::RecipientApprove | DecisionEffect::RecipientReject
+                                        | DecisionEffect::RecipientSend | DecisionEffect::RecipientView => {
                                             unreachable!("DecisionEffect::into_action maps these to their own arms");
                                         }
                                     }
@@ -2924,6 +2963,27 @@ pub async fn run(
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::OpenDecisionTab { conversation_id, key } => {
+                                    if let Some(index) = tab_manager.tabs().iter().position(|tab| {
+                                        tab.conversation.id == conversation_id && !tab.read_only
+                                    }) {
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                        tab_manager.switch_to_index(index + 1);
+                                        let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
+                                        if should_drain {
+                                            if let Some(queued_msg) = turn_queue.dequeue() {
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                            }
+                                        }
+                                        session_index.set_active(Some(&conversation.id));
+                                        let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
+                                        dq::prune_closed(&mut state, &facts);
+                                        presentation::reducer::close(&mut state, presentation::Surface::DecisionQueue);
+                                        dq::open(&mut state, &key);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -4918,6 +4978,8 @@ pub async fn run(
                     AppEvent::TeamRetractAnswered { conversation_id: c, message, board } => crate::infrastructure::runtime::transparency_bridge::team_retract_answered(conversation.id.clone(), &mut state, &mut tab_manager, c, message, board),
                     AppEvent::TeamThreadReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
                     AppEvent::TeamBoardReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_board_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
+                    #[cfg(feature = "a2a")]
+                    AppEvent::TeamBoardObserved(rows) => crate::adapters::tui::decision_queue::reply::observe_board(&mut state, rows),
                     AppEvent::ApprovalRuntimeEventBridged { event, review } => {
                         crate::infrastructure::runtime::approval_bridge::apply(&mut state, event, review);
                     }
@@ -6464,6 +6526,10 @@ pub async fn run(
                     // Story 18.2 (AC4) — first `DomainEvent` consumer: room
                     // events reached nothing before this arm.
                     AppEvent::DomainEvent(payload) => {
+                        if let crate::domain::events::DomainEventPayload::Room(event) = &payload {
+                            ticket_bridge.event(&mut state, event,
+                                #[cfg(feature = "mcp")] &mcp_task_runtimes).await;
+                        }
                         handlers::transparency::apply_domain_event(&mut state, &payload);
                         state.needs_redraw = true;
                     }
@@ -6586,6 +6652,12 @@ pub async fn run(
                     room_bridge::refresh_head(&app_state, &mut state).await;
                 }
                 state.needs_redraw |= log_awareness.tick(&mut state.log_awareness);
+                ticket_bridge.observe(&mut state, &log_awareness,
+                    crate::adapters::tui::decision_queue::Responder::Local, false,
+                    #[cfg(feature = "mcp")] &mcp_task_runtimes).await;
+                if let Some(counts) = log_awareness.reply_counts() {
+                    crate::adapters::tui::decision_queue::reply::journal_counts(&mut state, counts);
+                }
                 crate::adapters::tui::decision_queue::tick(&mut state);
                 crate::infrastructure::runtime::panel_bridge::tick_status(
                     &mut state, &conversation, tick_ms,
@@ -7409,7 +7481,7 @@ pub fn render(
     let mut visible_feedback_rows = Vec::new();
     state.restore_unflushed_log_visits();
 
-    let (recipient_blocked, card) = team_proposal_card::frame(state);
+    let recipient_blocked = crate::adapters::tui::app::recipient_higher_confirmation_active(state);
     let permission_mode = security.current_mode();
     let leader_tail = crate::adapters::tui::app::status_tail(state);
 
@@ -7450,12 +7522,11 @@ pub fn render(
             sidebar_visible,
             density_mode,
         ) {
-            Some(mut app_layout) => {
+            Some(app_layout) => {
                 let mut shell = presentation::Shell::new(area, &app_layout);
                 shell.stage = tab_manager_for_bar.map(|tm| (conversation, tm.active_tab().session_meta.bookmarks.as_slice()));
                 let _is_compact = area.width < 80 || area.height < 24;
 
-                let card = card.prepare(&mut app_layout, area, theme);
                 let mut opaque = presentation::occlusion::OpaqueRects::new(app_layout.chat_pane);
 
                 // Render tab bar if present
@@ -7879,12 +7950,6 @@ pub fn render(
                         ));
                     }
                 }
-                state.team_proposal_scroll_max = card.as_ref().map_or(0, |card| card.scroll_max());
-                state.team_proposal_scroll = state.team_proposal_scroll.min(state.team_proposal_scroll_max);
-                state.team_proposal_viewport_rows = card.as_ref().map_or(0, |card| card.viewport_rows());
-                state.team_proposal_footer_visible = card.as_ref().is_some_and(|card| card.footer_visible());
-                opaque.host(card.as_ref().map(|card| card.area()));
-                state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
 
                 let session_title = if !conversation.title.is_empty() {
                     Some(conversation.title.as_str())
@@ -7968,7 +8033,6 @@ pub fn render(
 
             }
             None => {
-                state.team_proposal_visible = None;
                 presentation::paint_too_small(frame, area);
             }
         }

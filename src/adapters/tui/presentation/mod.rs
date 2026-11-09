@@ -166,7 +166,7 @@ pub fn consistent(state: &TuiState) -> bool {
 /// RU-6 eligibility is evaluated BEFORE adding the incoming queue item.
 /// Both inherited text contexts protect a frame independently of recent typing.
 pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
-    use super::{app, decision_queue};
+    use super::decision_queue;
     use crate::domain::models::FocusState;
     if !state.decisions.is_empty()
         || state
@@ -178,7 +178,6 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
             .last_printable_at
             .is_some_and(|at| now.saturating_duration_since(at) < decision_queue::TYPING_GRACE)
         || state.pending_leader.is_some()
-        || app::proposal_higher_confirmation_active(state)
         || state.reverse_search.is_open()
         || !matches!(
             state.focus,

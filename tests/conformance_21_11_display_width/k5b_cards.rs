@@ -308,6 +308,7 @@ fn k5b_peer_add_decision_row_keeps_its_emphasis() {
 pub(crate) fn retract_pending(card: &str) -> TeamRetractPayload {
     TeamRetractPayload {
         conversation_id: "conv".to_owned(),
+        principal: None,
         target: RetractTarget::Item {
             peer: "jun-dev".into(),
             item: "ri_x".into(),

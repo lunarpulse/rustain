@@ -31,6 +31,32 @@ def _screen(tui, predicate, label, timeout=45):
             return screen
         assert time.monotonic() < deadline, f"{label}:\n{screen}"
 
+def _stable_decision(tui, title, rail, timeout=45):
+    deadline = time.monotonic() + timeout
+    previous, since = None, None
+    while time.monotonic() < deadline:
+        screen = tui.get_screen_text()
+        rows, frame = screen.splitlines(), None
+        for index, row in enumerate(rows):
+            if title not in row or "┌" not in row or "┐" not in row:
+                continue
+            left = row.rfind("┌", 0, row.index(title))
+            right = row.find("┐", row.index(title))
+            for end in range(index + 1, len(rows)):
+                if len(rows[end]) > right and rows[end][left] == "└" and rows[end][right] == "┘":
+                    candidate = tuple(line[left:right + 1] for line in rows[index:end + 1])
+                    if any((content := line[1:-1].strip().removeprefix("▶ ").lstrip()).startswith("[")
+                           and rail in content for line in candidate[1:-1]):
+                        frame = candidate
+                    break
+            break
+        now = time.monotonic()
+        if frame != previous:
+            previous, since = frame, now
+        elif frame is not None and now - since >= 0.6:
+            return screen
+    pytest.fail(f"Decision frame did not settle: {title}\n{screen}")
+
 
 def _rpc(endpoint, method, params):
     body = json.dumps({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}).encode()
@@ -124,14 +150,22 @@ def _outbound(stack, binary, root, stub, evidence):
         assert time.monotonic() < deadline, "clarifier discovery did not settle"
     _command(tui, "ask clarifier")
     approved = False
+    opened = False
     deadline = time.monotonic() + 60
     while True:
         screen = tui.get_screen_text()
         if "Question remains open." in screen:
             break
         if not approved and "[r] Review" in screen:
+            _stable_decision(tui, "Decision: Permission", "[y] Allow")
             tui.send("y")
             approved = True
+        elif not approved and not opened and "Needs you (" in screen and "Decision:" not in screen:
+            tui.send("\x18q")
+            _screen(tui, lambda value: "Needs you" in value and "Permission" in value,
+                    "queued outbound permission")
+            tui.send("\r")
+            opened = True
         assert time.monotonic() < deadline, f"outbound question:\n{screen}"
     # The Agents sidebar (including Dashboard's Agents selection) legitimately
     # requires >=120 columns. At 80 columns the real tool result is the closest
@@ -193,26 +227,41 @@ def _inbound(stack, binary, root, stub, evidence):
     initial = _rpc(endpoint, "message/send", _message(task))
     (evidence / "inbound-send.json").write_text(json.dumps(initial, indent=2) + "\n")
     approved = False
+    opened = False
     deadline = time.monotonic() + 45
     while True:
         screen = tui.get_screen_text()
-        if "[awaiting your response]" in screen:
+        if "Decision: Recipient draft" in screen:
             break
         if not approved and "[a] Always allow" in screen:
+            _stable_decision(tui, "Decision: Peer consent", "[a] Always allow")
             tui.send("a")
             approved = True
-        assert time.monotonic() < deadline, f"inbound pending card:\n{screen}"
+        elif approved and not opened and "Needs you (" in screen and "Decision:" not in screen:
+            tui.send("\x18q")
+            _screen(tui, lambda value: "Recipient draft" in value and "Needs you" in value,
+                    "queued recipient decision")
+            tui.send("\r")
+            opened = True
+        assert time.monotonic() < deadline, f"inbound pending decision:\n{screen}"
+    screen = _stable_decision(tui, "Decision: Recipient draft", "[w] My own")
+    assert "Peer is waiting for your response." in screen, screen
+    assert "[w] My own" in screen, screen
     (evidence / "02-inbound-pending.screen.txt").write_text(screen)
     cancelled = _rpc(endpoint, "tasks/cancel", {"id": task})
     assert cancelled["result"]["status"]["state"] == "canceled", cancelled
     (evidence / "inbound-cancel.json").write_text(json.dumps(cancelled, indent=2) + "\n")
+    _screen(tui, lambda value: "This decision is no longer pending." in value
+            or "Decision: Recipient draft" not in value, "cancelled decision withdrawn")
+    if "Decision: Recipient draft" in tui.get_screen_text():
+        tui.send("\x1b")
 
     def settled(screen):
         text = " ".join(screen.replace("│", " ").replace("┆", " ").split())
         return (NOTICE in text and "[awaiting your response]" not in screen
-                and "Peer is waiting for your response" not in screen)
+                and "[w] My own" not in screen)
 
-    screen = _screen(tui, settled, "cancelled transcript notice and no pending card")
+    screen = _screen(tui, settled, "cancelled transcript notice and no actionable decision")
     (evidence / "03-inbound-cancelled.screen.txt").write_text(screen)
     terminal = _rpc(endpoint, "message/send", _message("native-terminal-followup", task))
     assert terminal["error"] == {"code": -32004, "message": "Task is in a terminal state and cannot accept further messages"}, terminal
@@ -237,7 +286,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, one 80x24 native smoke, two legs.\n"
             "PASS: tool inspector output shows input-required and a continuation handle; zero tasks/cancel while parked.\n"
-            "PASS: attached inbound pending card cancels to canceled; card disappears and exact notice persists.\n"
+            "PASS: attached inbound pending decision cancels to canceled; its action disappears and exact notice persists.\n"
             "PASS: native cancelled taskId continuation refuses with -32004; no provider scene desync.\n")
 
 

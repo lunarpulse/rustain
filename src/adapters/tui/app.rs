@@ -149,13 +149,6 @@ pub enum InputAction {
     TeamRetractConfirm,
     /// Story 19.16f (AC4): cancel the `/team retract` card. Sends nothing.
     TeamRetractDecline,
-    #[cfg(feature = "a2a")]
-    TeamProposal {
-        conversation_id: String,
-        proposal_id: String,
-        /// None is Review, not an approval.
-        decision: Option<crate::domain::models::TeamProposalDecision>,
-    },
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -169,6 +162,11 @@ pub enum InputAction {
     CycleMode,
     /// Switch directly to a tab by 1-based index (number keys 1-9 in Chat focus).
     SwitchToTab(usize),
+    /// Open a passive proposal after switching to its originating conversation.
+    OpenDecisionTab {
+        conversation_id: String,
+        key: crate::adapters::tui::decision_queue::DecisionKey,
+    },
     /// Toggle Monitor density from the leader (Ctrl+X, W): Story 21.3 A6.
     SetDensityMode(crate::domain::models::visual::DensityMode),
     /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
@@ -453,7 +451,7 @@ impl InputAction {
     }
 }
 
-pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
+pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
     use crate::adapters::tui::decision_queue::DecisionKind as K;
     [
         K::Permission,
@@ -474,49 +472,15 @@ pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
         K::Fork,
         K::Rewind,
         K::ExportOverwrite,
+        K::LargeImage,
     ]
     .into_iter()
     .any(|kind| state.decisions.presenting(kind))
-        || state
-            .decisions
-            .holds_undeferred(crate::adapters::tui::decision_queue::DecisionKind::LargeImage)
-}
-
-pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
-    if proposal_higher_confirmation_active(state) {
-        return true;
-    }
-    #[cfg(feature = "a2a")]
-    {
-        state
-            .team_proposal_conversation_id
-            .as_ref()
-            .is_some_and(|id| state.pending_team_proposals.contains_key(id))
-    }
-    #[cfg(not(feature = "a2a"))]
-    false
-}
-
-#[cfg(feature = "a2a")]
-fn visible_team_proposal(
-    state: &TuiState,
-) -> Option<&std::sync::Arc<crate::domain::models::TeamProposal>> {
-    if !matches!(state.focus, FocusState::Chat | FocusState::Input)
-        || proposal_higher_confirmation_active(state)
-    {
-        return None;
-    }
-    let pending = state
-        .pending_team_proposals
-        .get(state.team_proposal_conversation_id.as_ref()?)?;
-    state
-        .team_proposal_visible
-        .as_ref()
-        .filter(|visible| std::sync::Arc::ptr_eq(visible, pending))
+        || crate::adapters::tui::decision_queue::team_proposal_presenting(state)
 }
 
 /// Preserve raw key ownership before conversion discards modifiers and kind.
-pub(crate) fn recipient_surface_ignores_raw_key(
+pub fn recipient_surface_ignores_raw_key(
     state: &TuiState,
     event: &crossterm::event::Event,
 ) -> bool {
@@ -545,16 +509,27 @@ pub(crate) fn recipient_surface_ignores_raw_key(
             C::DecisionConfirm => &['y', 'n'],
             C::Forget | C::ExportOverwrite => &['y', 'n'],
             C::Rewind => &['y', 'f', 'n'],
+            C::ReplyArrived => &['x'],
+            C::Ticket => &['d', 'x', 'e'],
+            C::TeamProposal => &['y', 'r', 'n'],
             _ => &[],
         };
         let enter_decides = matches!(
             context,
-            C::DecisionCompose | C::Question | C::QuestionIdle | C::SpawnGate
+            C::DecisionCompose
+                | C::Question
+                | C::QuestionIdle
+                | C::SpawnGate
+                | C::ReplyArrived
+                | C::Ticket
         );
         if matches!(context, C::Question | C::QuestionIdle)
             && key.code == KeyCode::Char('d')
             && key.modifiers == KeyModifiers::CONTROL
         {
+            return key.kind != KeyEventKind::Press;
+        }
+        if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL {
             return key.kind != KeyEventKind::Press;
         }
         let deciding = match key.code {
@@ -565,16 +540,6 @@ pub(crate) fn recipient_surface_ignores_raw_key(
         if deciding {
             return key.kind != KeyEventKind::Press || !key.modifiers.is_empty();
         }
-    }
-    #[cfg(feature = "a2a")]
-    if state.input_buffer.is_empty()
-        && visible_team_proposal(state).is_some()
-        && let Event::Key(key) = event
-        && matches!(key.code, KeyCode::Char('y' | 'r' | 'n'))
-    {
-        return key.kind != KeyEventKind::Press
-            || (!key.modifiers.is_empty()
-                && !(key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('r')));
     }
     if recipient_higher_confirmation_active(state) {
         return false;
@@ -1298,14 +1263,6 @@ pub(crate) fn dispatch_frame_key(
     host: Host,
 ) -> InputAction {
     dispatch(state, context, key, host)
-}
-
-#[cfg(feature = "a2a")]
-fn proposal_context(state: &TuiState) -> Option<Context> {
-    (state.focus == FocusState::Chat
-        && state.input_buffer.is_empty()
-        && visible_team_proposal(state).is_some())
-    .then_some(Context::TeamProposal)
 }
 
 pub(crate) fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
@@ -2412,37 +2369,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return dispatch(state, context, Key::Char(c), Host::Local);
     }
 
-    #[cfg(feature = "a2a")]
-    if matches!(c, 'y' | 'r' | 'n')
-        && state.input_buffer.is_empty()
-        && let Some(proposal) = visible_team_proposal(state)
-    {
-        use crate::domain::models::TeamProposalDecision;
-        if c == 'y' && !state.team_proposal_footer_visible {
-            return InputAction::Consumed;
-        }
-        let decision = match c {
-            'y' => Some(TeamProposalDecision::Send),
-            'r' => None,
-            'n' => Some(TeamProposalDecision::Dismiss),
-            _ => unreachable!("proposal key filtered above"),
-        };
-        return InputAction::TeamProposal {
-            conversation_id: proposal.conversation_id.clone(),
-            proposal_id: proposal.id.clone(),
-            decision,
-        };
-    }
-
-    #[cfg(feature = "a2a")]
-    if matches!(c, 'y' | 'r' | 'n')
-        && state.focus == FocusState::Chat
-        && !state.input_buffer.is_empty()
-        && visible_team_proposal(state).is_some()
-    {
-        reducer::set_base(state, FocusState::Input);
-    }
-
     match focus_context(state) {
         Some(context) => dispatch(state, context, Key::Char(c), Host::Local),
         None => InputAction::Ignored,
@@ -2567,64 +2493,6 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         state.pending_bracket = None;
         state.pending_g = false;
         state.needs_redraw = true;
-    }
-
-    #[cfg(feature = "a2a")]
-    if matches!(key, DomainKey::Esc | DomainKey::CtrlC)
-        && proposal_context(state).is_some()
-        && !matches!(
-            focus_context(state),
-            Some(Context::ChatReorder | Context::ChatDrill)
-        )
-    {
-        crate::adapters::tui::notifications::info(
-            state,
-            crate::adapters::tui::notifications::NoticeSource::Approval,
-            crate::adapters::tui::keymap::render::card_cue(Context::TeamProposal, Host::Local),
-        );
-        state.needs_redraw = true;
-        return InputAction::Consumed;
-    }
-
-    #[cfg(feature = "a2a")]
-    if matches!(key, DomainKey::PageUp | DomainKey::PageDown)
-        && state.input_buffer.is_empty()
-        && let Some(proposal) = visible_team_proposal(state)
-    {
-        let reviewing = state
-            .tab_render_states
-            .get(&state.active_tab_id)
-            .is_some_and(|tab| {
-                tab.team_proposal_reviews
-                    .values()
-                    .any(|review| std::sync::Arc::ptr_eq(review, proposal))
-            });
-        let at_boundary = if key == DomainKey::PageUp {
-            state.team_proposal_scroll == 0
-        } else {
-            state.team_proposal_scroll == state.team_proposal_scroll_max
-        };
-        if reviewing && at_boundary {
-            let step = state.viewport_height.saturating_sub(1).max(1);
-            let delta = if key == DomainKey::PageUp {
-                crate::domain::models::view_state::ScrollDelta::WheelUp(step)
-            } else {
-                crate::domain::models::view_state::ScrollDelta::WheelDown(step)
-            };
-            return InputAction::MouseScroll(delta);
-        }
-        if state.team_proposal_scroll_max > 0 {
-            let step = state.team_proposal_viewport_rows.saturating_sub(1).max(1);
-            state.team_proposal_scroll = if key == DomainKey::PageUp {
-                state.team_proposal_scroll.saturating_sub(step)
-            } else {
-                state.team_proposal_scroll.saturating_add(step)
-            }
-            .min(state.team_proposal_scroll_max);
-            state.team_proposal_footer_visible = false;
-            state.needs_redraw = true;
-            return InputAction::Consumed;
-        }
     }
 
     let k = Key::from_domain_key(key);
@@ -4258,7 +4126,7 @@ mod tests {
             );
             assert!(decision_queue::forget_pending(&state, "review"));
             assert!(state.recipient_surface.is_some());
-            assert!(proposal_higher_confirmation_active(&state));
+            assert!(recipient_higher_confirmation_active(&state));
             assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
             decision_queue::note_painted(&mut state);
             clock.advance(decision_queue::INERT_AFTER_PAINT);
@@ -5587,7 +5455,7 @@ mod tests {
         );
         assert!(state.decisions.holds(DecisionKind::Forget));
         assert!(!state.decisions.presenting(DecisionKind::Forget));
-        assert!(!proposal_higher_confirmation_active(&state));
+        assert!(!recipient_higher_confirmation_active(&state));
         decision_queue::raise(
             &mut state,
             DecisionDraft::new(DecisionKind::Forget, "here").conversation("here"),
@@ -5597,52 +5465,66 @@ mod tests {
         decision_queue::withdraw_for(&mut state, DecisionKind::Forget, "here");
         assert!(state.decisions.holds(DecisionKind::Forget));
         assert!(!state.decisions.presenting(DecisionKind::Forget));
-        assert!(!proposal_higher_confirmation_active(&state));
+        assert!(!recipient_higher_confirmation_active(&state));
     }
 
-    /// 6D-L1-03: deferring Forget restores the proposal's actual paint and key route.
+    /// A deferred Forget must not hide or disable a reopened proposal frame.
     #[cfg(feature = "a2a")]
     #[test]
     fn story21_6_deferred_forget_restores_local_proposal() {
-        use crate::adapters::tui::{decision_queue, widgets::team_proposal_card};
-        use crate::domain::models::{SemanticMessageType, TeamProposal, TeamProposalDecision};
-        use ratatui::{buffer::Buffer, layout::Rect};
+        use crate::adapters::tui::decision_queue::{
+            self, DecisionEffect, DecisionKind, DecisionSubject, Responder,
+        };
+        use crate::adapters::tui::notifications::NotificationStore;
+        use crate::domain::clock::MockClock;
+        use crate::domain::models::{SemanticMessageType, TeamProposal};
+        use ratatui::{Terminal, backend::TestBackend};
+        use std::sync::Arc;
 
         let mut state = make_state();
-        state.focus = FocusState::Chat;
-        let proposal = std::sync::Arc::new(TeamProposal {
+        let clock = Arc::new(MockClock::new(std::time::Instant::now()));
+        state.notifications = NotificationStore::from_config(
+            &crate::domain::models::NotificationsConfig::default(),
+            clock.clone(),
+        );
+        let facts = crate::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some("c".into()),
+            ..Default::default()
+        };
+        let proposal = Arc::new(TeamProposal {
             id: "tp-deferred".into(),
             conversation_id: "c".into(),
             recipients: vec!["peer".into()],
             message_type: SemanticMessageType::ArchitectureUpdate,
             body: "proposal body".into(),
         });
-        state.team_proposal_conversation_id = Some("c".into());
-        state
-            .pending_team_proposals
-            .insert("c".into(), proposal.clone());
-        state.team_proposal_visible = Some(proposal);
-        state.team_proposal_footer_visible = true;
+        decision_queue::raise_team_proposal(&mut state, proposal, Responder::Local);
+        let proposal_key = state.decisions.items().next().unwrap().key();
         let paint = |state: &TuiState| {
-            let area = Rect::new(0, 0, 80, 24);
-            let mut layout = crate::adapters::tui::layout::compute_layout(
-                area,
-                &state.theme,
-                &state.input_buffer,
-                1,
-                false,
-                crate::domain::models::visual::DensityMode::Focus,
-            )
-            .unwrap();
-            let card = team_proposal_card::frame(state)
-                .1
-                .prepare(&mut layout, area, &state.theme);
-            let mut buffer = Buffer::empty(area);
-            let visible = team_proposal_card::render(card, &mut buffer, &state.theme);
-            (visible.is_some(), buffer)
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut painted = false;
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    painted = crate::adapters::tui::widgets::decision_frame::render(
+                        frame,
+                        area,
+                        state,
+                        &facts,
+                        &state.theme,
+                        "Decision",
+                        None,
+                    );
+                })
+                .unwrap();
+            assert!(painted);
+            let buffer = terminal.backend().buffer();
+            (0..24)
+                .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
         };
-        let (visible, before) = paint(&state);
-        assert!(visible);
+        let before = paint(&state);
+        assert!(before.iter().any(|row| row.contains("proposal body")));
         decision_queue::raise_forget(
             &mut state,
             decision_queue::PendingForgetCard {
@@ -5651,93 +5533,131 @@ mod tests {
                 focused_index: 0,
             },
         );
-        assert!(!paint(&state).0);
+        assert_eq!(
+            decision_queue::current(&state, &facts).unwrap().kind,
+            DecisionKind::Forget
+        );
         route_conversation_decision(
             &mut state,
             "c",
             DomainInputEvent::SpecialKey(DomainKey::Esc),
         );
-        assert!(state.decisions.holds(decision_queue::DecisionKind::Forget));
-        let (visible, after) = paint(&state);
-        assert!(visible);
-        assert_eq!(before, after);
+        assert!(state.decisions.holds(DecisionKind::Forget));
+        // Deferral does not automatically reselect waiting items (A9).
+        assert!(decision_queue::open(&mut state, &proposal_key));
         assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
-            InputAction::TeamProposal {
-                conversation_id: "c".into(),
-                proposal_id: "tp-deferred".into(),
-                decision: Some(TeamProposalDecision::Send)
-            }
+            decision_queue::current(&state, &facts).unwrap().kind,
+            DecisionKind::TeamProposal
+        );
+        let after = paint(&state);
+        assert!(after.iter().any(|row| row.contains("proposal body")));
+        decision_queue::note_painted(&mut state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
+        assert_eq!(
+            route_conversation_decision(&mut state, "c", DomainInputEvent::KeyPress('y')),
+            InputAction::Decision(DecisionEffect::TeamProposalSend)
+        );
+        assert!(
+            matches!(state.decisions.take_resolved(), Some(DecisionSubject::TeamProposal(payload))
+            if payload.proposal.id == "tp-deferred" && payload.proposal.conversation_id == "c")
         );
     }
 
-    /// 21-3 3-C (R4g): the local team-proposal rows by value; `Esc` / `Ctrl+C` only cue.
+    /// Proposal rows act on their frame; Back defers and Review is a sub-context.
     #[cfg(feature = "a2a")]
     #[test]
-    fn story21_3_local_team_proposal_rows_decide_once_and_esc_only_cues() {
-        use crate::domain::models::{SemanticMessageType, TeamProposal, TeamProposalDecision};
-        let proposal = std::sync::Arc::new(TeamProposal {
+    fn story21_6_local_team_proposal_rows_decide_once_and_back_defers() {
+        use crate::adapters::tui::decision_queue::{
+            self, DecisionEffect, DecisionKind, DecisionSubject, Responder,
+        };
+        use crate::adapters::tui::notifications::NotificationStore;
+        use crate::domain::clock::MockClock;
+        use crate::domain::models::{SemanticMessageType, TeamProposal};
+        use std::sync::Arc;
+
+        let proposal = Arc::new(TeamProposal {
             id: "tp1".into(),
             conversation_id: "c".into(),
             recipients: vec!["lena-po".into()],
             message_type: SemanticMessageType::ArchitectureUpdate,
             body: "body".into(),
         });
-        let build = |footer: bool| {
+        let build = || {
             let mut state = make_state();
-            state.focus = FocusState::Chat;
-            state.team_proposal_conversation_id = Some("c".into());
-            state
-                .pending_team_proposals
-                .insert("c".into(), proposal.clone());
-            state.team_proposal_visible = Some(proposal.clone());
-            state.team_proposal_footer_visible = footer;
-            state
-        };
-        let decide = |decision| InputAction::TeamProposal {
-            conversation_id: "c".into(),
-            proposal_id: "tp1".into(),
-            decision,
-        };
-        for (key, want) in [
-            ('y', decide(Some(TeamProposalDecision::Send))),
-            ('r', decide(None)),
-            ('n', decide(Some(TeamProposalDecision::Dismiss))),
-        ] {
-            assert_eq!(
-                handle_input(&mut build(true), &DomainInputEvent::KeyPress(key)),
-                want,
-                "{key}"
+            let clock = Arc::new(MockClock::new(std::time::Instant::now()));
+            state.notifications = NotificationStore::from_config(
+                &crate::domain::models::NotificationsConfig::default(),
+                clock.clone(),
             );
-        }
-        // `y` sends only once the footer that offers it is visible.
-        assert_eq!(
-            handle_input(&mut build(false), &DomainInputEvent::KeyPress('y')),
-            InputAction::Consumed
-        );
-        // A draft owns the letters.
-        let mut typing = build(true);
-        typing.input_buffer = "draft".into();
-        assert_ne!(
-            handle_input(&mut typing, &DomainInputEvent::KeyPress('y')),
-            decide(Some(TeamProposalDecision::Send))
-        );
-        // Esc and Ctrl+C never decide: one registry cue, the proposal stays pending.
-        let cue =
-            crate::adapters::tui::keymap::render::card_cue(Context::TeamProposal, Host::Local);
-        for key in [DomainKey::Esc, DomainKey::CtrlC] {
-            let mut state = build(true);
+            decision_queue::raise_team_proposal(&mut state, proposal.clone(), Responder::Local);
+            (state, clock)
+        };
+        for (key, effect) in [
+            ('y', DecisionEffect::TeamProposalSend),
+            ('n', DecisionEffect::TeamProposalDismiss),
+        ] {
+            let (mut state, clock) = build();
+            decision_queue::note_painted(&mut state);
             assert_eq!(
-                handle_input(&mut state, &DomainInputEvent::SpecialKey(key)),
+                route_conversation_decision(&mut state, "c", DomainInputEvent::KeyPress(key)),
                 InputAction::Consumed
             );
-            assert!(state.pending_team_proposals.contains_key("c"), "{key:?}");
-            let posted: Vec<String> = state
-                .notifications
-                .records()
-                .map(|record| record.message.clone())
-                .collect();
-            assert_eq!(posted, vec![cue.clone()], "{key:?}");
+            clock.advance(decision_queue::INERT_AFTER_PAINT);
+            assert_eq!(
+                route_conversation_decision(&mut state, "c", DomainInputEvent::KeyPress(key)),
+                InputAction::Decision(effect)
+            );
+            assert!(
+                matches!(state.decisions.take_resolved(), Some(DecisionSubject::TeamProposal(payload))
+                if payload.proposal.id == "tp1" && payload.proposal.conversation_id == "c")
+            );
+            assert!(!state.decisions.holds(DecisionKind::TeamProposal));
+            assert_ne!(
+                handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
+                InputAction::Decision(effect)
+            );
+        }
+        let (mut review, clock) = build();
+        decision_queue::note_painted(&mut review);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
+        assert_eq!(
+            route_conversation_decision(&mut review, "c", DomainInputEvent::KeyPress('r')),
+            InputAction::Consumed
+        );
+        assert!(
+            matches!(&review.decisions.items().next().unwrap().subject, DecisionSubject::TeamProposal(p) if p.reviewing)
+        );
+        assert_eq!(
+            route_conversation_decision(
+                &mut review,
+                "c",
+                DomainInputEvent::SpecialKey(DomainKey::Esc)
+            ),
+            InputAction::Consumed
+        );
+        assert!(
+            matches!(&review.decisions.items().next().unwrap().subject, DecisionSubject::TeamProposal(p) if !p.reviewing)
+        );
+        let (mut typing, clock) = build();
+        typing.input_buffer = "draft".into();
+        decision_queue::note_painted(&mut typing);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
+        assert_eq!(
+            route_conversation_decision(&mut typing, "c", DomainInputEvent::KeyPress('y')),
+            InputAction::Consumed
+        );
+        assert_eq!(typing.input_buffer, "draft");
+        assert!(typing.decisions.holds(DecisionKind::TeamProposal));
+        for key in [DomainKey::Esc, DomainKey::CtrlC] {
+            let (mut state, _) = build();
+            assert_eq!(
+                route_conversation_decision(&mut state, "c", DomainInputEvent::SpecialKey(key)),
+                InputAction::Consumed
+            );
+            let item = state.decisions.items().next().unwrap();
+            assert_eq!(item.kind, DecisionKind::TeamProposal);
+            assert!(item.deferred, "{key:?}");
+            assert!(state.modal_stack.top().is_none());
         }
     }
 

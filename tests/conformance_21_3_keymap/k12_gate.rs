@@ -19,9 +19,9 @@
 //! P1/P2 apply to string literals only. The literal extractor ignores `//`, `///`, `//!` and
 //! block comments and every non-literal token (so `v[i]` indexing is never a hit); a hit is a
 //! physical source line whose literal text matches. The tests read `src/**/*.rs` relative to
-//! `CARGO_MANIFEST_DIR` and nothing outside `rustain/`. Known limit (DF-21-3-K12-ONE-LITERAL-PER-LINE):
-//! a hit is one physical line, so several literals on one line count once, and a pin matches by
-//! `starts_with`: a second literal on a pinned line is not seen.
+//! `CARGO_MANIFEST_DIR` and nothing outside `rustain/`. Accounting is per literal and physical
+//! line (DF-21-3-K12-ONE-LITERAL-PER-LINE, closed by 21.6 slice 6-E): several literals on one
+//! line are separate hits, and a pin matches one hit by `starts_with`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -84,7 +84,7 @@ const ALLOWLIST: &[Allow] = &[
     // permanent AC18 set: not TUI keys
     ("src/adapters/cli/doctor/checks.rs", &["tmux detected: Ctrl+B prefix"], OWNER_PERMANENT, "doctor note about a tmux prefix conflict, not a keymap row"),
     ("src/adapters/cli/init.rs", &["Sign in to a model provider now? [y/n] ", "{question} [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompts"),
-    ("src/adapters/cli/migrate.rs", &["[x][ ]"], OWNER_PERMANENT, "migrate checklist marker `[x]`/`[ ]`, not a key"),
+    ("src/adapters/cli/migrate.rs", &["[x]"], OWNER_PERMANENT, "migrate checklist marker `[x]`, not a key"),
     ("src/adapters/cli/profile/import.rs", &["Profile '{}' already exists at {}. Overwrite? [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
     ("src/adapters/cli/profile/install.rs", &["Profile '{}' already exists at {}. Overwrite? [y/n]: "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
     ("src/adapters/cli/profile/prompt.rs", &["{} [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
@@ -98,9 +98,9 @@ const ALLOWLIST: &[Allow] = &[
     ("src/infrastructure/runtime/event_loop.rs", &["Tab is read-only (subagent output view)", "Tab save timed out"], OWNER_PERMANENT, "two tab warnings, not keys"),
     ("src/adapters/cli/peer/rows.rs", &["         Awaiting your decision.  [y] Confirm and pin", "         Awaiting your decision.  [y] Update the address"], OWNER_PERMANENT, "shared CLI/TUI peer-add card copy: `cli` may not import `tui` (adapter ratchet); the keys are truth-checked against the Confirm rows by K11"),
     // `[x]` / `[ ]` are checkbox markers, not keys
-    ("src/adapters/tui/widgets/consolidation_card.rs", &["  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers, not keys"),
-    ("src/adapters/tui/widgets/forget_card.rs", &["  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers, not keys"),
-    ("src/adapters/tui/widgets/decision_frame.rs", &["  [x]   [ ] ", "  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers counted by the Copy preflight, not keys"),
+    ("src/adapters/tui/widgets/consolidation_card.rs", &["  [x] "], OWNER_PERMANENT, "checkbox markers, not keys"),
+    ("src/adapters/tui/widgets/forget_card.rs", &["  [x] "], OWNER_PERMANENT, "checkbox markers, not keys"),
+    ("src/adapters/tui/widgets/decision_frame.rs", &["  [x] ", "  [x] "], OWNER_PERMANENT, "checkbox markers counted by the Copy preflight, not keys"),
     // 21-4: the login overlay keeps `handlers::login::on_key` (security boundary)
     ("src/adapters/tui/widgets/login_dialog.rs", &[
         "Esc back", "Esc close", "↑↓ navigate · Enter select · Esc back", "↑↓ navigate · Enter select · Esc close",
@@ -167,10 +167,27 @@ fn production_part(source: &str) -> String {
 /// The text of the string literals on each physical line (1-based). Comments, char literals,
 /// lifetimes and all other tokens are skipped; escapes other than `\"`, `\\`, `\'` become a space;
 /// a `\`-newline continuation joins nothing; raw strings (`r#"…"#`) are literal text.
-fn literal_lines(source: &str) -> BTreeMap<usize, String> {
+fn literal_lines(source: &str) -> Vec<(usize, String)> {
+    // One entry per literal and physical line: several literals on one line never merge
+    // (DF-21-3-K12-ONE-LITERAL-PER-LINE).
+    fn push(
+        out: &mut Vec<(usize, String)>,
+        cur: &mut Option<(usize, usize)>,
+        literal: usize,
+        line: usize,
+        ch: char,
+    ) {
+        if *cur != Some((literal, line)) {
+            out.push((line, String::new()));
+            *cur = Some((literal, line));
+        }
+        out.last_mut().expect("just pushed").1.push(ch);
+    }
     let b: Vec<char> = source.chars().collect();
     let n = b.len();
-    let mut out: BTreeMap<usize, String> = BTreeMap::new();
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut cur: Option<(usize, usize)> = None;
+    let mut literal = 0usize;
     let mut line = 1usize;
     let mut i = 0usize;
     while i < n {
@@ -201,6 +218,7 @@ fn literal_lines(source: &str) -> BTreeMap<usize, String> {
                 }
             }
         } else if c == '"' {
+            literal += 1;
             i += 1;
             while i < n && b[i] != '"' {
                 if b[i] == '\\' && i + 1 < n {
@@ -208,22 +226,23 @@ fn literal_lines(source: &str) -> BTreeMap<usize, String> {
                     if escaped == '\n' {
                         line += 1;
                     } else if matches!(escaped, '"' | '\\' | '\'') {
-                        out.entry(line).or_default().push(escaped);
+                        push(&mut out, &mut cur, literal, line, escaped);
                     } else {
-                        out.entry(line).or_default().push(' ');
+                        push(&mut out, &mut cur, literal, line, ' ');
                     }
                     i += 2;
                 } else {
                     if b[i] == '\n' {
                         line += 1;
                     } else {
-                        out.entry(line).or_default().push(b[i]);
+                        push(&mut out, &mut cur, literal, line, b[i]);
                     }
                     i += 1;
                 }
             }
             i += 1;
         } else if c == 'r' && (next == '#' || next == '"') {
+            literal += 1;
             let mut j = i + 1;
             let mut hashes = 0usize;
             while j < n && b[j] == '#' {
@@ -240,7 +259,7 @@ fn literal_lines(source: &str) -> BTreeMap<usize, String> {
                     if b[i] == '\n' {
                         line += 1;
                     } else {
-                        out.entry(line).or_default().push(b[i]);
+                        push(&mut out, &mut cur, literal, line, b[i]);
                     }
                     i += 1;
                 }
@@ -631,6 +650,23 @@ fn k12_positive_control_literal_scanner_production_part_and_allowlist() {
     let p2 = "fn f() { s(\"Esc to close\"); }";
     assert_eq!(literal_hits("src/adapters/tui/widgets/new.rs", p2).len(), 1);
     assert!(literal_hits("src/domain/models/x.rs", p2).is_empty());
+    // 6-E: two hint literals on ONE physical line are two hits (they used to merge into one),
+    // so a pin for the first never hides the second.
+    let both = "fn f() { s(\"Press Ctrl+B\"); s(\"Alt+Q to quit\"); }";
+    assert_eq!(
+        literal_hits("src/domain/x.rs", both)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    let pinned_one: &[Allow] = &[("src/a.rs", &["Press Ctrl+B"], OWNER_PERMANENT, "pin")];
+    assert!(
+        literal_violations(&[src("src/a.rs", both)], pinned_one)
+            .iter()
+            .any(|v| v.contains("unpinned") && v.contains("Alt+Q to quit")),
+        "the second literal on a pinned line is seen"
+    );
 
     let hit = "fn f() { s(\"Press Ctrl+B\"); }";
     let two = "fn f() { s(\"Press Ctrl+B\"); }\nfn g() { s(\"Alt+Q\"); }";

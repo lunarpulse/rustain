@@ -1788,6 +1788,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn story21_6_local_ticket_keys_reach_tasks_update() {
+        use crate::adapters::tui::decision_queue::{
+            self, DecisionEffect, DecisionKind, PaneKey, PaneOutcome,
+        };
+        use crate::adapters::tui::notification_log::LogFacts;
+        use crate::adapters::tui::state::TuiState;
+        use crate::domain::events::DomainEventPayload;
+        use crate::infrastructure::runtime::ticket_bridge::{TicketBridge, send_local};
+
+        for (key, effect, action) in [
+            (PaneKey::Enter, DecisionEffect::TicketAccept, "accept"),
+            (PaneKey::Char('d'), DecisionEffect::TicketDecline, "decline"),
+            (PaneKey::Char('x'), DecisionEffect::TicketCancel, "cancel"),
+        ] {
+            let mut fx = fixture().await;
+            let transport = ScriptedTransport::repeat_forever("input_required");
+            let owner = CancellationToken::new();
+            fx.runtime
+                .start_task("srv", create_reply(), transport.clone(), owner.clone())
+                .await
+                .unwrap();
+            let assigned = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(AppEvent::DomainEvent(DomainEventPayload::Room(
+                        event @ RoomEvent::TicketAssigned { .. },
+                    ))) = fx.rx.recv().await
+                    {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .expect("ticket assignment");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if fx.tree.list().await.iter().any(|entry| {
+                        entry.agent_id == node_id()
+                            && entry.wait_reason
+                                == Some(crate::domain::models::WaitReason::AwaitingHumanInput)
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("durable waiting reason");
+            // The assignment was journaled before this observer existed:
+            // its cold fold must admit the same ticket without preemption or
+            // another journal read from the ticket projection.
+            let mut observer =
+                crate::infrastructure::transparency_awareness::LogAwarenessObserver::for_workspace(
+                    fx._dir.path(),
+                );
+            let mut view = crate::adapters::tui::state::LogAwarenessView::default();
+            let now = std::time::Instant::now();
+            observer.tick_at(now, &mut view);
+            observer.settle(&mut view).await;
+            let reads = observer.full_reads();
+            assert_eq!(reads, 1);
+            let mut replay = TuiState::new(80, 24);
+            let mut replay_bridge = TicketBridge::new(fx._dir.path());
+            replay_bridge
+                .observe(
+                    &mut replay,
+                    &observer,
+                    decision_queue::Responder::Attached,
+                    false,
+                    &[],
+                )
+                .await;
+            assert!(replay.decisions.holds(DecisionKind::Ticket));
+            assert!(replay.modal_stack.is_empty());
+            for second in 1..=3 {
+                observer.tick_at(now + Duration::from_secs(second), &mut view);
+                observer.settle(&mut view).await;
+                replay_bridge
+                    .observe(
+                        &mut replay,
+                        &observer,
+                        decision_queue::Responder::Attached,
+                        false,
+                        &[],
+                    )
+                    .await;
+            }
+            assert_eq!(observer.full_reads(), reads);
+            let clock = Arc::new(crate::domain::clock::MockClock::new(
+                std::time::Instant::now(),
+            ));
+            let mut state = TuiState::new(80, 24);
+            state.notifications =
+                crate::adapters::tui::notifications::NotificationStore::from_config(
+                    &crate::domain::models::NotificationsConfig::default(),
+                    clock.clone(),
+                );
+            let mut bridge = TicketBridge::new(fx._dir.path());
+            bridge
+                .event(&mut state, &assigned, &[fx.runtime.clone()])
+                .await;
+            assert!(state.modal_stack.is_empty());
+            let decision = state
+                .decisions
+                .items()
+                .find(|item| item.kind == DecisionKind::Ticket)
+                .unwrap()
+                .key();
+            assert!(decision_queue::open(&mut state, &decision));
+            decision_queue::note_painted(&mut state);
+            clock.advance(decision_queue::INERT_AFTER_PAINT);
+            let facts = LogFacts::default();
+            assert_eq!(
+                decision_queue::handle_key(&mut state, key, &facts),
+                PaneOutcome::Effect(effect)
+            );
+            send_local(&mut state, &facts, &[fx.runtime.clone()]).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if !transport.updates.lock().is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("tasks/update");
+            assert_eq!(
+                transport.updates.lock().as_slice(),
+                &[(
+                    "task-1".to_owned(),
+                    vec![("confirm".to_owned(), action.to_owned())]
+                )]
+            );
+            owner.cancel();
+        }
+    }
+
+    #[tokio::test]
     async fn pre_wait_answer_is_refused_not_buffered() {
         let fx = fixture().await;
         let transport = ScriptedTransport::repeat_forever("working");

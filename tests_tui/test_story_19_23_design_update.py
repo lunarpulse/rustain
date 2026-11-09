@@ -21,6 +21,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI as _RapStructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
+from decision_frame_helpers import has_row, open_recipient, view_recipient, wait_frame
 
 
 class _StructuralTUI(_RapStructuralTUI):
@@ -144,28 +145,27 @@ def _exercise(binary, evidence, root, monkeypatch):
             clients[alias] = tui
         sender, recipient = clients["A"], clients["B"]
         _command(sender, "/team send B consent-setup")
-        _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "standing sender consent")
+        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
         recipient.send("a")
         _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
                      "recipient accepted setup")
-        _wait_screen(recipient, lambda screen: "[Tab] Item actions" not in screen,
-                     "auto consent setup has no unsettled card")
+        _wait_screen(recipient, lambda screen: not has_row(screen, "Decision: Recipient draft"),
+                     "auto consent setup has no unsettled decision frame")
         _command(sender, "/team send --type story_assignment --stories S7-06=B B Sprint 7 stories")
         _wait_screen(recipient, lambda screen: (
             any(row["content"] == "Sprint 7 stories" for row in
                 _events(worlds["B"][0], "recipient_item_received"))
-            and "[Tab] Item actions" not in screen),
+            and not has_row(screen, "Decision: Recipient draft")),
             "assignment admitted and auto-settled before design update")
         body = "Updated payment flow: 2-step to 3-step"
         _command(sender, "/team send --type design_update --holders-of S7-06 " + body)
-        screen = _wait_screen(recipient, lambda screen: (
-            "design_update · A" in screen and "A selected you for story S7-06" in screen),
-            "holder-selected design update card")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "design_update · A") and has_row(screen, "A selected you for story S7-06"), screen
         (evidence / "01-arrival-card.screen.txt").write_text(screen)
-        recipient.send("\t")
+        view_recipient(recipient)
         screen = _wait_screen(recipient, lambda screen: (
-            "received thread" in screen and "A selected you for story S7-06" in screen
-            and "[a] Acknowledge" in screen), "selection View and receipt action")
+            has_row(screen, "received thread") and has_row(screen, "A selected you for story S7-06")
+            and has_row(screen, "[a] Acknowledge")), "selection View and receipt action")
         (evidence / "02-opened-item.screen.txt").write_text(screen)
         listed = [row for row in _events(worlds["B"][0], "recipient_item_received") if row["content"] == body]
         assert len(listed) == 1, listed
@@ -174,7 +174,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         recipient.send("a")
         screen = _wait_screen(recipient, lambda screen: (
             bool(_events(worlds["B"][0], "recipient_item_acknowledged"))
-            and "[a] Acknowledge" not in screen), "durable receipt-only acknowledgement")
+            and not has_row(screen, "[a] Acknowledge")), "durable receipt-only acknowledgement")
         (evidence / "03-acknowledged.screen.txt").write_text(screen)
         acknowledgements = _events(worlds["B"][0], "recipient_item_acknowledged")
         assert len(acknowledgements) == 1 and acknowledgements[0]["address"] == listed[0]["address"], acknowledgements
@@ -185,8 +185,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             (evidence / (alias + ".journal.json")).write_text(json.dumps(rows, indent=2) + "\n")
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, 80x24, two real daemons and attached writers; standing pinned sender consent.\n"
-            "PASS: auto consent setup and assignment settled with no card before design update.\n"
-            "PASS: design_update · A; A selected you for story S7-06 on card and View; [a] Acknowledge.\n"
+            "PASS: auto consent setup and assignment settled before design update.\n"
+            "PASS: design_update · A; A selected you for story S7-06 in decision and View; [a] Acknowledge.\n"
             "PASS: real Listed selection and durable receipt-only acknowledgement; zero provider turns.\n")
 
 

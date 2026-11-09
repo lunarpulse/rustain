@@ -42,6 +42,35 @@ def _wait(predicate, diagnostic, timeout=30):
 def _compact(text):
     return "".join(text.split())
 
+def _frame(screen):
+    """Return only the complete Permission sheet, excluding Stage and toast rows."""
+    rows = screen.splitlines()
+    for index, row in enumerate(rows):
+        if "Decision: Permission" not in row or "┌" not in row or "┐" not in row:
+            continue
+        left = row.rfind("┌", 0, row.index("Decision: Permission"))
+        right = row.find("┐", row.index("Decision: Permission"))
+        for end in range(index + 1, len(rows)):
+            if len(rows[end]) > right and rows[end][left] == "└" and rows[end][right] == "┘":
+                return tuple(line[left + 1:right].strip() for line in rows[index + 1:end])
+    return None
+
+
+def _stable_frame(tui, rail, timeout=60):
+    deadline = time.monotonic() + timeout
+    previous, since = None, None
+    while time.monotonic() < deadline:
+        screen = tui.get_screen_text()
+        rows = _frame(screen)
+        frame = rows if rows and all(any(row.removeprefix("▶ ").lstrip().startswith("[")
+                                         and key in row for row in rows) for key in rail) else None
+        now = time.monotonic()
+        if frame != previous:
+            previous, since = frame, now
+        elif frame is not None and now - since >= 0.6:
+            return screen
+    pytest.fail("Permission frame did not settle:\n" + screen)
+
 
 def _stop(process):
     if process.poll() is None:
@@ -134,29 +163,47 @@ def _tui(stack, ws, env, evidence, attached=False, name="writer"):
 
 
 def _card(tui, tool, evidence):
-    _wait(lambda: "[r] Review" in tui.get_screen_text(), tui.get_screen_text, 60)
-    text = evidence.screen(tui, "card")
-    assert tool in text and "┃" in text, text
-    assert "│ command:" in text if tool == "Bash" else "│ file_path:" in text, text
-    assert _compact("… more not shown — [r] Review first") in _compact(text), text
-    for key in ("[y] Allow", "[s] Session", "[a] Always", "[n] Deny", "[f] Deny + feedback", "[r] Review"):
-        assert _compact(key) in _compact(text), text
-    body = [row for row in text.splitlines() if "┃ │ " in row]
-    assert 1 <= len(body) <= 4, text
+    _wait(lambda: "Decision: Permission" in tui.get_screen_text()
+          or "Needs you (" in tui.get_screen_text(), tui.get_screen_text, 60)
+    if "Decision: Permission" not in tui.get_screen_text():
+        tui.send("\x18q")
+        _wait(lambda: "Permission" in tui.get_screen_text()
+              and "Needs you" in tui.get_screen_text(), tui.get_screen_text)
+        tui.send("\r")
+    rail = ("[y] Allow", "[s] Session", "[a] Always", "[n] Deny",
+            "[f] Deny + feedback", "[r] Review")
+    text = _stable_frame(tui, rail)
+    evidence.text("card.screen.txt", text)
+    rows = _frame(text)
+    assert any(tool in row for row in rows), text
+    field = "command:" if tool == "Bash" else "file_path:" if tool == "Write" else "message:"
+    body = [row for row in rows if row.startswith("│ ")]
+    assert 1 <= len(body) <= 4 and any(row.startswith("│ " + field) for row in body), text
+    for _ in range(8):
+        if any("… more not shown — [r] Review first" in row for row in rows):
+            break
+        before = rows
+        tui.send("\x1b[6~")
+        _wait(lambda: _frame(tui.get_screen_text()) != before, tui.get_screen_text, 5)
+        text = tui.get_screen_text()
+        rows = _frame(text)
+    else:
+        pytest.fail("Permission preview did not disclose Review first:\n" + text)
 
 
 def _review(tui, tool, evidence):
     tui.send("r")
+    _stable_frame(tui, ("[y] Allow", "[n] Deny"))
     _wait(lambda: "Exact tool input (not run yet)" in tui.get_screen_text(), tui.get_screen_text)
     for page in range(100):
         text = evidence.screen(tui, "review-%02d" % page)
-        assert _compact("Exact tool input (not run yet) · " + tool) in _compact(text), text
-        rows = text.splitlines()
-        source = next(i for i, row in enumerate(rows) if "risk:" in row)
+        rows = _frame(text)
+        assert rows and _compact("Exact tool input (not run yet) · " + tool) in _compact(" ".join(rows)), text
+        source = next(i for i, row in enumerate(rows) if row.startswith("risk:"))
         footer = next(i for i, row in enumerate(rows) if "[y] Allow" in row)
-        body = [row for row in rows[source + 1:footer] if row.strip()]
-        assert body and all(row.lstrip().startswith("│ ") for row in body), text
-        if MARKER in text:
+        body = [row for row in rows[source + 1:footer] if row]
+        assert body and all(row.startswith("│ ") for row in body), text
+        if any(MARKER in row for row in body):
             return text
         before = text
         tui.send("\x1b[6~")
@@ -427,9 +474,7 @@ def test_delegation_exact_review(tmp_path, monkeypatch, viewport, attached):
         mirror = _observer(stack, ws, env, evidence) if attached else None
         _wait(lambda: any("peer_id=reviewer" in path.read_text() for path in tmp_path.glob("runtime.log*")), tui.get_screen_text)
         _command(tui)
-        _wait(lambda: "[r] Review" in tui.get_screen_text(), tui.get_screen_text)
-        text = evidence.screen(tui, "card")
-        assert "│ message:" in text, text
+        _card(tui, tool, evidence)
         if mirror:
             _observer_pending(mirror, evidence)
         _review(tui, tool, evidence)

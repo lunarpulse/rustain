@@ -328,11 +328,10 @@ painted rows, and your own messages are shown exactly as typed. The supported
 terminal floor is unchanged (60×16). Notices appear as short toasts that expire on their own
 (errors within 60 s) and stay reviewable in the Notification Log
 (`Ctrl+X n`, `/notifications`); a `Log !N` badge counts warnings and errors you
-have not looked at yet. Prompts that need an answer (recovery, daily budget,
-context warning, large image, delete) wait in a decision pane instead of a
-toast; an automatically raised one never steals the keyboard while you type
-(one you asked for, such as delete, takes focus at once), and `Ctrl+X q` brings the
-oldest one back (`Needs you (N)` in the status row).
+have not looked at yet. Prompts that need an answer wait in the Needs-you queue;
+an automatically raised decision never steals the keyboard while you type.
+`Ctrl+X q` opens the list (`Needs you (N)` in the status row), where you can
+select a decision and open its frame. `Esc` defers it without deciding.
 
 Local sessions and `rustain daemon attach` share the composer, caret editing
 (`Ctrl+A/E/K`, arrows and paste), transcript view state and window compositor.

@@ -247,10 +247,10 @@ model       = "baai/bge-m3"         # 1024-dim, fixed (GATE-verified 2026-06-01)
 A memory you remove is **gone, not just hidden** — it can never resurface through memory
 search, now or after any reindex.
 
-- **`/memory forget <text>`** fuzzy-matches your memory entries and shows a confirm card
+- **`/memory forget <text>`** fuzzy-matches your memory entries and opens a decision frame
   listing each match (with its stable key). Because there is no separate `/memory show`, this
-  card doubles as the scoped "what's in memory" view. **Nothing is purged until you press
-  `[y]`** (`[n]` cancels; `Esc` never decides the card: it posts a reminder and the card stays).
+  frame doubles as the scoped "what's in memory" view. **Nothing is purged until you press
+  `[y]`** (`[n]` backs out; `Esc` defers without deciding; reopen via `Ctrl+X q`).
 - On confirm, a durable **redaction tombstone** is written to `…/.rustain/memory/redactions.bin`
   (a sibling of `index.bin`, **never** inside your `MEMORY.md`/daily-log source), then the
   vector index and the BM25 keyword index are purged of that entry.

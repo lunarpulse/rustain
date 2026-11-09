@@ -27,6 +27,8 @@ pub enum RetractTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamRetractPayload {
     pub target: RetractTarget,
+    /// Local host-resolved identity; attached previews disclose it in `card` instead.
+    pub principal: Option<String>,
     /// The conversation whose command raised it (`""` for an attached writer's items,
     /// which are decidable anywhere the writer is).
     pub conversation_id: String,

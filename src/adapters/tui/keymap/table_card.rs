@@ -1,23 +1,18 @@
-//! Rows of the decision cards (Story 21.3 AC15-AC17, A8, A9, KG-1, KG-2; 21.6 6-C).
+//! Rows of the decision cards (Story 21.3 AC15-AC17, A8, A9, KG-1, KG-2; 21.6 6-C..6-E).
 //!
-//! The cards that 21-6 moved onto the decision frame (question, skill trust, plan
-//! approval / card / deviation, skip cascade, delegation, spawn gate, cancel plan, agent
-//! kill) are children of `Context::Decision`: `Esc` defers, `Ctrl+C` backs, `Ctrl+Q` asks
-//! to quit, `c` copies and `PgUp`/`PgDn` scroll are the parent's rows. The cards 6-D has
-//! yet to move keep their hand-written arms (FR-21-3-b) under the shared `Card` parent;
-//! these rows are the truth they are checked against (K11) and the source of every rail
-//! and cue key (`render::rail`, `render::card_cue`). `Esc` and `Ctrl+C` never decide a card.
+//! Every decision card is a child of `Context::Decision`: `Esc` defers, `Ctrl+C` backs,
+//! `Ctrl+Q` asks to quit, `c` copies and `PgUp`/`PgDn` scroll are the parent's rows. These
+//! rows are the source of every rail key (`render::rail`) and the truth the decision
+//! frames are checked against (K11).
 //!
-//! A row with a label is a key the rail or cue names; a row without one (scroll, edit and
-//! cursor keys) is not offered as a decision.
+//! A row with a label is a key the rail names; a row without one (scroll, edit and cursor
+//! keys) is not offered as a decision.
 
 use super::model::{Binding, CommandId, Context, Key, bind};
 
 /// Commands of the decision cards. One name per meaning; a context's rows bind it to its key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CardCmd {
-    /// `Esc` / `Ctrl+C`: no decision, one cue naming the explicit keys.
-    Cue,
     /// `Esc`: back one frame (a sub-frame of a card, never a decision).
     Back,
     /// `Enter`: send the text (feedback, answer).
@@ -34,6 +29,10 @@ pub enum CardCmd {
     Always,
     /// `e`: edit / revise the plan.
     Edit,
+    /// Write a response without using the draft.
+    WriteOwn,
+    /// Open the associated item reader without resolving the decision.
+    ViewItem,
     /// `i`: inspect the skill file.
     Inspect,
     /// `r`: review (team proposal).
@@ -74,13 +73,8 @@ const fn k(ctx: Context, keys: &'static [Key], cmd: CardCmd, label: &'static str
     bind(ctx, keys, CommandId::Card(cmd), label).local()
 }
 
-const CUE: &str = "Never decides the card: posts one cue naming the keys that do";
-
 #[rustfmt::skip]
 pub const ROWS: &[Binding] = &[
-    // ── shared parent: Esc / Ctrl+C never decide ──
-    b(Context::Card, &[Key::Esc], CardCmd::Cue, "").does(CUE),
-    b(Context::Card, &[Key::Ctrl('c')], CardCmd::Cue, "").does(CUE),
     // ── the frame-owned text field (permission feedback, the question answer; both hosts) ──
     b(Context::DecisionCompose, &[Key::Enter], CardCmd::Send, "Send").te().does("Send the text and decide with it"),
     b(Context::DecisionCompose, &[Key::Esc], CardCmd::Back, "Back").te().does("Leave the field and return to the undecided request"),
@@ -134,10 +128,25 @@ pub const ROWS: &[Binding] = &[
     k(Context::Rewind, &[Key::Char('n')], CardCmd::No, "Cancel").does("Cancel the rewind"),
     k(Context::ExportOverwrite, &[Key::Char('y')], CardCmd::Yes, "Overwrite").does("Overwrite the existing export file"),
     k(Context::ExportOverwrite, &[Key::Char('n')], CardCmd::No, "Cancel").does("Keep the existing file"),
+    b(Context::ReplyArrived, &[Key::Enter], CardCmd::Confirm, "Read thread").does("Read the peer thread without adopting its content"),
+    b(Context::ReplyArrived, &[Key::Char('x')], CardCmd::CancelPlan, "Dismiss").does("Dismiss this reply arrival"),
+    b(Context::Ticket, &[Key::Enter], CardCmd::Confirm, "Accept").does("Validate and send the ticket answer"),
+    b(Context::Ticket, &[Key::Char('d')], CardCmd::Delegate, "Decline").does("Decline the request; the task continues"),
+    b(Context::Ticket, &[Key::Char('x')], CardCmd::CancelPlan, "Cancel task").does("Cancel the task"),
+    b(Context::Ticket, &[Key::Up], CardCmd::Up, "").does("Select the previous answer field"),
+    b(Context::Ticket, &[Key::Down], CardCmd::Down, "").does("Select the next answer field"),
+    b(Context::Ticket, &[Key::Left], CardCmd::Left, "").does("Select the previous answer"),
+    b(Context::Ticket, &[Key::Right], CardCmd::Right, "").does("Select the next answer"),
+    b(Context::Ticket, &[Key::Char('e')], CardCmd::Edit, "Edit").does("Edit the selected answer"),
     // ── team proposal (agent proposes a message; empty composer) and attached consent ──
     bind(Context::TeamProposal, &[Key::Char('y')], CommandId::Card(CardCmd::Yes), "Send").does("Send the proposed message"),
-    bind(Context::TeamProposal, &[Key::Char('r')], CommandId::Card(CardCmd::Review), "Review").does("Review the proposed message"),
+    bind(Context::TeamProposal, &[Key::Char('r')], CommandId::Card(CardCmd::Review), "Review first").does("Review the proposed message"),
     bind(Context::TeamProposal, &[Key::Char('n')], CommandId::Card(CardCmd::No), "Dismiss").does("Dismiss the proposal"),
+    b(Context::RecipientDraft, &[Key::Char('y')], CardCmd::Yes, "Approve").attached().does("Approve the peer draft"),
+    b(Context::RecipientDraft, &[Key::Char('e')], CardCmd::Edit, "Edit").attached().does("Edit the peer draft"),
+    b(Context::RecipientDraft, &[Key::Char('n')], CardCmd::No, "Reject").attached().does("Reject or decline the peer response"),
+    b(Context::RecipientDraft, &[Key::Char('w')], CardCmd::WriteOwn, "My own").attached().does("Write your own response"),
+    b(Context::RecipientDraft, &[Key::Char('v')], CardCmd::ViewItem, "View item").attached().does("Read the associated item without deciding"),
     bind(Context::Consent, &[Key::Char('y')], CommandId::Card(CardCmd::Yes), "Allow once").attached().does("Allow the sender's request once"),
     bind(Context::Consent, &[Key::Char('a')], CommandId::Card(CardCmd::Always), "Always allow").attached().does("Always allow this sender's tool and remember it"),
     bind(Context::Consent, &[Key::Char('n')], CommandId::Card(CardCmd::No), "Decline").attached().does("Decline the sender's request"),

@@ -402,9 +402,6 @@ pub enum Context {
     DecisionQueue,
     RecipientSurface,
     Login,
-    /// Shared parent of the decision cards that still own their own keys (the 6-D
-    /// cards): the `Esc` / `Ctrl+C` cue rows (A8).
-    Card,
     /// A decision frame's own text field (Deny + feedback, the question answer):
     /// readline editing, never the composer.
     DecisionCompose,
@@ -429,10 +426,16 @@ pub enum Context {
     TeamProposal,
     /// Attached sender-consent card.
     Consent,
+    /// A peer's pending response: approve / edit / reject / write your own (attached).
+    RecipientDraft,
+    /// An MCP task's input-request ticket (Accumulate).
+    Ticket,
+    /// A peer's reply was observed (Accumulate).
+    ReplyArrived,
 }
 
 impl Context {
-    pub const ALL: [Context; 60] = [
+    pub const ALL: [Context; 62] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -476,7 +479,6 @@ impl Context {
         Context::DecisionQueue,
         Context::RecipientSurface,
         Context::Login,
-        Context::Card,
         Context::DecisionCompose,
         Context::Question,
         Context::QuestionIdle,
@@ -493,6 +495,9 @@ impl Context {
         Context::ExportOverwrite,
         Context::TeamProposal,
         Context::Consent,
+        Context::RecipientDraft,
+        Context::Ticket,
+        Context::ReplyArrived,
     ];
 
     /// Name painted in the "No binding for Ctrl+X <key> in <context>" toast and docs.
@@ -541,7 +546,6 @@ impl Context {
             Context::DecisionQueue => "Needs-you list",
             Context::RecipientSurface => "Recipient surface",
             Context::Login => "Login",
-            Context::Card => "Decision cards (shared)",
             Context::DecisionCompose => "Decision field",
             Context::Question => "Question",
             Context::QuestionIdle => "Question (field closed)",
@@ -558,6 +562,9 @@ impl Context {
             Context::ExportOverwrite => "Export overwrite",
             Context::TeamProposal => "Team proposal",
             Context::Consent => "Consent",
+            Context::RecipientDraft => "Recipient draft",
+            Context::Ticket => "Ticket",
+            Context::ReplyArrived => "Reply arrived",
         }
     }
 
@@ -581,8 +588,7 @@ impl Context {
             | Context::QuitConfirm
             | Context::Decision
             | Context::RecipientSurface
-            | Context::Login
-            | Context::Card => &[],
+            | Context::Login => &[],
             // The decision frames: the parent owns Esc (defer), Ctrl+C (back), Ctrl+Q
             // (quit), `c` (copy) and PgUp/PgDn (scroll).
             Context::Permission
@@ -602,8 +608,11 @@ impl Context {
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector => &[Context::MarkdownBody],
-            // The team proposal still owns every key: the shared cue rows only (A8, 6-E).
-            Context::TeamProposal => &[Context::Card],
+            // The 6-E decision frames: the parent owns Esc, Ctrl+C, Ctrl+Q, `c` and scroll.
+            Context::TeamProposal
+            | Context::RecipientDraft
+            | Context::Ticket
+            | Context::ReplyArrived => &[Context::Decision],
             Context::DecisionCompose => &[Context::CaretField],
             // The answer field is a decision field plus its own `Ctrl+D` skip.
             Context::Question => &[Context::DecisionCompose],

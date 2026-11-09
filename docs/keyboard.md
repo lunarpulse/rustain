@@ -5,7 +5,7 @@
 
 Every key listed here comes from the keymap registry that also drives the keys, the `Ctrl+X` menu, the help overlay, the palette and the status row.
 `Ctrl+X` opens an untimed menu; press a follow-up key, or `Esc` to cancel. A follow-up with no binding answers with a notice instead of doing nothing.
-On a decision frame `Esc` sets the decision aside (it stays queued and counted) and `Ctrl+C` goes back one frame; `c` copies the decision's text. None of them decides. On the decision cards that are not frames yet, `Esc` and `Ctrl+C` never decide: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.
+On a decision frame `Esc` sets the decision aside (it stays queued and counted), `Ctrl+C` goes back one frame, and `c` copies the decision's text; none decides. `Ctrl+X q` opens the Needs-you list to select and open a queued decision. Arrivals do not steal focus from a draft or another protected surface. Review belongs to the decision frame, and recipient decisions offer View item for the associated item.
 The attached client starts in Input in both writer and read-only modes. Its shared composer supports caret motions and readline editing, including Ctrl+A, Ctrl+E and Ctrl+K; read-only mode refuses submission, not local typing or local slash commands.
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.
 
@@ -709,13 +709,6 @@ A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit,
 | `l` | Copy the launch link (only while no field has focus) | local | portable |  |
 | `u` | Copy the verification link (only while no field has focus) | local | portable |  |
 
-## Decision cards (shared)
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `Esc` | Never decides the card: posts one cue naming the keys that do | local, attached | portable |  |
-| `Ctrl+C` | Never decides the card: posts one cue naming the keys that do | local, attached | portable |  |
-
 ## Decision field
 
 Also inherits: Caret text field.
@@ -866,7 +859,7 @@ Also inherits: Decisions.
 
 ## Team proposal
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -883,3 +876,39 @@ Also inherits: Decisions.
 | `y` | Allow the sender's request once | attached | portable |  |
 | `a` | Always allow this sender's tool and remember it | attached | portable |  |
 | `n` | Decline the sender's request | attached | portable |  |
+
+## Recipient draft
+
+Also inherits: Decisions.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Approve the peer draft | attached | portable |  |
+| `e` | Edit the peer draft | attached | portable |  |
+| `n` | Reject or decline the peer response | attached | portable |  |
+| `w` | Write your own response | attached | portable |  |
+| `v` | Read the associated item without deciding | attached | portable |  |
+
+## Ticket
+
+Also inherits: Decisions.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Validate and send the ticket answer | local, attached | portable |  |
+| `d` | Decline the request; the task continues | local, attached | portable |  |
+| `x` | Cancel the task | local, attached | portable |  |
+| `Up` | Select the previous answer field | local, attached | portable |  |
+| `Down` | Select the next answer field | local, attached | portable |  |
+| `Left` | Select the previous answer | local, attached | portable |  |
+| `Right` | Select the next answer | local, attached | portable |  |
+| `e` | Edit the selected answer | local, attached | portable |  |
+
+## Reply arrived
+
+Also inherits: Decisions.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Read the peer thread without adopting its content | local, attached | portable |  |
+| `x` | Dismiss this reply arrival | local, attached | portable |  |

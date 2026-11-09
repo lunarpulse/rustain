@@ -8,6 +8,7 @@ use futures::stream::BoxStream;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_queue::{self, DecisionEffect, DecisionKey, DecisionKind};
 use rustain::domain::errors::{ProviderError, ToolError};
 use rustain::domain::events::{AppEvent, DomainInputEvent};
 use rustain::domain::models::checkpoint::CheckpointId;
@@ -240,6 +241,23 @@ async fn show_active_tab(fixture: &mut ProposalFixture) {
         &fixture.conversation,
     )
     .await;
+    decision_queue::prune_closed(
+        &mut fixture.state,
+        &rustain::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(fixture.conversation.id.clone()),
+            ..Default::default()
+        },
+    );
+}
+
+fn open_proposal(fixture: &mut ProposalFixture, conversation: &str) {
+    let proposal = fixture.proposal(conversation).expect("queued proposal");
+    let key = DecisionKey {
+        kind: DecisionKind::TeamProposal,
+        source: proposal.id.clone(),
+        conversation_id: Some(conversation.to_owned()),
+    };
+    assert!(decision_queue::open(&mut fixture.state, &key));
 }
 
 #[tokio::test]
@@ -327,14 +345,10 @@ async fn k03_interleaved_local_turns_keep_each_proposal_on_its_tab() {
         }
     }
     let snapshot_a = fixture
-        .state
-        .pending_team_proposals
-        .get(&conversation_a)
+        .proposal(&conversation_a)
         .expect("A's production ready event is bound to conversation A");
     let snapshot_b = fixture
-        .state
-        .pending_team_proposals
-        .get(&conversation_b)
+        .proposal(&conversation_b)
         .expect("B's production ready event is bound to conversation B");
     assert_ne!(snapshot_a.id, snapshot_b.id);
     assert_eq!(snapshot_a.conversation_id, conversation_a);
@@ -357,17 +371,29 @@ async fn k03_interleaved_local_turns_keep_each_proposal_on_its_tab() {
     assert!(Arc::ptr_eq(&raised_a, snapshot_a));
     assert!(Arc::ptr_eq(&raised_b, snapshot_b));
 
-    // The real card surface follows the active tab, and dismiss keys act only on
-    // that tab's snapshot; no accepted send is exercised.
+    // Explicitly open the active tab's queued frame, then defer it before switching.
+    // Dismiss keys act only on the frame's own snapshot.
+    if !rustain::adapters::tui::presentation::is_open(
+        &fixture.state,
+        rustain::adapters::tui::presentation::Surface::Decision,
+    ) {
+        open_proposal(&mut fixture, &conversation_b);
+    }
     let card_b = fixture.paint(80, 20).join("\n");
     assert!(card_b.contains(BODY_B), "active B card missing: {card_b}");
     assert!(
         !card_b.contains(BODY_A),
         "inactive A card leaked into B: {card_b}"
     );
+    fixture
+        .key(DomainInputEvent::SpecialKey(
+            rustain::domain::events::DomainKey::Esc,
+        ))
+        .await;
 
     fixture.tabs.switch_to_prev();
     show_active_tab(&mut fixture).await;
+    open_proposal(&mut fixture, &conversation_a);
     let card_a = fixture.paint(80, 20).join("\n");
     assert!(card_a.contains(BODY_A), "active A card missing: {card_a}");
     assert!(
@@ -376,27 +402,14 @@ async fn k03_interleaved_local_turns_keep_each_proposal_on_its_tab() {
     );
     assert!(matches!(
         fixture.key(DomainInputEvent::KeyPress('n')).await,
-        InputAction::TeamProposal {
-            conversation_id,
-            decision: Some(rustain::domain::models::TeamProposalDecision::Dismiss),
-            ..
-        } if conversation_id == conversation_a
+        InputAction::Decision(DecisionEffect::TeamProposalDismiss)
     ));
-    assert!(
-        !fixture
-            .state
-            .pending_team_proposals
-            .contains_key(&conversation_a)
-    );
-    assert!(
-        fixture
-            .state
-            .pending_team_proposals
-            .contains_key(&conversation_b)
-    );
+    assert!(fixture.proposal(&conversation_a).is_none());
+    assert!(fixture.proposal(&conversation_b).is_some());
 
     fixture.tabs.switch_to_next();
     show_active_tab(&mut fixture).await;
+    open_proposal(&mut fixture, &conversation_b);
     let card_b = fixture.paint(80, 20).join("\n");
     assert!(
         card_b.contains(BODY_B),
@@ -404,13 +417,10 @@ async fn k03_interleaved_local_turns_keep_each_proposal_on_its_tab() {
     );
     assert!(matches!(
         fixture.key(DomainInputEvent::KeyPress('n')).await,
-        InputAction::TeamProposal {
-            conversation_id,
-            decision: Some(rustain::domain::models::TeamProposalDecision::Dismiss),
-            ..
-        } if conversation_id == conversation_b
+        InputAction::Decision(DecisionEffect::TeamProposalDismiss)
     ));
-    assert!(fixture.state.pending_team_proposals.is_empty());
+    assert!(fixture.proposal(&conversation_a).is_none());
+    assert!(fixture.proposal(&conversation_b).is_none());
 
     assert_eq!(lena.counts(), HttpCounts { get: 0, post: 0 });
     assert_eq!(jun.counts(), HttpCounts { get: 0, post: 0 });

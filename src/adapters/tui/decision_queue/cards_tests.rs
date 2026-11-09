@@ -365,6 +365,7 @@ fn story21_6_retract_answer_transfers_the_armed_payload_once_and_restores_base()
                 item: "ri_x".into(),
             },
             conversation_id: CONV.into(),
+            principal: None,
             task: Some("task-x".into()),
             card: "retract the selected item".into(),
             armed: true,
@@ -403,6 +404,7 @@ fn story21_6_retract_resolution_restores_the_interrupted_frame() {
                 item: "ri_x".into(),
             },
             conversation_id: CONV.into(),
+            principal: None,
             task: None,
             card: "retract".into(),
             armed: true,
@@ -430,6 +432,7 @@ fn story21_6_disarmed_retract_cannot_confirm() {
                 item: "ri_x".into(),
             },
             conversation_id: CONV.into(),
+            principal: None,
             task: None,
             card: "Cannot verify on jun-dev's host.".into(),
             armed: false,
@@ -1345,6 +1348,14 @@ fn story21_6_raw_ingress_every_deciding_key_needs_a_plain_press() {
     for (kind, code, effect) in table {
         let uppercase = matches!(code, K::Char(ch) if ch.is_ascii_uppercase());
         for (modifiers, key_kind) in ignored {
+            // A plain Ctrl+X press is the registered leader chord, never a modified decision
+            // key (6E-L1-04): it reaches the leader instead of being swallowed.
+            if matches!(code, K::Char('x' | 'X'))
+                && modifiers == M::CONTROL
+                && key_kind == KeyEventKind::Press
+            {
+                continue;
+            }
             let (mut state, mut grant) = build(kind);
             let at = format!("{kind:?} {code:?} {modifiers:?} {key_kind:?}");
             let event = raw_key(code, modifiers, key_kind);

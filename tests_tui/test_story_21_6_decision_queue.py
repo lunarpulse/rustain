@@ -19,6 +19,10 @@ HOME/config/data dirs, no sleeps: every wait is a bounded structural predicate.
   stays empty), `Esc` `Esc` defers it (chip `Needs you (1) ^X q`, the turn keeps
   streaming), `Ctrl+X q` + `Enter` reopens it with the field intact and `Enter` sends it.
 
+* Leg D opens, defers and reopens a Fork decision.
+* Leg E (a2a debug binary): a real proposal preempts Chat, rejects an immediate
+  Send, gates decisions on a composer draft, and dismisses without a peer POST.
+
 The frame predicate is desk-checked offline first (a torn frame that paints the
 title but only half the rail must fail it): those tests need no binary. The
 native leg skips when no binary is built (`RUSTAIN_TUI_BINARY` absent).
@@ -29,17 +33,28 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
 import tempfile
 import time
 import traceback
 import re
+import urllib.error
+import urllib.request
 
 import harness
 import pytest
 from fixtures.scene_provider import SceneStub
 from test_story_21_3_keymap_truth import _PermissionTUI, _permission_daemon
+from test_story_19_21b_standalone_modes import _ObservedHttp, _events, _stop
 
 import test_story_21_1_notification_lifecycle as s21_1
+
+@pytest.fixture(scope="session", autouse=True)
+def build_binary():
+    """This smoke module never builds: live legs choose a binary or skip."""
+    yield
+
 
 WIDTH, HEIGHT = 80, 24
 REGION = HEIGHT - 4  # the modal region: everything above the composer and status row
@@ -813,3 +828,279 @@ def test_leg_d_user_confirmation_80x24(monkeypatch):
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"NATIVE_21_6_D_EVIDENCE={evidence}", flush=True)
+
+
+# ── Leg E: a local sender's team proposal is a decision frame ──────────────────────
+
+PROPOSAL_HEADING = "Your agent proposes a message. Nothing has been sent. Awaiting your decision."
+PROPOSAL_BODY = "Human approval is required."
+PROPOSAL_RAIL = ("[y] Send to lena-po", "[r] Review first", "[n] Dismiss")
+PROPOSAL_GATE = "Finish or clear your draft to decide."
+PROPOSAL_CRUMB = re.compile(r"Needs you › Team proposal(?: .*)? \| \d+ pending")
+
+
+def _e_unmark(row):
+    return row.removeprefix("▶ ")
+
+
+def proposal_frame(screen, gated=False):
+    """A complete proposal sheet, with ordered whole body rows and an exact rail or T9."""
+    content = _c_box(screen, "Team proposal")
+    if not content:
+        return None
+    rows = [_e_unmark(row) for row in content]
+    if not PROPOSAL_CRUMB.fullmatch(rows[0]):
+        return None
+    # The heading may wrap at a word boundary at the 60-column floor.
+    try:
+        to = rows.index("To: lena-po")
+    except ValueError:
+        return None
+    if " ".join(rows[1:to]) != PROPOSAL_HEADING:
+        return None
+    if rows[to + 1:to + 3] != ["Type: architecture_update", "│ " + PROPOSAL_BODY]:
+        return None
+    rest = rows[to + 3:]
+    if gated:
+        if rest != [PROPOSAL_GATE]:
+            return None
+    elif not rest or "  ".join(rest) != "  ".join(PROPOSAL_RAIL):
+        return None
+    return tuple(rows)
+
+
+def _e_listed(screen):
+    rows = screen.splitlines()
+    return (any(re.fullmatch(r"\s*┌ Needs you ─+┐\s*", row) for row in rows)
+            and any(re.fullmatch(r"\s*│\s*(?:▶ )?▸ Team proposal · .+│\s*", row) for row in rows)
+            and any(re.fullmatch(r"\s*│\s*\[Enter\] Open  \[Esc\] Back  \[Up/Down\] Select\s*│\s*", row)
+                    for row in rows))
+
+def _e_passive_listed(screen):
+    """Require a whole passive proposal row with the same origin title twice."""
+    if not _e_listed(screen) or not any(re.fullmatch(r"\s*└─+┘\s*", row) for row in screen.splitlines()):
+        return False
+    return any(re.fullmatch(
+        r"\s*│\s*(?:▶ )?▸ Team proposal · .* · (?P<title>[^·]+?) · \d+[smh]"
+        r"(?: · deferred)? · Open (?P=title) to decide\s*│\s*", row)
+        for row in screen.splitlines())
+
+
+
+def _e_draft(screen, text):
+    rows = screen.splitlines()
+    return any(re.fullmatch(r"│\s*" + re.escape(text) + r"\s*│", row) for row in rows[-4:])
+
+
+def _e_dismissed(screen):
+    return ("Decision:" not in screen
+            and any(re.fullmatch(r"\s*(?:▶ )?(?:│\s*ℹ\s*)?Proposal dismissed\. Nothing was sent\.\s*(?:│\s*)?",
+                                 row) for row in screen.splitlines()))
+
+
+def _e_sheet(width, height, gated=False, tear=None, rail_rows=None, marker=False):
+    box = width if width < FULL_SHEET_BELOW else 100
+    left, inner, region = (width - box) // 2, box - 2, height - 4
+    heading = ([PROPOSAL_HEADING] if width >= 80 else
+               ["Your agent proposes a message. Nothing has been sent.",
+                "Awaiting your decision."])
+    body = ["Needs you › Team proposal lena-po | 1 pending"] + heading + [
+        "To: lena-po", "Type: architecture_update", "│ " + PROPOSAL_BODY]
+    if tear == "no-crumb":
+        body[0] = "no crumb"
+    if marker:
+        body = ["▶ " + row for row in body]
+    rail = ([PROPOSAL_GATE] if gated else list(rail_rows or ["  ".join(PROPOSAL_RAIL)]))
+    if tear == "half-rail":
+        rail = [PROPOSAL_RAIL[0]]
+    if tear == "gate-as-rail":
+        rail = ["  ".join(PROPOSAL_RAIL)]
+    interior = body + [""] * (region - 2 - len(body) - len(rail)) + rail
+    rows = [("┌ Decision: Team proposal " + "─" * inner)[:inner + 1] + "┐"]
+    rows.extend("│" + row.ljust(inner) + "│" for row in interior)
+    rows.append((" " * box) if tear == "no-bottom" else "└" + "─" * inner + "┘")
+    rows = [" " * left + row + " " * (width - left - box) for row in rows]
+    rows += ["┌" + "─" * (width - 2) + "┐", "│" + " " * (width - 2) + "│",
+             "└" + "─" * (width - 2) + "┘", " Ready  Needs you (1) ^X q".ljust(width)]
+    return "\n".join(rows)
+
+
+def test_e_proposal_predicate_whole_sheets_and_torn_frames():
+    for width, height in SIZES:
+        # The 78-cell heading plus the `▶ ` prefix does not fit the 80-column sheet.
+        assert proposal_frame(_e_sheet(width, height, marker=width != 80))
+        assert proposal_frame(_e_sheet(width, height, rail_rows=[
+            "  ".join(PROPOSAL_RAIL[:2]), PROPOSAL_RAIL[2]]))
+        assert proposal_frame(_e_sheet(width, height, gated=True), gated=True)
+        for tear in ("half-rail", "no-bottom", "no-crumb"):
+            assert proposal_frame(_e_sheet(width, height, tear=tear)) is None
+        assert proposal_frame(_e_sheet(width, height, gated=True, tear="gate-as-rail"), gated=True) is None
+        assert proposal_frame(_e_sheet(width, height).replace("│", "║")) is None
+        assert proposal_frame(_e_sheet(width, height).replace(PROPOSAL_BODY, "different")) is None
+
+
+def test_e_queue_draft_and_dismissed_rows():
+    listed = "\n".join(["┌ Needs you ─────┐", "│ ▸ Team proposal · lena-po │",
+                        "│ [Enter] Open  [Esc] Back  [Up/Down] Select │"])
+    assert _e_listed(listed)
+    assert not _e_listed(listed.replace("Team proposal", "Fork"))
+    passive = "\n".join(["┌ Needs you ─────┐",
+                         "│ ▸ Team proposal · lena-po · original · 1s · deferred · Open original to decide │",
+                         "│ [Enter] Open  [Esc] Back  [Up/Down] Select │",
+                         "└────────────────────────────────────────────┘"])
+    assert _e_passive_listed(passive)
+    assert not _e_passive_listed(passive.replace("Open original to decide", "Open other to decide"))
+    assert not _e_passive_listed(passive.replace("Open original to decide", "Open original to"))
+    assert not _e_passive_listed(passive.replace("└", " "))
+    assert not _e_passive_listed(passive.replace("Team proposal", "Fork"))
+    assert _e_draft("│draft     │\n└────┘\nstatus", "draft")
+    assert not _e_draft("│drafty    │\n└────┘\nstatus", "draft")
+    assert _e_dismissed("▶ Proposal dismissed. Nothing was sent.")
+    assert _e_dismissed("│ ℹ Proposal dismissed. Nothing was sent.│")
+    assert not _e_dismissed("Proposal dismissed. Nothing was sent. extra")
+    assert not _e_dismissed("┌ Decision: Team proposal ┐\nProposal dismissed. Nothing was sent.")
+
+
+@pytest.mark.a2a_binary
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(400)
+def test_leg_e_team_proposal_80x24(tmp_path, monkeypatch):
+    binary = Path(os.environ.get("RUSTAIN_TUI_BINARY", harness.BINARY)).resolve()
+    if not binary.is_file():
+        pytest.skip("no native binary: build `cargo build --features a2a --bin rustain` and set RUSTAIN_TUI_BINARY")
+    assert "debug" in binary.parts and "release" not in binary.parts, binary
+    monkeypatch.setattr(harness, "TERM_COLS", WIDTH)
+    monkeypatch.setattr(harness, "TERM_ROWS", HEIGHT)
+    parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    evidence = Path(tempfile.mkdtemp(prefix="21-6-e-", dir=parent))
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size,
+                "viewport": [WIDTH, HEIGHT], "leg": "E",
+                "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING"}
+    try:
+        sender, recipient = tmp_path / "sender", tmp_path / "recipient"
+        sender_home, recipient_home = tmp_path / "sender-home", tmp_path / "recipient-home"
+        for path in (sender, recipient, sender_home, recipient_home):
+            path.mkdir()
+        scene = tmp_path / "scene.json"
+        scene.write_text(json.dumps({"scene": "21-6-e-proposal", "personas": {
+            "sender": {"turns": [
+                {"expect": "raise-proposal", "content": [{"type": "tool_use",
+                 "name": "propose_team_message", "input": {"recipients": ["lena-po"],
+                 "type": "architecture_update", "body": PROPOSAL_BODY}}],
+                 "stop_reason": "tool_use", "usage": {"input_tokens": 20, "output_tokens": 20}},
+                {"expect": "Proposal shown to the operator.", "content": [
+                    {"type": "text", "text": "PROPOSAL_TURN_DONE"}], "stop_reason": "end_turn",
+                 "usage": {"input_tokens": 20, "output_tokens": 20}},
+            ]}, "recipient": {"turns": []}}}))
+        with ExitStack() as stack:
+            # A daemon socket path must stay under the 108-byte limit: short data dirs.
+            short = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="r216e-", dir="/tmp")))
+            stub = stack.enter_context(SceneStub(scene, evidence / "requests.jsonl"))
+            observer = _ObservedHttp()
+            stack.callback(observer.close)
+            config = recipient / ".rustain"
+            config.mkdir()
+            (recipient / ".env").write_text("")
+            (config / "a2a.json").write_text(json.dumps({"server": {
+                "admission": "allow", "advertised_host": f"127.0.0.1:{observer.port}"}, "agents": {}}))
+            (config / "a2a-interaction.toml").write_text(
+                '[interaction.defaults]\nresponse_mode = "notify-and-wait"\nnotification = "immediate"\n')
+            (config / "config.toml").write_text("[permissions]\nalways_tools = []\n")
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            observer.backend = f"http://127.0.0.1:{port}"
+            log_path = evidence / "recipient.log"
+            log = stack.enter_context(log_path.open("w"))
+            env = {**os.environ, **stub.env("recipient", recipient_home),
+                   "RUSTAIN_CONFIG_DIR": str(config), "RUSTAIN_DATA_DIR": str(short / "r")}
+            process = subprocess.Popen([str(binary), f"--serve-a2a=127.0.0.1:{port}",
+                                        "daemon", "start", "--foreground"], cwd=recipient, env=env,
+                                       stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            stack.callback(_stop, process)
+            deadline = time.monotonic() + 60
+            while True:
+                assert process.poll() is None, log_path.read_text()
+                try:
+                    with urllib.request.urlopen(observer.backend + "/.well-known/agent-card.json", timeout=1) as reply:
+                        if reply.status == 200:
+                            break
+                except (OSError, urllib.error.URLError):
+                    pass
+                assert time.monotonic() < deadline, log_path.read_text()
+            (sender / ".env").write_text("")
+            (sender / ".rustain").mkdir()
+            (sender / ".rustain/a2a.json").write_text(json.dumps(
+                {"agents": {"lena-po": {"url": f"http://127.0.0.1:{observer.port}/"}}}))
+            env = {**os.environ, **stub.env("sender", sender_home),
+                   "RUSTAIN_CONFIG_DIR": str(sender / ".rustain"),
+                   "RUSTAIN_DATA_DIR": str(short / "s")}
+            tui = _b_launch(stack, sender, env, evidence, "sender", False)
+
+            def ready(_screen):
+                assert process.poll() is None, log_path.read_text()
+                return (observer.snapshot()["get"] >= 1
+                        and any("peer_id=lena-po" in path.read_text(errors="replace")
+                                for path in sender.glob("rustain.log*")))
+
+            _b_wait(tui, ready, "recipient discovery", timeout=60)
+            observer.reset()
+            _b_send(tui, "\x1b[200~raise-proposal\x1b[201~\r")
+            screen = _b_wait(tui, proposal_frame, "complete team proposal")
+            _b_capture(evidence, "proposal", screen)
+            _b_send(tui, "y")
+            _b_stable(tui, proposal_frame, "first-sight y is inert")
+            assert observer.snapshot()["post"] == 0
+            _b_send(tui, "\x1b")
+            _b_wait(tui, _d_deferred, "proposal deferred")
+            # The native local keymap binds Ctrl+T to a new conversation tab.
+            _b_send(tui, "\x14")
+            _b_send(tui, "\x18q")
+            screen = _b_wait(tui, _e_passive_listed, "other-tab passive proposal")
+            _b_capture(evidence, "other-tab-proposal", screen)
+            _b_send(tui, "\r")
+            _b_wait(tui, proposal_frame, "Enter switches to origin and opens proposal")
+            _b_stable(tui, proposal_frame, "origin proposal settled")
+            _b_send(tui, "\x1b")
+            _b_wait(tui, _d_deferred, "proposal deferred on origin")
+            _b_send(tui, "draft")
+            _b_wait(tui, lambda s: _d_deferred(s) and _e_draft(s, "draft"), "draft in composer")
+            _b_send(tui, "\x18q")
+            _b_wait(tui, _e_listed, "proposal in Needs-you list")
+            _b_stable(tui, _e_listed, "proposal list settled")
+            _b_send(tui, "\r")
+            _b_wait(tui, lambda s: proposal_frame(s, gated=True), "draft-gated proposal")
+            _b_stable(tui, lambda s: proposal_frame(s, gated=True), "draft gate settled")
+            _b_send(tui, "y")
+            screen = _b_stable(tui, lambda s: proposal_frame(s, gated=True), "draft blocks send")
+            _b_capture(evidence, "draft-gated", screen)
+            assert observer.snapshot()["post"] == 0
+            _b_send(tui, "\x1b")
+            _b_wait(tui, lambda s: _d_deferred(s) and _e_draft(s, "draft"), "draft restored")
+            _b_send(tui, "\x15")
+            _b_wait(tui, lambda s: _d_deferred(s) and _e_draft(s, ""), "composer cleared")
+            _b_send(tui, "\x18q")
+            _b_wait(tui, _e_listed, "proposal listed again")
+            _b_stable(tui, _e_listed, "proposal list settled again")
+            _b_send(tui, "\r")
+            _b_wait(tui, proposal_frame, "proposal reopened with clear composer")
+            _b_stable(tui, proposal_frame, "proposal ready to dismiss")
+            _b_send(tui, "n")
+            screen = _b_wait(tui, _e_dismissed, "proposal dismissed without send")
+            _b_capture(evidence, "dismissed", screen)
+            assert observer.snapshot()["post"] == 0
+            assert not _events(sender, "team_send_action_recorded")
+            assert not _events(sender, "remote_envelope_dispatched")
+            assert not any(row.get("desync") or row.get("kind") == "desync" for row in stub.rows())
+        assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
+        manifest["result"] = "PASS"
+    except BaseException:
+        manifest["result"] = "FAIL"
+        (evidence / "failure.txt").write_text(traceback.format_exc())
+        raise
+    finally:
+        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+        (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        print(f"NATIVE_21_6_E_EVIDENCE={evidence}", flush=True)

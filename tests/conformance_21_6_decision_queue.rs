@@ -44,5 +44,14 @@ mod k9_confirm;
 #[path = "conformance_21_6_decision_queue/k10_guards.rs"]
 mod k10_guards;
 
+#[path = "conformance_21_6_decision_queue/k12_proposal.rs"]
+mod k12_proposal;
+
+#[path = "conformance_21_6_decision_queue/k13_ticket.rs"]
+mod k13_ticket;
+
+#[path = "conformance_21_6_decision_queue/k14_reply.rs"]
+mod k14_reply;
+
 #[path = "conformance_21_6_decision_queue/k16_patch.rs"]
 mod k16_patch;

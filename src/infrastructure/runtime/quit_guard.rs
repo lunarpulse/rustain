@@ -775,6 +775,152 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn story21_6_raise_final_kind(state: &mut TuiState, kind: DecisionKind, attached: bool) {
+        use crate::adapters::tui::decision_queue as dq;
+        use crate::domain::models::{
+            AgentId, ArtifactId, ContentHash, SemanticMessageType, TeamProposal,
+        };
+        let responder = if attached {
+            dq::Responder::Attached
+        } else {
+            dq::Responder::Local
+        };
+        match kind {
+            DecisionKind::TeamProposal => {
+                dq::raise_team_proposal(
+                    state,
+                    std::sync::Arc::new(TeamProposal {
+                        id: "proposal".into(),
+                        conversation_id: "origin".into(),
+                        recipients: vec!["peer".into()],
+                        message_type: SemanticMessageType::ArchitectureUpdate,
+                        body: "body".into(),
+                    }),
+                    responder,
+                );
+            }
+            DecisionKind::Ticket => {
+                let node = AgentId::parse("ticket-node").unwrap();
+                let payload = dq::TicketPayload::new(node.clone(), ArtifactId::from(ContentHash::from_bytes([1; 32])),
+                    node, 1, 0, serde_json::json!({"key":"request","request":{"params":{"requestedSchema":{"type":"boolean"}}}})).unwrap();
+                dq::raise_ticket(state, payload, responder);
+            }
+            DecisionKind::ReplyArrived => {
+                dq::reply::observe(state, "principal", "alias", "item", 1)
+            }
+            DecisionKind::RecipientDraftApproval => {
+                use crate::domain::models::{ChatMessage, PeerRowControl, PeerRowStage};
+                let mut conversation = Conversation {
+                    id: "origin".into(),
+                    ..Default::default()
+                };
+                conversation.messages.push(ChatMessage {
+                    id: "row".into(),
+                    content: "draft".into(),
+                    ..Default::default()
+                });
+                conversation.peer_row_controls.insert(
+                    "row".into(),
+                    PeerRowControl {
+                        node_id: "node".into(),
+                        item_address: None,
+                        stories: None,
+                        status: None,
+                        retro: None,
+                        selected_for: None,
+                        message_type: SemanticMessageType::Consultation,
+                        sender_label: "sender".into(),
+                        stage: PeerRowStage::Ready,
+                        node_resolvable: true,
+                    },
+                );
+                dq::sync_recipient_drafts(state, &conversation, false);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn story21_6_make_final_kind_stale(state: &mut TuiState) {
+        use crate::adapters::tui::decision_queue as dq;
+        let item = state.decisions.items().next().unwrap();
+        let key = item.key();
+        let ticket = match &item.subject {
+            dq::DecisionSubject::Ticket(payload) => {
+                Some((payload.node.clone(), payload.artifact.clone()))
+            }
+            _ => None,
+        };
+        crate::adapters::tui::presentation::reducer::focus_decision(state, key.clone());
+        if let Some((node, artifact)) = ticket {
+            dq::resolve_ticket(state, &node, &artifact, true);
+        } else {
+            dq::withdraw_key(state, &key, dq::NO_LONGER_PENDING);
+        }
+        assert!(state.decisions.item(&key).unwrap().is_stale());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn story21_6_final_kinds_reach_real_host_quit_facts() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for kind in [
+            DecisionKind::TeamProposal,
+            DecisionKind::RecipientDraftApproval,
+            DecisionKind::Ticket,
+            DecisionKind::ReplyArrived,
+        ] {
+            for attached in [false, true] {
+                if !attached && kind == DecisionKind::RecipientDraftApproval {
+                    continue;
+                }
+                for stale in [false, true] {
+                    if attached {
+                        let mut rig =
+                            super::super::attach_loop::attach_keys::tests::Rig::new(false);
+                        story21_6_raise_final_kind(&mut rig.state, kind, true);
+                        if stale {
+                            story21_6_make_final_kind_stale(&mut rig.state);
+                        }
+                        rig.raw_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+                            .await;
+                        if stale {
+                            assert!(rig.state.quit_confirm.is_none(), "{kind:?}");
+                        } else {
+                            assert_eq!(
+                                rig.state
+                                    .quit_confirm
+                                    .as_ref()
+                                    .unwrap()
+                                    .facts
+                                    .pending_decisions,
+                                1,
+                                "{kind:?}"
+                            );
+                        }
+                    } else {
+                        let mut h = host();
+                        story21_6_raise_final_kind(&mut h.state, kind, false);
+                        if stale {
+                            story21_6_make_final_kind_stale(&mut h.state);
+                        }
+                        assert_eq!(pending(&h), usize::from(!stale), "{kind:?}");
+                        assert_eq!(
+                            ask(&mut h),
+                            if stale {
+                                QuitRequest::ExitNow
+                            } else {
+                                QuitRequest::Confirming
+                            },
+                            "{kind:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// A stale item can no longer be answered: it never makes quit ask (the live
     /// neighbour of the same kind still counts, so the exclusion is not an empty queue).
     #[test]

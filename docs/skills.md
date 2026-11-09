@@ -163,13 +163,13 @@ before it loads anything:
 - **`y`** — trust it and activate. The skill's instructions go into the system
   prompt and its `allowed-tools` starts filtering from the **next** message you
   send (see the note below).
-- **`n`** — decline. `Esc` never declines: it posts a reminder of these keys and the prompt
-  stays. The model is told
+- **`n`** — decline. The model is told
   `Skill '<name>' not trusted — activation declined.` and carries on without
-  it; nothing about the skill reaches the prompt.
+  it; nothing about the skill reaches the prompt. `Esc` defers without deciding;
+  use `Ctrl+X q` to reopen the decision from the Needs-you list.
 - **`i`** — inspect. The SKILL.md file is shown verbatim, up to 20 lines, so
   you can read the `allowed-tools` line and the body before you answer. `Esc`
-  returns to the prompt; it does **not** decline for you.
+  returns to the decision; it does **not** decline for you.
 
 Skills under `~/.agents/skills/` are treated as yours and are **not** prompted.
 Only the three workspace directories are — a skill that arrived with a `git

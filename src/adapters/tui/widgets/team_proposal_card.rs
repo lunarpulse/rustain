@@ -1,20 +1,16 @@
-use std::sync::Arc;
-
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Clear};
 
 use crate::adapters::tui::widgets::delimited_body::wrap_text as wrap_prefix;
 
 use crate::adapters::tui::keymap::Context;
 use crate::adapters::tui::keymap::render::rail;
 use crate::adapters::tui::keymap::table_card::CardCmd;
-use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{SemanticMessageType, TeamProposal};
+use crate::domain::services::peer_text::{sanitize_display_line, sanitize_tool_text_block};
 
 const HEADING: &str =
     "Your agent proposes a message. Nothing has been sent. Awaiting your decision.";
-const DRAFT: &str = "Finish or clear your draft to decide.";
 
 fn more_marker() -> String {
     format!(
@@ -28,7 +24,12 @@ fn type_token(message_type: SemanticMessageType) -> &'static str {
 }
 
 fn aliases(proposal: &TeamProposal) -> String {
-    proposal.recipients.join(", ")
+    proposal
+        .recipients
+        .iter()
+        .map(|alias| sanitize_display_line(alias))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn prefixed_body(
@@ -37,7 +38,8 @@ fn prefixed_body(
     limit: usize,
     theme: &Theme,
 ) -> (Vec<Line<'static>>, bool) {
-    let (rows, more) = wrap_prefix(&proposal.body, width.saturating_sub(2), limit);
+    let safe_body = sanitize_tool_text_block(&proposal.body);
+    let (rows, more) = wrap_prefix(&safe_body, width.saturating_sub(2), limit);
     let lines = rows
         .into_iter()
         .map(|row| {
@@ -50,12 +52,8 @@ fn prefixed_body(
     (lines, more)
 }
 
-/// Render the uncapped Review Info content; body rows remain prefixed on resize.
-pub fn render_review_lines(
-    proposal: &TeamProposal,
-    width: u16,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+/// The uncapped Review body; rows remain prefixed on resize.
+fn render_review_lines(proposal: &TeamProposal, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let text_style = Style::default().fg(theme.colors.fg_primary);
     let mut lines = wrap_prefix(
         &format!(
@@ -84,244 +82,104 @@ pub fn render_review_lines(
     lines
 }
 
-/// Owned frame snapshot avoids borrowing the rest of the split TUI state.
-/// The proposal body itself is never copied.
-pub struct CardView {
-    proposal: Option<Arc<TeamProposal>>,
-    draft_empty: bool,
+/// Borderless proposal content for the shared decision frame.
+pub fn body_lines(
+    proposal: &TeamProposal,
     reviewing: bool,
-    scroll: usize,
-}
-
-/// Prepare both overlays from one confirmation-precedence check.
-pub fn frame(state: &TuiState) -> (bool, CardView) {
-    let higher = crate::adapters::tui::app::proposal_higher_confirmation_active(state);
-    let proposal = if higher {
-        None
-    } else {
-        state
-            .team_proposal_conversation_id
-            .as_ref()
-            .and_then(|id| state.pending_team_proposals.get(id))
-            .cloned()
-    };
-    let reviewing = proposal.as_ref().is_some_and(|proposal| {
-        state
-            .tab_render_states
-            .get(&state.active_tab_id)
-            .is_some_and(|tab| {
-                tab.team_proposal_reviews
-                    .values()
-                    .any(|review| Arc::ptr_eq(review, proposal))
-            })
-    });
-    let blocked = higher || proposal.is_some();
-    (
-        blocked,
-        CardView {
-            proposal,
-            draft_empty: state.input_buffer.is_empty(),
-            reviewing,
-            scroll: state.team_proposal_scroll,
-        },
-    )
-}
-
-impl CardView {
-    /// Attached clients own a separate composer and tab render cache, but use
-    /// the same card preparation and painting as the standalone surface.
-    pub(crate) fn attached(
-        proposal: Option<Arc<TeamProposal>>,
-        draft_empty: bool,
-        reviewing: bool,
-    ) -> Self {
-        Self {
-            proposal,
-            draft_empty,
-            reviewing,
-            scroll: 0,
-        }
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if reviewing {
+        return render_review_lines(proposal, width, theme);
     }
-
-    pub fn from_state(state: &TuiState) -> Self {
-        frame(state).1
-    }
-
-    pub(crate) fn with_scroll(mut self, scroll: usize) -> Self {
-        self.scroll = scroll;
-        self
-    }
-
-    /// Prepare once per frame; Review reserves a real, scrollable chat viewport.
-    pub fn prepare(
-        self,
-        layout: &mut crate::adapters::tui::layout::AppLayout,
-        viewport: Rect,
-        theme: &Theme,
-    ) -> Option<CardPaint> {
-        let proposal = self.proposal?;
-        let top = layout
-            .tab_bar
-            .map_or(viewport.y, |bar| bar.bottom())
-            .max(viewport.y);
-        let area = Rect::new(
-            layout.chat_pane.x,
-            top,
-            layout.chat_pane.width,
-            layout.chat_pane.bottom().saturating_sub(top),
-        )
-        .intersection(viewport);
-        let width = area.width.min(72);
-        let x = area.x + area.width.saturating_sub(width) / 2;
-        let card_area = Rect::new(x, area.y, width, area.height);
-        let inner_width = width.saturating_sub(4) as usize;
-        if width < 20 || area.height < 9 || inner_width == 0 {
-            return None;
-        }
-
-        let footer = if self.draft_empty {
-            format!(
-                "{} Send to {}   {} Review first   {} Dismiss",
-                rail(Context::TeamProposal, CardCmd::Yes),
-                aliases(&proposal),
-                rail(Context::TeamProposal, CardCmd::Review),
-                rail(Context::TeamProposal, CardCmd::No)
-            )
-        } else {
-            DRAFT.to_owned()
-        };
-        let mut content = Vec::new();
-        content.extend(
-            wrap_prefix(HEADING, inner_width, usize::MAX)
+    let width = usize::from(width);
+    let mut lines = Vec::new();
+    for text in [
+        HEADING.to_owned(),
+        format!("To: {}", aliases(proposal)),
+        format!("Type: {}", type_token(proposal.message_type)),
+    ] {
+        lines.extend(
+            wrap_prefix(&text, width, usize::MAX)
                 .0
                 .into_iter()
                 .map(Line::from),
         );
-        content.extend(
-            wrap_prefix(
-                &format!("To: {}", aliases(&proposal)),
-                inner_width,
-                usize::MAX,
-            )
-            .0
-            .into_iter()
-            .map(Line::from),
+    }
+    let (body, more) = prefixed_body(proposal, width, 4, theme);
+    lines.extend(body);
+    if more {
+        lines.extend(
+            wrap_prefix(&more_marker(), width, usize::MAX)
+                .0
+                .into_iter()
+                .map(Line::from),
         );
-        content.extend(
-            wrap_prefix(
-                &format!("Type: {}", type_token(proposal.message_type)),
-                inner_width,
-                usize::MAX,
-            )
-            .0
-            .into_iter()
-            .map(Line::from),
-        );
-        let footer_rows = wrap_prefix(&footer, inner_width, usize::MAX).0;
-        // Preview yields space first; overflowing chrome stays complete and scrollable.
-        let chrome = content.len() + footer_rows.len();
-        // Keep Review text readable even when streaming uses its final row.
-        let max_height = area
-            .height
-            .saturating_sub(if self.reviewing { 3 } else { 0 });
-        let available_body = usize::from(max_height).saturating_sub(3 + chrome);
-        let overflow = available_body == 0;
-        let (mut body, more) = if self.reviewing {
-            (Vec::new(), true)
-        } else {
-            prefixed_body(&proposal, inner_width, available_body.clamp(1, 4), theme)
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn story21_6_preview_limits_rows_and_review_keeps_the_full_body() {
+        let proposal = TeamProposal {
+            id: "p".into(),
+            conversation_id: "c".into(),
+            recipients: vec!["peer\nforged".into()],
+            message_type: SemanticMessageType::ArchitectureUpdate,
+            body: "one\ntwo\nthree\nfour\nfive".into(),
         };
-        content.append(&mut body);
-        if more
-            && (overflow
-                || content.len() + footer_rows.len() < usize::from(max_height.saturating_sub(2)))
-        {
-            content.extend(
-                wrap_prefix(&more_marker(), inner_width, 1)
-                    .0
+        for width in [60, 80, 130] {
+            let text = |reviewing| {
+                body_lines(&proposal, reviewing, width, &Theme::dark())
                     .into_iter()
-                    .map(Line::from),
+                    .map(|line| {
+                        line.spans
+                            .into_iter()
+                            .map(|span| span.content.into_owned())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let preview = text(false);
+            assert_eq!(
+                preview
+                    .iter()
+                    .take_while(|line| !line.starts_with("To: "))
+                    .cloned()
+                    .collect::<String>(),
+                HEADING
             );
+            assert!(preview.iter().any(|line| line.contains("To: peer forged")));
+            assert!(
+                preview
+                    .iter()
+                    .any(|line| line == &format!("Type: {}", type_token(proposal.message_type)))
+            );
+            assert_eq!(
+                preview.iter().filter(|line| line.starts_with("│ ")).count(),
+                4
+            );
+            for row in ["│ one", "│ two", "│ three", "│ four"] {
+                assert!(preview.iter().any(|line| line == row));
+            }
+            assert!(
+                preview
+                    .iter()
+                    .any(|line| line.contains("… more not shown — [r] Review first"))
+            );
+            let review = text(true);
+            assert!(
+                review
+                    .iter()
+                    .any(|line| line.contains("Proposed message (not sent) ·"))
+            );
+            assert!(review.iter().any(|line| line == "To: peer forged"));
+            assert!(review.iter().any(|line| line == "│ five"));
         }
-        content.extend(footer_rows.into_iter().map(Line::from));
-        let height = (content.len() + 2).min(usize::from(max_height)) as u16;
-        let y = area.bottom() - height;
-        let draw_area = Rect::new(card_area.x, y, width, height);
-        if self.reviewing {
-            layout.chat_pane.y = area.y;
-            layout.chat_pane.height = draw_area.y - area.y;
-            layout.dashboard_panel = None;
-        }
-        Some(CardPaint {
-            proposal,
-            area: draw_area,
-            lines: content,
-            scroll: self.scroll,
-            has_decision_footer: self.draft_empty,
-        })
+        assert_eq!(proposal.recipients[0], "peer\nforged");
     }
-}
-
-pub struct CardPaint {
-    proposal: Arc<TeamProposal>,
-    area: Rect,
-    lines: Vec<Line<'static>>,
-    scroll: usize,
-    has_decision_footer: bool,
-}
-
-impl CardPaint {
-    pub fn scroll_max(&self) -> usize {
-        self.lines.len().saturating_sub(self.viewport_rows())
-    }
-
-    pub fn viewport_rows(&self) -> usize {
-        usize::from(self.area.height.saturating_sub(2))
-    }
-
-    pub fn footer_visible(&self) -> bool {
-        self.has_decision_footer && self.scroll >= self.scroll_max()
-    }
-
-    /// Exact prepared bounds consumed unchanged by the opaque painter.
-    pub fn area(&self) -> Rect {
-        self.area
-    }
-}
-
-/// Paint the prepared card and return only the snapshot actually visible.
-pub fn render(
-    card: Option<CardPaint>,
-    buffer: &mut Buffer,
-    theme: &Theme,
-) -> Option<Arc<TeamProposal>> {
-    let CardPaint {
-        proposal,
-        area,
-        lines,
-        scroll,
-        has_decision_footer: _,
-    } = card?;
-    let viewport_rows = usize::from(area.height.saturating_sub(2));
-    let scroll_max = lines.len().saturating_sub(viewport_rows);
-    Clear.render(area, buffer);
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(theme.colors.decision_border))
-        .style(Style::default().bg(theme.colors.bg_primary));
-    if scroll_max > 0 {
-        block = block.title(" PgUp/PgDn: scroll proposal ");
-    }
-    let inner = block.inner(area);
-    block.render(area, buffer);
-    for (i, line) in lines
-        .into_iter()
-        .skip(scroll.min(scroll_max))
-        .take(viewport_rows)
-        .enumerate()
-    {
-        buffer.set_line(inner.x, inner.y + i as u16, &line, inner.width);
-    }
-    Some(proposal)
 }

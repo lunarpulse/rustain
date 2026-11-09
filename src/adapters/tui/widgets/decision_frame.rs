@@ -41,7 +41,7 @@ use crate::adapters::tui::widgets::{
     ModalPart, agent_inspector, apply_card, ask_user_question, cancel_plan_confirm_card,
     consolidation_card, delegation_card, fit_modal, forget_card, fork_confirm, peer_add_prompt,
     plan_approval, plan_deviation_card, rewind_confirm, skill_trust_prompt, task_skip_cascade_card,
-    team_retract_prompt,
+    team_proposal_card, team_retract_prompt,
 };
 use crate::domain::models::Plan;
 use crate::domain::services::approval_presentation;
@@ -93,6 +93,17 @@ fn consent_text(payload: &ConsentPayload) -> String {
 /// elsewhere, else the sanitized source text.
 fn body_text(item: &DecisionItem) -> String {
     match (&item.validity, &item.subject) {
+        (Validity::Stale(copy), DecisionSubject::RecipientDraft(payload))
+            if payload
+                .compose
+                .as_ref()
+                .is_some_and(|(_, field)| !field.is_empty()) =>
+        {
+            format!(
+                "{} Your response was not sent. Copy it before closing.",
+                copy.0
+            )
+        }
         (Validity::Stale(copy), _) => copy.0.to_owned(),
         (Validity::Live, DecisionSubject::Consent(payload)) => {
             sanitize_tool_text_block(&consent_text(payload)).into_owned()
@@ -204,7 +215,9 @@ fn is_heavy(item: &DecisionItem) -> bool {
             | DecisionSubject::Rewind(_)
             | DecisionSubject::Forget(_)
             | DecisionSubject::Consolidation(_)
-    )
+            | DecisionSubject::TeamProposal(_)
+    ) || matches!(&item.subject, DecisionSubject::Ticket(ticket)
+        if matches!(&ticket.form, crate::adapters::tui::decision_queue::TicketForm::Raw(_)))
 }
 
 /// Identity of the text a heavy body is wrapped from. A payload that is replaced in place
@@ -242,6 +255,12 @@ fn signature(item: &DecisionItem, state: &TuiState) -> (usize, usize, usize) {
             payload.card.proposals.len(),
             8,
         ),
+        DecisionSubject::TeamProposal(payload) => (
+            Arc::as_ptr(&payload.proposal) as usize,
+            payload.proposal.body.len(),
+            usize::from(payload.reviewing),
+        ),
+        DecisionSubject::Ticket(payload) => (payload.as_ref() as *const _ as usize, 0, 9),
         _ => (0, 0, 0),
     }
 }
@@ -409,6 +428,109 @@ pub fn body_lines_for_test(
     build_body(item, state, &state.theme, width)
 }
 
+fn recipient_lines(
+    payload: &crate::adapters::tui::decision_queue::RecipientDraftPayload,
+    state: &TuiState,
+) -> Vec<Line<'static>> {
+    use crate::adapters::tui::decision_queue::RecipientDraftStage;
+    use crate::domain::models::{NOT_SHARED, NothingBecause};
+    let safe = |s: &str| -> String {
+        let end = s
+            .char_indices()
+            .nth(4096)
+            .map_or(s.len(), |(offset, _)| offset);
+        clean_line(&s[..end]).chars().take(512).collect()
+    };
+    let mut lines = vec![Line::from(format!(
+        "{} · {}",
+        payload.canonical_type,
+        safe(&payload.sender_label)
+    ))];
+    if let Some(address) = &payload.item_address {
+        use crate::domain::models::ItemPrincipal;
+        let principal = match address.principal() {
+            ItemPrincipal::Rap(peer)
+            | ItemPrincipal::A2aPseudonym(peer)
+            | ItemPrincipal::A2aBound(peer) => safe(peer.as_str()),
+            _ => "unknown".to_owned(),
+        };
+        lines.push(Line::from(format!("Principal: {principal}")));
+    }
+    if let Some(stories) = &payload.stories {
+        lines.push(Line::from(safe(&stories.0)));
+    }
+    if let Some(selection) = &payload.selected_for {
+        lines.push(Line::from(safe(&selection.0)));
+    }
+    if let Some(status) = &payload.status {
+        let shares = match status.nothing_because {
+            Some(NothingBecause::LevelNone) => {
+                "Shares nothing: your sharing level is none".to_owned()
+            }
+            Some(NothingBecause::NoStoriesHeld) => {
+                "Shares nothing: no stories are assigned to you on this host".to_owned()
+            }
+            None => {
+                let mut text = format!(
+                    "Shares ({}): ",
+                    status.statement.level.unwrap_or_default().as_str()
+                );
+                for (index, story) in status.statement.stories.iter().take(40).enumerate() {
+                    if index != 0 {
+                        text.push_str(" · ");
+                    }
+                    text.push_str(&safe(story.key.as_str()));
+                    if let Some(value) = story.state {
+                        text.push(' ');
+                        text.push_str(value.as_str());
+                    }
+                }
+                let omitted = status.statement.stories.len().saturating_sub(40);
+                if omitted != 0 {
+                    text.push_str(&format!(" … and {omitted} more"));
+                }
+                text
+            }
+        };
+        lines.push(Line::from(shares));
+        lines.push(Line::from(NOT_SHARED));
+    }
+    if let Some(retro) = &payload.retro {
+        let overlay = payload
+            .item_address
+            .as_ref()
+            .and_then(|address| state.retro_left_out.get(address.item().as_str()));
+        lines.extend(
+            super::recipient_surface::retro_preview_lines(retro, overlay)
+                .into_iter()
+                .take(40)
+                .map(|line| Line::from(safe(&line))),
+        );
+    }
+    match &payload.stage {
+        RecipientDraftStage::Ready(draft) => {
+            let end = draft
+                .char_indices()
+                .nth(4096)
+                .map_or(draft.len(), |(offset, _)| offset);
+            let cleaned = clean_line(&draft[..end]);
+            let omitted = end < draft.len() || cleaned.chars().count() > 512;
+            let mut preview: String = cleaned
+                .chars()
+                .take(if omitted { 511 } else { 512 })
+                .collect();
+            if omitted {
+                preview.push('…');
+            }
+            lines.push(Line::from(format!("Peer draft: {preview}")));
+        }
+        RecipientDraftStage::AwaitingOperator => {
+            lines.push(Line::from("Peer is waiting for your response."))
+        }
+    }
+    lines
+}
+
 /// The unscrolled body of a live, non-permission item at `width`.
 fn build_body(
     item: &DecisionItem,
@@ -418,6 +540,34 @@ fn build_body(
 ) -> Vec<Line<'static>> {
     let normal = Style::default().fg(theme.colors.fg_primary);
     match &item.subject {
+        DecisionSubject::Ticket(payload) => wrap_lines(super::ticket_form::lines(payload), width),
+        DecisionSubject::ReplyArrived(payload) => wrap_lines(
+            vec![
+                Line::raw(format!(
+                    "From: {}",
+                    decision_queue::reply::display(&payload.alias)
+                )),
+                Line::raw(format!(
+                    "Peer: {}",
+                    decision_queue::reply::display(&payload.peer)
+                )),
+                Line::raw(format!(
+                    "Item: {}",
+                    decision_queue::reply::display(&payload.item)
+                )),
+                Line::raw(format!(
+                    "Type: Reply arrived · {} replies",
+                    payload.reply_count
+                )),
+            ],
+            width,
+        ),
+        DecisionSubject::TeamProposal(payload) => team_proposal_card::body_lines(
+            &payload.proposal,
+            payload.reviewing,
+            width.min(u16::MAX as usize) as u16,
+            theme,
+        ),
         DecisionSubject::Question(payload) => {
             ask_user_question::question_lines(&clean(&payload.question), width, theme)
         }
@@ -508,6 +658,9 @@ fn build_body(
         }
         DecisionSubject::PeerAdd(pending) => {
             wrap_lines(clean_lines(peer_add_prompt::lines(pending, theme)), width)
+        }
+        DecisionSubject::RecipientDraft(payload) => {
+            wrap_lines(recipient_lines(payload, state), width)
         }
         DecisionSubject::TeamRetract(payload) => wrap_lines(
             clean_lines(team_retract_prompt::lines(payload, theme)),
@@ -690,6 +843,57 @@ fn parts(
             key_style,
         ));
         rail.push(Span::styled(" Close  ", normal));
+        if matches!(&item.subject, DecisionSubject::RecipientDraft(payload)
+            if payload.compose.as_ref().is_some_and(|(_, field)| !field.is_empty()))
+        {
+            rail.push(Span::styled(
+                keymap::render::rail(Context::Decision, OverlayCmd::PaneCopy),
+                key_style,
+            ));
+            rail.push(Span::styled(" Copy unsent response  ", normal));
+        }
+    } else if item.kind == DecisionKind::TeamProposal
+        && decision_queue::team_proposal_draft_blocked(state, item.responder)
+    {
+        rail.push(Span::styled(
+            "Finish or clear your draft to decide.",
+            normal,
+        ));
+    } else if matches!(&item.subject, DecisionSubject::TeamProposal(payload) if payload.reviewing) {
+        rail.push(Span::styled(
+            keymap::render::rail(Context::Decision, OverlayCmd::PaneEsc),
+            key_style,
+        ));
+        rail.push(Span::styled(" Back  ", normal));
+    } else if let DecisionSubject::TeamProposal(payload) = &item.subject {
+        let aliases = decision_queue::proposal_aliases(&payload.proposal);
+        let send = format!("Send to {aliases}");
+        let key = keymap::render::rail(Context::TeamProposal, CardCmd::Yes);
+        // Never clip a recipient in the pinned rail. The complete list is in
+        // the scrollable To: body and Review, even on the smallest frame.
+        let send = if geom::cells(&key) + geom::cells(&send) + 3 > width
+            || payload.proposal.recipients.len() > 16
+            || payload
+                .proposal
+                .recipients
+                .iter()
+                .any(|alias| alias.chars().count() > 128)
+        {
+            "Send to … (see To)".to_owned()
+        } else {
+            send
+        };
+        for (command, label) in [
+            (CardCmd::Yes, send),
+            (CardCmd::Review, "Review first".to_owned()),
+            (CardCmd::No, "Dismiss".to_owned()),
+        ] {
+            rail.push(Span::styled(
+                keymap::render::rail(Context::TeamProposal, command),
+                key_style,
+            ));
+            rail.push(Span::styled(format!(" {label}  "), normal));
+        }
     } else {
         for (key, label) in rail_of(item) {
             rail.push(Span::styled(key, key_style));
@@ -717,14 +921,42 @@ fn parts(
         (Validity::Live, DecisionSubject::Question(payload)) => {
             Some(answer_row(payload, width, theme))
         }
+        (Validity::Live, DecisionSubject::RecipientDraft(payload)) => {
+            payload.compose.as_ref().and_then(|(_, field)| {
+                clean_lines(vec![field_line("Response: ", field, true, width, theme)]).pop()
+            })
+        }
+        (Validity::Live, DecisionSubject::Ticket(payload)) => payload
+            .editing_field()
+            .map(|field| field_line("Answer: ", field, true, width, theme)),
         _ => None,
     };
+    let rail = footer_lines(rail, width);
     Parts {
         header: Vec::new(),
         body: body_rows,
         field,
-        rail: footer_lines(rail, width),
+        rail,
     }
+}
+
+/// Accept must not act when the pinned field and rail consume the whole frame.
+pub(crate) fn ticket_body_visible(state: &TuiState, item: &DecisionItem) -> bool {
+    let Some(area) = crate::adapters::tui::tool_inspector::frame_rect(state, 1) else {
+        return false;
+    };
+    if area.width < 12 || area.height < 5 {
+        return false;
+    }
+    let parts = parts(
+        item,
+        state,
+        &state.theme,
+        usize::from(area.width - 2),
+        usize::from(area.height),
+    );
+    !parts.body.is_empty()
+        && parts.rail.len() + usize::from(parts.field.is_some()) < usize::from(area.height - 2)
 }
 
 /// The rows from the scroll offset on, at most `visible` of them (only those are cloned).
@@ -765,6 +997,25 @@ pub(crate) fn forget_focus_row(
         .forget_rows
         .get(card.focused_index)
         .copied()
+}
+
+/// First wrapped row of the currently selected ticket control.
+pub(crate) fn ticket_focus_row(
+    item: &DecisionItem,
+    state: &TuiState,
+    width: usize,
+) -> Option<usize> {
+    if !matches!(item.subject, DecisionSubject::Ticket(_)) {
+        return None;
+    }
+    body_all(item, state, &state.theme, width)
+        .rows
+        .iter()
+        .position(|line| {
+            line.spans
+                .first()
+                .is_some_and(|span| span.content.starts_with("> "))
+        })
 }
 
 /// The breadcrumb's source: the item's own summary, else its source identity.
@@ -914,6 +1165,29 @@ fn json_bytes(value: &serde_json::Value, limit: usize) -> usize {
     total
 }
 
+/// Exact serialized JSON length, with early termination at the clipboard bound.
+fn ticket_json_bytes(value: &serde_json::Value, limit: usize) -> usize {
+    struct Counter {
+        count: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.count = self.count.saturating_add(bytes.len());
+            if self.count > self.limit {
+                return Err(std::io::Error::other("copy limit"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { count: 0, limit };
+    let _ = serde_json::to_writer(&mut counter, value);
+    counter.count
+}
+
 /// Count the exact plain-line representation without allocating it.
 struct SourceCounter {
     bytes: usize,
@@ -943,6 +1217,15 @@ fn new_subject_source_len(item: &DecisionItem, limit: usize) -> Option<usize> {
     use crate::domain::models::OperatorApplyFinding;
     let mut count = SourceCounter { bytes: 0, lines: 0 };
     match &item.subject {
+        DecisionSubject::ReplyArrived(payload) => {
+            count.line(format_args!("From: {}", payload.alias));
+            count.line(format_args!("Peer: {}", payload.peer));
+            count.line(format_args!("Item: {}", payload.item));
+            count.line(format_args!(
+                "Type: Reply arrived · {} replies",
+                payload.reply_count
+            ));
+        }
         DecisionSubject::Artifact(card) => {
             let id = card.artifact.id.as_str();
             let end = id
@@ -1093,6 +1376,21 @@ fn source_len(item: &DecisionItem, limit: usize) -> usize {
         return bytes;
     }
     match &item.subject {
+        DecisionSubject::Ticket(payload) => ticket_json_bytes(&payload.envelope, limit),
+        DecisionSubject::ReplyArrived(payload) => {
+            let digits = payload.reply_count.checked_ilog10().unwrap_or(0) as usize + 1;
+            "From: "
+                .len()
+                .saturating_add(payload.alias.len())
+                .saturating_add("\nPeer: ".len())
+                .saturating_add(payload.peer.len())
+                .saturating_add("\nItem: ".len())
+                .saturating_add(payload.item.len())
+                .saturating_add("\nType: Reply arrived · ".len())
+                .saturating_add(digits)
+                .saturating_add(" replies".len())
+        }
+        DecisionSubject::TeamProposal(payload) => payload.proposal.body.len(),
         DecisionSubject::Question(payload) => payload.question.len(),
         DecisionSubject::SkillTrust(payload) => payload
             .inspect_content
@@ -1138,6 +1436,12 @@ fn plain(lines: &[Line<'_>]) -> String {
 /// The item's original body text (never sanitized, never wrapped).
 fn source_text(item: &DecisionItem, theme: &Theme) -> String {
     match &item.subject {
+        DecisionSubject::Ticket(payload) => payload.envelope.to_string(),
+        DecisionSubject::RecipientDraft(_) => unreachable!("recipient copy is streamed separately"),
+        DecisionSubject::ReplyArrived(payload) => format!(
+            "From: {}\nPeer: {}\nItem: {}\nType: Reply arrived · {} replies",
+            payload.alias, payload.peer, payload.item, payload.reply_count
+        ),
         DecisionSubject::Permission(payload) => match &payload.input {
             PermissionInput::Ready(value) => {
                 approval_presentation::body_lines(&payload.tool_name, value)
@@ -1149,6 +1453,7 @@ fn source_text(item: &DecisionItem, theme: &Theme) -> String {
             PermissionInput::Receiving { summary } => summary.clone(),
         },
         DecisionSubject::Consent(payload) => consent_text(payload),
+        DecisionSubject::TeamProposal(payload) => payload.proposal.body.clone(),
         DecisionSubject::Question(payload) => payload.question.clone(),
         DecisionSubject::SkillTrust(payload) => match &payload.inspect_content {
             Some(content) if payload.inspecting => content.clone(),
@@ -1190,7 +1495,13 @@ fn source_text(item: &DecisionItem, theme: &Theme) -> String {
             plain(&apply_card::lines_with_file_limit(card, theme, usize::MAX))
         }
         DecisionSubject::PeerAdd(pending) => plain(&peer_add_prompt::lines(pending, theme)),
-        DecisionSubject::TeamRetract(payload) => plain(&team_retract_prompt::lines(payload, theme)),
+        // Painted rows are sanitized; Copy keeps the card's original bytes.
+        DecisionSubject::TeamRetract(payload) => payload
+            .card
+            .lines()
+            .map(|raw| format!("  {raw}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         // The builders clip the preview and paths to a few cells for the card; Copy keeps
         // the original bytes.
         DecisionSubject::Fork(payload) => payload.preview.clone(),
@@ -1207,11 +1518,109 @@ fn source_text(item: &DecisionItem, theme: &Theme) -> String {
         }
     }
 }
+/// Stream raw recipient source to a counting sink first, then to the clipboard buffer.
+/// This retains unbounded original strings without preparing them during preflight.
+fn write_recipient_source(
+    out: &mut impl std::fmt::Write,
+    payload: &crate::adapters::tui::decision_queue::RecipientDraftPayload,
+) -> std::fmt::Result {
+    use crate::adapters::tui::decision_queue::RecipientDraftStage;
+    use crate::domain::models::ItemPrincipal;
+    write!(
+        out,
+        "{} · {}",
+        payload.canonical_type, payload.sender_source
+    )?;
+    if let Some(address) = &payload.item_address {
+        let principal = match address.principal() {
+            ItemPrincipal::Rap(peer)
+            | ItemPrincipal::A2aPseudonym(peer)
+            | ItemPrincipal::A2aBound(peer) => peer.as_str(),
+            _ => "unknown",
+        };
+        write!(out, "\nPrincipal: {principal}")?;
+    }
+    if let Some(stories) = &payload.stories {
+        write!(out, "\n{}", stories.0)?;
+    }
+    if let Some(selection) = &payload.selected_for {
+        write!(out, "\n{}", selection.0)?;
+    }
+    if let Some(status) = &payload.status {
+        use crate::domain::models::{NOT_SHARED, NothingBecause};
+        match status.nothing_because {
+            Some(NothingBecause::LevelNone) => {
+                write!(out, "\nShares nothing: your sharing level is none")?
+            }
+            Some(NothingBecause::NoStoriesHeld) => write!(
+                out,
+                "\nShares nothing: no stories are assigned to you on this host"
+            )?,
+            None => {
+                write!(
+                    out,
+                    "\nShares ({}): ",
+                    status.statement.level.unwrap_or_default().as_str()
+                )?;
+                for (index, story) in status.statement.stories.iter().enumerate() {
+                    if index != 0 {
+                        write!(out, " · ")?;
+                    }
+                    write!(out, "{}", story.key.as_str())?;
+                    if let Some(value) = story.state {
+                        write!(out, " {}", value.as_str())?;
+                    }
+                }
+            }
+        }
+        write!(out, "\n{NOT_SHARED}")?;
+    }
+    if let Some(retro) = &payload.retro {
+        write!(out, "\nRetrospective received:")?;
+        for (kind, count) in &retro.contribution.received {
+            write!(out, "\n{kind}: {count}")?;
+        }
+        write!(out, "\nReply minutes:")?;
+        for value in &retro.contribution.reply_minutes {
+            write!(out, " {value}")?;
+        }
+        write!(out, "\nAcknowledgement minutes:")?;
+        for value in &retro.contribution.ack_minutes {
+            write!(out, " {value}")?;
+        }
+    }
+    match &payload.stage {
+        RecipientDraftStage::Ready(draft) => write!(out, "\nPeer draft: {draft}"),
+        RecipientDraftStage::AwaitingOperator => {
+            write!(out, "\nPeer is waiting for your response.")
+        }
+    }
+}
 
 /// `c` on a decision frame: the item's original text, all or nothing at the copy limit
 /// (nothing is built above it).
 #[must_use]
 pub(crate) fn copy_source(item: &DecisionItem, state: &TuiState) -> CopySource {
+    if let DecisionSubject::RecipientDraft(payload) = &item.subject {
+        if item.is_stale()
+            && let Some((_, field)) = &payload.compose
+            && !field.is_empty()
+        {
+            return if field.as_str().len() > COPY_MAX_BYTES {
+                CopySource::TooLarge
+            } else {
+                CopySource::Text(field.as_str().to_owned())
+            };
+        }
+        let mut count = SourceCounter { bytes: 0, lines: 0 };
+        let _ = write_recipient_source(&mut count, payload);
+        if count.bytes > COPY_MAX_BYTES {
+            return CopySource::TooLarge;
+        }
+        let mut text = String::with_capacity(count.bytes);
+        let _ = write_recipient_source(&mut text, payload);
+        return CopySource::Text(text);
+    }
     if source_len(item, COPY_MAX_BYTES) > COPY_MAX_BYTES {
         return CopySource::TooLarge;
     }
@@ -1228,6 +1637,40 @@ mod tests {
     use super::*;
     use crate::domain::models::ToolRisk;
     use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+
+    #[test]
+    fn story21_6_proposal_rail_rows_disclose_without_clipping() {
+        use crate::adapters::tui::decision_queue::{Responder, raise_team_proposal};
+        use crate::domain::models::{SemanticMessageType, TeamProposal};
+        for width in [58, 78] {
+            let mut state = TuiState::new((width + 2) as u16, 24);
+            raise_team_proposal(
+                &mut state,
+                Arc::new(TeamProposal {
+                    id: "p".into(),
+                    conversation_id: "c".into(),
+                    recipients: vec!["recipient".repeat(20), "second".into()],
+                    message_type: SemanticMessageType::ArchitectureUpdate,
+                    body: "body".into(),
+                }),
+                Responder::Local,
+            );
+            let item = state.decisions.items().next().unwrap();
+            let rows = parts(item, &state, &state.theme, width, 20).rail;
+            assert!(
+                rows.iter()
+                    .all(|line| geom::cells(&line.to_string()) <= width)
+            );
+            let text = rows
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("[y] Send to … (see To)"), "{text}");
+            assert!(text.contains("[r] Review first"), "{text}");
+            assert!(text.contains("[n] Dismiss"), "{text}");
+        }
+    }
 
     #[test]
     fn story21_6_permission_layout_reuses_and_invalidates_by_input_and_width() {

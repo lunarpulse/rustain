@@ -21,6 +21,7 @@ import pytest
 
 import harness
 from fixtures.scene_provider import SceneStub
+from decision_frame_helpers import open_decision
 from harness import RustainTUI
 
 NOTICE = "[no reply over RAP]"
@@ -203,7 +204,9 @@ def _exercise(binary, evidence, root, monkeypatch, after_delivery=None):
             screen = tui.get_screen_text()
             if NOTICE in screen:
                 break
-            if "[y] Allow once" in screen and not consent_answered:
+            if not consent_answered and ("[y] Allow once" in screen or
+                                         ("Needs you (" in screen and "^X q" in screen)):
+                screen = open_decision(tui, "Peer consent", ("[y] Allow once",), timeout=60)
                 (evidence / "consent.screen.txt").write_text(screen)
                 tui.send("y")
                 consent_answered = True

@@ -70,10 +70,7 @@ async fn allow_subagent_write_does_not_auto_send_parent_proposal() {
         "Proposal shown to the operator. Nothing has been sent; the operator decides whether to send it to lena-po."
     );
     assert!(
-        fixture
-            .state
-            .pending_team_proposals
-            .contains_key(&fixture.conversation.id),
+        fixture.proposal(&fixture.conversation.id).is_some(),
         "proposal remains pending until a human Send key"
     );
     assert_pending_without_egress(&fixture, &[&host]).await;
@@ -132,7 +129,7 @@ async fn k01_subagent_proposal_is_denied_by_real_runner() {
             "a denied subagent proposal must never execute"
         );
         assert!(
-            fixture.state.pending_team_proposals.is_empty(),
+            fixture.proposal_count() == 0,
             "a child turn cannot install a proposal on its parent surface"
         );
         assert!(
@@ -156,7 +153,7 @@ async fn k01_subagent_proposal_is_denied_by_real_runner() {
                 ),
             ))
             .await;
-        assert!(fixture.state.pending_team_proposals.is_empty());
+        assert_eq!(fixture.proposal_count(), 0);
         assert!(fixture.state.team_send_blocks.is_empty());
         assert!(fixture.sender.rows().await.is_empty());
         assert!(host.journal().entries().await.is_empty());

@@ -187,6 +187,10 @@ pub(crate) fn context_of(item: &DecisionItem) -> Context {
         DecisionSubject::Permission(payload) if payload.feedback.is_some() => {
             Context::DecisionCompose
         }
+        DecisionSubject::RecipientDraft(payload) if payload.compose.is_some() => {
+            Context::DecisionCompose
+        }
+        DecisionSubject::Ticket(payload) if payload.editing => Context::DecisionCompose,
         DecisionSubject::Question(payload) if payload.editing => Context::Question,
         DecisionSubject::SkillTrust(payload) if payload.inspecting => Context::SkillTrustInspect,
         _ => item.kind.context(),
@@ -222,6 +226,31 @@ fn edit_target(subject: &mut DecisionSubject) -> Option<(&mut TextField, usize)>
             .map(|field| (field, super::permission::FEEDBACK_MAX_BYTES)),
         DecisionSubject::Question(payload) if payload.editing => {
             Some((&mut payload.field, ANSWER_MAX_BYTES))
+        }
+        DecisionSubject::RecipientDraft(payload) => payload
+            .compose
+            .as_mut()
+            .map(|(_, field)| (field, ANSWER_MAX_BYTES)),
+        DecisionSubject::Ticket(payload) if payload.editing => {
+            use super::ticket::{TicketControl, TicketForm};
+            let field = match &mut payload.form {
+                TicketForm::Raw(field) => Some(field),
+                TicketForm::Scalar(TicketControl::Text(field) | TicketControl::Number(field)) => {
+                    Some(field)
+                }
+                TicketForm::Scalar(_) => None,
+                TicketForm::Fields(fields) => {
+                    fields
+                        .get_mut(payload.focused)
+                        .and_then(|field| match &mut field.control {
+                            TicketControl::Text(field) | TicketControl::Number(field) => {
+                                Some(field)
+                            }
+                            _ => None,
+                        })
+                }
+            };
+            field.map(|field| (field, ANSWER_MAX_BYTES))
         }
         _ => None,
     }
@@ -277,12 +306,16 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
     };
     let item_key = item.key();
     let kind = item.kind;
+    let responder = item.responder;
     let stale = item.is_stale();
     let in_field = field_open(item);
-    let reviewing = matches!(&item.subject, DecisionSubject::Permission(p) if p.reviewing);
+    let reviewing = matches!(&item.subject, DecisionSubject::Permission(p) if p.reviewing)
+        || matches!(&item.subject, DecisionSubject::TeamProposal(p) if p.reviewing);
     let conversation_id = item.conversation_id.clone();
     let retract_armed =
         !matches!(&item.subject, DecisionSubject::TeamRetract(payload) if !payload.armed);
+    let recipient_ready = matches!(&item.subject, DecisionSubject::RecipientDraft(payload)
+        if matches!(payload.stage, super::recipient::RecipientDraftStage::Ready(_)));
     let context = context_of(item);
     let inspecting = context == Context::SkillTrustInspect;
     let command = match keymap::resolve(context, host, &[key]) {
@@ -294,6 +327,13 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
     }
     if stale {
         // Its source settled elsewhere: no mutation key acts, Close removes it (A7).
+        if matches!(&item.subject, DecisionSubject::RecipientDraft(payload)
+            if payload.compose.as_ref().is_some_and(|(_, field)| !field.is_empty()))
+            && matches!(keymap::resolve(Context::Decision, host, &[key]),
+                Resolved::Hit(row) if command_of(row.command) == Some(Cmd::Copy))
+        {
+            return copy(state, &item_key);
+        }
         if matches!(command, Some(Cmd::Esc | Cmd::Back)) {
             close_stale(state, &item_key);
         }
@@ -304,7 +344,16 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
     }
     match command {
         Some(Cmd::Back | Cmd::Esc) if reviewing => {
-            leave_review(state, &item_key);
+            if let Some(DecisionSubject::TeamProposal(payload)) = state
+                .decisions
+                .item_mut(&item_key)
+                .map(|item| &mut item.subject)
+            {
+                payload.reviewing = false;
+                state.decisions.scroll = 0;
+            } else {
+                leave_review(state, &item_key);
+            }
             return PaneOutcome::Consumed;
         }
         Some(Cmd::Card(CardCmd::Back)) if inspecting => {
@@ -348,7 +397,21 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
     let Some(command) = command else {
         return PaneOutcome::Consumed;
     };
+    if kind == DecisionKind::TeamProposal && super::team_proposal_draft_blocked(state, responder) {
+        return PaneOutcome::Consumed;
+    }
     let effect = match (kind, command) {
+        (DecisionKind::Ticket, Cmd::Card(CardCmd::Confirm)) => Some(DecisionEffect::TicketAccept),
+        (DecisionKind::Ticket, Cmd::Card(CardCmd::Delegate)) => Some(DecisionEffect::TicketDecline),
+        (DecisionKind::Ticket, Cmd::Card(CardCmd::CancelPlan)) => {
+            Some(DecisionEffect::TicketCancel)
+        }
+        (DecisionKind::ReplyArrived, Cmd::Card(CardCmd::Confirm)) => {
+            Some(DecisionEffect::ReplyRead)
+        }
+        (DecisionKind::ReplyArrived, Cmd::Card(CardCmd::CancelPlan)) => {
+            Some(DecisionEffect::ReplyDismiss)
+        }
         (DecisionKind::Recovery, Cmd::Enter) => Some(DecisionEffect::RecoveryContinue),
         (DecisionKind::Recovery, Cmd::No) => Some(DecisionEffect::RecoveryNewSession),
         (DecisionKind::Carryover, Cmd::Yes) => Some(DecisionEffect::CarryoverAccept),
@@ -449,6 +512,18 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
         (DecisionKind::TeamRetract, Cmd::Card(CardCmd::No)) => {
             Some(DecisionEffect::TeamRetractDecline)
         }
+        (DecisionKind::TeamProposal, Cmd::Card(CardCmd::Yes)) if !reviewing => {
+            Some(DecisionEffect::TeamProposalSend)
+        }
+        (DecisionKind::TeamProposal, Cmd::Card(CardCmd::No)) if !reviewing => {
+            Some(DecisionEffect::TeamProposalDismiss)
+        }
+        (DecisionKind::RecipientDraftApproval, Cmd::Card(CardCmd::Yes)) if recipient_ready => {
+            Some(DecisionEffect::RecipientApprove)
+        }
+        (DecisionKind::RecipientDraftApproval, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::RecipientReject)
+        }
         (DecisionKind::Fork, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::ForkConfirm),
         (DecisionKind::Fork, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::ForkCancel),
         (DecisionKind::Rewind, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::RewindConfirm),
@@ -475,6 +550,108 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
         return resolve(state, facts, &item_key, effect);
     }
     match (kind, command) {
+        (
+            DecisionKind::Ticket,
+            Cmd::Card(
+                card @ (CardCmd::Up
+                | CardCmd::Down
+                | CardCmd::Left
+                | CardCmd::Right
+                | CardCmd::Edit),
+            ),
+        ) => {
+            if let Some(DecisionSubject::Ticket(ticket)) = state
+                .decisions
+                .item_mut(&item_key)
+                .map(|item| &mut item.subject)
+            {
+                use super::ticket::{TicketControl, TicketForm};
+                match (&mut ticket.form, card) {
+                    (TicketForm::Raw(_), CardCmd::Edit) => ticket.editing = true,
+                    (
+                        TicketForm::Scalar(TicketControl::Text(_) | TicketControl::Number(_)),
+                        CardCmd::Edit,
+                    ) => ticket.editing = true,
+                    (
+                        TicketForm::Scalar(TicketControl::Boolean(value)),
+                        CardCmd::Left | CardCmd::Right,
+                    ) => *value = !*value,
+                    (
+                        TicketForm::Scalar(TicketControl::Enum { choices, selected }),
+                        direction @ (CardCmd::Left | CardCmd::Right),
+                    ) => {
+                        *selected = if direction == CardCmd::Left {
+                            selected.saturating_sub(1)
+                        } else {
+                            (*selected + 1).min(choices.len().saturating_sub(1))
+                        };
+                    }
+                    (TicketForm::Fields(_), CardCmd::Up) => {
+                        ticket.focused = ticket.focused.saturating_sub(1)
+                    }
+                    (TicketForm::Fields(fields), CardCmd::Down) => {
+                        ticket.focused = (ticket.focused + 1).min(fields.len().saturating_sub(1))
+                    }
+                    (TicketForm::Fields(fields), CardCmd::Edit) => {
+                        ticket.editing = fields.get(ticket.focused).is_some_and(|field| {
+                            matches!(
+                                &field.control,
+                                TicketControl::Text(_) | TicketControl::Number(_)
+                            )
+                        });
+                    }
+                    (TicketForm::Fields(fields), direction @ (CardCmd::Left | CardCmd::Right)) => {
+                        if let Some(field) = fields.get_mut(ticket.focused) {
+                            match &mut field.control {
+                                TicketControl::Boolean(value) => *value = !*value,
+                                TicketControl::Enum { choices, selected } => {
+                                    *selected = if direction == CardCmd::Left {
+                                        selected.saturating_sub(1)
+                                    } else {
+                                        (*selected + 1).min(choices.len().saturating_sub(1))
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                ticket.error = None;
+            }
+            *state.decisions.body_layout.get_mut() = None;
+            if matches!(card, CardCmd::Up | CardCmd::Down)
+                && let Some(item) = state.decisions.item(&item_key)
+                && let Some(row) = decision_frame::ticket_focus_row(
+                    item,
+                    state,
+                    decision_frame::inner_width(state.terminal_width),
+                )
+            {
+                state.decisions.scroll = row;
+            }
+        }
+        (DecisionKind::RecipientDraftApproval, Cmd::Card(CardCmd::ViewItem)) => {
+            return PaneOutcome::Effect(DecisionEffect::RecipientView);
+        }
+        (
+            DecisionKind::RecipientDraftApproval,
+            Cmd::Card(card @ (CardCmd::Edit | CardCmd::WriteOwn)),
+        ) => {
+            if let Some(DecisionSubject::RecipientDraft(payload)) =
+                state.decisions.item_mut(&item_key).map(|i| &mut i.subject)
+            {
+                use super::recipient::{RecipientComposeMode, RecipientDraftStage};
+                let (mode, text) = match (card, &payload.stage) {
+                    (CardCmd::Edit, RecipientDraftStage::Ready(draft)) => {
+                        (RecipientComposeMode::Edit, draft.as_str())
+                    }
+                    (CardCmd::WriteOwn, _) => (RecipientComposeMode::WriteOwn, ""),
+                    _ => return PaneOutcome::Consumed,
+                };
+                payload.compose = Some((mode, TextField::from(text)));
+            }
+        }
         // The per-row selection of `/memory forget` lives inside its frame.
         (
             DecisionKind::Forget,
@@ -514,6 +691,16 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
         (DecisionKind::Permission, Cmd::Review) => {
             if let Some(payload) = payload_mut(state, &item_key)
                 && payload.ready()
+            {
+                payload.reviewing = true;
+                state.decisions.scroll = 0;
+            }
+        }
+        (DecisionKind::TeamProposal, Cmd::Card(CardCmd::Review)) => {
+            if let Some(DecisionSubject::TeamProposal(payload)) = state
+                .decisions
+                .item_mut(&item_key)
+                .map(|item| &mut item.subject)
             {
                 payload.reviewing = true;
                 state.decisions.scroll = 0;
@@ -586,6 +773,8 @@ fn field_key(
             }
             let effect = match kind {
                 DecisionKind::Question => DecisionEffect::QuestionSend,
+                DecisionKind::Ticket => DecisionEffect::TicketAccept,
+                DecisionKind::RecipientDraftApproval => DecisionEffect::RecipientSend,
                 _ => DecisionEffect::PermissionDenyFeedback,
             };
             resolve(state, facts, item_key, effect)
@@ -600,6 +789,8 @@ fn field_key(
             match state.decisions.item_mut(item_key).map(|i| &mut i.subject) {
                 Some(DecisionSubject::Permission(payload)) => payload.feedback = None,
                 Some(DecisionSubject::Question(payload)) => payload.editing = false,
+                Some(DecisionSubject::Ticket(payload)) => payload.editing = false,
+                Some(DecisionSubject::RecipientDraft(payload)) => payload.compose = None,
                 _ => {}
             }
             PaneOutcome::Consumed
@@ -624,10 +815,27 @@ fn resolve(
         state.decisions.feedback = Some(remedy);
         return PaneOutcome::Consumed;
     }
-    let attached = state
-        .decisions
-        .item(key)
-        .is_some_and(|item| item.responder == Responder::Attached);
+    if effect == DecisionEffect::TicketAccept {
+        if !state.decisions.item(key).is_some_and(|item| {
+            crate::adapters::tui::widgets::decision_frame::ticket_body_visible(state, item)
+        }) {
+            return PaneOutcome::Consumed;
+        }
+        if let Some(DecisionSubject::Ticket(ticket)) =
+            state.decisions.item_mut(key).map(|item| &mut item.subject)
+        {
+            if let Err(error) = ticket.answer() {
+                ticket.error = Some(error);
+                state.decisions.scroll = 0;
+                *state.decisions.body_layout.get_mut() = None;
+                return PaneOutcome::Consumed;
+            }
+            ticket.error = None;
+        }
+    }
+    let attached = state.decisions.item(key).is_some_and(|item| {
+        item.responder == Responder::Attached || item.kind == DecisionKind::Ticket
+    });
     if attached {
         state.decisions.sending = Some((key.clone(), effect));
         return PaneOutcome::Effect(effect);
@@ -703,6 +911,15 @@ fn defer_current(state: &mut TuiState, key: &DecisionKey) {
     }
     state.decisions.last_defer_at = Some(state.notifications.now());
     presentation::reducer::close(state, Surface::Decision);
+}
+
+/// Set the focused decision aside exactly as `Esc` does (the frame pops, the item stays
+/// queued): for a host action that leaves the frame to open another surface (the recipient
+/// item reader). A host never calls the key handlers directly.
+pub fn defer_focused(state: &mut TuiState) {
+    if let Some(key) = focused_key(state) {
+        defer_current(state, &key);
+    }
 }
 
 /// Close on a stale item removes it: nothing was decided, nothing is deferred.

@@ -93,6 +93,12 @@ fn raise_kind(state: &mut TuiState, kind: DecisionKind) {
         | DecisionKind::ExportOverwrite => {
             unreachable!("the 6-D kinds have their own producer fixtures")
         }
+        DecisionKind::TeamProposal
+        | DecisionKind::RecipientDraftApproval
+        | DecisionKind::Ticket
+        | DecisionKind::ReplyArrived => {
+            unreachable!("the 6-E kinds have their own producer fixtures (k12, k13, k14)")
+        }
     }
     assert!(presentation::consistent(state));
 }

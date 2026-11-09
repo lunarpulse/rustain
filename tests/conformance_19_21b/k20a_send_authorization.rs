@@ -2,6 +2,7 @@ use super::inherited::Host;
 use super::proposal_harness::ProposalFixture;
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_queue::DecisionEffect;
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::{
     Authorship, JournalRecord, ResponseMode, RoomEvent, SendAuthorization,
@@ -18,20 +19,17 @@ async fn k20a_approved_proposal_is_agent_composed_human_decided() {
         "{result}"
     );
     f.paint(100, 32);
-    assert!(
-        f.state
-            .pending_team_proposals
-            .contains_key(&f.conversation.id)
-    );
+    assert!(f.proposal(&f.conversation.id).is_some());
     let decision = f.key(DomainInputEvent::KeyPress('y')).await;
     assert!(
-        matches!(decision, InputAction::TeamProposal { .. }),
+        matches!(
+            decision,
+            InputAction::Decision(DecisionEffect::TeamProposalSend)
+        ),
         "{decision:?}"
     );
     assert!(
-        !f.state
-            .pending_team_proposals
-            .contains_key(&f.conversation.id),
+        f.proposal(&f.conversation.id).is_none(),
         "M38: real y must close the raised card"
     );
     assert_eq!(

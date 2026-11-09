@@ -97,12 +97,16 @@ async fn k03_retract_exact_card_single_post_and_remembered_board_without_list() 
         "the preview carries a body, not the decision frame's key rail: {}",
         expected.body
     );
+    let principal = expected.principal.as_deref().expect("bound peer identity");
+    let expected_body = expected
+        .body
+        .replacen('\n', &format!("\nPrincipal: {principal}\n"), 1);
     assert_eq!(
         actual,
         TeamRetractPreviewView::Card {
             peer: expected.peer,
             item_id: expected.item_id,
-            body: expected.body,
+            body: expected_body,
             armed: expected.armed
         }
     );
@@ -152,6 +156,68 @@ async fn k03_retract_exact_card_single_post_and_remembered_board_without_list() 
     }
     assert!(daemon.requests.lock().is_empty());
     observer.detach().await;
+    writer.detach().await;
+    daemon.stop().await;
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn story21_6_attached_real_retract_preview_discloses_bound_principal_in_spans() {
+    use rustain::adapters::tui::{
+        decision_queue::{RetractTarget, TeamRetractPayload},
+        theme::Theme,
+        widgets::team_retract_prompt,
+    };
+
+    let host = RecipientHost::start(A2aAdmissionPolicy::Allow).await;
+    let spec = host.peer("B");
+    let principal = spec.resolved_identity().to_string();
+    assert_ne!(principal, "B");
+    let daemon = AttachedDaemon::start(vec![spec]).await;
+    let mut writer =
+        AttachedClient::attach(&daemon.path, ConnectionTier::TrustedLocal, false).await;
+    let item = seed(&mut writer, &host, "seed-principal").await;
+    let TeamRetractPreviewView::Card {
+        peer,
+        item_id,
+        mut body,
+        armed,
+    } = preview(&mut writer, "principal", &item).await
+    else {
+        panic!("expected attached retract card");
+    };
+    // Hostile peer-originated content must remain safe at the span boundary too.
+    body.push_str("\npeer \x1b[31mred\u{202e}");
+    let payload = TeamRetractPayload {
+        target: RetractTarget::Item {
+            peer: peer.clone(),
+            item: item_id,
+        },
+        conversation_id: "conv".into(),
+        principal: None,
+        task: None,
+        card: body,
+        armed,
+        request: Some("principal".into()),
+    };
+    let lines = team_retract_prompt::lines(&payload, &Theme::dark());
+    let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.content.contains("Retract on B's host"))
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.content == format!("  Principal: {principal}"))
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|span| !span.content.contains(&['\n', '\x1b', '\u{202e}'][..]))
+    );
+    decide(&mut writer, "principal", false).await;
     writer.detach().await;
     daemon.stop().await;
     host.stop().await;

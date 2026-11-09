@@ -28,7 +28,7 @@ async fn no_surface_returns_r2_instead_of_parking_or_creating_a_card() {
         .await;
     assert_eq!(result, R2);
     assert!(fixture.last_turn_completed);
-    assert!(fixture.state.pending_team_proposals.is_empty());
+    assert_eq!(fixture.proposal_count(), 0);
     assert_eq!(peer.counts(), HttpCounts { get: 0, post: 0 });
     assert!(peer.journal().entries().await.is_empty());
     assert!(fixture.sender.journal.entries().await.is_empty());
@@ -71,9 +71,7 @@ async fn exact_utf8_byte_limit_and_allowed_tabs_newlines_preserve_the_snapshot()
         "Proposal shown to the operator. Nothing has been sent; the operator decides whether to send it to lena-po."
     );
     let snapshot = fixture
-        .state
-        .pending_team_proposals
-        .get(&fixture.conversation.id)
+        .proposal(&fixture.conversation.id)
         .expect("ready event must retain its real snapshot");
     assert_eq!(snapshot.body.as_bytes(), body.as_bytes());
     assert_eq!(
@@ -99,7 +97,7 @@ async fn utf8_limit_refusal_reports_bytes_not_character_count() {
         result.contains("131074") && result.contains("131072"),
         "R4 must identify actual bytes and the bound: {result}"
     );
-    assert!(fixture.state.pending_team_proposals.is_empty());
+    assert_eq!(fixture.proposal_count(), 0);
     assert_eq!(peer.counts(), HttpCounts { get: 0, post: 0 });
     assert!(peer.journal().entries().await.is_empty());
     assert!(fixture.sender.journal.entries().await.is_empty());
@@ -121,7 +119,7 @@ async fn forbidden_range_edges_report_utf8_byte_offsets_without_recipient_io() {
             "R4 must locate U+{:04X} by bytes, not characters: {result}",
             forbidden as u32
         );
-        assert!(fixture.state.pending_team_proposals.is_empty());
+        assert_eq!(fixture.proposal_count(), 0);
     }
     assert_eq!(peer.counts(), HttpCounts { get: 0, post: 0 });
     assert!(peer.journal().entries().await.is_empty());

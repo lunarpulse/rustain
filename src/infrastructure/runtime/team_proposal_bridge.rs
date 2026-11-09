@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::adapters::tui::presentation::reducer;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{ProposalRaiseOutcome, TeamProposal};
 use crate::domain::ports::TeamProposalSink;
@@ -42,16 +41,12 @@ impl StandaloneTeamProposalSink {
     }
 
     /// One acquisition checks both bindings and destructively takes once.
-    pub async fn take(
-        &self,
-        conversation_id: &str,
-        proposal_id: &str,
-    ) -> Option<Arc<TeamProposal>> {
+    pub async fn take(&self, proposal: &Arc<TeamProposal>) -> Option<Arc<TeamProposal>> {
         let mut conversations = self.conversations.lock().await;
-        let pending = conversations.get_mut(conversation_id)?;
+        let pending = conversations.get_mut(&proposal.conversation_id)?;
         if pending
             .as_ref()
-            .is_some_and(|proposal| proposal.id == proposal_id)
+            .is_some_and(|pending| Arc::ptr_eq(pending, proposal))
         {
             pending.take()
         } else {
@@ -109,16 +104,11 @@ pub async fn proposal_ready(
         .await
         .is_some_and(|pending| Arc::ptr_eq(&pending, &proposal))
     {
-        if state.team_proposal_conversation_id.as_deref() == Some(proposal.conversation_id.as_str())
-        {
-            state.team_proposal_visible = None;
-            state.team_proposal_scroll = 0;
-            state.team_proposal_scroll_max = 0;
-        }
-        state
-            .pending_team_proposals
-            .insert(proposal.conversation_id.clone(), proposal);
-        state.needs_redraw = true;
+        crate::adapters::tui::decision_queue::raise_team_proposal(
+            state,
+            proposal,
+            crate::adapters::tui::decision_queue::Responder::Local,
+        );
     }
 }
 
@@ -154,12 +144,21 @@ pub async fn synchronize_surface(
                 slots.insert((*id).to_owned(), None);
             }
         }
-        state
-            .pending_team_proposals
-            .retain(|id, _| open.contains(id.as_str()));
-        state.team_proposal_visible = None;
-        state.team_proposal_scroll = 0;
-        state.team_proposal_scroll_max = 0;
+        let closed: Vec<_> = state
+            .decisions
+            .items()
+            .filter(|item| {
+                item.kind == crate::adapters::tui::decision_queue::DecisionKind::TeamProposal
+                    && item
+                        .conversation_id
+                        .as_deref()
+                        .is_some_and(|id| !open.contains(id))
+            })
+            .filter_map(|item| item.conversation_id.clone())
+            .collect();
+        for id in closed {
+            crate::adapters::tui::decision_queue::withdraw_team_proposal_conversation(state, &id);
+        }
         state.team_proposal_conversation_id = active_conversation_id.map(str::to_owned);
         state.team_proposal_surface_tab_count = tabs.tab_count();
         state.needs_redraw = true;
@@ -184,20 +183,16 @@ pub async fn withdraw_conversation(
     } else {
         false
     };
-    let cached = state
-        .pending_team_proposals
-        .remove(conversation_id)
-        .is_some();
-    if state.team_proposal_conversation_id.as_deref() == Some(conversation_id) {
-        state.team_proposal_withdrawal_pending |= retired || cached;
-        state.team_proposal_visible = None;
-        state.team_proposal_scroll = 0;
-        state.team_proposal_scroll_max = 0;
-        state
-            .tab_render_state(state.active_tab_id)
-            .team_proposal_reviews
-            .retain(|_, proposal| proposal.conversation_id != conversation_id);
-    }
+    let queued = state.decisions.items().any(|item| {
+        item.kind == crate::adapters::tui::decision_queue::DecisionKind::TeamProposal
+            && !item.is_stale()
+            && item.conversation_id.as_deref() == Some(conversation_id)
+    });
+    crate::adapters::tui::decision_queue::withdraw_team_proposal_conversation(
+        state,
+        conversation_id,
+    );
+    state.team_proposal_withdrawal_pending |= retired || queued;
     state.team_proposal_surface_tab_count = 0;
     state.needs_redraw = true;
 }
@@ -206,6 +201,8 @@ pub async fn withdraw_all(
     state: &mut crate::adapters::tui::state::TuiState,
     app_state: &crate::infrastructure::runtime::app_state::AppState,
 ) {
+    let queued = crate::adapters::tui::decision_queue::team_proposal_pending(state);
+    state.team_proposal_withdrawal_pending |= queued;
     if let Some(sink) = app_state.team_proposals.as_ref() {
         let mut slots = sink.conversations.lock().await;
         state.team_proposal_withdrawal_pending |= state
@@ -215,39 +212,20 @@ pub async fn withdraw_all(
             .is_some_and(Option::is_some);
         slots.clear();
     }
-    state.pending_team_proposals.clear();
-    state.team_proposal_visible = None;
-    state.team_proposal_scroll = 0;
-    state.team_proposal_scroll_max = 0;
+    crate::adapters::tui::decision_queue::withdraw_all_team_proposals(state);
     state.team_proposal_surface_tab_count = 0;
-    for render in state.tab_render_states.values_mut() {
-        render.team_proposal_reviews.clear();
-    }
     state.needs_redraw = true;
 }
 
-/// The card's key handler supplies the decision; Review is not an approval.
+/// Resolve the queued snapshot through the sink's single-take identity fence.
 pub async fn proposal_action(
     state: &mut crate::adapters::tui::state::TuiState,
     app_state: &crate::infrastructure::runtime::app_state::AppState,
     active_conversation_id: &str,
-    conversation_id: &str,
-    proposal_id: &str,
-    decision: Option<crate::domain::models::TeamProposalDecision>,
+    proposal: Arc<TeamProposal>,
+    decision: crate::domain::models::TeamProposalDecision,
 ) {
-    if active_conversation_id != conversation_id
-        || state.team_proposal_conversation_id.as_deref() != Some(conversation_id)
-        || !state.input_buffer.is_empty()
-        || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
-        || !state.team_proposal_visible.as_ref().is_some_and(|visible| {
-            visible.id == proposal_id
-                && visible.conversation_id == conversation_id
-                && state
-                    .pending_team_proposals
-                    .get(conversation_id)
-                    .is_some_and(|pending| Arc::ptr_eq(pending, visible))
-        })
-    {
+    if active_conversation_id != proposal.conversation_id || !state.input_buffer.is_empty() {
         stale(state);
         return;
     }
@@ -255,66 +233,17 @@ pub async fn proposal_action(
         stale(state);
         return;
     };
-    if decision.is_none() {
-        let Some(proposal) = sink
-            .pending(conversation_id)
-            .await
-            .filter(|proposal| proposal.id == proposal_id)
-        else {
-            stale(state);
-            return;
-        };
-        // Review belongs to the chat feedback surface, not the task/agent
-        // detail surface. Preserve unrelated confirmation state.
-        state.task_panel_state.drill_down_task = None;
-        state.task_panel_state.expanded_detail = false;
-        state.task_panel_state.detail_scroll_offset = 0;
-        state.agent_panel_state.drill_down_agent = None;
-        state.agent_panel_state.inspector_scroll_offset = 0;
-        reducer::set_base(state, crate::domain::models::FocusState::Chat);
-        state.team_proposal_scroll = 0;
-        state.team_proposal_scroll_max = 0;
-        state.team_proposal_footer_visible = false;
-        let block_id = format!("team-proposal-review-{proposal_id}");
-        show_info(
-            state,
-            &block_id,
-            format!(
-                "Proposed message (not sent) · {}",
-                crate::domain::models::semantic_message_type_metadata(proposal.message_type).token
-            ),
-        );
-        state
-            .tab_render_state(state.active_tab_id)
-            .team_proposal_reviews
-            .insert(block_id, proposal);
-        state.auto_snapshot = true;
-        return;
-    }
-    if decision == Some(crate::domain::models::TeamProposalDecision::Send)
-        && !state.team_proposal_footer_visible
-    {
-        show_info(
-            state,
-            "team-proposal-status",
-            "Scroll to the proposal decision footer before sending. Nothing was sent.".to_owned(),
-        );
-        return;
-    }
-    let Some(proposal) = sink.take(conversation_id, proposal_id).await else {
+    let Some(proposal) = sink.take(&proposal).await else {
         stale(state);
         return;
     };
-    state.pending_team_proposals.remove(conversation_id);
-    state.team_proposal_visible = None;
-    state.team_proposal_scroll = 0;
-    state.team_proposal_scroll_max = 0;
     state.needs_redraw = true;
-    match decision.expect("review returned above") {
+    match decision {
         crate::domain::models::TeamProposalDecision::Send => {
+            let conversation_id = proposal.conversation_id.clone();
             super::transparency_bridge::start_proposed_team_send(
                 state,
-                conversation_id,
+                &conversation_id,
                 app_state,
                 proposal,
             )

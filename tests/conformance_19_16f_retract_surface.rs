@@ -502,6 +502,7 @@ async fn hostile_preview_task_cannot_forge_a_decision_row() {
     );
     seed_item(host.room.as_ref(), "ri_hostile", &task, received()).await;
     let server = Host::allow(&host).await;
+    let principal = server.peer("jun-dev").resolved_identity().to_string();
     let sender = sender(vec![server.peer("jun-dev")]).await;
     let preview = rustain::infrastructure::runtime::transparency_bridge::team_retract_preview(
         sender.runtime(),
@@ -512,6 +513,7 @@ async fn hostile_preview_task_cannot_forge_a_decision_row() {
     let mut state = TuiState::new(120, 40);
     open_team_retract_card(&mut state, "conv", preview);
     let payload = retract_card(&state);
+    assert_eq!(payload.principal.as_deref(), Some(principal.as_str()));
     assert_eq!(payload.task.as_deref(), Some(task.as_str()));
     let lines = team_retract_prompt::lines(payload, &state.theme);
     let text: Vec<String> = lines
@@ -523,6 +525,10 @@ async fn hostile_preview_task_cannot_forge_a_decision_row() {
                 .collect()
         })
         .collect();
+    assert!(
+        text.iter()
+            .any(|line| line == &format!("  Principal: {principal}"))
+    );
     let cleaned = sanitize_disclosable(&task, MAX_PEER_ID_BYTES);
     assert!(
         text.iter()

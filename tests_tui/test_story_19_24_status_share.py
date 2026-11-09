@@ -20,6 +20,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
+from decision_frame_helpers import has_row, open_recipient, recipient_text, view_recipient, wait_frame
 
 
 def _logical(screen):
@@ -128,40 +129,41 @@ def _exercise(binary, evidence, root, monkeypatch):
             clients[alias] = tui
         sender, recipient = clients["A"], clients["B"]
         _command(sender, "/team send B consent-setup")
-        _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "standing sender consent")
+        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
         recipient.send("a")
-        _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
-                     "recipient accepted setup")
+        open_recipient(recipient)
         setup = [row for row in _events(worlds["B"][0], "recipient_item_received") if row["content"] == "consent-setup"]
         assert len(setup) == 1, setup
         setup_item = setup[0]["address"]["item"]
+        recipient.send("\x1b")
         _command(recipient, f"/team reply {setup_item} setup-complete")
-        _wait_screen(recipient, lambda screen: "reply recorded" in screen.lower() and "[Tab] Item actions" not in screen,
-                     "setup item resolved before assignment card")
+        _wait_screen(recipient, lambda screen: has_row(screen.lower(), "reply recorded") and not has_row(screen, "Needs you ("),
+                     "setup item resolved before assignment decision")
         _command(sender, "/team send --type story_assignment --stories S7-03=B,S7-05=B B Sprint 7")
-        _wait_screen(recipient, lambda screen: "story_assignment · A" in screen
-                     and "2 stories, 2 assigned to you" in screen, "assignment received")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "story_assignment · A") and has_row(screen, "2 stories, 2 assigned to you"), screen
         assigned = [row for row in _events(worlds["B"][0], "recipient_item_received")
                     if row["content"] == "Sprint 7"]
         assert len(assigned) == 1 and assigned[0]["stories"]["state"] == "Listed", assigned
-        # Resolve the older assignment card so Tab targets the status request.
+        # Defer the older decision before replying to its item.
         assignment_item = assigned[0]["address"]["item"]
+        recipient.send("\x1b")
         _command(recipient, f"/team reply {assignment_item} assignment-received")
-        _wait_screen(recipient, lambda screen: "reply recorded" in screen.lower()
-                     and "[Tab] Item actions" not in screen, "assignment card resolved")
+        _wait_screen(recipient, lambda screen: has_row(screen.lower(), "reply recorded") and not has_row(screen, "Needs you (")
+                     and any(row.get("answers") == assignment_item for row in _events(worlds["B"][0], "recipient_item_replied")),
+                     "assignment decision resolved")
         _command(sender, "/team send --type status_request B Give me a sprint progress report")
-        screen = _wait_screen(recipient, lambda screen: "status_request · A" in screen
-                              and "Shares (minimal): S7-03 · S7-05" in _logical(screen)
-                              and "Not shared: conversations, plans, files, activity" in _logical(screen),
-                              "minimal compact status preview")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "status_request · A"), screen
+        assert "Shares (minimal): S7-03 · S7-05" in recipient_text(screen), screen
+        assert "Not shared: conversations, plans, files, activity" in recipient_text(screen), screen
         (evidence / "01-status-card.screen.txt").write_text(screen)
-        recipient.send("\t")
-        screen = _wait_screen(recipient, lambda screen: "received thread" in screen
-                              and "[s] Share status" in screen, "status item actions")
+        view_recipient(recipient)
+        screen = _wait_screen(recipient, lambda screen: has_row(screen, "received thread")
+                              and has_row(screen, "[s] Share status"), "status item actions")
         (evidence / "02-status-actions.screen.txt").write_text(screen)
         recipient.send("s")
-        _wait_screen(recipient, lambda screen: "[s] Share status" not in screen
-                     and "[Tab] Item actions" not in screen
+        _wait_screen(recipient, lambda screen: not has_row(screen, "[s] Share status")
                      and any(row.get("status") is not None for row in
                              _events(worlds["B"][0], "recipient_item_replied")),
                      "persisted status share resolved")
@@ -182,8 +184,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             (evidence / (alias + ".journal.json")).write_text(json.dumps(rows, indent=2) + "\n")
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, 80x24, two real daemons, attached writers and standing pinned consent.\n"
-            "PASS: setup and assignment cards replied before status; B minimal, notify-and-wait.\n"
-            "PASS: exact minimal shares and not-shared preview; Tab exposes [s] Share status; s resolves.\n"
+            "PASS: setup and assignment decisions replied before status; B minimal, notify-and-wait.\n"
+            "PASS: exact minimal shares and not-shared preview; View item exposes [s] Share status; s resolves.\n"
             "PASS: board keys, limited detail, manually shared B policy and agent-composed source.\n"
             "PASS: zero provider requests.\n")
 

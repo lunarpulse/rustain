@@ -287,10 +287,10 @@ pub fn render_show(
         {
             out.push_str(&format!("  ticket    {ticket}\n"));
         }
-        out.push_str(
-            "  note      this is an inventory row. Answering an input request \
-             arrives with the operator inbox.\n",
-        );
+        out.push_str(&format!(
+            "  note      {}\n",
+            crate::adapters::tui::widgets::artifacts_panel::input_request_note()
+        ));
     }
     if let Some(disposition) = operator_patch_decision(artifact, permission_mode, policy)
         .map(|decision| decision.disposition)

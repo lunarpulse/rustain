@@ -1096,6 +1096,61 @@ impl AttachServer {
 const RETRACT_NOT_AWAITING: &str =
     "That retract is no longer awaiting your answer. Nothing was marked.";
 
+#[cfg(feature = "a2a")]
+fn attached_retract_body(mut body: String, principal: Option<&str>) -> String {
+    if let Some(principal) = principal {
+        use crate::domain::services::{
+            peer_text::sanitize_display_line,
+            transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable},
+        };
+        let principal = sanitize_disclosable(&sanitize_display_line(principal), MAX_PEER_ID_BYTES);
+        let position = body.find('\n').unwrap_or(body.len());
+        body.insert_str(position, &format!("\nPrincipal: {principal}"));
+    }
+    body
+}
+
+#[cfg(all(test, feature = "a2a"))]
+mod retract_body_tests {
+    #[test]
+    fn story21_6_attached_retract_principal_controls_are_sanitized_before_spans() {
+        use crate::adapters::tui::{
+            decision_queue::{RetractTarget, TeamRetractPayload},
+            theme::Theme,
+            widgets::team_retract_prompt,
+        };
+        let principal = "identity\x1b[31m\nforged\u{202e}";
+        let body = super::attached_retract_body(
+            "Retract on alias's host\n\nAwaiting your decision.".into(),
+            Some(principal),
+        );
+        let payload = TeamRetractPayload {
+            target: RetractTarget::Item {
+                peer: "alias".into(),
+                item: "ri_1".into(),
+            },
+            conversation_id: "conv".into(),
+            principal: None,
+            task: None,
+            card: body,
+            armed: true,
+            request: None,
+        };
+        let lines = team_retract_prompt::lines(&payload, &Theme::dark());
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.content == "  Principal: identity forged")
+        );
+        assert!(
+            spans
+                .iter()
+                .all(|span| !span.content.contains(&['\n', '\x1b', '\u{202e}'][..]))
+        );
+    }
+}
+
 impl AttachServer {
     pub(super) async fn handle_team_retract_preview(
         &self,
@@ -1169,8 +1224,9 @@ impl AttachServer {
                                 request: request.clone(), peer: card.peer.clone(),
                                 item_id: card.item_id.clone(), task: card.task, armed: card.armed,
                             });
+                            let body = attached_retract_body(card.body, card.principal.as_deref());
                             protocol::TeamRetractPreviewView::Card {
-                                peer: card.peer, item_id: card.item_id, body: card.body, armed: card.armed,
+                                peer: card.peer, item_id: card.item_id, body, armed: card.armed,
                             }
                         }
                         crate::domain::events::TeamRetractPreview::Answer(message) => {

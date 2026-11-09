@@ -736,8 +736,8 @@ fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
     );
     assert!(painted.contains("input-request cccccc"), "{painted}");
     assert!(
-        painted.contains("input requests are listed as inventory"),
-        "ruling A5 — the row says answering is not available here: {painted}"
+        painted.contains("answer it from the Needs-you queue (Ctrl+X q)"),
+        "input requests point to the Needs-you queue: {painted}"
     );
     // Ruling P6 — inventory, not a worklist.
     assert!(

@@ -115,23 +115,6 @@ fn place_runs(
     }
 }
 
-fn feedback_lines(
-    block: &FeedbackBlock,
-    width: u16,
-    theme: &Theme,
-    tab_render_state: &TabRenderState,
-) -> Vec<Line<'static>> {
-    if let Some(proposal) = tab_render_state.team_proposal_reviews.get(&block.id) {
-        return feedback_block::render_feedback_lines_with_review(
-            block,
-            width,
-            theme,
-            Some(proposal),
-        );
-    }
-    feedback_block::render_feedback_lines(block, width, theme)
-}
-
 fn legacy_streaming_lines(
     streaming: &StreamingState,
     width: usize,
@@ -2421,7 +2404,7 @@ fn render_with_search_impl(
         let pre_spacing = if cumulative_offset > 0 { spacing } else { 0 };
         let fb_heights: usize = feedback_blocks
             .values()
-            .map(|fb| feedback_lines(fb, area.width, theme, tab_render_state).len())
+            .map(|fb| feedback_block::render_feedback_lines(fb, area.width, theme).len())
             .sum();
         pre_spacing + fb_heights
     } else {
@@ -2901,7 +2884,7 @@ fn render_with_search_impl(
             line_offset += spacing;
         }
         for fb in crate::adapters::tui::views::in_render_order(feedback_blocks) {
-            let fb_lines = feedback_lines(fb, area.width, theme, tab_render_state);
+            let fb_lines = feedback_block::render_feedback_lines(fb, area.width, theme);
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
             if fb_end > visible_start && line_offset < visible_end {

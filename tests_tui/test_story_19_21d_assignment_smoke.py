@@ -20,6 +20,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
+from decision_frame_helpers import has_row, open_recipient, view_recipient, wait_frame
 
 
 def _exercise(binary, evidence, root, monkeypatch):
@@ -123,23 +124,23 @@ def _exercise(binary, evidence, root, monkeypatch):
             clients[alias] = tui
         sender, recipient = clients["A"], clients["B"]
         _command(sender, "/team send B consent-setup")
-        _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "standing sender consent")
+        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
         recipient.send("a")
-        _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
-                     "recipient accepted setup")
+        open_recipient(recipient)
         setup = [row for row in _events(worlds["B"][0], "recipient_item_received") if row["content"] == "consent-setup"]
         assert len(setup) == 1, setup
         setup_item = setup[0]["address"]["item"]
+        recipient.send("\x1b")
         _command(recipient, f"/team reply {setup_item} setup-complete")
-        _wait_screen(recipient, lambda screen: "reply recorded" in screen.lower() and "[Tab] Item actions" not in screen,
-                     "setup item resolved before assignment card")
+        _wait_screen(recipient, lambda screen: has_row(screen.lower(), "reply recorded") and not has_row(screen, "Needs you ("),
+                     "setup item resolved before assignment decision")
         command = "/team send --type story_assignment --stories S7-01,S7-04=B,S7-05=B B Sprint 7 stories"
         _command(sender, command)
-        screen = _wait_screen(recipient, lambda screen: "story_assignment · A" in screen and "3 stories, 2 assigned to you" in screen,
-                              "typed recipient arrival summary")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "story_assignment · A") and has_row(screen, "3 stories, 2 assigned to you"), screen
         (evidence / "01-arrival-card.screen.txt").write_text(screen)
-        recipient.send("\t")
-        screen = _wait_screen(recipient, lambda screen: "received thread" in screen and "S7-04  assigned to you" in screen,
+        view_recipient(recipient)
+        screen = _wait_screen(recipient, lambda screen: has_row(screen, "received thread") and has_row(screen, "S7-04  assigned to you"),
                               "opened manifest block")
         (evidence / "02-opened-item.screen.txt").write_text(screen)
         listed = [row for row in _events(worlds["B"][0], "recipient_item_received") if row["content"] == "Sprint 7 stories"]
@@ -151,8 +152,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             (evidence / (alias + ".journal.json")).write_text(json.dumps(rows, indent=2) + "\n")
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, 80x24, two real daemons and attached writers; standing pinned sender consent.\n"
-            "PASS: consent setup replied and its oldest card gone before distribution.\n"
-            "PASS: story_assignment · A; 3 stories, 2 assigned to you; Tab opens S7-04  assigned to you.\n"
+            "PASS: consent setup replied and its decision settled before distribution.\n"
+            "PASS: story_assignment · A; 3 stories, 2 assigned to you; View item opens S7-04  assigned to you.\n"
             "PASS: real Listed recipient journal; zero provider turns.\n")
 
 

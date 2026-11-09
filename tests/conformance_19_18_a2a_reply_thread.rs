@@ -789,11 +789,14 @@ async fn read_board(sender: &mut Sender, state: &mut TuiState, peer: &str) -> St
     sender
         .type_command(state, &format!("/team board {peer}"))
         .await;
-    let event = next_event(sender).await;
-    let AppEvent::TeamBoardReady { message, .. } = event else {
-        panic!("a board read publishes TeamBoardReady, got {event:?}");
-    };
-    message
+    // 21-6 6-E: the board pull also publishes the in-process reply observation (no I/O).
+    loop {
+        match next_event(sender).await {
+            AppEvent::TeamBoardObserved(_) => continue,
+            AppEvent::TeamBoardReady { message, .. } => return message,
+            event => panic!("a board read publishes TeamBoardReady, got {event:?}"),
+        }
+    }
 }
 
 /// `P8` — the operator's discovery hop: the item id is parsed from the
@@ -1008,6 +1011,59 @@ async fn ask(
 }
 
 // ── Keystones ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn story21_6_bound_board_pull_emits_and_raises_one_reply() {
+    use rustain::adapters::tui::decision_queue::{self, DecisionKind, reply};
+
+    let mut b = Host::serve(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
+    let (mut operator, attach_shutdown) = attach_operator(&mut b).await;
+    let mut sender = new_sender(vec![b.peer("b")]).await;
+    let mut state = TuiState::new(120, 40);
+    let (item, task) = ask(&mut sender, &mut state, &b, "board observation").await;
+    let node = waiting_node(&b, &task).await;
+    pending_card(&b, &node).await;
+    let _ = frame_turn(&operator_reply(&mut operator, &item, "answer").await);
+
+    sender.type_command(&mut state, "/team board b").await;
+    let event = next_event(&mut sender).await;
+    let AppEvent::TeamBoardObserved(rows) = event else {
+        panic!("board pull must emit its bound observation first, got {event:?}");
+    };
+    assert_eq!(
+        rows,
+        vec![(
+            b.peer("b").resolved_identity().to_string(),
+            "b".to_owned(),
+            item,
+            1
+        )]
+    );
+    reply::observe_board(&mut state, rows.clone());
+    reply::observe_board(&mut state, rows);
+    assert_eq!(
+        state
+            .decisions
+            .items()
+            .filter(|item| item.kind == DecisionKind::ReplyArrived)
+            .count(),
+        1
+    );
+    let notices: Vec<_> = state
+        .notifications
+        .records()
+        .filter(|notice| notice.message == "b replied")
+        .collect();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].count, 1);
+    assert!(notices[0].action.is_none());
+    assert_eq!(decision_queue::waiting(&state), 1);
+    assert!(matches!(
+        next_event(&mut sender).await,
+        AppEvent::TeamBoardReady { .. }
+    ));
+    attach_shutdown.cancel();
+}
 
 /// `K02`, `K05`, `K07`, `K09`, `K10`, `K18` — the headline round trip, every
 /// hop through its front door: the asker's typed `/team send` → B's real

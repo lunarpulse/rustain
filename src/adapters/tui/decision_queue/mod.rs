@@ -23,9 +23,13 @@ mod list;
 mod memory;
 mod permission;
 mod plan;
+mod proposal;
 mod question;
+mod recipient;
+pub mod reply;
 mod retract;
 mod skill_trust;
+mod ticket;
 
 #[cfg(test)]
 mod cards_tests;
@@ -47,7 +51,7 @@ pub use delegation::{
     raise_spawn_gate, withdraw_agent_kill, withdraw_gone_agent_kills,
 };
 pub use handle::ReplyHandle;
-pub use keys::{PaneKey, PaneOutcome, handle_domain_event, handle_key, settle_sent};
+pub use keys::{PaneKey, PaneOutcome, defer_focused, handle_domain_event, handle_key, settle_sent};
 pub(crate) use keys::{clear_feedback, paste};
 pub use kinds::rail_of;
 pub use kinds::{
@@ -72,7 +76,16 @@ pub use plan::{
     raise_plan_deviation, raise_skip_cascade, set_plan_contents, settle_plan_approval,
     withdraw_plan, withdraw_plan_card,
 };
+pub use proposal::{
+    PROPOSAL_STALE, PROPOSAL_WITHDRAWN, TeamProposalPayload, proposal_aliases, raise_team_proposal,
+    team_proposal_draft_blocked, team_proposal_pending, team_proposal_presenting,
+    withdraw_all_team_proposals, withdraw_team_proposal_conversation, withdraw_team_proposal_id,
+};
 pub use question::{ANSWER_MAX_BYTES, QuestionPayload, drain_questions, raise_question};
+pub use recipient::{
+    RecipientComposeMode, RecipientDraftPayload, RecipientDraftStage, sync_recipient_drafts,
+};
+pub use reply::ReplyPayload;
 pub use retract::{
     RetractTarget, TeamRetractPayload, confirmation_pending, raise_team_retract,
     team_retract_pending, withdraw_team_retract_request,
@@ -80,6 +93,10 @@ pub use retract::{
 pub use skill_trust::{
     SkillOrigin, SkillTrustPayload, drain_skill_trust, inspect_target, open_inspect,
     raise_model_skill_trust, raise_user_skill_trust,
+};
+pub use ticket::{
+    MISSED_TICKET, TicketControl, TicketField, TicketForm, TicketPayload, raise_ticket,
+    resolve_ticket, set_ticket_error,
 };
 
 use crate::adapters::tui::app::InputAction;
@@ -100,15 +117,18 @@ pub const TYPING_GRACE: Duration = Duration::from_secs(1);
 pub const DEFER_COOLDOWN: Duration = Duration::from_secs(60);
 /// One item's detail is bounded before it is stored (a title can be long).
 const MAX_DETAIL_CHARS: usize = 2_048;
-/// The toast raised when an arrival could not take focus; the key text
-/// (`Ctrl+X q`) is generated from the registry's `Ctrl+X, Q` row (Story 21.3 A10).
+/// The key that opens the Needs-you list (`Ctrl+X q`), generated from the registry's
+/// `Ctrl+X, Q` row (Story 21.3 A10).
+#[must_use]
+pub fn queue_key_hint() -> String {
+    let compact = leader_follow_up_compact(LeaderCmd::Decisions);
+    format!("Ctrl+{}", compact.strip_prefix('^').unwrap_or(&compact))
+}
+
+/// The toast raised when an arrival could not take focus.
 #[must_use]
 pub fn waiting_toast() -> String {
-    let compact = leader_follow_up_compact(LeaderCmd::Decisions);
-    format!(
-        "Decision waiting — Ctrl+{}",
-        compact.strip_prefix('^').unwrap_or(&compact)
-    )
+    format!("Decision waiting — {}", queue_key_hint())
 }
 
 /// State-only effects consumed by the live pane action arms, after the pane has
@@ -336,6 +356,9 @@ pub enum Arrival {
     Requested,
     /// The system raised it (startup recovery, budget, context): RU-6 applies.
     Automatic,
+    /// A ticket or reply signal (FR-21-6-g): queued and counted, it never opens a
+    /// frame and never preempts; opening is the user's explicit `Ctrl+X q`.
+    Accumulate,
 }
 
 /// What `raise` did with focus.
@@ -350,6 +373,7 @@ pub enum Raised {
 #[derive(Debug, Default)]
 pub struct DecisionQueue {
     items: Vec<DecisionItem>,
+    replies: reply::ReplyProjection,
     painted_at: Option<Instant>,
     /// The inert window's end was already announced to the redraw tick.
     inert_released: bool,
@@ -665,12 +689,14 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
                     && !presentation::typing_top(state)
             }
             Arrival::Automatic => may_preempt,
+            // Tickets and replies never open a frame by themselves (FR-21-6-g).
+            Arrival::Accumulate => false,
         };
     if take_focus {
         presentation::reducer::focus_decision(state, key);
         return Raised::Focused;
     }
-    if is_new {
+    if is_new && arrival != Arrival::Accumulate {
         notifications::info(state, NoticeSource::System, waiting_toast());
     }
     Raised::Waiting
@@ -811,6 +837,9 @@ pub(crate) fn frame_context(state: &TuiState) -> Context {
 /// Requested open (A10). False when the key is not queued, not decidable in this
 /// conversation, or the top is the quit guard or a text field.
 pub fn open(state: &mut TuiState, key: &DecisionKey) -> bool {
+    if key.kind == DecisionKind::ReplyArrived {
+        reply::refresh(state);
+    }
     let Some(item) = state.decisions.item(key) else {
         return false;
     };

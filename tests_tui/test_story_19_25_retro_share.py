@@ -21,6 +21,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
+from decision_frame_helpers import has_row, open_recipient, recipient_text, view_recipient, wait_frame
 
 
 def _logical(screen):
@@ -130,37 +131,36 @@ def _exercise(binary, evidence, root, monkeypatch):
         sender, recipient = clients["A"], clients["B"]
         question = "Could you review the handoff?"
         _command(sender, "/team send --type consultation B " + question)
-        _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "standing sender consent")
+        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
         recipient.send("a")
-        _wait_screen(recipient, lambda screen: "consultation · A" in screen
-                     and "[Tab] Item actions" in screen and "Always allow" not in screen,
-                     "consultation received after consent")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "consultation · A"), screen
         consultation = [row for row in _events(worlds["B"][0], "recipient_item_received")
                         if row["content"] == question]
         assert len(consultation) == 1, consultation
         consultation_item = consultation[0]["address"]["item"]
-        recipient.send("\t")
-        _wait_screen(recipient, lambda screen: "received thread" in screen and "[r] Respond" in screen,
+        view_recipient(recipient)
+        _wait_screen(recipient, lambda screen: has_row(screen, "received thread") and has_row(screen, "[r] Respond"),
                      "consultation response slot")
         recipient.send("r")
         _wait_screen(recipient, lambda screen: "/team reply " + consultation_item in _logical(screen),
                      "Respond opens the human reply composer")
         recipient.send("Handoff reviewed.\r")
-        _wait_screen(recipient, lambda screen: "[Tab] Item actions" not in screen
+        _wait_screen(recipient, lambda screen: not has_row(screen, "Needs you (")
                      and any(row.get("answers") == consultation_item for row in
                              _events(worlds["B"][0], "recipient_item_replied")),
                      "human consultation reply settled")
         _command(sender, "/team send --type retro_request B Sprint 7 retro")
-        screen = _wait_screen(recipient, lambda screen: "retro_request · A" in screen
-                              and "[1] received items: consultation 1" in _logical(screen)
-                              and "[2] reply times: 1 reply, median <1m" in _logical(screen),
-                              "fixed received-side retrospective manifest")
+        screen = open_recipient(recipient)
+        assert has_row(screen, "retro_request · A"), screen
+        assert "[1] received items: consultation 1" in recipient_text(screen), screen
+        assert "[2] reply times: 1 reply, median <1m" in recipient_text(screen), screen
         (evidence / "01-retro-card.screen.txt").write_text(screen)
         send_screen = _wait_screen(sender, lambda screen: "● B sent" in _logical(screen),
                                    "retro send outcome reads sent")
         (evidence / "02-retro-send.screen.txt").write_text(send_screen)
-        recipient.send("\t")
-        _wait_screen(recipient, lambda screen: "[s] Share" in screen and "[1-3] Leave out" in screen,
+        view_recipient(recipient)
+        _wait_screen(recipient, lambda screen: has_row(screen, "[s] Share") and has_row(screen, "[1-3] Leave out"),
                      "retrospective item acts")
         recipient.send("2")
         screen = _wait_screen(recipient, lambda screen: "[2] reply times: left out" in _logical(screen)
@@ -169,8 +169,7 @@ def _exercise(binary, evidence, root, monkeypatch):
                               "local leave-out overlay and share hint")
         (evidence / "03-retro-redacted.screen.txt").write_text(screen)
         recipient.send("s")
-        _wait_screen(recipient, lambda screen: "[s] Share" not in screen
-                     and "[Tab] Item actions" not in screen
+        _wait_screen(recipient, lambda screen: not has_row(screen, "[s] Share")
                      and any(row.get("kind") == {"type": "retro"} for row in
                              _events(worlds["B"][0], "recipient_item_replied")),
                      "retrospective reply persisted and card settled")
@@ -201,7 +200,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, 80x24, two real daemons, attached writers and standing pinned consent.\n"
             "PASS: typed consultation, explicit consent, [r] Respond human reply; zero provider requests.\n"
-            "PASS: retrospective card shows consultation 1 and one sub-minute reply sample.\n"
+            "PASS: retrospective decision shows consultation 1 and one sub-minute reply sample.\n"
             "PASS: [2] left out and redactions hint; one canonical Retro turn without replyTimes.\n"
             "PASS: send row sent; aggregate report has consultation 1, honesty line, no reply times or B.\n")
 

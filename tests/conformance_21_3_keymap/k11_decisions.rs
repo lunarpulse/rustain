@@ -6,7 +6,6 @@ use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::decision_queue::{
     self, DecisionEffect, DecisionKind, DecisionSubject, Validity,
 };
-use rustain::adapters::tui::keymap::render::card_cue;
 use rustain::adapters::tui::keymap::{Context, Host, Key, Resolved, resolve};
 use rustain::adapters::tui::notifications::NoticeSeverity;
 use rustain::adapters::tui::presentation::{self, Surface};
@@ -826,67 +825,23 @@ fn the_shared_peer_add_card_copy_names_the_confirm_rows() {
     assert!(card.contains(&line), "{card}");
 }
 
-/// Legacy card cues still name their negative key inside the toast budget (the frame
-/// cards have no cue: `Esc` defers them).
+/// The proposal inherits the shared frame's Back/Defer keys on both hosts.
+/// The by-value local witness is `story21_6_local_team_proposal_rows_decide_once_and_back_defers`.
 #[test]
-fn every_cue_names_its_negative_key_inside_the_toast_budget() {
-    use rustain::adapters::tui::keymap::render::{CUE_BUDGET_CELLS, is_negative};
-    use rustain::adapters::tui::keymap::resolve::rows_of;
-    use rustain::adapters::tui::keymap::table_card;
-    use rustain::adapters::tui::text_geometry::cells;
-    assert_eq!(CUE_BUDGET_CELLS, 74, "80 columns minus the notice prefix");
-    let mut contexts: Vec<Context> = Vec::new();
-    for row in table_card::ROWS {
-        contexts.push(row.context);
-    }
-    contexts.dedup();
-    // The shared parent, the field/sub-frame contexts and every decision-frame context
-    // answer `Esc` with a defer or a back, never a cue.
-    let cued = |context: &&Context| {
-        !matches!(
-            **context,
-            Context::Card
-                | Context::DecisionCompose
-                | Context::Question
-                | Context::QuestionIdle
-                | Context::SkillTrust
-                | Context::SkillTrustInspect
-                | Context::PlanApproval
-                | Context::PlanDecision
-                | Context::SkipCascade
-                | Context::Delegation
-                | Context::SpawnGate
-                | Context::DecisionConfirm
-                | Context::Forget
-                | Context::Rewind
-                | Context::ExportOverwrite
-                | Context::Consent
-        )
-    };
-    let mut checked = 0;
-    for context in contexts.iter().filter(cued) {
-        for host in [Host::Local, Host::Attached] {
-            let labelled: Vec<_> = rows_of(*context, host)
-                .filter(|row| !row.label.is_empty())
-                .collect();
-            let cue = card_cue(*context, host);
-            for row in labelled.iter().filter(|row| is_negative(row.command)) {
-                let item = format!("[{}] {}", row.long_label(), row.label);
-                let at = cue.find(&item).expect("the cue names its negative key");
-                let end = cells(&cue[..at + item.len()]);
-                assert!(
-                    end <= CUE_BUDGET_CELLS,
-                    "{context:?}/{host:?}: `{item}` ends at cell {end}: {cue}"
-                );
-                checked += 1;
+fn story21_6_team_proposal_inherits_decision_back_and_defer() {
+    use rustain::adapters::tui::keymap::model::CommandId;
+    use rustain::adapters::tui::keymap::table_overlay::OverlayCmd;
+    for host in [Host::Local, Host::Attached] {
+        for (key, expected) in [
+            (Key::Esc, OverlayCmd::PaneEsc),
+            (Key::Ctrl('c'), OverlayCmd::PaneBack),
+        ] {
+            match resolve(Context::TeamProposal, host, &[key]) {
+                Resolved::Hit(row) => assert_eq!(row.command, CommandId::Overlay(expected)),
+                other => panic!("{host:?} {key:?}: {other:?}"),
             }
-            assert!(
-                labelled.is_empty() || labelled.iter().any(|row| is_negative(row.command)),
-                "{context:?}/{host:?} has no negative key: {cue}"
-            );
         }
     }
-    assert!(checked >= 2, "{checked} legacy negative keys checked");
 }
 
 /// Feedback edits in the frame; Back never decides or posts a cue, Send resolves once.
@@ -983,7 +938,7 @@ fn esc_goes_back_from_a_drill_down_or_reorder_after_the_frame_defers() {
 
 /// Every local row of `table_card` has a by-value witness: a `frame_cards()`
 /// row, or one of the named tests below. A row added to the table without one fails here.
-/// (`TeamProposal` is witnessed in `app.rs` under `a2a` and `Consent` in the attached tests.)
+/// (`Consent` is witnessed in the attached tests.)
 #[test]
 fn every_table_card_row_has_a_witness() {
     use rustain::adapters::tui::keymap::table_card;
@@ -992,9 +947,24 @@ fn every_table_card_row_has_a_witness() {
         witnessed.extend(card.rows.iter().map(|(key, _)| (card.context, *key)));
     }
     witnessed.extend([
-        // `story21_3_local_team_proposal_rows_decide_once_and_esc_only_cues` in app.rs.
-        (Context::Card, Key::Esc),
-        (Context::Card, Key::Ctrl('c')),
+        // Team proposal frame witnesses in 21-6 K12 and the 19-21b lifecycle tests.
+        (Context::TeamProposal, Key::Char('y')),
+        (Context::TeamProposal, Key::Char('r')),
+        (Context::TeamProposal, Key::Char('n')),
+        // 6-E K13 `story21_6_ticket_rails_and_effects_are_distinct` (Enter/d/x by effect) and
+        // `story21_6_ticket_selection_and_edit_keys_change_the_form` (Up/Down/Left/Right/e).
+        (Context::Ticket, Key::Enter),
+        (Context::Ticket, Key::Char('d')),
+        (Context::Ticket, Key::Char('x')),
+        (Context::Ticket, Key::Up),
+        (Context::Ticket, Key::Down),
+        (Context::Ticket, Key::Left),
+        (Context::Ticket, Key::Right),
+        (Context::Ticket, Key::Char('e')),
+        // 6-E K14 `story21_6_reply_leader_lists_and_enter_returns_read_effect` (Enter) and
+        // `story21_6_reply_dismiss_is_stable_until_a_new_count` (x).
+        (Context::ReplyArrived, Key::Enter),
+        (Context::ReplyArrived, Key::Char('x')),
         // `the_feedback_field_types_erases_sends_and_backs_out`, `the_question_*`.
         (Context::DecisionCompose, Key::Enter),
         (Context::DecisionCompose, Key::Esc),
@@ -1027,7 +997,7 @@ fn every_table_card_row_has_a_witness() {
     let unwitnessed: Vec<String> = table_card::ROWS
         .iter()
         .filter(|row| row.hosts.includes(Host::Local))
-        .filter(|row| !matches!(row.context, Context::TeamProposal | Context::Consent))
+        .filter(|row| row.context != Context::Consent)
         .filter(|row| !witnessed.contains(&(row.context, row.keys[0])))
         .map(|row| format!("{:?} {:?}", row.context, row.keys))
         .collect();

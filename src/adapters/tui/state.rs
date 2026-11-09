@@ -291,7 +291,6 @@ pub struct TabRenderState {
     /// Adapter-side and tab-owned so selection never borrows another tab's layout.
     pub item_boundaries: Vec<(usize, String)>,
     pub cached_width: Option<u16>,
-    pub team_proposal_reviews: BTreeMap<String, Arc<crate::domain::models::TeamProposal>>,
     /// Story 21.12 (D15): the output supports OSC 8, so Stage markdown links
     /// are encoded after the paint. Changes no geometry (the host suffix is
     /// painted either way), so no height-cache key depends on it. Production
@@ -2544,17 +2543,7 @@ pub struct TuiState {
     /// Set by `submit_message` when registry is not yet discovered;
     /// consumed by `AgentsDiscovered` handler in the event loop.
     pub pending_agent_activation: Option<(String, Option<String>)>,
-    /// Runtime snapshots are keyed by conversation, never by a mutable toolset binding.
-    pub pending_team_proposals:
-        BTreeMap<String, std::sync::Arc<crate::domain::models::TeamProposal>>,
     pub team_proposal_conversation_id: Option<String>,
-    pub team_proposal_visible: Option<std::sync::Arc<crate::domain::models::TeamProposal>>,
-    /// Top row of an overflowing proposal card; decisions stay behind its footer.
-    pub team_proposal_scroll: usize,
-    pub team_proposal_scroll_max: usize,
-    pub team_proposal_viewport_rows: usize,
-    /// Send is armed only by a paint of the decision footer.
-    pub team_proposal_footer_visible: bool,
     #[cfg(feature = "a2a")]
     pub team_proposal_surface_tab_count: usize,
     #[cfg(feature = "a2a")]
@@ -2930,13 +2919,7 @@ impl TuiState {
             agent_suggestions: Vec::new(),
             active_agent_name: None,
             pending_agent_activation: None,
-            pending_team_proposals: BTreeMap::new(),
             team_proposal_conversation_id: None,
-            team_proposal_visible: None,
-            team_proposal_scroll: 0,
-            team_proposal_scroll_max: 0,
-            team_proposal_viewport_rows: 0,
-            team_proposal_footer_visible: false,
             #[cfg(feature = "a2a")]
             team_proposal_surface_tab_count: 0,
             #[cfg(feature = "a2a")]

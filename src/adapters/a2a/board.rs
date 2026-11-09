@@ -246,6 +246,60 @@ pub struct BoardView {
     pub narrowed: bool,
 }
 
+/// Project the already-collected inventory into local reply observations.
+/// Aliases are roster keys, retained verbatim for routing and sanitized only
+/// when displayed; identities come from the corresponding roster binding.
+pub(crate) fn reply_observations(
+    view: &BoardView,
+    identity_for_alias: impl FnMut(&str) -> Option<String>,
+) -> Vec<(String, String, String, u64)> {
+    reply_observations_from_rows(
+        view.rows
+            .iter()
+            .map(|row| (row.peer.as_str(), row.items.as_slice())),
+        identity_for_alias,
+    )
+}
+
+/// Project action-board reads using their current binding, not the alias
+/// frozen in the historical send record.
+pub(crate) fn action_reply_observations(
+    view: &ActionBoardView,
+    identity_for_alias: impl FnMut(&str) -> Option<String>,
+) -> Vec<(String, String, String, u64)> {
+    reply_observations_from_rows(
+        view.rows.iter().filter_map(|row| {
+            row.bound_alias
+                .as_deref()
+                .map(|alias| (alias, row.items.as_slice()))
+        }),
+        identity_for_alias,
+    )
+}
+
+fn reply_observations_from_rows<'a>(
+    rows: impl Iterator<Item = (&'a str, &'a [BoardItem])>,
+    mut identity_for_alias: impl FnMut(&str) -> Option<String>,
+) -> Vec<(String, String, String, u64)> {
+    let mut observations = Vec::new();
+    for (alias, items) in rows {
+        let Some(identity) = identity_for_alias(alias) else {
+            continue;
+        };
+        for item in items {
+            if let Some(count) = item.reply_count {
+                observations.push((
+                    identity.clone(),
+                    alias.to_owned(),
+                    item.item_id.clone(),
+                    count,
+                ));
+            }
+        }
+    }
+    observations
+}
+
 /// The board's stated poll floor, refused when a refresh arrives inside it.
 ///
 /// Story 19.16b `AC5(d)` — ⛔ **a design bound, never an NFR64 latency claim,
@@ -1883,6 +1937,57 @@ mod tests {
         assert_eq!(render_item_row(&replied), format!("{plain} · 1 replies"));
     }
 
+    #[test]
+    fn story21_6_board_reply_observations_keep_identity_alias_and_each_count() {
+        let items = parse_peer_items(
+            &serde_json::json!({ "items": [
+                {"itemId": "one", "task": "t", "state": "received", "ordinal": 0, "replyCount": 2},
+                {"itemId": "none", "task": "t", "state": "received", "ordinal": 1},
+                {"itemId": "two", "task": "t", "state": "received", "ordinal": 2, "replyCount": 5}
+            ]}),
+            None,
+        );
+        let alias = "roster\n\u{1b}[31mname";
+        let view = BoardView {
+            rows: vec![
+                BoardRow {
+                    peer: alias.to_owned(),
+                    outcome: BoardOutcome::Delivered,
+                    items,
+                },
+                BoardRow {
+                    peer: "unbound".to_owned(),
+                    outcome: BoardOutcome::Delivered,
+                    items: vec![BoardItem {
+                        reply_count: Some(1),
+                        ..item("ignored", 0)
+                    }],
+                },
+            ],
+            ..BoardView::default()
+        };
+        let observations = reply_observations(&view, |peer| {
+            (peer == alias).then(|| "resolved-pinned-identity".to_owned())
+        });
+        assert_eq!(
+            observations,
+            vec![
+                (
+                    "resolved-pinned-identity".to_owned(),
+                    alias.to_owned(),
+                    "one".to_owned(),
+                    2
+                ),
+                (
+                    "resolved-pinned-identity".to_owned(),
+                    alias.to_owned(),
+                    "two".to_owned(),
+                    5
+                ),
+            ]
+        );
+    }
+
     /// Story 19.16f AC1(a) — the item id is REACHABLE: the board carries a
     /// line an `itemId` can be copied from, in the ratified grammar, with the
     /// 0-based `ordinal` rendered as `arrival 1`.
@@ -2331,6 +2436,37 @@ mod tests {
             items: Vec::new(),
             status_report: None,
         }
+    }
+
+    #[test]
+    fn story21_6_action_board_observes_current_binding_not_historical_alias() {
+        let mut renamed = action_row("old-name", ActionRowState::Delivered);
+        renamed.bound_alias = Some("new-name".to_owned());
+        renamed.items = vec![
+            BoardItem {
+                reply_count: Some(3),
+                ..item("replied", 0)
+            },
+            item("no-replies", 1),
+        ];
+        let mut unbound = action_row("old-unbound", ActionRowState::Delivered);
+        unbound.bound_alias = None;
+        unbound.items = vec![BoardItem {
+            reply_count: Some(2),
+            ..item("ignored", 0)
+        }];
+        let view = action_view(vec![renamed, unbound], 2);
+        assert_eq!(
+            action_reply_observations(&view, |alias| {
+                (alias == "new-name").then(|| "identity".to_owned())
+            }),
+            vec![(
+                "identity".to_owned(),
+                "new-name".to_owned(),
+                "replied".to_owned(),
+                3
+            )]
+        );
     }
 
     /// `S1` — the header carries the type, the sender-local label, the age

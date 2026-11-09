@@ -80,7 +80,7 @@ use crate::infrastructure::runtime::turn_driver::{TurnDriver, TurnViewState, Use
 // The attached key front door lives in its own file but is a child of this
 // module so it can use the private team/approval/surface machinery.
 #[path = "attach_keys.rs"]
-mod attach_keys;
+pub(super) mod attach_keys;
 
 /// The second [`TurnDriver`] implementation (Story 12.2c, Q3 — shared origination
 /// seam). Where [`LocalTurnDriver`](crate::infrastructure::runtime::turn_driver::LocalTurnDriver)
@@ -326,81 +326,6 @@ fn system_message(content: impl Into<String>) -> ChatMessage {
     }
 }
 
-// ── Story 19.19 (AC2) — host-authoritative peer row view ────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PeerResponseStage<'a> {
-    AwaitingOperator,
-    Drafting,
-    Ready(&'a str),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingPeerResponse<'a> {
-    node: &'a str,
-    stage: PeerResponseStage<'a>,
-    queued: usize,
-    node_resolvable: bool,
-    canonical_type: &'static str,
-    sender_label: &'a str,
-    item_address: Option<&'a crate::domain::models::ItemAddress>,
-    stories: Option<&'a crate::domain::models::StorySummary>,
-    status: Option<&'a crate::domain::models::StatusPreview>,
-    selected_for: Option<&'a crate::domain::models::SelectionSummary>,
-    retro: Option<&'a crate::domain::models::RetroPreview>,
-    retro_left_out: Option<&'a crate::domain::models::RetroFieldSet>,
-}
-
-fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerResponse<'_>> {
-    use crate::domain::models::{PeerRowStage, semantic_message_type_metadata};
-    let mut pendings = conversation.messages.iter().filter_map(|message| {
-        let control = conversation.peer_row_controls.get(&message.id)?;
-        if control.stage == PeerRowStage::Settled {
-            return None;
-        }
-        let stage = match control.stage {
-            PeerRowStage::AwaitingOperator => PeerResponseStage::AwaitingOperator,
-            PeerRowStage::Drafting => PeerResponseStage::Drafting,
-            PeerRowStage::Ready => PeerResponseStage::Ready(
-                message
-                    .content
-                    .strip_prefix(crate::adapters::daemon::response_modes::DRAFT_APPROVAL_PREFIX)
-                    .unwrap_or(&message.content),
-            ),
-            PeerRowStage::Settled => return None,
-        };
-        Some((control, stage))
-    });
-    let (control, stage) = pendings.next()?;
-    Some(PendingPeerResponse {
-        node: &control.node_id,
-        stage,
-        queued: pendings.count(),
-        node_resolvable: control.node_resolvable,
-        canonical_type: semantic_message_type_metadata(control.message_type).operator_noun,
-        sender_label: &control.sender_label,
-        item_address: control.item_address.as_ref(),
-        stories: control.stories.as_ref(),
-        status: control.status.as_ref(),
-        selected_for: control.selected_for.as_ref(),
-        retro: control.retro.as_ref(),
-        retro_left_out: None,
-    })
-}
-
-/// Story 19.25 `AC3` — the card as drawn: the pending response plus this
-/// client's leave-out overlay for its item.
-fn pending_peer_card<'a>(
-    conversation: &'a Conversation,
-    retro_left_out: &'a HashMap<String, crate::domain::models::RetroFieldSet>,
-) -> Option<PendingPeerResponse<'a>> {
-    let mut pending = pending_peer_response(conversation)?;
-    pending.retro_left_out = pending
-        .item_address
-        .and_then(|address| retro_left_out.get(address.item().as_str()));
-    Some(pending)
-}
-
 /// Unretracted automatic responses supported by the daemon, newest first.
 /// Diagnostic/tool-evidence rows have no response identity, and pending response
 /// controls remain ineligible even when an edited draft is agent-composed.
@@ -454,119 +379,6 @@ fn preview_line(content: &str, max_cells: usize) -> String {
         }
     }
     output
-}
-
-/// S1 retains status and preview; decisions require explicit non-Input focus.
-fn peer_response_card_lines<'a>(
-    pending: &PendingPeerResponse<'a>,
-    read_only: bool,
-    width: usize,
-) -> Vec<ratatui::text::Line<'a>> {
-    use ratatui::text::{Line, Span};
-    let queued = if pending.queued > 0 {
-        format!("  [{} more queued]", pending.queued)
-    } else {
-        String::new()
-    };
-    let mut lines = Vec::with_capacity(
-        3 + usize::from(pending.stories.is_some()) + usize::from(pending.selected_for.is_some()),
-    );
-    lines.push(Line::from(vec![
-        Span::raw(pending.canonical_type),
-        Span::raw(" · "),
-        Span::raw(pending.sender_label),
-    ]));
-    if let Some(summary) = pending.stories {
-        lines.push(Line::from(summary.0.as_str()));
-    }
-    if let Some(selection) = pending.selected_for {
-        lines.push(Line::from(selection.0.as_str()));
-    }
-    if let Some(preview) = pending.status {
-        use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
-        use crate::domain::models::{NOT_SHARED, NothingBecause};
-        let shares = match preview.nothing_because {
-            Some(NothingBecause::LevelNone) => {
-                "Shares nothing: your sharing level is none".to_owned()
-            }
-            Some(NothingBecause::NoStoriesHeld) => {
-                "Shares nothing: no stories are assigned to you on this host".to_owned()
-            }
-            None => {
-                let mut text = format!(
-                    "Shares ({}): ",
-                    preview.statement.level.unwrap_or_default().as_str()
-                );
-                for (index, story) in preview.statement.stories.iter().enumerate() {
-                    if index != 0 {
-                        text.push_str(" · ");
-                    }
-                    text.push_str(story.key.as_str());
-                    if let Some(state) = story.state {
-                        text.push(' ');
-                        text.push_str(state.as_str());
-                    }
-                }
-                text
-            }
-        };
-        for text in [shares.as_str(), NOT_SHARED] {
-            lines.extend(
-                wrap_text(text, width.saturating_sub(2).max(1))
-                    .into_iter()
-                    .map(|line| Line::from(format!("  {line}"))),
-            );
-        }
-    }
-    if let Some(preview) = pending.retro {
-        use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
-        // The card's own width, like the status preview: a floor wider than
-        // the pane would cut lines the card promises never to truncate.
-        let wrap_width = width.saturating_sub(2).max(1);
-        for text in crate::adapters::tui::widgets::recipient_surface::retro_preview_lines(
-            preview,
-            pending.retro_left_out,
-        ) {
-            lines.extend(
-                wrap_text(&text, wrap_width)
-                    .into_iter()
-                    .map(|line| Line::from(format!("  {line}"))),
-            );
-        }
-    }
-    if pending.node_resolvable {
-        match &pending.stage {
-            PeerResponseStage::AwaitingOperator => {
-                lines.push(Line::from(format!(
-                    "Peer is waiting for your response.{queued}"
-                )));
-            }
-            PeerResponseStage::Drafting => {
-                lines.push(Line::from("Agent is drafting a reply to the peer…"));
-            }
-            PeerResponseStage::Ready(draft) => {
-                lines.push(Line::from(format!(
-                    "Peer draft: {}{queued}",
-                    preview_line(draft, 72)
-                )));
-            }
-        }
-    }
-    let passive = read_only
-        || (pending.item_address.is_none()
-            && (!pending.node_resolvable || matches!(pending.stage, PeerResponseStage::Drafting)));
-    let tab = crate::adapters::tui::keymap::render::rail(
-        crate::adapters::tui::keymap::Context::RecipientSurface,
-        crate::adapters::tui::keymap::table_overlay::OverlayCmd::RecipientToggle,
-    );
-    let action = match (pending.item_address.is_some(), passive) {
-        (true, false) => "Item actions",
-        (false, false) => "Response actions",
-        (true, true) => "View item",
-        (false, true) => "View response",
-    };
-    lines.push(Line::from(format!("{tab} {action}")));
-    lines
 }
 
 async fn recipient_projection(
@@ -1448,7 +1260,7 @@ enum AttachedTeamRequest {
 }
 
 #[derive(Default)]
-struct AttachedTeamRequests {
+pub(in crate::infrastructure::runtime) struct AttachedTeamRequests {
     next_id: u64,
     next_send_id: u64,
     pending: std::collections::BTreeMap<String, AttachedTeamRequest>,
@@ -1749,7 +1561,7 @@ fn attached_decision_pending(state: &TuiState) -> bool {
         || presentation::is_open(state, Surface::DecisionQueue)
 }
 
-fn attached_proposal_higher_confirmation(state: &TuiState) -> bool {
+fn attached_higher_confirmation(state: &TuiState) -> bool {
     attached_decision_pending(state)
         || state
             .decisions
@@ -1757,16 +1569,7 @@ fn attached_proposal_higher_confirmation(state: &TuiState) -> bool {
         || state
             .decisions
             .presenting(crate::adapters::tui::decision_queue::DecisionKind::Consent)
-        || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
-}
-
-fn attached_proposal_pending(
-    state: &TuiState,
-) -> Option<&Arc<crate::domain::models::TeamProposal>> {
-    state
-        .team_proposal_conversation_id
-        .as_ref()
-        .and_then(|id| state.pending_team_proposals.get(id))
+        || crate::adapters::tui::app::recipient_higher_confirmation_active(state)
 }
 
 /// Apply approval frames while keeping incomplete input outside the decision queue.
@@ -1876,208 +1679,10 @@ fn apply_attached_consolidation_frame(state: &mut TuiState, frame: DaemonFrame, 
     }
 }
 
-/// Nearest production-path key seam: called before recipient/composer dispatch.
-/// Only a painted snapshot can decide; a nonempty composer owns its letters.
-#[allow(clippy::too_many_arguments)] // Attached loop owns separate composer/tab/socket state.
-fn attached_proposal_key(
-    key: crossterm::event::KeyEvent,
-    higher_confirmation: bool,
-    read_only: bool,
-    state: &mut TuiState,
-    tab: &mut TabRenderState,
-    requests: &mut AttachedTeamRequests,
-    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
-    view: &mut crate::domain::models::view_state::ViewState,
-) -> bool {
-    use crate::domain::models::TeamProposalDecision;
-    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-    if higher_confirmation
-        || read_only
-        || !matches!(state.focus, FocusState::Chat | FocusState::Input)
-    {
-        return false;
-    }
-    let Some(proposal) = attached_proposal_pending(state).cloned() else {
-        return false;
-    };
-    if !state
-        .team_proposal_visible
-        .as_ref()
-        .is_some_and(|visible| Arc::ptr_eq(visible, &proposal))
-    {
-        return false;
-    }
-    if key.code == KeyCode::Esc
-        || (key.code == KeyCode::Char('c')
-            && key.modifiers == KeyModifiers::CONTROL
-            && crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
-                .unwrap_or(&state.input_buffer)
-                .is_empty())
-    {
-        // Keep pending, rather than detaching the approving surface: never a decision (A8).
-        // The cue names `y/r/n`, which are text while the composer holds a draft: no cue then.
-        if key.kind == KeyEventKind::Press
-            && crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
-                .unwrap_or(&state.input_buffer)
-                .is_empty()
-        {
-            crate::adapters::tui::notifications::info(
-                state,
-                crate::adapters::tui::notifications::NoticeSource::Approval,
-                crate::adapters::tui::keymap::render::card_cue(
-                    crate::adapters::tui::keymap::Context::TeamProposal,
-                    crate::adapters::tui::keymap::Host::Attached,
-                ),
-            );
-        }
-        return true;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return false;
-    }
-    if !crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
-        .unwrap_or(&state.input_buffer)
-        .is_empty()
-    {
-        return false;
-    }
-    if key.code == KeyCode::Enter {
-        return true; // Enter is never a proposal decision.
-    }
-    if state.team_proposal_scroll_max > 0
-        && key.kind == KeyEventKind::Press
-        && key.modifiers.is_empty()
-        && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
-    {
-        let reviewing = tab
-            .team_proposal_reviews
-            .values()
-            .any(|review| Arc::ptr_eq(review, &proposal));
-        let at_boundary = if key.code == KeyCode::PageUp {
-            state.team_proposal_scroll == 0
-        } else {
-            state.team_proposal_scroll == state.team_proposal_scroll_max
-        };
-        if reviewing && at_boundary {
-            return false;
-        }
-        let step = state.team_proposal_viewport_rows.saturating_sub(1).max(1);
-        state.team_proposal_scroll = if key.code == KeyCode::PageUp {
-            state.team_proposal_scroll.saturating_sub(step)
-        } else {
-            state
-                .team_proposal_scroll
-                .saturating_add(step)
-                .min(state.team_proposal_scroll_max)
-        };
-        state.team_proposal_footer_visible = false;
-        state.needs_redraw = true;
-        return true;
-    }
-    if !matches!(key.code, KeyCode::Char('y' | 'r' | 'n')) {
-        return false;
-    }
-    if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() {
-        return true;
-    }
-    if key.code == KeyCode::Char('r') {
-        state.team_proposal_scroll = 0;
-        state.team_proposal_scroll_max = 0;
-        state.team_proposal_footer_visible = false;
-        crate::adapters::tui::handlers::scroll::dispatch_scroll(
-            view,
-            state,
-            crate::domain::models::view_state::ScrollDelta::Bottom,
-        );
-        if let Some(surface) = state.recipient_surface.take() {
-            crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);
-            crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
-        }
-        let id = format!("team-proposal-review-{}", proposal.id);
-        crate::adapters::tui::handlers::team_command::show_team_send(
-            state,
-            &id,
-            format!(
-                "Proposed message (not sent) · {}",
-                crate::domain::models::semantic_message_type_metadata(proposal.message_type).token
-            ),
-        );
-        tab.team_proposal_reviews.insert(id, proposal);
-        state.needs_redraw = true;
-        return true;
-    }
-    if key.code == KeyCode::Char('y') && !state.team_proposal_footer_visible {
-        return true;
-    }
-    let decision = if key.code == KeyCode::Char('y') {
-        TeamProposalDecision::Send
-    } else {
-        TeamProposalDecision::Dismiss
-    };
-    let frame = ClientFrame::TeamProposalDecision {
-        proposal: proposal.id.clone(),
-        decision,
-    };
-    let queued = if decision == TeamProposalDecision::Send {
-        enqueue_attached_team_frame(state, requests, frame, frame_tx)
-    } else {
-        frame_tx.send(frame).is_ok()
-    };
-    if queued {
-        state
-            .pending_team_proposals
-            .remove(&proposal.conversation_id);
-        state.team_proposal_visible = None;
-        if decision == TeamProposalDecision::Dismiss {
-            crate::adapters::tui::handlers::team_command::show_team_send(
-                state,
-                "team-proposal-status",
-                "Proposal dismissed. Nothing was sent.".into(),
-            );
-        }
-    } else {
-        crate::adapters::tui::handlers::team_command::show_team_send(
-            state,
-            "team-proposal-status",
-            "Attach socket closed — the proposal decision was not sent.".into(),
-        );
-    }
-    state.needs_redraw = true;
-    true
-}
-
-#[allow(clippy::too_many_arguments)] // Match the split attached render state without copying it.
-fn prepare_attached_proposal(
-    state: &TuiState,
-    tab: &TabRenderState,
-    higher_confirmation: bool,
-    read_only: bool,
-    layout: &mut crate::adapters::tui::layout::AppLayout,
-    area: ratatui::layout::Rect,
-) -> Option<crate::adapters::tui::widgets::team_proposal_card::CardPaint> {
-    let proposal = (!higher_confirmation && !read_only)
-        .then(|| attached_proposal_pending(state).cloned())
-        .flatten();
-    let reviewing = proposal.as_ref().is_some_and(|pending| {
-        tab.team_proposal_reviews
-            .values()
-            .any(|review| Arc::ptr_eq(review, pending))
-    });
-    crate::adapters::tui::widgets::team_proposal_card::CardView::attached(
-        proposal,
-        crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
-            .unwrap_or(&state.input_buffer)
-            .is_empty(),
-        reviewing,
-    )
-    .with_scroll(state.team_proposal_scroll)
-    .prepare(layout, area, &state.theme)
-}
-
 /// Consume private DTOs explicitly; these never enter the public RawEvent bus.
 fn apply_attached_proposal_frame(
     state: &mut TuiState,
-    tab: &mut TabRenderState,
+    read_only: bool,
     requests: &mut AttachedTeamRequests,
     conversation_id: &str,
     frame: DaemonFrame,
@@ -2090,42 +1695,47 @@ fn apply_attached_proposal_frame(
             message_type,
             body,
         } => {
-            // The authenticated socket is the conversation binding. A reset's
-            // withdrawal arrives before any proposal from its replacement turn.
-            state.team_proposal_conversation_id = Some(conversation_id.to_owned());
-            state.pending_team_proposals.insert(
-                conversation_id.to_owned(),
-                Arc::new(crate::domain::models::TeamProposal {
-                    id: proposal,
-                    conversation_id: conversation_id.to_owned(),
-                    recipients,
-                    message_type,
-                    body,
-                }),
-            );
-            state.team_proposal_visible = None;
-            state.team_proposal_scroll = 0;
-            state.team_proposal_scroll_max = 0;
+            if !read_only {
+                crate::adapters::tui::decision_queue::raise_team_proposal(
+                    state,
+                    Arc::new(crate::domain::models::TeamProposal {
+                        id: proposal,
+                        conversation_id: conversation_id.to_owned(),
+                        recipients,
+                        message_type,
+                        body,
+                    }),
+                    crate::adapters::tui::decision_queue::Responder::Attached,
+                );
+            }
         }
         DaemonFrame::TeamProposalClosed { proposal, outcome } => {
-            state
-                .pending_team_proposals
-                .retain(|_, pending| pending.id != proposal);
-            if state
-                .team_proposal_visible
-                .as_ref()
-                .is_some_and(|pending| pending.id == proposal)
-            {
-                state.team_proposal_visible = None;
-                state.team_proposal_scroll = 0;
-                state.team_proposal_scroll_max = 0;
+            let queued = state.decisions.items().any(|item| {
+                item.kind == crate::adapters::tui::decision_queue::DecisionKind::TeamProposal
+                    && item.conversation_id.as_deref() == Some(conversation_id)
+                    && item.source == proposal
+                    && item.responder == crate::adapters::tui::decision_queue::Responder::Attached
+            });
+            let sending = matches!(
+                requests.pending.get(&proposal),
+                Some(AttachedTeamRequest::Send { .. })
+            );
+            if !queued && !sending {
+                return;
             }
-            if outcome == TeamProposalCloseOutcome::Withdrawn {
-                tab.team_proposal_reviews
-                    .retain(|_, pending| pending.id != proposal);
+            let busy = matches!(&outcome, TeamProposalCloseOutcome::Refused { reason }
+                if reason == "Not sent yet — this daemon is busy sending. The proposal is still waiting.");
+            if !busy {
+                crate::adapters::tui::decision_queue::withdraw_team_proposal_id(
+                    state,
+                    conversation_id,
+                    &proposal,
+                    matches!(outcome, TeamProposalCloseOutcome::Withdrawn),
+                );
             }
-            if let Some(AttachedTeamRequest::Send { block_id, .. }) =
-                requests.pending.remove(&proposal)
+            if sending
+                && let Some(AttachedTeamRequest::Send { block_id, .. }) =
+                    requests.pending.remove(&proposal)
             {
                 state.team_send_blocks.remove(&block_id);
                 state.feedback_blocks.remove(&block_id);
@@ -2156,8 +1766,6 @@ fn enqueue_attached_team_frame(
     frame: ClientFrame,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
 ) -> bool {
-    use crate::domain::models::TeamProposalDecision;
-
     let (request, pending) = match &frame {
         ClientFrame::TeamSend {
             request,
@@ -2210,21 +1818,6 @@ fn enqueue_attached_team_frame(
                 return false;
             }
             (request.clone(), AttachedTeamRequest::RetractPreview)
-        }
-        ClientFrame::TeamProposalDecision {
-            proposal,
-            decision: TeamProposalDecision::Send,
-        } => {
-            let Some(snapshot) = attached_proposal_pending(state)
-                .filter(|snapshot| snapshot.id == *proposal)
-                .cloned()
-            else {
-                return false;
-            };
-            (
-                proposal.clone(),
-                begin_attached_team_send(state, &snapshot.recipients, snapshot.message_type),
-            )
         }
         ClientFrame::TeamBoard { request, .. } => {
             requests
@@ -2576,6 +2169,7 @@ fn apply_attached_team_frame(
                                     item: item_id,
                                 },
                                 conversation_id: String::new(),
+                                principal: None,
                                 task: None,
                                 card: body,
                                 armed,
@@ -2824,7 +2418,7 @@ fn paint_attached(
 ) -> Option<chat_pane::RenderResult> {
     let read_only = attach_info.read_only;
     let area = f.area();
-    let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
+    let Some(layout) = crate::adapters::tui::layout::compute_layout(
         area,
         &state.theme,
         crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
@@ -2842,37 +2436,7 @@ fn paint_attached(
         .set_capacity(crate::adapters::tui::widgets::toast_layer::capacity_for(
             layout.chat_pane.height,
         ));
-    let proposal_higher = attached_proposal_higher_confirmation(state);
-    let proposal_card = prepare_attached_proposal(
-        state,
-        tab_render_state,
-        proposal_higher,
-        read_only,
-        &mut layout,
-        area,
-    );
-    let peer_card = if state.recipient_surface.is_none()
-        && !proposal_higher
-        && attached_proposal_pending(state).is_none()
-    {
-        pending_peer_card(conversation, &state.retro_left_out).map(|pending| {
-            peer_response_card_lines(
-                &pending,
-                read_only,
-                usize::from(layout.chat_pane.width.saturating_sub(2)),
-            )
-        })
-    } else {
-        None
-    };
-    let mut transcript_area = layout.chat_pane;
-    if let Some(lines) = peer_card.as_ref() {
-        transcript_area.height = transcript_area.height.saturating_sub(
-            u16::try_from(lines.len())
-                .unwrap_or(u16::MAX)
-                .saturating_add(2),
-        );
-    }
+    let transcript_area = layout.chat_pane;
     let mut opaque =
         crate::adapters::tui::presentation::occlusion::OpaqueRects::new(transcript_area);
     tab_render_state.osc8_links =
@@ -2938,31 +2502,6 @@ fn paint_attached(
             &state.theme,
         ));
     }
-    use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
-    if let Some(lines) = peer_card {
-        render_bottom_anchored_card(
-            f.buffer_mut(),
-            lines,
-            state.theme.colors.accent,
-            layout.chat_pane,
-        );
-    }
-    state.team_proposal_scroll_max = proposal_card.as_ref().map_or(0, |card| card.scroll_max());
-    state.team_proposal_scroll = state
-        .team_proposal_scroll
-        .min(state.team_proposal_scroll_max);
-    state.team_proposal_viewport_rows = proposal_card
-        .as_ref()
-        .map_or(0, |card| card.viewport_rows());
-    state.team_proposal_footer_visible = proposal_card
-        .as_ref()
-        .is_some_and(|card| card.footer_visible());
-    opaque.host(proposal_card.as_ref().map(|card| card.area()));
-    let visible_proposal = crate::adapters::tui::widgets::team_proposal_card::render(
-        proposal_card,
-        f.buffer_mut(),
-        &state.theme,
-    );
     // Inline cards can leave fewer than five rows; paging must not skip visible content.
     state.viewport_height = transcript_area.height;
     let paint_status = |f: &mut ratatui::Frame<'_>| {
@@ -3019,7 +2558,6 @@ fn paint_attached(
     state.total_content_height = result.total_content_height;
     state.scroll_snapshot = view.scroll_offset;
     state.auto_snapshot = matches!(view.mode, crate::domain::models::AnchorMode::Following);
-    state.team_proposal_visible = visible_proposal;
     Some(result)
 }
 
@@ -3109,6 +2647,11 @@ pub async fn run_attached(
             size.height.saturating_sub(5),
         ));
     state.recipient_context_ids = snapshot.recipient_context_ids.iter().cloned().collect();
+    crate::adapters::tui::decision_queue::sync_recipient_drafts(
+        &mut state,
+        conversation,
+        read_only,
+    );
     // Attach-time notices are store records visible in the first frame (AC6).
     if let Some(notice) = blocked_actions_notice(&snapshot) {
         notifications::warning(&mut state, NoticeSource::Attached, notice);
@@ -3146,6 +2689,7 @@ pub async fn run_attached(
         crate::infrastructure::transparency_awareness::LogAwarenessObserver::for_workspace(
             workspace,
         );
+    let mut ticket_bridge = super::ticket_bridge::TicketBridge::new(workspace);
     // Attached clients render the same feedback blocks as the local TUI so
     // forwarded transparency room/failure events have the same visible result.
 
@@ -3178,9 +2722,6 @@ pub async fn run_attached(
         });
         if let Some(result) = rendered {
             after_attached_draw(&mut state, drawn.is_ok(), &result.visible_feedback_rows);
-        }
-        if drawn.is_err() {
-            state.team_proposal_visible = None;
         }
 
         tokio::select! {
@@ -3252,6 +2793,7 @@ pub async fn run_attached(
                                     .is_some_and(|control| control.item_address.as_ref() == Some(address))
                             });
                             if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
+                                crate::adapters::tui::decision_queue::sync_recipient_drafts(&mut state, conversation, read_only);
                                 if refresh_node && let Some(surface) = state.recipient_surface.as_mut()
                                     && let RecipientSurfaceTarget::Node(node) = &surface.target
                                 {
@@ -3319,7 +2861,7 @@ pub async fn run_attached(
                     Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
                     | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
                         apply_attached_proposal_frame(
-                            &mut state, &mut tab_render_state, &mut attached_team_requests,
+                            &mut state, read_only, &mut attached_team_requests,
                             &conversation.id, frame,
                         );
                     }
@@ -3334,7 +2876,7 @@ pub async fn run_attached(
                     | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
                         if !read_only || !matches!(&frame, DaemonFrame::TeamRetractPreviewed { .. }) {
                             let confirmation_busy =
-                                crate::adapters::tui::app::proposal_higher_confirmation_active(&state)
+                                crate::adapters::tui::app::recipient_higher_confirmation_active(&state)
                                     || state.decisions.presenting(crate::adapters::tui::decision_queue::DecisionKind::Consent);
                             let _ = apply_attached_team_frame(
                                 &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
@@ -3390,6 +2932,12 @@ pub async fn run_attached(
             _ = tick.tick() => {
                 crate::adapters::tui::decision_queue::tick(&mut state);
                 log_awareness.tick(&mut state.log_awareness);
+                ticket_bridge.observe(&mut state, &log_awareness,
+                    crate::adapters::tui::decision_queue::Responder::Attached, read_only,
+                    #[cfg(feature = "mcp")] &[]).await;
+                if let Some(counts) = log_awareness.reply_counts() {
+                    crate::adapters::tui::decision_queue::reply::journal_counts(&mut state, counts);
+                }
                 // Story 21.1 AC6: attached notices expire — the tick requests the
                 // deadline redraw (the draw's `begin_draw` does the sweep).
                 notifications::tick(&mut state);
@@ -4071,6 +3619,7 @@ mod tests {
                                 message_id: "peer-response-owned-wire".into(),
                             },
                             conversation_id: String::new(),
+                            principal: None,
                             task: None,
                             card: "Retract actual retract target".into(),
                             armed: true,
@@ -4577,638 +4126,201 @@ mod tests {
     /// In-crate nearest-production-path seams, not native socket/PTY evidence.
     mod attached_proposals {
         use super::*;
-        use crate::adapters::daemon::protocol::{TeamProposalCloseOutcome, TeamSendOutcome};
-        use crate::domain::models::{FeedbackLevel, SemanticMessageType, TeamProposalDecision};
+        use crate::adapters::daemon::protocol::TeamProposalCloseOutcome;
+        use crate::adapters::tui::decision_queue::{self, DecisionKind, DecisionSubject};
+        use crate::domain::models::{SemanticMessageType, TeamProposalDecision};
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-        use ratatui::{Terminal, backend::TestBackend};
 
-        struct Surface {
-            state: TuiState,
-            tab: TabRenderState,
-            requests: AttachedTeamRequests,
-            tx: mpsc::UnboundedSender<ClientFrame>,
-            rx: mpsc::UnboundedReceiver<ClientFrame>,
-            domain_tab: crate::domain::models::tab::TabState,
-            streaming: StreamingState,
+        type Rig = attach_keys::tests::Rig;
+
+        fn frame(rig: &mut Rig, frame: DaemonFrame, read_only: bool) {
+            let conversation = rig.domain_tab.conversation.id.clone();
+            apply_attached_proposal_frame(
+                &mut rig.state,
+                read_only,
+                &mut rig.team_requests,
+                &conversation,
+                frame,
+            );
         }
 
-        impl Surface {
-            fn new(body: &str) -> Self {
-                let (tx, rx) = mpsc::unbounded_channel();
-                let mut surface = Self {
-                    state: TuiState::new(80, 24),
-                    tab: TabRenderState::default(),
-                    requests: AttachedTeamRequests::default(),
-                    tx,
-                    rx,
-                    domain_tab: crate::domain::models::tab::TabState::from_conversation(
-                        0,
-                        Conversation::default(),
-                    ),
-                    streaming: StreamingState::default(),
-                };
-                surface.frame(DaemonFrame::TeamProposal {
-                    proposal: "tp_attached".into(),
-                    recipients: vec!["lena-po".into(), "jun-dev".into()],
-                    message_type: SemanticMessageType::ArchitectureUpdate,
-                    body: body.into(),
-                });
-                surface
-            }
-
-            fn frame(&mut self, frame: DaemonFrame) {
-                apply_attached_proposal_frame(
-                    &mut self.state,
-                    &mut self.tab,
-                    &mut self.requests,
-                    "conversation",
-                    frame,
-                );
-            }
-
-            fn key(&mut self, code: KeyCode, higher: bool, read_only: bool) -> bool {
-                let consumed = attached_proposal_key(
-                    KeyEvent::new(code, KeyModifiers::NONE),
-                    higher,
-                    read_only,
-                    &mut self.state,
-                    &mut self.tab,
-                    &mut self.requests,
-                    &self.tx,
-                    &mut self.domain_tab.view_state,
-                );
-                if !consumed && matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
-                    let page = self.state.viewport_height.saturating_sub(1).max(1);
-                    crate::adapters::tui::handlers::scroll::dispatch_scroll(
-                        &mut self.domain_tab.view_state,
-                        &mut self.state,
-                        if code == KeyCode::PageUp {
-                            crate::domain::models::view_state::ScrollDelta::WheelUp(page)
-                        } else {
-                            crate::domain::models::view_state::ScrollDelta::WheelDown(page)
-                        },
-                    );
-                    return true;
-                }
-                consumed
-            }
-
-            fn paint(&mut self, width: u16, height: u16, higher: bool, read_only: bool) -> String {
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                let mut visible = None;
-                terminal
-                    .draw(|frame| {
-                        let area = frame.area();
-                        let display_input =
-                            crate::adapters::tui::handlers::recipient_actions::pending_composition(
-                                &self.state,
-                            )
-                            .unwrap_or(&self.state.input_buffer);
-                        let mut layout = crate::adapters::tui::layout::compute_layout(
-                            area,
-                            &self.state.theme,
-                            display_input,
-                            1,
-                            false,
-                            DensityMode::Focus,
-                        )
-                        .unwrap();
-                        let card = prepare_attached_proposal(
-                            &self.state,
-                            &self.tab,
-                            higher,
-                            read_only,
-                            &mut layout,
-                            area,
-                        );
-                        let rendered = chat_pane::render_attached(
-                            frame,
-                            layout.chat_pane,
-                            &Conversation::default(),
-                            &self.streaming,
-                            &self.domain_tab.view_state,
-                            &self.state.theme,
-                            &mut self.tab,
-                            &self.state.feedback_blocks,
-                            &HashMap::new(),
-                        );
-                        input_box::render(
-                            frame,
-                            layout.input_area,
-                            display_input,
-                            self.state.cursor_position,
-                            self.state.focus.clone(),
-                            &self.state.theme,
-                            self.state.multiline_mode,
-                            self.state.input_scroll_offset,
-                            None,
-                        );
-                        self.state.total_content_height = rendered.total_content_height;
-                        let actions = recipient_surface_actions(
-                            &self.state,
-                            &Conversation::default(),
-                            read_only,
-                        );
-                        if let Some(surface) = self.state.recipient_surface.as_mut() {
-                            let _ = render_recipient_surface(
-                                frame,
-                                layout.chat_pane,
-                                surface,
-                                &self.state.recipient_actions,
-                                &actions,
-                                // No conversation, so no pinned retro card.
-                                None,
-                                read_only,
-                                &self.state.theme,
-                            );
-                        }
-                        self.state.viewport_height = layout.chat_pane.height;
-                        self.state.team_proposal_scroll_max =
-                            card.as_ref().map_or(0, |card| card.scroll_max());
-                        self.state.team_proposal_scroll = self
-                            .state
-                            .team_proposal_scroll
-                            .min(self.state.team_proposal_scroll_max);
-                        self.state.team_proposal_viewport_rows =
-                            card.as_ref().map_or(0, |card| card.viewport_rows());
-                        self.state.team_proposal_footer_visible =
-                            card.as_ref().is_some_and(|card| card.footer_visible());
-                        visible = crate::adapters::tui::widgets::team_proposal_card::render(
-                            card,
-                            frame.buffer_mut(),
-                            &self.state.theme,
-                        );
-                    })
-                    .unwrap();
-                self.state.team_proposal_visible = visible;
-                let buffer = terminal.backend().buffer();
-                (0..height)
-                    .map(|y| {
-                        (0..width)
-                            .map(|x| buffer[(x, y)].symbol())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-
-            fn assert_send(&mut self) {
-                assert!(self.key(KeyCode::Char('y'), false, false));
-                assert!(
-                    matches!(
-                        self.rx.try_recv().unwrap(),
-                        ClientFrame::TeamProposalDecision { proposal, decision: TeamProposalDecision::Send }
-                            if proposal == "tp_attached"
-                    ),
-                    "attached Send must emit exactly the snapshot proposal decision"
-                );
-                assert!(
-                    self.rx.try_recv().is_err(),
-                    "one human Send emits one frame"
-                );
-            }
-
-            fn submit_pending_reply(&mut self, draft: &str, reply: &str) {
-                self.state.input_buffer = draft.to_owned();
-                self.state.cursor_position = self.state.input_buffer.chars().count();
-                assert!(
-                    matches!(
-                        attached_composer_key_with_team_requests(
-                            KeyCode::Enter,
-                            false,
-                            &mut self.state,
-                            &self.tx,
-                            &mut self.requests,
-                        ),
-                        ComposerOutcome::FrameSent
-                    ),
-                    "the real composer must submit the recipient reply before testing proposal guards"
-                );
-                assert!(
-                    matches!(
-                        self.rx.try_recv().unwrap(),
-                        ClientFrame::ReplyToRecipientItem { item_id, text, .. }
-                            if item_id == "ri_pending" && text == reply
-                    ),
-                    "the recipient reply must retain its target and exact operator-authored body"
-                );
-                assert!(
-                    self.state.input_buffer.is_empty(),
-                    "begin_action must move the submitted draft out of the local buffer"
-                );
-                assert_eq!(
-                    crate::adapters::tui::handlers::recipient_actions::pending_composition(
-                        &self.state
-                    ),
-                    Some(draft),
-                    "the real pending-action producer must retain the displayed draft"
-                );
-                assert!(
-                    self.rx.try_recv().is_err(),
-                    "submitting a recipient reply must not submit a proposal decision"
-                );
-                // Intentionally withhold the recipient result until resolve_pending_reply:
-                // channel consumption, not a sleep, establishes the pending interval.
-            }
-
-            fn resolve_pending_reply(&mut self) {
-                use crate::adapters::daemon::protocol::{
-                    RecipientAction, RecipientActionOutcome, RecipientActionTarget,
-                };
-                crate::adapters::tui::handlers::recipient_actions::apply_action_result(
-                    &mut self.state,
-                    RecipientAction::Reply,
-                    RecipientActionTarget::Item {
-                        item_id: "ri_pending".into(),
-                    },
-                    RecipientActionOutcome::Applied { reply: None },
-                );
-                assert!(
-                    crate::adapters::tui::handlers::recipient_actions::pending_composition(
-                        &self.state
-                    )
-                    .is_none(),
-                    "the correlated recipient result must end the displayed pending composition"
-                );
-                assert!(
-                    self.state.input_buffer.is_empty(),
-                    "successful reply settlement must leave the composer genuinely empty"
-                );
-            }
-        }
-
-        #[test]
-        fn attached_overflow_proposal_pages_before_authorizing_send() {
-            let mut surface = Surface::new("body");
-            surface.frame(DaemonFrame::TeamProposal {
-                proposal: "tp_attached".into(),
-                recipients: (0..12)
-                    .map(|index| format!("member-{index:02}-dev"))
-                    .collect(),
+        fn proposal(id: &str, body: &str) -> DaemonFrame {
+            DaemonFrame::TeamProposal {
+                proposal: id.into(),
+                recipients: vec!["lena-po".into(), "jun-dev".into()],
                 message_type: SemanticMessageType::ArchitectureUpdate,
-                body: "Exact attached overflow body.".into(),
-            });
-            let first = surface.paint(60, 16, false, false);
-            assert!(first.contains("PgUp/PgDn"), "{first}");
-            assert!(surface.key(KeyCode::Char('y'), false, false));
-            assert!(
-                surface.rx.try_recv().is_err(),
-                "hidden footer must not authorize Send"
-            );
-            while surface.state.team_proposal_scroll < surface.state.team_proposal_scroll_max {
-                assert!(surface.key(KeyCode::PageDown, false, false));
-                if surface.state.team_proposal_scroll == surface.state.team_proposal_scroll_max {
-                    assert!(surface.key(KeyCode::Char('y'), false, false));
-                    assert!(
-                        surface.rx.try_recv().is_err(),
-                        "paging must paint the footer before Send"
-                    );
-                }
-                surface.paint(60, 16, false, false);
-            }
-            let last = surface.paint(60, 16, false, false);
-            assert!(last.contains("[n] Dismiss"), "{last}");
-            surface.assert_send();
-        }
-
-        #[test]
-        fn attached_overflow_review_paging_reaches_the_complete_body() {
-            let live_text = (0..60)
-                .map(|index| format!("LIVE_STREAM_{index}"))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            for stream in [None, Some(String::new()), Some(live_text)] {
-                let body = (0..30)
-                    .map(|index| format!("REVIEW_ROW_{index:02}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let mut surface = Surface::new(&body);
-                surface.streaming.is_streaming = stream.is_some();
-                surface.streaming.current_text_buffer = stream.unwrap_or_default();
-                surface.frame(DaemonFrame::TeamProposal {
-                    proposal: "tp_attached".into(),
-                    recipients: (0..12)
-                        .map(|index| format!("member-{index:02}-dev"))
-                        .collect(),
-                    message_type: SemanticMessageType::ArchitectureUpdate,
-                    body,
-                });
-                surface.paint(60, 16, false, false);
-                assert!(surface.key(KeyCode::Char('r'), false, false));
-                let mut pages = vec![surface.paint(60, 16, false, false)];
-                for _ in 0..20 {
-                    assert!(surface.key(KeyCode::PageUp, false, false));
-                    pages.push(surface.paint(60, 16, false, false));
-                }
-                for index in 0..30 {
-                    assert!(
-                        pages
-                            .iter()
-                            .any(|page| page.contains(&format!("REVIEW_ROW_{index:02}"))),
-                        "full Review row {index} is inaccessible: {pages:#?}"
-                    );
-                }
-                assert!(
-                    surface.rx.try_recv().is_err(),
-                    "Review paging must never send"
-                );
-                assert!(surface.key(KeyCode::Char('n'), false, false));
-                assert!(matches!(
-                    surface.rx.try_recv().unwrap(),
-                    ClientFrame::TeamProposalDecision {
-                        decision: TeamProposalDecision::Dismiss,
-                        ..
-                    }
-                ));
+                body: body.into(),
             }
         }
 
-        #[test]
-        fn attached_proposal_enter_and_escape_never_send() {
-            let mut surface = Surface::new("body");
-            surface.paint(80, 24, false, false);
-            for key in [KeyCode::Enter, KeyCode::Esc] {
-                assert!(surface.key(key, false, false));
-                assert!(
-                    surface.rx.try_recv().is_err(),
-                    "attached Enter/Escape must not send a proposal"
-                );
-                assert!(attached_proposal_pending(&surface.state).is_some());
-                assert!(surface.state.team_send_blocks.is_empty());
-            }
-            surface.assert_send();
+        fn rig(body: &str) -> Rig {
+            let mut rig = Rig::new(false);
+            rig.paint();
+            frame(&mut rig, proposal("tp_attached", body), false);
+            rig.ready();
+            rig
         }
 
-        /// 21-3 3-C (R4d, R13): `Esc` on an attached proposal posts the registry cue with an
-        /// empty composer only; with a draft `y/r/n` are text and the cue would lie.
-        #[test]
-        fn story21_3_attached_proposal_esc_cues_only_with_an_empty_composer() {
-            let cues = |surface: &Surface| -> Vec<String> {
-                surface
-                    .state
-                    .notifications
-                    .records()
-                    .filter(|record| record.source == NoticeSource::Approval)
-                    .map(|record| record.message.clone())
-                    .collect()
+        fn item(rig: &Rig) -> &decision_queue::DecisionItem {
+            rig.state
+                .decisions
+                .items()
+                .find(|item| item.kind == DecisionKind::TeamProposal)
+                .unwrap()
+        }
+
+        fn snapshot(rig: &Rig) -> Arc<crate::domain::models::TeamProposal> {
+            let DecisionSubject::TeamProposal(payload) = &item(rig).subject else {
+                panic!("proposal payload")
             };
-            let mut empty = Surface::new("body");
-            empty.paint(80, 24, false, false);
-            assert!(empty.key(KeyCode::Esc, false, false));
-            assert_eq!(
-                cues(&empty),
-                vec![crate::adapters::tui::keymap::render::card_cue(
-                    crate::adapters::tui::keymap::Context::TeamProposal,
-                    crate::adapters::tui::keymap::Host::Attached,
-                )]
-            );
-            assert!(attached_proposal_pending(&empty.state).is_some());
-            let mut drafting = Surface::new("body");
-            drafting.state.input_buffer = "draft".into();
-            drafting.state.cursor_position = drafting.state.input_buffer.chars().count();
-            drafting.paint(80, 24, false, false);
-            assert!(drafting.key(KeyCode::Esc, false, false));
-            assert!(cues(&drafting).is_empty(), "no cue over a draft");
-            assert!(attached_proposal_pending(&drafting.state).is_some());
+            Arc::clone(&payload.proposal)
         }
 
-        #[test]
-        fn attached_proposal_nonempty_composer_owns_y_r_n_and_t9() {
-            let mut surface = Surface::new("body");
-            surface.state.input_buffer = "draft ".into();
-            surface.state.cursor_position = surface.state.input_buffer.chars().count();
-            let text = surface.paint(80, 24, false, false);
-            assert!(
-                text.contains("Finish or clear your draft to decide."),
-                "attached draft must paint T9"
-            );
-            assert!(!text.contains("[y] Send to"));
-            for letter in ['y', 'r', 'n'] {
-                assert!(
-                    !surface.key(KeyCode::Char(letter), false, false),
-                    "composer letters must not decide an attached proposal"
-                );
-                attached_composer_key_with_team_requests(
-                    KeyCode::Char(letter),
-                    false,
-                    &mut surface.state,
-                    &surface.tx,
-                    &mut surface.requests,
-                );
-            }
-            assert_eq!(
-                surface.state.input_buffer, "draft yrn",
-                "attached proposal keys must preserve and edit the draft"
-            );
-            assert!(
-                surface.rx.try_recv().is_err(),
-                "composer letters must not decide an attached proposal"
-            );
-            assert!(surface.tab.team_proposal_reviews.is_empty());
-            surface.state.input_buffer.clear();
-            surface.paint(80, 24, false, false);
-            surface.assert_send();
+        async fn key(rig: &mut Rig, code: KeyCode) {
+            rig.raw_key(KeyEvent::new(code, KeyModifiers::NONE)).await;
         }
 
-        #[test]
-        fn attached_proposal_pending_reply_composition_cannot_authorize_send() {
-            use crate::adapters::tui::handlers::recipient_actions::pending_composition;
-            let reply = "operator draft e\u{301}界";
-            let draft = format!("/team reply ri_pending {reply}");
-            let mut surface = Surface::new("proposal body distinct from the operator reply");
-            let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
-            surface.submit_pending_reply(&draft, reply);
-            let painted = surface.paint(80, 24, false, false);
+        async fn send(rig: &mut Rig) {
+            key(rig, KeyCode::Char('y')).await;
+            let frames = rig.frames();
             assert!(
-                painted.contains(&draft),
-                "the real input renderer must still show the submitted draft while its result is delayed"
+                matches!(frames.as_slice(), [ClientFrame::TeamProposalDecision {
+                proposal, decision: TeamProposalDecision::Send
+            }] if proposal == "tp_attached"),
+                "{frames:?}"
             );
-            assert!(
-                Arc::ptr_eq(
-                    surface.state.team_proposal_visible.as_ref().unwrap(),
-                    &snapshot
-                ),
-                "the pending-input guard must be exercised against an actually painted proposal"
-            );
-
-            let handled = surface.key(KeyCode::Char('y'), false, false);
-            assert!(
-                surface.rx.try_recv().is_err(),
-                "pending recipient composition must not authorize a proposal Send merely because the local buffer was taken"
-            );
-            assert!(
-                !handled,
-                "a visible nonempty pending draft must retain ownership of proposal decision letters"
-            );
-            assert!(
-                Arc::ptr_eq(
-                    attached_proposal_pending(&surface.state).unwrap(),
-                    &snapshot
-                ),
-                "blocked Send must preserve the exact immutable waiting proposal"
-            );
-            assert_eq!(
-                pending_composition(&surface.state),
-                Some(draft.as_str()),
-                "blocked proposal Send must preserve the pending recipient composition byte-for-byte"
-            );
-            assert!(surface.requests.pending.is_empty());
-            assert!(surface.state.team_send_blocks.is_empty());
-
-            surface.resolve_pending_reply();
-            surface.paint(80, 24, false, false);
-            assert!(Arc::ptr_eq(
-                attached_proposal_pending(&surface.state).unwrap(),
-                &snapshot
-            ));
-            surface.assert_send();
         }
 
-        #[test]
-        fn attached_proposal_pending_reply_card_uses_existing_draft_disabled_state() {
-            use crate::adapters::tui::handlers::recipient_actions::pending_composition;
-            let reply = "operator draft e\u{301}界";
-            let draft = format!("/team reply ri_pending {reply}");
-            let mut surface = Surface::new("proposal body distinct from the operator reply");
-            let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
-            surface.state.input_buffer = draft.clone();
-            surface.state.cursor_position = surface.state.input_buffer.chars().count();
-            let local_draft = surface.paint(80, 24, false, false);
-            let card_rows = |text: &str| {
-                text.lines()
-                    .filter(|row| row.contains('║') || row.contains('╔') || row.contains('╚'))
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            };
-            let disabled_card = card_rows(&local_draft);
-            assert!(
-                !disabled_card.is_empty(),
-                "the local-draft control must paint a proposal card"
-            );
-            assert!(
-                !disabled_card.iter().any(|row| row.contains("[y]")),
-                "the existing nonempty-composer control must disable the proposal Send action"
-            );
-
-            surface.submit_pending_reply(&draft, reply);
-            let pending_draft = surface.paint(80, 24, false, false);
-            assert!(
-                pending_draft.contains(&draft),
-                "the pending recipient draft must remain visible in the real composer renderer"
-            );
-            assert_eq!(
-                card_rows(&pending_draft),
-                disabled_card,
-                "pending recipient composition must paint the same T9/action-disabled card as the identical local draft, not offer Send"
-            );
-            assert!(Arc::ptr_eq(
-                attached_proposal_pending(&surface.state).unwrap(),
-                &snapshot
-            ));
-            assert_eq!(pending_composition(&surface.state), Some(draft.as_str()));
-            assert!(surface.rx.try_recv().is_err());
-
-            surface.resolve_pending_reply();
-            let empty_composer = surface.paint(80, 24, false, false);
-            assert!(
-                card_rows(&empty_composer)
-                    .iter()
-                    .any(|row| row.contains("[y]")),
-                "after the recipient result clears the displayed composer, the waiting proposal must offer Send again"
-            );
-            surface.assert_send();
-        }
-
-        #[test]
-        fn attached_proposal_dismiss_is_only_a_decision_and_shared_info() {
-            let mut surface = Surface::new("private body");
-            surface.paint(80, 24, false, false);
-            assert!(surface.key(KeyCode::Char('n'), false, false));
-            assert!(
-                matches!(
-                    surface.rx.try_recv().unwrap(),
-                    ClientFrame::TeamProposalDecision {
-                        decision: TeamProposalDecision::Dismiss,
-                        ..
-                    }
-                ),
-                "attached Dismiss must not emit a Send frame"
-            );
-            assert!(surface.rx.try_recv().is_err());
-            assert!(surface.requests.pending.is_empty());
-            assert!(
-                surface.state.team_send_blocks.is_empty(),
-                "attached Dismiss must not open a send block"
-            );
-            assert!(attached_proposal_pending(&surface.state).is_none());
-            let block = &surface.state.feedback_blocks["team-proposal-status"];
-            assert_eq!(block.level, FeedbackLevel::Info);
-            assert_eq!(block.message, "Proposal dismissed. Nothing was sent.");
-            surface.frame(DaemonFrame::TeamProposalClosed {
-                proposal: "tp_attached".into(),
-                outcome: TeamProposalCloseOutcome::Dismissed,
-            });
-            assert!(
-                surface
-                    .paint(80, 24, false, false)
-                    .contains("Proposal dismissed. Nothing was sent.")
-            );
-            let mut positive = Surface::new("private body");
-            positive.paint(80, 24, false, false);
-            positive.assert_send();
-        }
-
-        #[test]
-        fn attached_review_repositions_transcript_after_history_scrolling() {
-            let old_body = (0..150)
-                .map(|line| format!("OLDER_REVIEW_{line}"))
+        fn screen(rig: &mut Rig) -> String {
+            let terminal = rig.paint();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
-                .join("\n");
-            let mut surface = Surface::new(&old_body);
-            surface.paint(80, 24, false, false);
-            assert!(surface.key(KeyCode::Char('r'), false, false));
-            assert!(surface.key(KeyCode::Char('n'), false, false));
-            assert!(matches!(
-                surface.rx.try_recv().unwrap(),
-                ClientFrame::TeamProposalDecision {
-                    decision: TeamProposalDecision::Dismiss,
-                    ..
-                }
-            ));
-            surface.frame(DaemonFrame::TeamProposal {
-                proposal: "tp_current".into(),
-                recipients: vec!["lena-po".into()],
-                message_type: SemanticMessageType::ArchitectureUpdate,
-                body: "CURRENT_REVIEW_FIRST\nCURRENT_REVIEW_LAST".into(),
-            });
-            surface.domain_tab.view_state.scroll_offset = 100;
-            surface.domain_tab.view_state.mode = crate::domain::models::AnchorMode::Reading;
-            let before = surface.paint(80, 24, false, false);
-            assert!(before.contains("OLDER_REVIEW_"), "{before}");
-            assert!(surface.key(KeyCode::Char('r'), false, false));
-            let reviewed = surface.paint(80, 24, false, false);
-            for line in ["CURRENT_REVIEW_FIRST", "CURRENT_REVIEW_LAST"] {
-                assert!(reviewed.contains(&format!("│ {line}")), "{reviewed}");
-            }
-            assert!(surface.rx.try_recv().is_err());
-            assert_eq!(
-                attached_proposal_pending(&surface.state).unwrap().id,
-                "tp_current"
-            );
-
-            assert!(surface.key(KeyCode::PageUp, false, false));
-            let earlier = surface.paint(80, 24, false, false);
-            assert!(earlier.contains("OLDER_REVIEW_"), "{earlier}");
-            assert!(surface.key(KeyCode::Char('r'), false, false));
-            let reopened = surface.paint(80, 24, false, false);
-            assert!(reopened.contains("│ CURRENT_REVIEW_LAST"), "{reopened}");
-            assert!(surface.rx.try_recv().is_err());
+                .join("\n")
         }
 
         #[tokio::test]
-        async fn attached_review_replaces_an_open_received_item_surface() {
-            use crate::adapters::tui::state::RecipientSurfaceAccess;
+        async fn story21_6_attached_proposal_enter_escape_defer_without_send() {
+            let mut rig = rig("body");
+            key(&mut rig, KeyCode::Enter).await;
+            assert!(rig.frames().is_empty());
+            key(&mut rig, KeyCode::Esc).await;
+            assert!(rig.frames().is_empty());
+            assert!(item(&rig).deferred);
+            let decision = item(&rig).key();
+            assert!(decision_queue::open(&mut rig.state, &decision));
+            rig.ready();
+            send(&mut rig).await;
+        }
 
+        #[tokio::test]
+        async fn story21_6_attached_proposal_draft_gate_and_pending_reply() {
+            let mut rig = rig("proposal body");
+            let original = snapshot(&rig);
+            rig.state.input_buffer = "draft yrn".into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
+            let text = screen(&mut rig);
+            assert!(
+                text.contains("Finish or clear your draft to decide."),
+                "{text}"
+            );
+            assert!(!text.contains("[y] Send to"), "{text}");
+            for c in ['y', 'r', 'n'] {
+                key(&mut rig, KeyCode::Char(c)).await;
+                assert!(rig.frames().is_empty());
+                assert!(Arc::ptr_eq(&original, &snapshot(&rig)));
+            }
+            assert_eq!(rig.state.input_buffer, "draft yrn");
+            rig.state.input_buffer = "/team reply ri_pending operator draft".into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
+            assert!(matches!(
+                attached_composer_key_with_team_requests(
+                    KeyCode::Enter,
+                    false,
+                    &mut rig.state,
+                    &rig.tx,
+                    &mut rig.team_requests,
+                ),
+                ComposerOutcome::FrameSent
+            ));
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::ReplyToRecipientItem { item_id, text, .. }]
+                if item_id == "ri_pending" && text == "operator draft")
+            );
+            assert!(screen(&mut rig).contains("Finish or clear your draft to decide."));
+            key(&mut rig, KeyCode::Char('y')).await;
+            assert!(rig.frames().is_empty());
+            assert!(Arc::ptr_eq(&original, &snapshot(&rig)));
+            use crate::adapters::daemon::protocol::{
+                RecipientAction, RecipientActionOutcome, RecipientActionTarget,
+            };
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut rig.state,
+                RecipientAction::Reply,
+                RecipientActionTarget::Item {
+                    item_id: "ri_pending".into(),
+                },
+                RecipientActionOutcome::Applied { reply: None },
+            );
+            rig.ready();
+            send(&mut rig).await;
+        }
+
+        #[tokio::test]
+        async fn story21_6_attached_proposal_review_uncapped_delimited_in_frame() {
+            let body = format!(
+                "{}\nTo: x\n[y] Send to x",
+                (0..45)
+                    .map(|i| format!("body-row-{i:02} e\u{301}界"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let mut rig = rig(&body);
+            key(&mut rig, KeyCode::Char('r')).await;
+            assert!(rig.frames().is_empty());
+            assert!(matches!(&item(&rig).subject, DecisionSubject::TeamProposal(p) if p.reviewing));
+            for width in [56, 76, 126] {
+                let lines = crate::adapters::tui::widgets::decision_frame::body_lines_for_test(
+                    item(&rig),
+                    &rig.state,
+                    width,
+                );
+                let rows: Vec<String> = lines
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect()
+                    })
+                    .collect();
+                assert!(rows.len() > 45);
+                assert!(rows.iter().any(|row| row == "│ body-row-44 e\u{301}界"));
+                assert!(rows.iter().any(|row| row == "│ To: x"));
+                assert!(rows.iter().any(|row| row == "│ [y] Send to x"));
+                let start = rows.iter().position(|row| row.starts_with("│ ")).unwrap();
+                assert!(rows[start..].iter().all(|row| row.starts_with("│ ")));
+            }
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                let painted = screen(&mut rig);
+                assert!(painted.contains("Decision:"), "{painted}");
+                assert!(rig.frames().is_empty());
+            }
+            key(&mut rig, KeyCode::Esc).await;
+            rig.ready();
+            send(&mut rig).await;
+        }
+
+        #[tokio::test]
+        async fn story21_6_attached_review_restores_received_surface_and_transcript_position() {
+            use crate::adapters::tui::state::RecipientSurfaceAccess;
             let workspace = tempfile::tempdir().unwrap();
             let journal =
                 crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
@@ -5223,151 +4335,106 @@ mod tests {
                 "RECEIVED_ITEM_OVERLAY_BODY",
             )
             .await;
-            let mut surface = Surface::new("CURRENT_PROPOSAL_FIRST\nCURRENT_PROPOSAL_LAST");
-            surface.paint(80, 24, false, false);
-            surface.state.input_buffer = format!("/team view {}", address.item().as_str());
-            surface.state.cursor_position = surface.state.input_buffer.chars().count();
-            let ComposerOutcome::LocalView(item_id) = attached_composer_key_with_team_requests(
-                KeyCode::Enter,
-                false,
-                &mut surface.state,
-                &surface.tx,
-                &mut surface.requests,
-            ) else {
-                panic!("the typed view command must open the received item");
-            };
+            let mut surface = rig("CURRENT_PROPOSAL_FIRST\nCURRENT_PROPOSAL_LAST");
+            key(&mut surface, KeyCode::Esc).await;
+            surface.domain_tab.view_state.scroll_offset = 100;
+            surface.domain_tab.view_state.mode = crate::domain::models::AnchorMode::Reading;
             crate::infrastructure::runtime::recipient_surface::open_received_surface(
                 workspace.path(),
                 None,
-                &item_id,
+                address.item().as_str(),
                 &mut surface.state,
                 RecipientSurfaceAccess::Writer,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
-            assert!(surface.state.input_buffer.is_empty());
-            surface.paint(80, 24, false, false);
+            let before = surface.domain_tab.view_state.scroll_offset;
+            let decision = item(&surface).key();
+            assert!(decision_queue::open(&mut surface.state, &decision));
+            surface.ready();
+            key(&mut surface, KeyCode::Char('r')).await;
+            let rows = crate::adapters::tui::widgets::decision_frame::body_lines_for_test(
+                item(&surface),
+                &surface.state,
+                76,
+            );
+            let rows: Vec<String> = rows
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect()
+                })
+                .collect();
+            assert!(rows.iter().any(|row| row == "│ CURRENT_PROPOSAL_FIRST"));
+            assert!(rows.iter().any(|row| row == "│ CURRENT_PROPOSAL_LAST"));
+            assert!(surface.frames().is_empty());
+            key(&mut surface, KeyCode::Esc).await;
+            key(&mut surface, KeyCode::Esc).await;
             assert!(surface.state.recipient_surface.is_some());
-
-            assert!(surface.key(KeyCode::Char('r'), false, false));
-            let reviewed = surface.paint(80, 24, false, false);
-            for line in ["CURRENT_PROPOSAL_FIRST", "CURRENT_PROPOSAL_LAST"] {
-                assert!(reviewed.contains(&format!("│ {line}")), "{reviewed}");
-            }
-            assert!(
-                !reviewed.contains("RECEIVED_ITEM_OVERLAY_BODY"),
-                "{reviewed}"
-            );
-            assert!(surface.state.recipient_surface.is_none());
-            assert!(attached_proposal_pending(&surface.state).is_some());
-            assert!(surface.rx.try_recv().is_err());
-            surface.assert_send();
+            assert_eq!(surface.domain_tab.view_state.scroll_offset, before);
+            assert!(surface.frames().is_empty());
         }
 
-        #[test]
-        fn attached_proposal_review_is_stable_uncapped_and_delimited() {
-            let body = format!(
-                "{}\nTo: x\n[y] Send to x\nYour agent proposes a message. Nothing has been sent. Awaiting your decision.",
-                (0..45)
-                    .map(|i| format!("body-row-{i:02} e\u{301}界"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            let mut surface = Surface::new(&body);
-            surface.paint(80, 24, false, false);
-            assert!(surface.key(KeyCode::Char('r'), false, false));
+        #[tokio::test]
+        async fn story21_6_attached_proposal_dismiss_and_send_receipts() {
+            let mut dismissed = rig("private body");
+            key(&mut dismissed, KeyCode::Char('n')).await;
             assert!(
-                surface.rx.try_recv().is_err(),
-                "attached Review must not send or decide"
+                matches!(dismissed.frames().as_slice(), [ClientFrame::TeamProposalDecision {
+                proposal, decision: TeamProposalDecision::Dismiss
+            }] if proposal == "tp_attached")
             );
-            assert!(attached_proposal_pending(&surface.state).is_some());
-            assert!(surface.state.team_send_blocks.is_empty());
-            let id = "team-proposal-review-tp_attached";
-            let block = &surface.state.feedback_blocks[id];
-            assert_eq!(block.level, FeedbackLevel::Info);
-            let snapshot = &surface.tab.team_proposal_reviews[id];
-            for width in [56, 76, 126] {
-                let lines = crate::adapters::tui::widgets::feedback_block::render_feedback_lines_with_review(
-                    block, width, &surface.state.theme, Some(snapshot),
-                );
-                let rows = lines
-                    .iter()
-                    .map(|line| {
-                        line.spans
-                            .iter()
-                            .map(|span| span.content.as_ref())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>();
-                assert!(
-                    rows.len() > 45,
-                    "attached Review must not cap the full body"
-                );
-                assert!(rows.iter().any(|row| row == "│ body-row-44 e\u{301}界"));
-                let body_start = rows.iter().position(|row| row.starts_with("│ ")).unwrap();
-                assert!(
-                    rows[body_start..].iter().all(|row| row.starts_with("│ ")),
-                    "attached Review must delimit every body row"
-                );
-                assert!(rows.iter().any(|row| row == "│ To: x"));
-                assert!(rows.iter().any(|row| row == "│ [y] Send to x"));
-            }
-            let painted = surface.paint(80, 24, false, false);
-            assert!(
-                painted.contains("body-row-44"),
-                "attached chat must consume the real Review render cache"
+            assert!(dismissed.team_requests.pending.is_empty());
+            assert!(dismissed.state.team_send_blocks.is_empty());
+            assert_eq!(
+                dismissed.state.feedback_blocks["team-proposal-status"].message,
+                "Proposal dismissed. Nothing was sent."
             );
-            surface.paint(130, 30, false, false);
-            assert_eq!(surface.tab.team_proposal_reviews[id].body, body);
-            surface.assert_send();
-        }
-
-        #[test]
-        fn attached_proposal_send_binds_ordinary_block_and_receipts() {
-            let mut proposed = Surface::new("exact\n\tbody e\u{301}界");
-            proposed.paint(80, 24, false, false);
-            let snapshot = attached_proposal_pending(&proposed.state).unwrap().clone();
-            proposed.assert_send();
+            let mut sent = rig("exact\n\tbody e\u{301}界");
+            let original = snapshot(&sent);
+            send(&mut sent).await;
+            assert_eq!(original.body, "exact\n\tbody e\u{301}界");
+            assert!(sent.team_requests.pending.contains_key("tp_attached"));
+            assert!(!decision_queue::team_proposal_pending(&sent.state));
             let mut typed = TuiState::new(80, 24);
-            let mut typed_requests = AttachedTeamRequests::default();
+            let mut requests = AttachedTeamRequests::default();
             let (tx, mut rx) = mpsc::unbounded_channel();
             assert!(enqueue_attached_team_frame(
                 &mut typed,
-                &mut typed_requests,
+                &mut requests,
                 ClientFrame::TeamSend {
                     request: "typed".into(),
-                    recipients: snapshot.recipients.clone(),
-                    text: snapshot.body.clone(),
-                    message_type: Some(snapshot.message_type),
+                    recipients: original.recipients.clone(),
+                    text: original.body.clone(),
+                    message_type: Some(original.message_type),
                     subject: None,
                     stories: None,
                     holders_of: None,
                 },
-                &tx,
+                &tx
             ));
             assert!(matches!(
                 rx.try_recv().unwrap(),
                 ClientFrame::TeamSend { .. }
             ));
-            let proposed_block = match &proposed.requests.pending["tp_attached"] {
+            let block = match &sent.team_requests.pending["tp_attached"] {
                 AttachedTeamRequest::Send {
                     block_id,
                     action: None,
                     ..
                 } => block_id.clone(),
-                other => panic!(
-                    "human Send must open the ordinary send block before receipts: {other:?}"
-                ),
+                other => panic!("ordinary send block expected: {other:?}"),
             };
             assert_eq!(
-                proposed.state.feedback_blocks[&proposed_block].message,
-                typed.feedback_blocks["team-send-1"].message,
-                "attached proposal must use the ordinary send-block renderer"
+                sent.state.feedback_blocks[&block].message,
+                typed.feedback_blocks["team-send-1"].message
             );
             for (state, requests, request) in [
-                (&mut proposed.state, &mut proposed.requests, "tp_attached"),
-                (&mut typed, &mut typed_requests, "typed"),
+                (&mut sent.state, &mut sent.team_requests, "tp_attached"),
+                (&mut typed, &mut requests, "typed"),
             ] {
                 assert!(apply_attached_team_frame(
                     state,
@@ -5378,7 +4445,7 @@ mod tests {
                         recipients: Vec::new(),
                     },
                     false,
-                    &mpsc::unbounded_channel().0
+                    &tx
                 ));
                 for index in 0..2 {
                     assert!(apply_attached_team_frame(
@@ -5387,338 +4454,307 @@ mod tests {
                         DaemonFrame::TeamSendSettled {
                             request: request.into(),
                             index,
-                            outcome: TeamSendOutcome::Delivered,
+                            outcome: crate::adapters::daemon::protocol::TeamSendOutcome::Delivered,
                         },
                         false,
-                        &mpsc::unbounded_channel().0
+                        &tx
                     ));
                 }
             }
             assert_eq!(
-                proposed.state.feedback_blocks[&proposed_block].message,
-                typed.feedback_blocks["team-send-1"].message,
-                "attached proposal receipts must settle exactly like a typed send"
+                sent.state.feedback_blocks[&block].message,
+                typed.feedback_blocks["team-send-1"].message
             );
-            assert!(proposed.requests.pending.is_empty());
-            let text = proposed.paint(80, 24, false, false);
+            assert!(sent.team_requests.pending.is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_6_attached_proposal_busy_refusal_and_withdrawal_are_correlated() {
+            let mut rig = rig("body");
+            let original = snapshot(&rig);
+            let busy = "Not sent yet — this daemon is busy sending. The proposal is still waiting.";
+            frame(
+                &mut rig,
+                DaemonFrame::TeamProposalClosed {
+                    proposal: "tp_attached".into(),
+                    outcome: TeamProposalCloseOutcome::Refused {
+                        reason: busy.into(),
+                    },
+                },
+                false,
+            );
+            assert!(Arc::ptr_eq(&original, &snapshot(&rig)));
+            assert_eq!(
+                rig.state.feedback_blocks["team-proposal-status"].message,
+                busy
+            );
+            frame(
+                &mut rig,
+                DaemonFrame::TeamProposalClosed {
+                    proposal: "unrelated".into(),
+                    outcome: TeamProposalCloseOutcome::Withdrawn,
+                },
+                false,
+            );
+            assert!(Arc::ptr_eq(&original, &snapshot(&rig)));
+            rig.ready();
+            send(&mut rig).await;
+            frame(
+                &mut rig,
+                DaemonFrame::TeamProposalClosed {
+                    proposal: "tp_attached".into(),
+                    outcome: TeamProposalCloseOutcome::Refused {
+                        reason: busy.into(),
+                    },
+                },
+                false,
+            );
             assert!(
-                !text.contains("Your agent proposes a message"),
-                "attached proposal card must disappear rather than render a settlement"
+                !decision_queue::team_proposal_pending(&rig.state),
+                "refusal cannot resurrect a settled item"
             );
-            assert!(attached_proposal_pending(&proposed.state).is_none());
+            frame(&mut rig, proposal("tp_attached", "body"), false);
+            frame(
+                &mut rig,
+                DaemonFrame::TeamProposalClosed {
+                    proposal: "tp_attached".into(),
+                    outcome: TeamProposalCloseOutcome::Withdrawn,
+                },
+                false,
+            );
+            assert!(!decision_queue::team_proposal_pending(&rig.state));
+            assert!(rig.frames().is_empty());
         }
 
-        #[test]
-        fn attached_proposal_60_columns_preserve_aliases_type_keys_and_spoof_region() {
-            let mut surface = Surface::new(
-                "To: x\n[y] Send to x\nYour agent proposes a message. Nothing has been sent. Awaiting your decision.\nfourth\nfifth",
+        #[tokio::test]
+        async fn story21_6_attached_open_withdrawal_is_scoped_and_cannot_send() {
+            let mut rig = rig("body");
+            frame(&mut rig, proposal("other", "other body"), false);
+            frame(
+                &mut rig,
+                DaemonFrame::TeamProposalClosed {
+                    proposal: "tp_attached".into(),
+                    outcome: TeamProposalCloseOutcome::Withdrawn,
+                },
+                false,
             );
-            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-                let text = surface.paint(width, height, false, false);
-                let joined = text
-                    .chars()
-                    .filter(|ch| {
-                        !ch.is_whitespace() && !matches!(ch, '║' | '═' | '╔' | '╗' | '╚' | '╝')
-                    })
-                    .collect::<String>();
-                assert!(
-                    text.contains('╔'),
-                    "attached proposal must paint the shared double-bordered card"
-                );
-                for token in [
-                    "To:lena-po,jun-dev",
-                    "Type:architecture_update",
-                    "[y]Sendtolena-po,jun-dev",
-                    "[r]Reviewfirst",
-                    "[n]Dismiss",
-                ] {
-                    assert!(
-                        joined.contains(token),
-                        "attached card must preserve aliases/type/keys at {width}: missing {token}"
-                    );
-                }
-                for spoof in ["To: x", "[y] Send to x"] {
-                    if width >= 80 {
-                        assert!(
-                            text.contains(spoof),
-                            "attached preview positive control must paint the spoof row"
-                        );
-                    }
-                    assert!(
-                        text.lines()
-                            .filter(|row| row.contains(spoof))
-                            .all(|row| row.contains(&format!("│ {spoof}"))),
-                        "attached proposal spoof rows must stay inside the body delimiter"
-                    );
-                }
-                assert!(
-                    text.contains("… more not shown — [r] Review first"),
-                    "attached preview must disclose the hidden body"
-                );
-                assert!(
-                    !text.contains("Delivered"),
-                    "attached card must never paint a send outcome"
-                );
-            }
-            surface.assert_send();
+            assert!(matches!(
+                item(&rig).validity,
+                decision_queue::Validity::Stale(decision_queue::PROPOSAL_WITHDRAWN)
+            ));
+            let text = screen(&mut rig);
+            assert!(
+                text.contains("Proposal withdrawn with the conversation."),
+                "{text}"
+            );
+            assert!(
+                rig.state
+                    .decisions
+                    .items()
+                    .any(|item| item.source == "other" && !item.is_stale())
+            );
+            key(&mut rig, KeyCode::Char('y')).await;
+            assert!(rig.frames().is_empty());
         }
 
-        /// 6D-L1-03: a deferred consolidation no longer hides the attached proposal
-        /// or steals the Send key.
-        #[test]
-        fn story21_6_attached_defer_restores_proposal_paint_and_keys() {
-            use crate::adapters::tui::{app, decision_queue};
-            use crate::domain::events::{DomainInputEvent, DomainKey};
-            let mut surface = Surface::new("body");
-            let before = surface.paint(80, 24, false, false);
-            assert!(before.contains("Your agent proposes a message"));
+        #[tokio::test]
+        async fn story21_6_attached_proposal_conversation_and_failed_enqueue_keep_snapshot() {
+            let mut surface = rig("exact body");
+            let original = snapshot(&surface);
+            let conversation = surface.domain_tab.conversation.id.clone();
+            surface.domain_tab.conversation.id = "other-conversation".into();
+            surface.paint();
+            key(&mut surface, KeyCode::Char('y')).await;
+            assert!(surface.frames().is_empty());
+            assert!(Arc::ptr_eq(&original, &snapshot(&surface)));
+            // A key of a frame that is not decidable here reaches the owner beneath (the
+            // composer); the T9 gate would then rightly block the next decision.
+            assert_eq!(surface.state.input_buffer, "y");
+            surface.state.input_buffer.clear();
+            surface.state.cursor_position = 0;
+            surface.domain_tab.conversation.id = conversation;
+            surface.paint();
+            let decision = item(&surface).key();
+            assert!(decision_queue::open(&mut surface.state, &decision));
+            surface.ready();
+            surface.close_receiver();
+            key(&mut surface, KeyCode::Char('y')).await;
+            assert!(Arc::ptr_eq(&original, &snapshot(&surface)));
+            assert!(surface.team_requests.pending.is_empty());
+            assert_eq!(
+                surface.state.feedback_blocks["team-proposal-status"].message,
+                "Attach socket closed — the proposal decision was not sent."
+            );
+            let mut positive = rig("exact body");
+            send(&mut positive).await;
+        }
+
+        #[tokio::test]
+        async fn story21_6_attached_proposal_waits_behind_consolidation_and_can_open_after_defer() {
+            let mut surface = Rig::new(false);
+            surface.paint();
             decision_queue::raise_attached_consolidation(
                 &mut surface.state,
                 crate::adapters::daemon::protocol::ProposalToken(1),
                 Vec::new(),
             );
-            assert!(attached_proposal_higher_confirmation(&surface.state));
-            app::handle_input(
-                &mut surface.state,
-                &DomainInputEvent::SpecialKey(DomainKey::Esc),
-            );
-            assert!(
-                surface
-                    .state
-                    .decisions
-                    .holds(decision_queue::DecisionKind::Consolidation)
-            );
-            let higher = attached_proposal_higher_confirmation(&surface.state);
-            assert!(!higher);
-            assert_eq!(surface.paint(80, 24, higher, false), before);
-            surface.assert_send();
+            surface.ready();
+            frame(&mut surface, proposal("tp_attached", "body"), false);
+            assert!(decision_queue::team_proposal_pending(&surface.state));
+            assert!(surface.frames().is_empty());
+            key(&mut surface, KeyCode::Esc).await;
+            assert!(surface.frames().is_empty());
+            assert!(surface.state.decisions.holds(DecisionKind::Consolidation));
+            let proposal_key = item(&surface).key();
+            assert!(decision_queue::open(&mut surface.state, &proposal_key));
+            surface.ready();
+            send(&mut surface).await;
         }
 
-        #[test]
-        fn attached_proposal_higher_confirmations_and_raw_key_fences_keep_ownership() {
-            let mut surface = Surface::new("body");
-            for retract in [false, true] {
-                let mut surface = Surface::new("body");
-                if retract {
-                    crate::adapters::tui::decision_queue::raise_team_retract(
-                        &mut surface.state,
-                        crate::adapters::tui::decision_queue::TeamRetractPayload {
-                            target:
-                                crate::adapters::tui::decision_queue::RetractTarget::AutoResponse {
+        #[tokio::test]
+        async fn story21_6_attached_proposal_does_not_steal_other_decision_keys() {
+            use decision_queue::{
+                ConsentPayload, PermissionInput, PermissionPayload, Responder, RetractTarget,
+                TeamRetractPayload,
+            };
+            for other in ["permission", "consent", "retract"] {
+                let mut surface = Rig::new(false);
+                surface.paint();
+                let request = crate::domain::models::RequestId::new();
+                match other {
+                    "permission" => {
+                        let conversation = surface.domain_tab.conversation.id.clone();
+                        decision_queue::raise_permission(
+                            &mut surface.state,
+                            PermissionPayload::new(
+                                request.clone(),
+                                crate::domain::models::ApprovalSource::ForegroundTurn {
+                                    conversation_id: conversation,
+                                },
+                                "Write".into(),
+                                crate::domain::models::ToolRisk::Safe,
+                                PermissionInput::Ready(Arc::new(serde_json::json!({}))),
+                            ),
+                            Responder::Attached,
+                        );
+                    }
+                    "consent" => {
+                        decision_queue::raise_consent(
+                            &mut surface.state,
+                            ConsentPayload {
+                                request_id: request,
+                                tool: "a2a/sender-consent".into(),
+                                input_preview: "consent".into(),
+                            },
+                        );
+                    }
+                    _ => {
+                        decision_queue::raise_team_retract(
+                            &mut surface.state,
+                            TeamRetractPayload {
+                                target: RetractTarget::AutoResponse {
                                     message_id: "m1".into(),
                                 },
-                            conversation_id: String::new(),
-                            task: None,
-                            card: "retract".into(),
-                            armed: true,
-                            request: None,
-                        },
-                        crate::adapters::tui::decision_queue::Responder::Attached,
-                    );
-                } else {
-                    crate::adapters::tui::decision_queue::raise_attached_consolidation(
-                        &mut surface.state,
-                        crate::adapters::daemon::protocol::ProposalToken(1),
-                        Vec::new(),
-                    );
+                                conversation_id: String::new(),
+                                principal: None,
+                                task: None,
+                                card: "retract".into(),
+                                armed: true,
+                                request: None,
+                            },
+                            Responder::Attached,
+                        );
+                    }
                 }
-                let higher = attached_proposal_higher_confirmation(&surface.state);
-                assert!(higher);
-                surface.paint(80, 24, false, false);
+                surface.ready();
+                frame(&mut surface, proposal("tp_attached", "body"), false);
+                key(&mut surface, KeyCode::Char('y')).await;
                 assert!(
-                    !surface.key(KeyCode::Char('y'), higher, false),
-                    "attached higher confirmation must retain its Send key"
+                    surface
+                        .frames()
+                        .iter()
+                        .all(|frame| !matches!(frame, ClientFrame::TeamProposalDecision { .. })),
+                    "{other} must own the active decision key"
                 );
-                assert!(
-                    !surface
-                        .paint(80, 24, higher, false)
-                        .contains("Your agent proposes a message")
-                );
+                assert!(decision_queue::team_proposal_pending(&surface.state));
             }
-            let id = crate::domain::models::RequestId::new();
-            surface.state.pending_leader = Some(crate::adapters::tui::keymap::Context::Input);
-            crate::adapters::tui::decision_queue::raise_permission(
-                &mut surface.state,
-                crate::adapters::tui::decision_queue::PermissionPayload::new(
-                    id.clone(),
-                    crate::domain::models::ApprovalSource::ForegroundTurn {
-                        conversation_id: "c".into(),
-                    },
-                    "Write".into(),
-                    crate::domain::models::ToolRisk::Safe,
-                    crate::adapters::tui::decision_queue::PermissionInput::Ready(
-                        std::sync::Arc::new(serde_json::json!({})),
-                    ),
-                ),
-                crate::adapters::tui::decision_queue::Responder::Attached,
-            );
-            surface.state.pending_leader = None;
-            assert!(
-                attached_proposal_higher_confirmation(&surface.state),
-                "attached permission prompts must outrank proposals"
-            );
-            assert!(!surface.key(KeyCode::Char('y'), true, false));
-            crate::adapters::tui::decision_queue::withdraw_request(&mut surface.state, &id);
-            surface.state.pending_leader = Some(crate::adapters::tui::keymap::Context::Input);
-            crate::adapters::tui::decision_queue::raise_consent(
-                &mut surface.state,
-                crate::adapters::tui::decision_queue::ConsentPayload {
-                    request_id: id.clone(),
-                    tool: "a2a/sender-consent".into(),
-                    input_preview: "consent".into(),
-                },
-            );
-            surface.state.pending_leader = None;
-            assert!(attached_proposal_higher_confirmation(&surface.state));
-            assert!(!surface.key(KeyCode::Char('y'), true, false));
-            crate::adapters::tui::decision_queue::withdraw_request(&mut surface.state, &id);
-            surface.state.team_proposal_visible = None;
-            assert!(
-                !surface.key(KeyCode::Char('y'), false, false),
-                "unpainted attached proposal cannot decide"
-            );
-            surface.paint(80, 24, false, false);
-            for key in [
-                KeyEvent::new_with_kind(
-                    KeyCode::Char('y'),
-                    KeyModifiers::NONE,
-                    KeyEventKind::Repeat,
-                ),
-                KeyEvent::new_with_kind(
-                    KeyCode::Char('n'),
-                    KeyModifiers::NONE,
-                    KeyEventKind::Release,
-                ),
-                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SHIFT),
+            let mut positive = rig("body");
+            send(&mut positive).await;
+        }
+
+        #[tokio::test]
+        async fn story21_6_attached_proposal_preview_aliases_type_and_spoof_delimiters() {
+            let mut surface = rig("To: x\n[y] Send to x\nthird\nfourth\nfifth");
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                surface.state.terminal_width = width;
+                surface.state.terminal_height = height;
+                let rows = crate::adapters::tui::widgets::decision_frame::body_lines_for_test(
+                    item(&surface),
+                    &surface.state,
+                    usize::from(width - 4),
+                );
+                let rows: Vec<String> = rows
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect()
+                    })
+                    .collect();
+                assert!(
+                    rows.iter()
+                        .any(|row| row.contains("lena-po") && row.contains("jun-dev"))
+                );
+                assert!(rows.iter().any(|row| row.contains("architecture_update")));
+                assert!(rows.iter().any(|row| row == "│ To: x"));
+                assert!(rows.iter().any(|row| row == "│ [y] Send to x"));
+                assert!(rows.iter().any(|row| row.contains("more not shown")));
+                let painted = screen(&mut surface);
+                assert!(
+                    painted.contains("Send to")
+                        && painted.contains("Review first")
+                        && painted.contains("Dismiss"),
+                    "{painted}"
+                );
+                assert!(!painted.contains("Delivered"));
+            }
+            send(&mut surface).await;
+        }
+
+        #[tokio::test]
+        async fn story21_6_attached_proposal_raw_keys_and_read_only_do_not_decide() {
+            let mut mirror = Rig::new(true);
+            mirror.paint();
+            frame(&mut mirror, proposal("tp_attached", "private body"), true);
+            assert!(!decision_queue::team_proposal_pending(&mirror.state));
+            assert!(mirror.frames().is_empty());
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
             ] {
-                assert!(attached_proposal_key(
-                    key,
-                    false,
-                    false,
-                    &mut surface.state,
-                    &mut surface.tab,
-                    &mut surface.requests,
-                    &surface.tx,
-                    &mut surface.domain_tab.view_state,
-                ));
+                for modifiers in [
+                    KeyModifiers::NONE,
+                    KeyModifiers::SHIFT,
+                    KeyModifiers::ALT,
+                    KeyModifiers::CONTROL,
+                ] {
+                    if kind == KeyEventKind::Press && modifiers == KeyModifiers::NONE {
+                        continue;
+                    }
+                    for c in ['y', 'r', 'n'] {
+                        let mut surface = rig("body");
+                        surface
+                            .raw_key(KeyEvent::new_with_kind(KeyCode::Char(c), modifiers, kind))
+                            .await;
+                        assert!(surface.frames().is_empty(), "{kind:?} {modifiers:?} {c}");
+                        assert!(decision_queue::team_proposal_pending(&surface.state));
+                    }
+                }
             }
-            assert!(
-                surface.rx.try_recv().is_err(),
-                "attached repeat/release/modified keys must not decide"
-            );
-            assert!(surface.tab.team_proposal_reviews.is_empty());
-            assert!(!surface.key(KeyCode::Char('y'), false, true));
-            assert!(
-                !surface
-                    .paint(80, 24, false, true)
-                    .contains("Your agent proposes a message")
-            );
-            surface.paint(80, 24, false, false);
-            surface.assert_send();
-        }
-
-        #[test]
-        fn attached_proposal_refusal_withdrawal_and_reemit_are_correlated() {
-            let mut surface = Surface::new("body");
-            surface.paint(80, 24, false, false);
-            surface.assert_send();
-            let busy = "Not sent yet — this daemon is busy sending. The proposal is still waiting.";
-            surface.frame(DaemonFrame::TeamProposalClosed {
-                proposal: "tp_attached".into(),
-                outcome: TeamProposalCloseOutcome::Refused {
-                    reason: busy.into(),
-                },
-            });
-            assert!(surface.requests.pending.is_empty());
-            assert!(surface.state.team_send_blocks.is_empty());
-            assert_eq!(
-                surface.state.feedback_blocks["team-proposal-status"].message,
-                busy
-            );
-            assert!(
-                attached_proposal_pending(&surface.state).is_none(),
-                "a refusal alone must not resurrect a terminal attached proposal"
-            );
-            surface.frame(DaemonFrame::TeamProposal {
-                proposal: "tp_attached".into(),
-                recipients: vec!["lena-po".into(), "jun-dev".into()],
-                message_type: SemanticMessageType::ArchitectureUpdate,
-                body: "body".into(),
-            });
-            surface.paint(80, 24, false, false);
-            assert!(surface.key(KeyCode::Char('r'), false, false));
-            surface.frame(DaemonFrame::TeamProposalClosed {
-                proposal: "unrelated".into(),
-                outcome: TeamProposalCloseOutcome::Withdrawn,
-            });
-            assert!(
-                attached_proposal_pending(&surface.state).is_some(),
-                "an unrelated close must not remove the current attached snapshot"
-            );
-            surface.frame(DaemonFrame::TeamProposalClosed {
-                proposal: "tp_attached".into(),
-                outcome: TeamProposalCloseOutcome::Withdrawn,
-            });
-            assert!(attached_proposal_pending(&surface.state).is_none());
-            assert!(surface.tab.team_proposal_reviews.is_empty());
-            assert_eq!(
-                surface.state.feedback_blocks["team-proposal-status"].message,
-                "Proposal withdrawn with the conversation. Nothing was sent."
-            );
-            assert!(
-                surface.rx.try_recv().is_err(),
-                "attached withdrawal must never submit a decision"
-            );
-            surface.state.team_proposal_conversation_id = Some("other-conversation".into());
-            surface.frame(DaemonFrame::TeamProposal {
-                proposal: "tp_attached".into(),
-                recipients: vec!["lena-po".into(), "jun-dev".into()],
-                message_type: SemanticMessageType::ArchitectureUpdate,
-                body: "body".into(),
-            });
-            surface.paint(80, 24, false, false);
-            surface.assert_send();
-        }
-
-        #[test]
-        fn attached_proposal_conversation_binding_and_enqueue_failure_keep_snapshot() {
-            let mut surface = Surface::new("exact body");
-            surface.paint(80, 24, false, false);
-            let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
-            surface.state.team_proposal_conversation_id = Some("different-view".into());
-            assert!(
-                !surface.key(KeyCode::Char('y'), false, false),
-                "attached proposal must not decide from a different conversation view"
-            );
-            assert!(
-                !surface
-                    .paint(80, 24, false, false)
-                    .contains("Your agent proposes a message")
-            );
-            surface.state.team_proposal_conversation_id = Some("conversation".into());
-            surface.paint(80, 24, false, false);
-            assert!(Arc::ptr_eq(
-                attached_proposal_pending(&surface.state).unwrap(),
-                &snapshot
-            ));
-            surface.rx.close();
-            assert!(surface.key(KeyCode::Char('y'), false, false));
-            assert!(
-                Arc::ptr_eq(
-                    attached_proposal_pending(&surface.state).unwrap(),
-                    &snapshot
-                ),
-                "failed attached decision enqueue must preserve the exact pending snapshot"
-            );
-            assert!(surface.requests.pending.is_empty());
-            assert!(surface.state.team_send_blocks.is_empty());
-            assert_eq!(
-                surface.state.feedback_blocks["team-proposal-status"].message,
-                "Attach socket closed — the proposal decision was not sent."
-            );
-            let mut positive = Surface::new("exact body");
-            positive.paint(80, 24, false, false);
-            positive.assert_send();
+            let mut positive = rig("body");
+            send(&mut positive).await;
         }
     }
 
@@ -5804,6 +4840,58 @@ mod tests {
             stage,
             node_resolvable: true,
         }
+    }
+
+    fn recipient_body(
+        conversation: &Conversation,
+        state: &mut TuiState,
+        width: usize,
+    ) -> Vec<String> {
+        use crate::adapters::tui::{
+            decision_queue::{self, DecisionKind},
+            widgets::decision_frame,
+        };
+        decision_queue::sync_recipient_drafts(state, conversation, false);
+        let item = state
+            .decisions
+            .items()
+            .find(|item| item.kind == DecisionKind::RecipientDraftApproval && !item.is_stale())
+            .expect("recipient decision");
+        decision_frame::body_lines_for_test(item, state, width)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn story21_6_attached_recipient_body_preserves_alias_and_principal_without_controls() {
+        use crate::domain::models::{ItemAddress, ItemId, PeerId, PeerRowStage};
+        let peer = PeerId::from_public_key(&[76; 32]).unwrap();
+        let mut control = peer_control("principal-node", PeerRowStage::Ready);
+        control.sender_label = "stored\nalias\u{1b}[31m".into();
+        control.item_address = Some(ItemAddress::from_a2a_ingress(
+            peer.clone(),
+            ItemId::from_replay("alias-test"),
+        ));
+        let conversation = Conversation {
+            messages: vec![peer_row("row", "draft")],
+            peer_row_controls: [("row".to_owned(), control)].into_iter().collect(),
+            ..Default::default()
+        };
+        let body = recipient_body(&conversation, &mut TuiState::new(130, 30), 130);
+        let joined = body.join(" ");
+        assert!(
+            joined.contains("consultation")
+                && joined.contains("stored")
+                && joined.contains("alias"),
+            "{body:?}"
+        );
+        assert!(joined.contains(peer.as_str()), "{body:?}");
+        assert!(
+            body.iter()
+                .all(|line| !line.contains('\n') && !line.contains('\u{1b}')),
+            "{body:?}"
+        );
     }
 
     #[tokio::test]
@@ -6284,7 +5372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story19_25_retro_keys_toggle_overlay_hint_card_and_send_frames() {
+    async fn story21_6_attached_retro_overlay_updates_frame_and_surface_and_sends() {
         use crate::adapters::daemon::protocol::{
             ProtocolError, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
         };
@@ -6299,35 +5387,26 @@ mod tests {
         state.input_buffer = "unfinished operator text".to_owned();
         state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let card = |conversation: &Conversation, state: &TuiState| {
-            peer_response_card_lines(
-                &pending_peer_card(conversation, &state.retro_left_out).unwrap(),
-                false,
-                60,
-            )
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
+        let card = |conversation: &Conversation, state: &mut TuiState| {
+            recipient_body(conversation, state, 60).join("\n")
         };
         let overlay = |state: &TuiState| state.retro_left_out.get(item).cloned();
         let set = |fields: &[RetroField]| fields.iter().copied().collect::<RetroFieldSet>();
 
-        assert!(card(&conversation, &state).contains("  [2] reply times: 3 replies, median 25m"));
+        assert!(card(&conversation, &mut state).contains("[2] reply times: 3 replies, median 25m"));
         let painted = paint_surface(&mut state, &conversation, 100, 40);
         assert!(painted.contains("Shares (last 14 days):"), "{painted}");
         assert!(painted.contains("[s] Share") && !painted.contains("with redactions"));
         assert!(painted.contains("[1-3] Leave out") && painted.contains("[n] Decline"));
 
-        // `[2]` leaves reply times out: no frame, the card and the surface
-        // (same width: the overlay bits invalidate its cache) both re-render.
+        // `[2]` leaves reply times out: the frame body and surface both reflect the overlay.
         press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
         assert!(rx.try_recv().is_err());
         assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
-        let text = card(&conversation, &state);
-        assert!(text.contains("  [2] reply times: left out"), "{text}");
+        let text = card(&conversation, &mut state);
+        assert!(text.contains("[2] reply times: left out"), "{text}");
         assert!(
-            text.contains("  Not shared: reply times · message content"),
+            text.contains("Not shared: reply times · message content"),
             "{text}"
         );
         let painted = paint_surface(&mut state, &conversation, 100, 40);
@@ -6411,7 +5490,7 @@ mod tests {
             RecipientActionOutcome::Applied { reply: None },
         );
         assert!(state.retro_left_out.is_empty());
-        assert!(!card(&conversation, &state).contains("left out"));
+        assert!(!card(&conversation, &mut state).contains("left out"));
         let actions = recipient_surface_actions(&state, &conversation, false);
         assert_eq!(actions[2], Some(RecipientSurfaceAction::RetroShare));
 
@@ -6832,7 +5911,7 @@ mod tests {
     }
 
     #[test]
-    fn story19_24_status_card_preview_forms_wrap_without_truncation() {
+    fn story21_6_attached_status_frame_preview_wraps_and_caps_stories() {
         use crate::domain::models::{
             HeldStory, PeerRowStage, ReceiptState, StatusDisclosure, StatusPreview, StoryKey,
         };
@@ -6871,9 +5950,7 @@ mod tests {
                 peer_row_controls: [("status".to_owned(), control)].into_iter().collect(),
                 ..Default::default()
             };
-            let pending = pending_peer_response(&conversation).unwrap();
-            let lines = peer_response_card_lines(&pending, false, 60);
-            let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let text = recipient_body(&conversation, &mut TuiState::new(80, 24), 60);
             assert!(
                 text.iter()
                     .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 60),
@@ -6890,16 +5967,18 @@ mod tests {
                 "{joined}"
             );
             if level != StatusDisclosure::None && !stories.is_empty() {
-                for story in stories {
+                for story in stories.iter().take(40) {
                     assert!(joined.contains(story.key.as_str()), "{joined}");
                 }
+                assert!(joined.contains("… and 24 more"), "{joined}");
+                assert!(!joined.contains(stories[40].key.as_str()), "{joined}");
             }
             assert!(!joined.contains("private request body"));
         }
     }
 
     #[test]
-    fn story19_25_retro_card_preview_forms_wrap_without_truncation() {
+    fn story21_6_attached_retro_frame_preview_wraps_and_reflects_redactions() {
         use crate::domain::models::{
             PeerRowStage, RetroContribution, RetroField, RetroFieldSet, RetroPreview,
         };
@@ -6919,18 +5998,29 @@ mod tests {
         let render = |preview: RetroPreview, left_out: Option<&RetroFieldSet>| {
             let mut control = peer_control("retro", PeerRowStage::AwaitingOperator);
             control.retro = Some(preview);
+            let address = crate::domain::models::ItemAddress::from_a2a_ingress(
+                crate::domain::models::PeerId::from_public_key(&[75; 32]).unwrap(),
+                crate::domain::models::ItemId::from_replay("retro-preview"),
+            );
+            control.item_address = Some(address.clone());
             let conversation = Conversation {
                 messages: vec![peer_row("retro", "private request body")],
                 peer_row_controls: [("retro".to_owned(), control)].into_iter().collect(),
                 ..Default::default()
             };
-            let mut pending = pending_peer_response(&conversation).unwrap();
-            assert!(pending.retro_left_out.is_none());
-            pending.retro_left_out = left_out;
-            let text = peer_response_card_lines(&pending, false, 60)
+            let mut state = TuiState::new(80, 24);
+            if let Some(fields) = left_out {
+                state
+                    .retro_left_out
+                    .insert(address.item().as_str().to_owned(), fields.clone());
+            }
+            let body = recipient_body(&conversation, &mut state, 60);
+            let first_preview = body
                 .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
+                .position(|line| line.starts_with("Shares"))
+                .unwrap();
+            let mut text = vec![body[0].clone()];
+            text.extend_from_slice(&body[first_preview..]);
             assert!(
                 text.iter()
                     .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 60),
@@ -6954,20 +6044,20 @@ mod tests {
             },
             None,
         );
-        assert_eq!(shared[1], "  Shares (last 14 days):");
+        assert_eq!(shared[1], "Shares (last 14 days):");
         assert_eq!(
             shared[2],
-            "  [1] received items: consultation 3 · story_assignment 2"
+            "[1] received items: consultation 3 · story_assignment 2"
         );
-        assert_eq!(shared[3], "  [2] reply times: 5 replies, median 25m");
-        assert_eq!(shared[4], "  [3] acknowledgement times: none");
+        assert_eq!(shared[3], "[2] reply times: 5 replies, median 25m");
+        assert_eq!(shared[4], "[3] acknowledgement times: none");
         assert_eq!(full[1], "[2] reply times: 5 replies, median 25m");
         let tail = joined(&shared[5..]);
         assert!(
             tail.starts_with(&format!("Not shared: {not_shared_tail}")),
             "{tail}"
         );
-        assert!(shared[5].starts_with("  Not shared: message content,"));
+        assert!(shared[5].starts_with("Not shared: message content,"));
 
         let left_out: RetroFieldSet = [RetroField::ReplyTimes].into_iter().collect();
         let redacted = render(
@@ -6978,9 +6068,9 @@ mod tests {
             Some(&left_out),
         );
         assert_eq!(redacted[2], shared[2]);
-        assert_eq!(redacted[3], "  [2] reply times: left out");
+        assert_eq!(redacted[3], "[2] reply times: left out");
         assert_eq!(redacted[4], shared[4]);
-        assert!(redacted[5].starts_with("  Not shared: reply times · message content,"));
+        assert!(redacted[5].starts_with("Not shared: reply times · message content,"));
         assert!(
             joined(&redacted[5..])
                 .starts_with(&format!("Not shared: reply times · {not_shared_tail}")),
@@ -6995,9 +6085,9 @@ mod tests {
             },
             Some(&all),
         );
-        assert_eq!(everything[2], "  [1] received items: left out");
-        assert_eq!(everything[3], "  [2] reply times: left out");
-        assert_eq!(everything[4], "  [3] acknowledgement times: left out");
+        assert_eq!(everything[2], "[1] received items: left out");
+        assert_eq!(everything[3], "[2] reply times: left out");
+        assert_eq!(everything[4], "[3] acknowledgement times: left out");
         assert!(
             joined(&everything[5..]).starts_with(&format!(
                 "Not shared: received items · reply times · acknowledgement times · {not_shared_tail}"
@@ -7022,7 +6112,7 @@ mod tests {
         assert!(!nothing_text.contains("Shares (last 14 days):"));
         assert!(nothing.iter().all(|line| !line.contains("[1]")));
 
-        // Narrower than 60 columns the preview still wraps inside the card.
+        // Narrower than 60 columns the preview still wraps inside the frame.
         let mut narrow = peer_control("retro", PeerRowStage::AwaitingOperator);
         narrow.retro = Some(RetroPreview {
             contribution: contribution.clone(),
@@ -7033,15 +6123,11 @@ mod tests {
             peer_row_controls: [("retro".to_owned(), narrow)].into_iter().collect(),
             ..Default::default()
         };
-        let narrow =
-            peer_response_card_lines(&pending_peer_response(&conversation).unwrap(), false, 40)
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
+        let narrow = recipient_body(&conversation, &mut TuiState::new(80, 24), 40);
         let preview = narrow
             .iter()
             .skip(1)
-            .take_while(|line| line.starts_with("  "))
+            .take(narrow.len() - 2)
             .cloned()
             .collect::<Vec<_>>();
         assert!(
@@ -7062,21 +6148,17 @@ mod tests {
             peer_row_controls: [("plain".to_owned(), plain)].into_iter().collect(),
             ..Default::default()
         };
-        let pending = pending_peer_response(&conversation).unwrap();
-        assert!(pending.retro.is_none());
-        let plain_text = joined(
-            &peer_response_card_lines(&pending, false, 60)
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
+        let plain_text = joined(&recipient_body(
+            &conversation,
+            &mut TuiState::new(80, 24),
+            60,
+        ));
         assert!(!plain_text.contains("Shares"), "{plain_text}");
         assert!(!plain_text.contains("Not shared"), "{plain_text}");
     }
 
     #[test]
-    fn story_card_summary_uses_control_only_at_floor_width() {
-        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card;
+    fn story21_6_attached_story_summary_uses_control_at_floor_width() {
         use crate::domain::models::{PeerRowStage, StorySummary};
         let summary = "8 stories, 2 assigned to you";
         for expected in [
@@ -7092,42 +6174,18 @@ mod tests {
                 peer_row_controls: [("story".to_owned(), control)].into_iter().collect(),
                 ..Default::default()
             };
-            let pending = pending_peer_response(&conversation).unwrap();
-            let lines = peer_response_card_lines(&pending, false, 58);
-            let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let text = recipient_body(&conversation, &mut TuiState::new(80, 24), 58);
             if let Some(expected) = expected {
                 assert_eq!(text[1], expected);
             } else {
                 assert!(!text.iter().any(|line| line.contains(summary)));
-            }
-            let pane = ratatui::layout::Rect::new(0, 0, 60, 12);
-            let mut buffer = ratatui::buffer::Buffer::empty(pane);
-            render_bottom_anchored_decision_card(
-                &mut buffer,
-                lines,
-                ratatui::style::Color::Reset,
-                pane,
-            );
-            let rendered = (0..pane.height)
-                .map(|y| {
-                    (0..pane.width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if let Some(expected) = expected {
-                assert!(rendered.contains(expected));
-            } else {
-                assert!(!rendered.contains(summary));
             }
         }
     }
 
     /// Story 19.23 AC5(a,c): one compact host line under header + story summary.
     #[test]
-    fn story19_23_card_selection_line_at_floor_width() {
-        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card;
+    fn story21_6_attached_selection_line_at_floor_width() {
         use crate::domain::models::{
             PeerRowStage, ReceivedSelection, SelectionSummary, StoryKey, StorySummary,
         };
@@ -7161,42 +6219,19 @@ mod tests {
                 peer_row_controls: [("selection".to_owned(), control)].into_iter().collect(),
                 ..Default::default()
             };
-            let pending = pending_peer_response(&conversation).unwrap();
-            let lines = peer_response_card_lines(&pending, false, 58);
-            let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let text = recipient_body(&conversation, &mut TuiState::new(80, 24), 58);
             assert!(text[0].ends_with(" · nina"), "{text:?}");
             assert_eq!(text[1], "2 stories");
             match expected {
                 Some(expected) => {
                     assert_eq!(text[2], expected);
-                    assert_eq!(text.len(), 5, "{text:?}");
+                    assert_eq!(text.len(), 4, "{text:?}");
                 }
                 None => {
-                    assert_eq!(text.len(), 4, "{text:?}");
+                    assert_eq!(text.len(), 3, "{text:?}");
                     assert_eq!(text[2], format!("Peer draft: {spoof}"));
                     assert!(!text.iter().any(|line| line == spoof), "{text:?}");
                 }
-            }
-            let pane = ratatui::layout::Rect::new(0, 0, 60, 12);
-            let mut buffer = ratatui::buffer::Buffer::empty(pane);
-            render_bottom_anchored_decision_card(
-                &mut buffer,
-                lines,
-                ratatui::style::Color::Reset,
-                pane,
-            );
-            let rendered = (0..pane.height)
-                .map(|y| {
-                    (0..pane.width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>();
-            if let Some(expected) = expected {
-                assert!(
-                    rendered.iter().any(|row| row.contains(expected)),
-                    "{rendered:?}"
-                );
             }
         }
     }
@@ -7742,7 +6777,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_enter_remains_a_model_turn_while_a_peer_card_is_pending() {
+    fn story21_6_attached_ordinary_enter_remains_a_model_turn_with_queued_recipient() {
         use crate::domain::models::PeerRowStage;
         use crossterm::event::KeyCode;
 
@@ -7756,9 +6791,14 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        assert!(pending_peer_response(&conversation).is_some());
 
         let mut state = TuiState::new(80, 24);
+        crate::adapters::tui::decision_queue::sync_recipient_drafts(
+            &mut state,
+            &conversation,
+            false,
+        );
+        assert_eq!(state.decisions.len(), 1);
         state.input_buffer = "ordinary model question".to_owned();
         state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -7775,7 +6815,7 @@ mod tests {
         );
         assert!(state.pinned_peer_compose.is_none());
         assert!(rx.try_recv().is_err());
-        assert!(pending_peer_response(&conversation).is_some());
+        assert_eq!(state.decisions.len(), 1);
     }
 
     fn paint_received_surface(state: &mut TuiState) -> String {
@@ -8196,7 +7236,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_classification_uses_host_controls_even_when_bodies_disagree() {
+    fn story21_6_attached_recipient_classification_uses_host_controls() {
         use crate::adapters::daemon::response_modes::{
             AWAITING_RESPONSE_PLACEHOLDER, DRAFT_APPROVAL_PREFIX, DRAFTING_PLACEHOLDER,
         };
@@ -8236,19 +7276,38 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        let pending = pending_peer_response(&conversation).expect("a pending exists");
-        assert_eq!(pending.node, "node-a", "FIFO is message order");
-        assert_eq!(pending.stage, PeerResponseStage::AwaitingOperator);
-        assert_eq!(pending.queued, 2, "settled rows never classify as pending");
+        use crate::adapters::tui::decision_queue::{self, DecisionSubject, RecipientDraftStage};
+        let mut state = TuiState::new(80, 24);
+        decision_queue::sync_recipient_drafts(&mut state, &conversation, false);
+        let items = state.decisions.items().collect::<Vec<_>>();
+        assert_eq!(
+            items.len(),
+            2,
+            "drafting and settled rows do not require a decision"
+        );
+        assert!(
+            matches!(&items[0].subject, DecisionSubject::RecipientDraft(p)
+            if p.node == "node-a" && p.stage == RecipientDraftStage::AwaitingOperator)
+        );
+        assert!(
+            matches!(&items[1].subject, DecisionSubject::RecipientDraft(p)
+            if p.node == "node-c" && p.stage == RecipientDraftStage::Ready("draft body".into()))
+        );
     }
 
     #[test]
-    fn no_pending_rows_means_no_card() {
+    fn story21_6_attached_no_pending_rows_means_no_recipient_item() {
         let conversation = Conversation {
             messages: vec![peer_row("peer-response-node-d", "already sent")],
             ..Default::default()
         };
-        assert_eq!(pending_peer_response(&conversation), None);
+        let mut state = TuiState::new(80, 24);
+        crate::adapters::tui::decision_queue::sync_recipient_drafts(
+            &mut state,
+            &conversation,
+            false,
+        );
+        assert_eq!(state.decisions.len(), 0);
     }
 
     #[test]
@@ -10570,7 +9629,7 @@ mod attached_parity_tests {
         );
         let mut requests = AttachedTeamRequests::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let busy = attached_proposal_higher_confirmation(&state);
+        let busy = attached_higher_confirmation(&state);
         preview(&mut state, &mut requests, true, busy, &tx);
         assert!(decision_queue::team_retract_pending(&state));
         assert_eq!(requests.open_retract.as_deref(), Some("retract"));

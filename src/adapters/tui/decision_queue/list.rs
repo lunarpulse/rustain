@@ -15,15 +15,21 @@ use crate::adapters::tui::presentation::{self, Surface};
 use crate::adapters::tui::state::TuiState;
 
 /// What the host must do after a key on the list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListOutcome {
     Consumed,
     /// `Ctrl+Q`: run the host's S-QUIT guard.
     Quit,
+    /// Switch to a proposal's origin, then open its decision.
+    OpenTab {
+        conversation_id: String,
+        key: DecisionKey,
+    },
 }
 
 /// Open the list over whatever is open. False when nothing waits.
 pub fn open_list(state: &mut TuiState, _facts: &LogFacts) -> bool {
+    super::reply::refresh(state);
     if state.decisions.is_empty() {
         return false;
     }
@@ -85,22 +91,39 @@ pub fn handle_list_key(
             let next = state.decisions.items().nth(moved).map(DecisionItem::key);
             state.decisions.list_selected = next;
         }
-        Some(OverlayCmd::QueueOpen) => open_selected(state, facts),
+        Some(OverlayCmd::QueueOpen) => {
+            if let Some(outcome) = open_selected(state, facts) {
+                return outcome;
+            }
+        }
         _ => {}
     }
     ListOutcome::Consumed
 }
 
-/// Open the selected row's item as its own frame, in place of the list. A row of
-/// another tab is passive: it shows where to go and never opens here.
-fn open_selected(state: &mut TuiState, facts: &LogFacts) {
-    let Some(item) = state.decisions.items().nth(selected_index(state)) else {
-        return;
-    };
-    if !(item.is_stale() || item.actionable(facts)) {
-        return;
+/// Open the selected row in place of the list, or ask the local host to switch tabs.
+fn open_selected(state: &mut TuiState, facts: &LogFacts) -> Option<ListOutcome> {
+    let item = state.decisions.items().nth(selected_index(state))?;
+    if !item.actionable(facts) && !item.is_stale() {
+        if item.kind == super::DecisionKind::TeamProposal {
+            return item
+                .conversation_id
+                .clone()
+                .map(|conversation_id| ListOutcome::OpenTab {
+                    conversation_id,
+                    key: item.key(),
+                });
+        }
+        return None;
     }
     let key: DecisionKey = item.key();
+    if key.kind == super::DecisionKind::ReplyArrived {
+        super::reply::refresh(state);
+        if !state.decisions.contains_key(&key) {
+            return None;
+        }
+    }
     presentation::reducer::close(state, Surface::DecisionQueue);
     presentation::reducer::focus_decision(state, key);
+    None
 }
