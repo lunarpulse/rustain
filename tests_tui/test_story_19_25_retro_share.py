@@ -21,7 +21,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
-from decision_frame_helpers import has_row, open_recipient, recipient_text, view_recipient, wait_frame
+from decision_frame_helpers import has_row, open_recipient, recipient_text, view_recipient, wait_frame_resending
 
 
 def _logical(screen):
@@ -131,7 +131,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         sender, recipient = clients["A"], clients["B"]
         question = "Could you review the handoff?"
         _command(sender, "/team send --type consultation B " + question)
-        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
+        wait_frame_resending(recipient, "Decision: Peer consent", ("[a] Always allow",), sender,
+                             lambda: _command(sender, "/team send --type consultation B " + question))
         recipient.send("a")
         screen = open_recipient(recipient)
         assert has_row(screen, "consultation · A"), screen

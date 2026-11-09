@@ -20,7 +20,9 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
-from decision_frame_helpers import has_row, open_recipient, view_recipient, wait_frame
+from decision_frame_helpers import (
+    defer_frame, has_row, open_recipient, view_recipient, wait_frame_resending,
+)
 
 
 def _exercise(binary, evidence, root, monkeypatch):
@@ -124,13 +126,14 @@ def _exercise(binary, evidence, root, monkeypatch):
             clients[alias] = tui
         sender, recipient = clients["A"], clients["B"]
         _command(sender, "/team send B consent-setup")
-        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
+        wait_frame_resending(recipient, "Decision: Peer consent", ("[a] Always allow",), sender,
+                             lambda: _command(sender, "/team send B consent-setup"))
         recipient.send("a")
         open_recipient(recipient)
         setup = [row for row in _events(worlds["B"][0], "recipient_item_received") if row["content"] == "consent-setup"]
         assert len(setup) == 1, setup
         setup_item = setup[0]["address"]["item"]
-        recipient.send("\x1b")
+        defer_frame(recipient)
         _command(recipient, f"/team reply {setup_item} setup-complete")
         _wait_screen(recipient, lambda screen: has_row(screen.lower(), "reply recorded") and not has_row(screen, "Needs you ("),
                      "setup item resolved before assignment decision")

@@ -19,6 +19,7 @@ import harness
 from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command
+from decision_frame_helpers import open_recipient
 
 NOTICE = "[cancelled] This request was cancelled before you answered; no response was sent."
 
@@ -227,7 +228,6 @@ def _inbound(stack, binary, root, stub, evidence):
     initial = _rpc(endpoint, "message/send", _message(task))
     (evidence / "inbound-send.json").write_text(json.dumps(initial, indent=2) + "\n")
     approved = False
-    opened = False
     deadline = time.monotonic() + 45
     while True:
         screen = tui.get_screen_text()
@@ -237,12 +237,9 @@ def _inbound(stack, binary, root, stub, evidence):
             _stable_decision(tui, "Decision: Peer consent", "[a] Always allow")
             tui.send("a")
             approved = True
-        elif approved and not opened and "Needs you (" in screen and "Decision:" not in screen:
-            tui.send("\x18q")
-            _screen(tui, lambda value: "Recipient draft" in value and "Needs you" in value,
-                    "queued recipient decision")
-            tui.send("\r")
-            opened = True
+        elif approved:
+            open_recipient(tui)
+            break
         assert time.monotonic() < deadline, f"inbound pending decision:\n{screen}"
     screen = _stable_decision(tui, "Decision: Recipient draft", "[w] My own")
     assert "Peer is waiting for your response." in screen, screen

@@ -21,7 +21,7 @@ from fixtures.scene_provider import SceneStub
 from test_story_19_20b_rap_one_way import _StructuralTUI as _RapStructuralTUI, _sha256, _stop
 from test_story_19_21_act1_distribution import _command, _events
 from test_story_19_21c_attached_parity import _wait_screen
-from decision_frame_helpers import has_row, open_recipient, view_recipient, wait_frame
+from decision_frame_helpers import has_row, open_recipient, view_recipient, wait_frame_resending
 
 
 class _StructuralTUI(_RapStructuralTUI):
@@ -145,7 +145,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             clients[alias] = tui
         sender, recipient = clients["A"], clients["B"]
         _command(sender, "/team send B consent-setup")
-        wait_frame(recipient, "Decision: Peer consent", ("[a] Always allow",))
+        wait_frame_resending(recipient, "Decision: Peer consent", ("[a] Always allow",), sender,
+                             lambda: _command(sender, "/team send B consent-setup"))
         recipient.send("a")
         _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
                      "recipient accepted setup")

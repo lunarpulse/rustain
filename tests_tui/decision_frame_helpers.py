@@ -56,63 +56,89 @@ def wait_frame(tui, title, rail, timeout=45):
         assert now < deadline, f"stable {title}:\n{screen}"
 
 
-def open_decision(tui, kind, rail, timeout=45):
-    """Open a selected queued decision, then wait out its structural inert window."""
-    title = "Decision: " + kind
+def _open_queued(tui, title, rail, kinds, timeout, blocked=lambda screen: False):
+    """Present a decision: it may already be a frame, or sit behind the Needs-you chip.
+
+    Ctrl+X q and Enter are sent only on a painted screen that has been unchanged for
+    600 ms, and are asked again every 2 s while the list/frame has not appeared: a key
+    pressed while the previous decision is still settling with the daemon is dropped.
+    """
     deadline = time.monotonic() + timeout
-    phase = "waiting"
+    previous = since = asked = entered = None
     while True:
         screen = tui.get_screen_text()
         assert "unavailable in this session" not in screen, screen
         if _frame(screen, title, rail):
-            return wait_frame(tui, title, rail, timeout)
-        if phase == "waiting" and has_row(screen, "Needs you (") and has_row(screen, "^X q"):
-            tui.send("\x18q")
-            phase = "list"
-        if phase == "list":
-            lines = screen.splitlines()
-            start = next((i for i, line in enumerate(lines)
-                          if line.strip().startswith("┌ Needs you ")), None)
-            end = next((i for i in range(start + 1, len(lines))
-                        if lines[i].strip().startswith("└") and lines[i].strip().endswith("┘")),
-                       None) if start is not None else None
-            frame = lines[start:end + 1] if end is not None else ()
-            list_rail = any("[Enter] Open" in line for line in frame)
+            return screen
+        now = time.monotonic()
+        if screen != previous:
+            previous, since = screen, now
+        stable = now - since >= 0.6
+        if _frame(screen, "Needs you", ("[Enter] Open",)):
             selected = any(
-                line.strip().lstrip("│ ").startswith(("▸ " + kind + " ·", "▶ " + kind + " ·"))
-                for line in frame
+                row.strip().lstrip("│ ").startswith(tuple(f"{mark} {kind} ·" for kind in kinds for mark in ("▸", "▶")))
+                for row in screen.splitlines()
             )
-            if frame and list_rail and selected:
+            if selected and stable and (entered is None or now - entered >= 2.0):
                 tui.send("\r")
-                phase = "opening"
-        assert time.monotonic() < deadline, f"{title} arrival:\n{screen}"
+                entered = now
+        elif (stable and not blocked(screen) and has_row(screen, "Needs you (")
+              and has_row(screen, "^X q") and (asked is None or now - asked >= 2.0)):
+            tui.send("\x18q")
+            asked = now
+        assert now < deadline, f"{title} arrival:\n{screen}"
+
+
+def open_decision(tui, kind, rail, timeout=45):
+    """Open a selected queued decision, then wait out its structural inert window."""
+    title = "Decision: " + kind
+    _open_queued(tui, title, rail, (kind,), timeout)
+    return wait_frame(tui, title, rail, timeout)
 
 
 def open_recipient(tui, timeout=45):
     """Open the current recipient draft whether it preempted or accumulated."""
-    deadline = time.monotonic() + timeout
-    while True:
-        screen = tui.get_screen_text()
-        assert "unavailable in this session" not in screen, screen
-        if _frame(screen, "Decision: Recipient draft", ("[v] View item",)):
-            break
-        if (not has_row(screen, "Decision: Peer consent")
-                and has_row(screen, "Needs you (") and has_row(screen, "^X q")):
-            tui.send("\x18q")
-            while True:
-                screen = tui.get_screen_text()
-                if _frame(screen, "Needs you", ("[Enter] Open",)) and any(
-                    row.strip().lstrip("│ ").startswith(("▸ Recipient draft ·", "▶ Recipient draft ·"))
-                    for row in screen.splitlines()
-                ):
-                    tui.send("\r")
-                    break
-                assert time.monotonic() < deadline, f"recipient queue item:\n{screen}"
-            break
-        assert time.monotonic() < deadline, f"recipient decision arrival:\n{screen}"
+    _open_queued(tui, "Decision: Recipient draft", ("[v] View item",), ("Recipient draft",), timeout,
+                 blocked=lambda screen: has_row(screen, "Decision: Peer consent"))
     return wait_frame(tui, "Decision: Recipient draft", ("[v] View item",), timeout)
 
 
 def view_recipient(tui):
     """Open the associated RecipientSurface without resolving the decision."""
     tui.send("v")
+
+
+def defer_frame(tui, title="Decision: Recipient draft", timeout=15):
+    """Esc a presented frame and wait until it is gone, so a following paste is not eaten.
+
+    An Esc left in the PTY buffer directly ahead of a bracketed paste (`ESC ESC [ 2 0 0 ~`)
+    is parsed as one Alt sequence and the paste arrives as literal text.
+    """
+    tui.send("\x1b")
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = tui.get_screen_text()
+        if not has_row(screen, title):
+            return screen
+        assert time.monotonic() < deadline, f"{title} stayed after Esc:\n{screen}"
+
+
+def wait_frame_resending(tui, title, rail, sender, resend, timeout=45, resends=4):
+    """wait_frame for an arrival whose send may be refused while the peer card is uncached.
+
+    The sender states the refusal itself (`AgentCard is not cached` — discovery runs once
+    at startup); only then is the identical command sent again, once per new refusal.
+    """
+    deadline = time.monotonic() + timeout * (resends + 1)
+    handled = 0
+    while True:
+        try:
+            return wait_frame(tui, title, rail, timeout=3)
+        except AssertionError:
+            pass
+        refused = "".join(c for c in sender.get_screen_text() if c not in "│┃ \n").count("AgentCardisnotcached")
+        if refused > handled and resends > 0:
+            handled = refused
+            resends -= 1
+            resend()
+        assert time.monotonic() < deadline, f"stable {title}:\n{tui.get_screen_text()}"
