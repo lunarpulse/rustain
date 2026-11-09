@@ -589,39 +589,52 @@ notify-and-auto arrival includes `Open: /team view <item-id>` when the response
 has a journal-backed item. An attached recipient decision's **View item** action
 opens its associated item; use `Ctrl+X q` to open a queued decision first.
 
-The Info reader pins the explicitly opened item. Its canonical type, current
-principal label, raw body-byte manifest and full available body are scrollable;
-the thread root remains separately identified. The opened body appears once,
-not again in its chronological row. Missing ids refuse; removed bodies remain
+The thread window (S-THREAD, Story 21.8) pins the explicitly opened item in one
+frame on the shared modal stack, the same frame in the local TUI and in
+`rustain daemon attach`. Its title is `Thread · <type>`; the item id, its
+canonical type, current principal label, raw body-byte manifest and full
+available body are scrollable, and the thread root remains separately
+identified. The opened body appears once, not again in its chronological row.
+Missing ids refuse with a warning notice and open nothing; removed bodies remain
 unavailable. Unknown legacy types use a fixed disclosure, not body-derived type.
+
+The window does not take over the keyboard: `Ctrl+X` (menu, help, notifications,
+Needs-you list), `Ctrl+P` and `Ctrl+Q` work above it, `Esc` or `Ctrl+C` closes
+it and returns to exactly what it covered, and keys it does not bind never reach
+the composer, the transcript or a card. It never moves focus, the transcript or
+the composer. Opening a second item retargets the one window.
 
 Each local page reserves the root and opened item, deduplicated within the
 50-turn/896-KiB bounds, then retains remaining turns chronologically. Bodies over
 64 KiB and display-expanded turns over 448 KiB are withheld with metadata, not
 silently clipped. `[p] Earlier` and `[l] Newer` deliberately read local journal
-pages; PgUp/PgDn scroll within the page. Header/footer remain outside the scroll
-area, including the 60×16 floor. No read/page acknowledges, sends, selects model
-context, contacts a peer or creates a model request.
+pages (painted only when such a page exists); `j`/`k`, `PgUp`/`PgDn`, `Ctrl+D`/`Ctrl+U`,
+`g`/`G` and the wheel scroll within the page. The identity rows and the key rail
+stay outside the scroll area, including the 60×16 floor. No read/page
+acknowledges, sends, selects model context, contacts a peer or creates a model
+request.
 
 At a byte-saturated pinned page, root/linked-turn bodies can be unavailable on
 that page while their metadata remains readable; the opened body stays pinned
 and earlier/newer navigation advances actual linked turns within the same caps.
 
-For an item-backed card, Tab switches between Item actions and its verified
-response-node target when that target exists. The full Ready draft is scrollable;
-Respond/Edit require empty input and pin the exact target before returning to
-composition. Read-only observers cannot mutate either target. Offline sessions
-show local-view-only controls.
+The attached writer's rail is generated from the same registry rows as the keys
+and offers only what that item allows now (reply, discuss, busy, acknowledge,
+accept, share status or retrospective, decline, leave out, use as context);
+a key the rail does not show does nothing. Read-only observers cannot mutate;
+offline (local) sessions show local-view-only controls. A peer draft's
+approve/edit/reject decision belongs to the Needs-you decision frame, whose
+**View item** opens this window.
 
-Native confirmations take priority over an open reader, including the complete
-proposed plan and its approval controls. Rejecting the plan resumes the same
-pinned reader; opening a reader never accepts a hidden confirmation.
+Native confirmations stack above an open window, including the complete
+proposed plan and its approval controls; closing or answering them returns to
+the same window.
 
 ### Explicit item-backed model context
 
-`/team context <item-id>` or `[c] Use as context` selects only that received
+`/team context <item-id>` or `[u] Use as context` selects only that received
 body, by its existing principal/item reference. It does not adopt the displayed
-thread or replies. `[c] Stop using` and `/team context off <item-id>` remove
+thread or replies. `[u] Stop using as context` and `/team context off <item-id>` remove
 the reference prospectively, including when its content became unavailable.
 An unselected id is a truthful no-op. Retracted text remains available with its
 mark; removed or withheld content is unavailable.
@@ -721,7 +734,9 @@ process is an idempotent no-op; after restart it is refused as already settled.
 On restart, turns and follow-up links are rebuilt from the journal; the waiting
 node still fails, but the item remains answerable with `/team reply`.
 
-On an attached consultation card, Tab explicitly opens Item actions. `[b] Busy
+On an attached consultation item, open the queued recipient decision with
+`Ctrl+X q` and press `v` View item to open the item in the thread window.
+`[b] Busy
 — defer 30m` and `/team defer` use the same trusted-local writer/room-content
 gate and journal-backed item lookup. Confirmation follows the durable append.
 The pending real-answer card, draft buffer and waiting task remain unchanged;
@@ -731,15 +746,18 @@ while a live draft is composing.
 Defer requires the `a2a` feature, just like the existing item-reply command;
 a build without it refuses without recording an unservable turn.
 
-Outside the explicitly focused item/response surface, `y/e/n/b` are ordinary
-input and Enter does not implicitly answer the FIFO head. Respond and Edit
-require an empty composer, pin their target, and return to Input; `/team` and
-`/clear` take precedence over that target. Esc closes the surface and restores
-the frozen input; Ctrl+C also closes it and Ctrl+D is inert there — neither detaches (detach is `Ctrl+X d` or `/detach`). Only
-unmodified lowercase Press events invoke surface actions; reported Repeat,
-Release and modified action letters cannot mutate the item.
+Outside the thread window, `y/e/n/b` are ordinary input and Enter does not
+implicitly answer the FIFO head. Approve, Edit, Reject and My own belong only to
+the Needs-you recipient decision frame, not to the thread window. In the thread
+window, item `r` and `d` keep the interim composer prefill (`/team reply <id> `
+and `/team reply --discuss <id> `): they are refused while the composer holds
+text, otherwise they prefill the composer and close the window. Ctrl+D and
+Ctrl+U scroll the thread body half a page. Esc closes the window (back one
+frame); Ctrl+C also closes it and never detaches (detach is `Ctrl+X d` or
+`/detach`). Only unmodified lowercase Press events invoke thread actions;
+reported Repeat, Release and modified action letters cannot mutate the item.
 
-On an architecture-update Item surface, `[a] Acknowledge` records receipt and
+On an architecture-update thread window, `[a] Acknowledge` records receipt and
 `[d] Discuss` seeds an explicit `/team reply <item-id>` composition. Ack confirms
 only after its durable append; a repeated/raced Ack reports already recorded
 without another append. Its hint disappears after acknowledgement. It does not
@@ -748,8 +766,8 @@ resolve a pending answer or select model context.
 On a readable story-list Item surface, `[d] Discuss concerns` seeds
 `/team reply --discuss <item-id> `. When the item names you as a story's
 holder, `[y] Accept` records the same verdict as the typed accept form. A live
-Drafting card offers neither verdict; Ready keeps Approve/Edit/Reject instead of
-the Accept key.
+Drafting card offers neither verdict; a Ready draft is decided in the Needs-you
+recipient decision frame (Approve/Edit/Reject/My own), never by the Accept key.
 Settled items remain answerable from their View, including NotifyAndAuto items,
 but no automatic verdict is produced. Verdicts are human-written,
 human-decided reply turns: they never acknowledge the item, change its state,
@@ -763,9 +781,9 @@ Action results carry their originating action and item/node target. Each
 pending marker survives closing/reopening the reader until its own outcome;
 unrelated completions cannot clear it. Item-turn outcomes show the recorded turn
 and pull-only disclosure. Applied node actions without a turn, settled no-ops
-and refusals remain distinct. Stale/refused reply composition retains its text
-and explicit target; an idempotent Ack consumes its command rather than
-restoring it as unsent reply text.
+and refusals remain distinct. A refused reply prefill retains the composer text;
+an idempotent Ack consumes its command rather than restoring it as unsent reply
+text.
 
 Reply-kind metadata is additive. Missing journal `kind` means Answer and
 Answer omits the field; Defer uses `{"type":"defer","minutes":30}`. Served

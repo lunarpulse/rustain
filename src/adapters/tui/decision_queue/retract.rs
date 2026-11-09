@@ -105,6 +105,37 @@ pub fn confirmation_pending(state: &TuiState) -> bool {
     .any(|kind| state.decisions.presenting(kind))
 }
 
+/// True while any confirmation-class decision, or a team proposal, is presenting: a second
+/// attached retract preview is refused while one is (the sweep the retract refusal has always
+/// counted).
+#[must_use]
+pub fn higher_confirmation_presenting(state: &TuiState) -> bool {
+    [
+        DecisionKind::Permission,
+        DecisionKind::PlanCard,
+        DecisionKind::PlanApproval,
+        DecisionKind::PlanDeviation,
+        DecisionKind::SkipCascade,
+        DecisionKind::CancelPlan,
+        DecisionKind::Delegation,
+        DecisionKind::SkillTrust,
+        DecisionKind::SpawnGate,
+        DecisionKind::Consolidation,
+        DecisionKind::Forget,
+        DecisionKind::ArtifactApply,
+        DecisionKind::ArtifactResolve,
+        DecisionKind::PeerAdd,
+        DecisionKind::TeamRetract,
+        DecisionKind::Fork,
+        DecisionKind::Rewind,
+        DecisionKind::ExportOverwrite,
+        DecisionKind::LargeImage,
+    ]
+    .into_iter()
+    .any(|kind| state.decisions.presenting(kind))
+        || super::team_proposal_presenting(state)
+}
+
 /// The attached preview request settled elsewhere (answered, refused, the daemon closed
 /// it): its item leaves the queue, or turns stale while its frame is open.
 pub fn withdraw_team_retract_request(state: &mut TuiState, request: &str) {

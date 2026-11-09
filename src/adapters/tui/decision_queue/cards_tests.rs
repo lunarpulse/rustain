@@ -1247,7 +1247,7 @@ fn raw_key(
 #[test]
 fn story21_6_raw_ingress_every_deciding_key_needs_a_plain_press() {
     use crate::adapters::tui::app::{
-        convert_crossterm_event, handle_operator_input, recipient_surface_ignores_raw_key,
+        convert_crossterm_event, frame_ignores_raw_key, handle_operator_input,
     };
     use crate::adapters::tui::keymap::Host;
     use DecisionEffect as E;
@@ -1359,7 +1359,7 @@ fn story21_6_raw_ingress_every_deciding_key_needs_a_plain_press() {
             let (mut state, mut grant) = build(kind);
             let at = format!("{kind:?} {code:?} {modifiers:?} {key_kind:?}");
             let event = raw_key(code, modifiers, key_kind);
-            assert!(recipient_surface_ignores_raw_key(&state, &event), "{at}");
+            assert!(frame_ignores_raw_key(&state, &event), "{at}");
             let domain = convert_crossterm_event(&event, &mouse).expect("a key converts");
             assert_eq!(
                 handle_operator_input(&mut state, &event, &domain),
@@ -1380,7 +1380,7 @@ fn story21_6_raw_ingress_every_deciding_key_needs_a_plain_press() {
         let (mut state, _grant) = build(kind);
         let event = raw_key(code, M::NONE, KeyEventKind::Press);
         let at = format!("{kind:?} {code:?} plain press");
-        assert!(!recipient_surface_ignores_raw_key(&state, &event), "{at}");
+        assert!(!frame_ignores_raw_key(&state, &event), "{at}");
         let domain = convert_crossterm_event(&event, &mouse).expect("a key converts");
         assert!(
             handle_operator_input(&mut state, &event, &domain).is_some(),

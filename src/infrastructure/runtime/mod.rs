@@ -15,7 +15,6 @@ pub(crate) mod notice_actions;
 pub(crate) mod panel_bridge;
 pub mod peer_bridge;
 pub(crate) mod quit_guard;
-pub(crate) mod recipient_surface;
 pub mod recipient_view;
 pub(crate) mod recovery_prompt;
 pub mod room_bridge;
@@ -27,6 +26,7 @@ pub(crate) mod task_panel_bridge;
 pub mod team_proposal_bridge;
 #[cfg(unix)]
 pub mod team_send_cli;
+pub mod thread_open;
 pub(crate) mod ticket_bridge;
 pub mod transparency_bridge;
 pub mod tui_turn_lifecycle;

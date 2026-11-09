@@ -232,7 +232,7 @@ async fn a3_k05_selected_design_update_is_compared_locally_and_consultation_is_t
         "arrival under NotifyAndWait asks no provider"
     );
 
-    // `[c] Use as context`: the explicit, removable selection.
+    // `[u] Use as context`: the explicit, removable selection.
     fixture
         .client
         .send_frame(ClientFrame::SetRecipientContext {

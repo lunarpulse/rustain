@@ -109,12 +109,6 @@ const ALLOWLIST: &[Allow] = &[
         "Enter submit · Alt+C copy link · Alt+L copy local link · Esc cancel", "Enter submit · Esc cancel",
         "Enter submit · Alt+C copy code · Alt+U copy link · Esc cancel", "Esc cancel",
     ], OWNER_21_4, "login overlay literals"),
-    // 21-4: a writer's action keys depend on the received item (NAMED EXCLUSION, K9 R5)
-    ("src/adapters/tui/widgets/recipient_surface.rs", &[
-        "[r] Respond", "[d] Discuss", "[b] Busy", "[a] Acknowledge", "[y] Approve", "[e] Edit", "[n] Reject",
-        "[n] Decline", "[s] Share status", "[n] Decline", "[c] Use as context", "[d] Discuss concerns",
-        "[y] Accept", "[s] Share", "[n] Decline", "[c] Stop using as context", "[s] Share with redactions",
-    ], OWNER_21_4, "per-item writer action keys of the recipient surface"),
 ];
 
 // ── scanner ───────────────────────────────────────────────────────────────────

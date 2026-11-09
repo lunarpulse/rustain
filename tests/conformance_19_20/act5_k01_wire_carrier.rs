@@ -113,7 +113,7 @@ async fn assert_surfaces(journal: &Journal, received: &JournalEntry, tags: &str)
     );
     let state = local_view(journal.workspace.path(), address.item().as_str()).await;
     let surface = state
-        .recipient_surface
+        .thread_inspector
         .expect("production /team view opens the real received item");
     let expected = format!("  {} · received{tags}", address.item().as_str());
     assert!(
@@ -254,7 +254,7 @@ async fn act5_k01_policy_delegation_carries_facts_and_log_marks() {
     let row = transparency_row(&retracted).expect("retract has a production log row");
     assert_eq!(row.kind.label(), "item-retracted");
     let view = local_view(host.journal.workspace.path(), &policy_item).await;
-    let surface = view.recipient_surface.expect("retracted item still opens");
+    let surface = view.thread_inspector.expect("retracted item still opens");
     let expected =
         format!("  {policy_item} · received [agent-composed] [auto-sent] · retracted by sender");
     assert!(

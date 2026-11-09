@@ -364,7 +364,7 @@ impl ProposalFixture {
         &mut self,
         event: crossterm::event::Event,
     ) -> Option<rustain::adapters::tui::app::InputAction> {
-        if rustain::adapters::tui::app::recipient_surface_ignores_raw_key(&self.state, &event) {
+        if rustain::adapters::tui::app::frame_ignores_raw_key(&self.state, &event) {
             return None;
         }
         let domain =

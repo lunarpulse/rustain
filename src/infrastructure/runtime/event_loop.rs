@@ -1081,8 +1081,8 @@ pub async fn run(
                             {
                                 palette_gate.sync(&mut state, &mut command_registry, &mut palette_registry, &workspace_path).await;
                             }
-                        } else if presentation::is_open(&state, presentation::Surface::Decision) && crate::adapters::tui::app::recipient_surface_ignores_raw_key(&state, &event) {
-                            // A repeat/release/modified key never decides a permission frame (19.20c).
+                        } else if crate::adapters::tui::app::frame_ignores_raw_key(&state, &event) {
+                            // A repeat/release/modified key never decides a permission frame (19.20c) or acts as a thread writer letter.
                         } else if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
                             let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog)
                                 || presentation::is_open(&state, presentation::Surface::Decision)
@@ -1208,8 +1208,8 @@ pub async fn run(
                                 InputAction::NotificationLog(outcome) => {
                                     notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
                                 }
-                                InputAction::RecipientThreadPage { earlier } => {
-                                    if let Err(error) = super::recipient_surface::navigate_received_surface(&workspace_path, None, &mut state, earlier).await {
+                                InputAction::ThreadPage { earlier } => {
+                                    if let Err(error) = super::thread_open::navigate(&workspace_path, None, &mut state, earlier).await {
                                         tracing::warn!(%error, "received-thread page unavailable");
                                     }
                                 }
@@ -7480,7 +7480,6 @@ pub fn render(
     let mut visible_feedback_rows = Vec::new();
     state.restore_unflushed_log_visits();
 
-    let recipient_blocked = crate::adapters::tui::app::recipient_higher_confirmation_active(state);
     let permission_mode = security.current_mode();
     let leader_tail = crate::adapters::tui::app::status_tail(state);
 
@@ -7489,28 +7488,28 @@ pub fn render(
     let mut decision_painted = false;
     let mut rendered_hint = None;
     terminal.draw(|frame| {
-    let wave_frame_open = presentation::is_open(state, presentation::Surface::WaveOverlay);
-    let TuiState {
-        ref feedback_blocks,
-        ref theme,
-        ref status,
-        ref token_usage,
-        ref input_buffer,
-        cursor_position,
-        ref focus,
-        has_project_context,
-        multiline_mode,
-        input_scroll_offset,
-        ref search_state,
-        active_profile: ref _active_profile,
-        ref selected_model,
-        ref image_indicator,
-        density_mode,
-        sidebar_visible,
-        ..
-    } = *state;
+        let wave_frame_open = presentation::is_open(state, presentation::Surface::WaveOverlay);
+        let TuiState {
+            ref feedback_blocks,
+            ref theme,
+            ref status,
+            ref token_usage,
+            ref input_buffer,
+            cursor_position,
+            ref focus,
+            has_project_context,
+            multiline_mode,
+            input_scroll_offset,
+            ref search_state,
+            active_profile: ref _active_profile,
+            ref selected_model,
+            ref image_indicator,
+            density_mode,
+            sidebar_visible,
+            ..
+        } = *state;
 
-    let display_model = selected_model.as_deref().unwrap_or(config_model);
+        let display_model = selected_model.as_deref().unwrap_or(config_model);
         let area = frame.area();
 
         match layout::compute_layout(
@@ -7523,7 +7522,12 @@ pub fn render(
         ) {
             Some(app_layout) => {
                 let mut shell = presentation::Shell::new(area, &app_layout);
-                shell.stage = tab_manager_for_bar.map(|tm| (conversation, tm.active_tab().session_meta.bookmarks.as_slice()));
+                shell.stage = tab_manager_for_bar.map(|tm| {
+                    (
+                        conversation,
+                        tm.active_tab().session_meta.bookmarks.as_slice(),
+                    )
+                });
                 let _is_compact = area.width < 80 || area.height < 24;
 
                 let mut opaque = presentation::occlusion::OpaqueRects::new(app_layout.chat_pane);
@@ -7621,20 +7625,32 @@ pub fn render(
                         }
                         Some(crate::domain::models::visual::PanelType::TransparencyLog) => {
                             crate::adapters::tui::widgets::transparency_panel::render(
-                                sidebar_area, frame.buffer_mut(), &mut state.transparency_panel,
-                                state.sidebar_selected, &state.focus, theme,
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                &mut state.transparency_panel,
+                                state.sidebar_selected,
+                                &state.focus,
+                                theme,
                             );
                         }
                         Some(crate::domain::models::visual::PanelType::Room) => {
                             crate::adapters::tui::widgets::room_panel::render(
-                                sidebar_area, frame.buffer_mut(), &mut state.room_panel,
-                                state.sidebar_selected, &state.focus, theme,
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                &mut state.room_panel,
+                                state.sidebar_selected,
+                                &state.focus,
+                                theme,
                             );
                         }
                         Some(crate::domain::models::visual::PanelType::Artifacts) => {
                             crate::adapters::tui::widgets::artifacts_panel::render(
-                                sidebar_area, frame.buffer_mut(), &mut state.artifacts_panel,
-                                state.sidebar_selected, &state.focus, theme,
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                &mut state.artifacts_panel,
+                                state.sidebar_selected,
+                                &state.focus,
+                                theme,
                             );
                         }
                     }
@@ -7717,8 +7733,12 @@ pub fn render(
                         // Dashboard density (Story 18.3a AC1).
                         Some(crate::domain::models::visual::PanelType::Room) => {
                             crate::adapters::tui::widgets::room_panel::render(
-                                panel_area, frame.buffer_mut(), &mut state.room_panel,
-                                state.sidebar_selected, &state.focus, theme,
+                                panel_area,
+                                frame.buffer_mut(),
+                                &mut state.room_panel,
+                                state.sidebar_selected,
+                                &state.focus,
+                                theme,
                             );
                         }
                         // Hand-written, NOT compiler-surfaced, for the same
@@ -7729,8 +7749,12 @@ pub fn render(
                         // AC3, headline mutant).
                         Some(crate::domain::models::visual::PanelType::Artifacts) => {
                             crate::adapters::tui::widgets::artifacts_panel::render(
-                                panel_area, frame.buffer_mut(), &mut state.artifacts_panel,
-                                state.sidebar_selected, &state.focus, theme,
+                                panel_area,
+                                frame.buffer_mut(),
+                                &mut state.artifacts_panel,
+                                state.sidebar_selected,
+                                &state.focus,
+                                theme,
                             );
                         }
                         _ => {
@@ -7916,12 +7940,16 @@ pub fn render(
                         focused_match_opt,
                         search_state.matches.as_slice(),
                         bookmark_indices,
-                        crate::adapters::tui::handlers::plan_card::pending_plan_id(&state.decisions, &conversation.id),
+                        crate::adapters::tui::handlers::plan_card::pending_plan_id(
+                            &state.decisions,
+                            &conversation.id,
+                        ),
                         liveness_ref,
                         open_prose_ref,
                         chat_pane::ToolFocus {
                             current: state.focused_item_id.as_deref(),
-                            inspector_marker: state.focus == FocusState::Chat && state.modal_stack.is_empty(),
+                            inspector_marker: state.focus == FocusState::Chat
+                                && state.modal_stack.is_empty(),
                             blocks: true,
                         },
                     );
@@ -7942,14 +7970,6 @@ pub fn render(
                     wave_frame_open,
                 ));
 
-                if !recipient_blocked {
-                    if let Some(surface) = state.recipient_surface.as_mut() {
-                        opaque.host(crate::adapters::tui::widgets::recipient_surface::render_recipient_surface(
-                            frame, app_layout.chat_pane, surface, &state.recipient_actions, &[None; 6], None, true, theme,
-                        ));
-                    }
-                }
-
                 let session_title = if !conversation.title.is_empty() {
                     Some(conversation.title.as_str())
                 } else {
@@ -7959,63 +7979,81 @@ pub fn render(
                     .task_panel_state
                     .drill_down_task
                     .map(|n| format!("Tasks > Task {}", n));
-                state.notifications.set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
+                state
+                    .notifications
+                    .set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
                 rendered_hint = crate::adapters::tui::hints::contextual_hint(
-                    focus, state.session_count, theme.timing.status_hint_fade_sessions, state.is_vscode,
-                    &state.modal_stack, state.pending_leader,
-                    *focus == FocusState::Chat && state.modal_stack.is_empty() && focused_item_id.is_some(),
+                    focus,
+                    state.session_count,
+                    theme.timing.status_hint_fade_sessions,
+                    state.is_vscode,
+                    &state.modal_stack,
+                    state.pending_leader,
+                    *focus == FocusState::Chat
+                        && state.modal_stack.is_empty()
+                        && focused_item_id.is_some(),
                 );
                 let paint_status = |frame: &mut ratatui::Frame<'_>| {
-                status_bar::render(
-                    frame,
-                    app_layout.status_bar,
-                    display_model,
-                    Some(provider_id),
-                    status,
-                    theme,
-                    scroll_offset,
-                    &msg_bounds,
-                    content_height,
-                    app_layout.chat_pane.height,
-                    permission_mode,
-                    token_usage.as_ref(),
-                    context_window,
-                    has_project_context,
-                    session_title,
-                    multiline_mode,
-                    state.context_injection_on,
-                    state.last_context_bundle.as_ref().map_or(0, |b| b.diagnostics.total_tokens as u32),
-                    rendered_hint.as_deref(),
-                    state.active_skill_count,
-                    state.active_agent_name.as_deref(),
-                    state.pending_plan_reminder_at_turn,
-                    drill_down_breadcrumb.as_deref(),
-                    tab_manager_for_bar.is_some_and(|tm| {
-                        matches!(
-                            tm.active_tab().view_state.mode,
-                            crate::domain::models::AnchorMode::Pinned(_)
-                        )
-                    }),
-                    state.daily_budget.as_ref(),
-                    state.active_profile.as_ref(),
-                    density_mode,
-                    tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
-                    None, // Story 12.2c — local TUI is not an attach client
-                    state.log_awareness.display,
-                    crate::adapters::tui::widgets::status_bar::NoticeBadges {
-                        unseen: state.notifications.unseen(),
-                        decisions: state.decisions.len(),
-                        tail: leader_tail,
-                        ..Default::default()
-                    },
-);
+                    status_bar::render(
+                        frame,
+                        app_layout.status_bar,
+                        display_model,
+                        Some(provider_id),
+                        status,
+                        theme,
+                        scroll_offset,
+                        &msg_bounds,
+                        content_height,
+                        app_layout.chat_pane.height,
+                        permission_mode,
+                        token_usage.as_ref(),
+                        context_window,
+                        has_project_context,
+                        session_title,
+                        multiline_mode,
+                        state.context_injection_on,
+                        state
+                            .last_context_bundle
+                            .as_ref()
+                            .map_or(0, |b| b.diagnostics.total_tokens as u32),
+                        rendered_hint.as_deref(),
+                        state.active_skill_count,
+                        state.active_agent_name.as_deref(),
+                        state.pending_plan_reminder_at_turn,
+                        drill_down_breadcrumb.as_deref(),
+                        tab_manager_for_bar.is_some_and(|tm| {
+                            matches!(
+                                tm.active_tab().view_state.mode,
+                                crate::domain::models::AnchorMode::Pinned(_)
+                            )
+                        }),
+                        state.daily_budget.as_ref(),
+                        state.active_profile.as_ref(),
+                        density_mode,
+                        tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
+                        None, // Story 12.2c — local TUI is not an attach client
+                        state.log_awareness.display,
+                        crate::adapters::tui::widgets::status_bar::NoticeBadges {
+                            unseen: state.notifications.unseen(),
+                            decisions: state.decisions.len(),
+                            tail: leader_tail,
+                            ..Default::default()
+                        },
+                    );
                 };
                 input_box::render(
                     frame,
                     app_layout.input_area,
                     input_buffer,
                     cursor_position,
-                    if state.modal_stack.is_empty() && state.pending_leader.is_none() && !state.reverse_search.is_open() { focus.clone() } else { FocusState::Chat },
+                    if state.modal_stack.is_empty()
+                        && state.pending_leader.is_none()
+                        && !state.reverse_search.is_open()
+                    {
+                        focus.clone()
+                    } else {
+                        FocusState::Chat
+                    },
                     theme,
                     multiline_mode,
                     input_scroll_offset,
@@ -8024,12 +8062,15 @@ pub fn render(
 
                 shell.chat_pane = app_layout.chat_pane;
                 decision_painted = presentation::compose(
-                    frame, state, &shell, crate::adapters::tui::keymap::Host::Local, &log_facts,
+                    frame,
+                    state,
+                    &shell,
+                    crate::adapters::tui::keymap::Host::Local,
+                    &log_facts,
                     &mut opaque,
                     paint_status,
                 );
                 visible_feedback_rows.retain(|(_, rows)| opaque.presented(rows));
-
             }
             None => {
                 presentation::paint_too_small(frame, area);

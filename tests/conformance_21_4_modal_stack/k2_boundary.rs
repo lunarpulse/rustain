@@ -519,7 +519,6 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
     }
     for (name, args) in [
         ("retract-auto", "peer-response-id"),
-        ("team", "view peer"),
         ("team", "retract peer"),
         ("artifact", "apply id"),
         ("artifact", "resolve id"),

@@ -325,8 +325,8 @@ pub(crate) async fn load_received_thread(
             content,
             "  {omitted_before} earlier turns not shown — {} loads earlier turns from this host",
             crate::adapters::tui::keymap::render::rail(
-                crate::adapters::tui::keymap::Context::RecipientSurface,
-                crate::adapters::tui::keymap::table_overlay::OverlayCmd::RecipientPrev,
+                crate::adapters::tui::keymap::Context::ThreadInspector,
+                crate::adapters::tui::keymap::table_thread::ThreadCmd::Earlier,
             )
         );
     }
@@ -1002,7 +1002,7 @@ mod tests {
     }
     #[tokio::test]
     async fn story19_19_review_pinned_bodies_leave_truthful_thread_paging() {
-        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::{
             FocusState, ItemAddress, ItemId, PeerId, RoomEvent, SemanticMessageType,
         };
@@ -1114,18 +1114,18 @@ mod tests {
 
         let mut state = crate::adapters::tui::state::TuiState::new(80, 24);
         state.focus = FocusState::Input;
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+        crate::infrastructure::runtime::thread_open::open_received(
             workspace.path(),
             None,
             "review-opened",
             &mut state,
-            RecipientSurfaceAccess::ReadOnly,
+            ThreadAccess::ReadOnly,
             ReceivedThreadWindow::Newest,
         )
         .await
         .expect("open surface");
         let (first_omitted, first_ordinal) = {
-            let first = state.recipient_surface.as_ref().expect("surface");
+            let first = state.thread_inspector.as_ref().expect("thread");
             (
                 first.omitted_before,
                 first
@@ -1133,12 +1133,8 @@ mod tests {
                     .expect("bounded newest page includes a linked turn"),
             )
         };
-        state
-            .recipient_surface
-            .as_mut()
-            .expect("surface")
-            .scroll_offset = 9;
-        crate::infrastructure::runtime::recipient_surface::navigate_received_surface(
+        state.thread_inspector.as_mut().expect("thread").viewer.top = 9;
+        crate::infrastructure::runtime::thread_open::navigate(
             workspace.path(),
             None,
             &mut state,
@@ -1146,7 +1142,7 @@ mod tests {
         )
         .await
         .expect("earlier navigation");
-        let earlier = state.recipient_surface.as_ref().expect("earlier surface");
+        let earlier = state.thread_inspector.as_ref().expect("earlier thread");
         assert_eq!(earlier.root_id.as_deref(), Some("review-root"));
         assert!(earlier.content.len() <= bounds::MAX_THREAD_RESPONSE_BYTES);
         assert!(
@@ -1160,7 +1156,15 @@ mod tests {
             earlier.content.contains(&rendered_opened)
                 && earlier.content.matches(&rendered_opened).count() == 1
         );
-        assert_eq!(state.focus, FocusState::Chat);
+        assert_eq!(
+            earlier.viewer.top, 0,
+            "paging puts the viewer back at the top"
+        );
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "the thread frame never writes base focus"
+        );
     }
 }
 

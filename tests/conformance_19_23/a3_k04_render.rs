@@ -131,10 +131,10 @@ fn rejoined(lines: &[String]) -> String {
 async fn open_view(
     daemon: &AttachedDaemon,
     item: &str,
-) -> rustain::adapters::tui::state::RecipientSurface {
+) -> rustain::adapters::tui::state::ThreadInspectorState {
     super::k07_k08_recipient::local_view(daemon.journal.workspace.path(), item)
         .await
-        .recipient_surface
+        .thread_inspector
         .expect("production /team view opens the received item")
 }
 
@@ -253,7 +253,7 @@ async fn acknowledge(client: &mut AttachedClient, item: &str) {
 /// keys) when a carrier was journaled; nothing host-generated otherwise, with
 /// any spoof only inside the body.
 fn assert_view(
-    page: &rustain::adapters::tui::state::RecipientSurface,
+    page: &rustain::adapters::tui::state::ThreadInspectorState,
     item: &str,
     body: &str,
     view_line: Option<&str>,

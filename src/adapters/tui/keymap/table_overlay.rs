@@ -1,20 +1,16 @@
 //! Overlay rows (Story 21.3 AC21, KG-2): Help, CommandPalette, ModelSelector,
 //! ProfileSwitcher, UsagePanel, CrossSearch, ReverseSearch, Autocomplete,
-//! NotificationLog, QuitConfirm, Decision, RecipientSurface and Login.
+//! NotificationLog, QuitConfirm, Decision and Login.
 //!
 //! The rows describe TODAY's hand-written arms exactly (3-B2 moves the dispatch
 //! under the resolver and keeps every by-value witness green). Printable keys
 //! that edit a query are typing, not rows. Hosts: the attached client reaches
-//! Help, CommandPalette, Autocomplete, NotificationLog, QuitConfirm and
-//! RecipientSurface through the same local handlers (rows `Both`) or its own
+//! Help, CommandPalette, Autocomplete, NotificationLog and QuitConfirm
+//! through the same local handlers (rows `Both`) or its own
 //! arms (rows `attached`). `Ctrl+Q` is a quit request in every attached overlay
 //! and swallowed by some local ones; each row says which.
 //!
-//! Named exclusion: the attached RecipientSurface action keys (`recipient_surface_key`:
-//! Accept, Busy, Acknowledge, Share/Decline status, Retro share/leave-out/decline,
-//! Respond, Discuss, Edit, Use as context) are chosen per received item (`recipient_surface_actions`),
-//! so they are not rows; the docs say so and `story21_3_attached_recipient_action_key_sends_its_frame`
-//! pins one of them to the frame it sends.
+//! The thread frame's rows, writer action keys included, are in `table_thread.rs`.
 //!
 //! One row per line on purpose (`rustfmt::skip`): the table is data.
 
@@ -53,9 +49,6 @@ pub enum OverlayCmd {
     PaneScrollUp, PaneScrollDown, PaneCopy,
     // Needs-you list (S-QUEUE).
     QueuePrev, QueueNext, QueueOpen, QueueBack,
-    // Recipient surface.
-    RecipientPrev, RecipientNext, RecipientClose, RecipientPageUp, RecipientPageDown,
-    RecipientToggle,
     // Login.
     LoginBack, LoginEnter, LoginMove, LoginBackspace, LoginCopy,
 }
@@ -92,9 +85,6 @@ const fn q(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
 }
 const fn d(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
     bind(Context::Decision, keys, CommandId::Overlay(cmd), "")
-}
-const fn s(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
-    bind(Context::RecipientSurface, keys, CommandId::Overlay(cmd), "")
 }
 const fn g(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
     bind(Context::Login, keys, CommandId::Overlay(cmd), "").local()
@@ -269,15 +259,6 @@ pub const ROWS: &[Binding] = &[
     bind(Context::DecisionQueue, &[Key::Esc], CommandId::Overlay(OverlayCmd::QueueBack), "Back").does("Close the list and restore what it covered"),
     bind(Context::DecisionQueue, &[Key::Ctrl('c')], CommandId::Overlay(OverlayCmd::QueueBack), "").does("Close the list (back one frame)"),
     bind(Context::DecisionQueue, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").does("Ask to quit (guarded by the quit confirmation)"),
-    // ── Recipient surface ──
-    s(&[Key::Char('p')], OverlayCmd::RecipientPrev).does("Show the earlier part of the thread"),
-    s(&[Key::Char('l')], OverlayCmd::RecipientNext).does("Show the later part of the thread"),
-    s(&[Key::Esc], OverlayCmd::RecipientClose).does("Close the recipient view"),
-    s(&[Key::Ctrl('c')], OverlayCmd::RecipientClose).does("Close the recipient view (back one frame)"),
-    s(&[Key::PageUp], OverlayCmd::RecipientPageUp).does("Scroll the recipient view up one page"),
-    s(&[Key::PageDown], OverlayCmd::RecipientPageDown).does("Scroll the recipient view down one page"),
-    s(&[Key::Tab], OverlayCmd::RecipientToggle).attached().does("Switch between the item and the node view"),
-    s(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit (guarded by the quit confirmation)"),
     // ── Login (the overlay keeps handlers::login::on_key; rows only) ──
     g(&[Key::Esc], OverlayCmd::LoginBack).does("Clear the search; go back a step; close the overlay"),
     g(&[Key::Ctrl('c')], OverlayCmd::LoginBack).does("Clear the search; go back a step; close the overlay (back one frame)"),

@@ -37,6 +37,9 @@ mod conformance_21_4_modal_stack;
 #[path = "../conformance_21_6_decision_queue.rs"]
 mod conformance_21_6_decision_queue;
 
+#[path = "../conformance_21_8_thread_inspector.rs"]
+mod conformance_21_8_thread_inspector;
+
 #[path = "../conformance_21_1_notification_lifecycle.rs"]
 mod conformance_21_1_notification_lifecycle;
 

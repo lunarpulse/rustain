@@ -121,7 +121,7 @@ async fn k02_bug_report_acknowledgement_and_fix_reply_cross_real_hosts_without_p
 
     let before = local_view(recipient.journal.workspace.path(), &item)
         .await
-        .recipient_surface
+        .thread_inspector
         .expect("local View opens the received bug report");
     assert_eq!(before.message_type, SemanticMessageType::BugReport);
     assert_eq!(before.item_state, Some("received"));
@@ -217,7 +217,7 @@ async fn k02_bug_report_acknowledgement_and_fix_reply_cross_real_hosts_without_p
 
     let after = local_view(recipient.journal.workspace.path(), &item)
         .await
-        .recipient_surface
+        .thread_inspector
         .expect("recipient View opens the acknowledged thread");
     assert_eq!(after.item_state, Some("acknowledged"));
     assert!(

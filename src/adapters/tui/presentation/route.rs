@@ -172,6 +172,13 @@ pub fn route(
             crate::adapters::tui::block_viewer::on_wheel(state, *delta),
         ));
     }
+    // The thread window's wheel is state-only in both hosts.
+    if surface == Surface::ThreadInspector
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        crate::adapters::tui::thread_inspector::on_wheel(state, *delta);
+        return Some(RouteEffect::Consumed);
+    }
     if surface == Surface::Login && Key::from_domain(event).is_none() {
         return Some(RouteEffect::Action(
             crate::adapters::tui::handlers::login::on_key(state, event),
@@ -220,6 +227,16 @@ pub fn route(
         Surface::BlockViewer(_) => {
             RouteEffect::Action(crate::adapters::tui::block_viewer::on_key(state, key, host))
         }
+        // The attached host executes the thread keys itself (its writer frames are async).
+        Surface::ThreadInspector if host == Host::Local => RouteEffect::Action(
+            match crate::adapters::tui::thread_inspector::on_key(state, key, host, None) {
+                crate::adapters::tui::thread_inspector::ThreadOutcome::Page { earlier } => {
+                    InputAction::ThreadPage { earlier }
+                }
+                _ => InputAction::Consumed,
+            },
+        ),
+        Surface::ThreadInspector => RouteEffect::Frame(context),
         Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
             Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
                 RouteEffect::Decision(effect)

@@ -185,7 +185,7 @@ fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
         ("retract-auto" | "cancel-plan" | "reorder-task", _) => LegacySurface,
         ("room" | "artifacts", None) => LegacySurface,
         ("artifact", Some(_)) if matches!(subcommand, Some("apply" | "resolve")) => LegacySurface,
-        ("team", Some(_)) if matches!(subcommand, Some("view" | "retract")) => LegacySurface,
+        ("team", Some(_)) if matches!(subcommand, Some("retract")) => LegacySurface,
         ("peer", Some(_)) if matches!(subcommand, Some("add" | "reach")) => LegacySurface,
         ("memory", Some(_)) if matches!(subcommand, Some("forget" | "consolidate")) => {
             LegacySurface
@@ -205,7 +205,8 @@ fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
         {
             NoLegacySurface
         }
-        ("team", Some(_)) if matches!(subcommand, Some("status" | "board" | "log")) => {
+        // `view` opens the thread frame (a stack surface, Story 21.8) from either host.
+        ("team", Some(_)) if matches!(subcommand, Some("status" | "board" | "log" | "view")) => {
             NoLegacySurface
         }
         ("peer", Some(_)) if matches!(subcommand, Some("list" | "status" | "log")) => {
@@ -349,6 +350,7 @@ pub fn all_rows() -> Vec<Binding> {
         super::table_card::ROWS,
         super::table_viewer::ROWS,
         super::table_tool::ROWS,
+        super::table_thread::ROWS,
         super::table_block::ROWS,
     ]
     .concat()

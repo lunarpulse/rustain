@@ -43,7 +43,7 @@ pub enum InputAction {
     CopyBlockSource,
     /// Event not handled by this focus mode.
     Ignored,
-    RecipientThreadPage {
+    ThreadPage {
         earlier: bool,
     },
     /// Enter pressed with this text (buffer already cleared by handle_input).
@@ -451,39 +451,9 @@ impl InputAction {
     }
 }
 
-pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
-    use crate::adapters::tui::decision_queue::DecisionKind as K;
-    [
-        K::Permission,
-        K::PlanCard,
-        K::PlanApproval,
-        K::PlanDeviation,
-        K::SkipCascade,
-        K::CancelPlan,
-        K::Delegation,
-        K::SkillTrust,
-        K::SpawnGate,
-        K::Consolidation,
-        K::Forget,
-        K::ArtifactApply,
-        K::ArtifactResolve,
-        K::PeerAdd,
-        K::TeamRetract,
-        K::Fork,
-        K::Rewind,
-        K::ExportOverwrite,
-        K::LargeImage,
-    ]
-    .into_iter()
-    .any(|kind| state.decisions.presenting(kind))
-        || crate::adapters::tui::decision_queue::team_proposal_presenting(state)
-}
-
-/// Preserve raw key ownership before conversion discards modifiers and kind.
-pub fn recipient_surface_ignores_raw_key(
-    state: &TuiState,
-    event: &crossterm::event::Event,
-) -> bool {
+/// Preserve raw key ownership before conversion discards modifiers and kind: the decision
+/// frame's deciding keys and the thread frame's writer letters require a plain press.
+pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) -> bool {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
     // Conversion loses kind and modifiers. Only the permission's deciding keys
     // (and the feedback field's Send) require a plain press.
@@ -541,17 +511,15 @@ pub fn recipient_surface_ignores_raw_key(
             return key.kind != KeyEventKind::Press || !key.modifiers.is_empty();
         }
     }
-    if recipient_higher_confirmation_active(state) {
-        return false;
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::ThreadInspector)
+        && let Event::Key(key) = event
+    {
+        return crate::adapters::tui::thread_inspector::ignores_raw_key(state, key);
     }
-    if state.recipient_surface.is_none() || state.focus != FocusState::Chat {
-        return false;
-    }
-    let Event::Key(key) = event else { return false };
-    key.kind != KeyEventKind::Press
-        || (!key.modifiers.is_empty()
-            && !(key.modifiers == KeyModifiers::CONTROL
-                && matches!(key.code, KeyCode::Char('c' | 'q'))))
+    false
 }
 
 /// Preserve the raw event's key ownership before dispatching its converted form.
@@ -560,7 +528,7 @@ pub fn handle_operator_input(
     raw_event: &crossterm::event::Event,
     domain_event: &DomainInputEvent,
 ) -> Option<InputAction> {
-    if recipient_surface_ignores_raw_key(state, raw_event) {
+    if frame_ignores_raw_key(state, raw_event) {
         None
     } else {
         Some(handle_input(state, domain_event))
@@ -829,21 +797,6 @@ pub(crate) fn handle_leader_key(
 }
 
 fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
-    if state.recipient_surface.is_some()
-        && state.focus == FocusState::Chat
-        && !recipient_higher_confirmation_active(state)
-        && !matches!(event, DomainInputEvent::Resize(_, _))
-    {
-        let resolved = Key::from_domain(event)
-            .map(|key| resolve(Context::RecipientSurface, Host::Local, &[key]));
-        return match resolved {
-            Some(Resolved::Hit(row)) => exec_recipient(state, row.command),
-            _ => {
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-        };
-    }
     // Cancel pending vim chords on any event that isn't a character key.
     if !matches!(event, DomainInputEvent::KeyPress(_)) {
         state.pending_z = false;
@@ -1190,9 +1143,10 @@ fn execute(
                 _ => crate::adapters::tui::tool_inspector::on_key(state, key, host),
             }
         }
-        CommandId::Leader(_) | CommandId::Permission(_) | CommandId::Card(_) => {
-            InputAction::Consumed
-        }
+        CommandId::Leader(_)
+        | CommandId::Permission(_)
+        | CommandId::Card(_)
+        | CommandId::Thread(_) => InputAction::Consumed,
     })
 }
 
@@ -1961,55 +1915,10 @@ fn exec_overlay(
         Context::InspectorSearch => exec_inspector_search(state, cmd),
         Context::ReverseSearch => exec_reverse_search(state, cmd),
         Context::Autocomplete => exec_autocomplete(state, cmd),
-        // The host-neutral frames (S-QUIT, S-LOG, decisions), the recipient surface and
-        // the login overlay have their own owners.
+        // The host-neutral frames (S-QUIT, S-LOG, decisions, the thread window) and the
+        // login overlay have their own owners.
         _ => InputAction::Consumed,
     }
-}
-
-/// The recipient surface (local): thread paging, scrolling and back; every other key
-/// is consumed.
-fn exec_recipient(state: &mut TuiState, command: CommandId) -> InputAction {
-    let CommandId::Overlay(cmd) = command else {
-        return InputAction::Consumed;
-    };
-    match cmd {
-        OverlayCmd::RecipientPrev
-            if state
-                .recipient_surface
-                .as_ref()
-                .is_some_and(|surface| surface.omitted_before > 0) =>
-        {
-            return InputAction::RecipientThreadPage { earlier: true };
-        }
-        OverlayCmd::RecipientNext
-            if state
-                .recipient_surface
-                .as_ref()
-                .is_some_and(|surface| surface.omitted_after > 0) =>
-        {
-            return InputAction::RecipientThreadPage { earlier: false };
-        }
-        OverlayCmd::RecipientClose => {
-            if let Some(surface) = state.recipient_surface.take() {
-                reducer::set_base(state, surface.prior_focus);
-            }
-        }
-        OverlayCmd::RecipientPageUp | OverlayCmd::RecipientPageDown => {
-            if let Some(surface) = state.recipient_surface.as_mut() {
-                let page = surface.viewport_rows.saturating_sub(1).max(1);
-                surface.scroll_offset = if cmd == OverlayCmd::RecipientPageUp {
-                    surface.scroll_offset.saturating_sub(page)
-                } else {
-                    surface.scroll_offset.saturating_add(page)
-                };
-            }
-        }
-        OverlayCmd::QuitRequest => return InputAction::Quit,
-        _ => {}
-    }
-    state.needs_redraw = true;
-    InputAction::Consumed
 }
 
 fn filtered_help_scroll_limit(state: &TuiState) -> usize {
@@ -3445,7 +3354,7 @@ mod tests {
         state: &mut TuiState,
         event: crossterm::event::Event,
     ) -> Option<presentation::RouteEffect> {
-        if recipient_surface_ignores_raw_key(state, &event) {
+        if frame_ignores_raw_key(state, &event) {
             return None;
         }
         let input =
@@ -3494,21 +3403,21 @@ mod tests {
                     (KeyModifiers::CONTROL, KeyEventKind::Press),
                 ] {
                     assert!(
-                        recipient_surface_ignores_raw_key(
+                        frame_ignores_raw_key(
                             &state,
                             &story21_6_raw_key(KeyCode::Char(c), modifiers, event_kind)
                         ),
                         "{kind:?} {c:?} {modifiers:?} {event_kind:?}"
                     );
                 }
-                assert!(!recipient_surface_ignores_raw_key(
+                assert!(!frame_ignores_raw_key(
                     &state,
                     &story21_6_raw_key(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press)
                 ));
             }
             if kind == DecisionKind::Forget {
                 for c in [' ', 'j', 'k'] {
-                    assert!(!recipient_surface_ignores_raw_key(
+                    assert!(!frame_ignores_raw_key(
                         &state,
                         &story21_6_raw_key(
                             KeyCode::Char(c),
@@ -3571,10 +3480,7 @@ mod tests {
         }
         for c in ['a', 'e', 'k', 'w', 'u', 'h'] {
             let event = ctrl_key(c);
-            assert!(
-                !recipient_surface_ignores_raw_key(&state, &event),
-                "Ctrl+{c}"
-            );
+            assert!(!frame_ignores_raw_key(&state, &event), "Ctrl+{c}");
             story21_6_raw_route(&mut state, event);
         }
         story21_6_raw_route(
@@ -3601,10 +3507,7 @@ mod tests {
             assert_eq!(state.decisions.len(), 1);
         }
         for c in ['x', 'p', 'c', 'q'] {
-            assert!(
-                !recipient_surface_ignores_raw_key(&state, &ctrl_key(c)),
-                "Ctrl+{c}"
-            );
+            assert!(!frame_ignores_raw_key(&state, &ctrl_key(c)), "Ctrl+{c}");
         }
         for c in ['x', 'p'] {
             let mut plain = story21_6_raw_permission();
@@ -4010,9 +3913,7 @@ mod tests {
     }
     #[test]
     fn story19_19_review_consolidation_keys_belong_to_confirmation() {
-        use crate::adapters::tui::state::{
-            RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget,
-        };
+        use crate::adapters::tui::state::{ThreadAccess, ThreadInspectorState, ThreadTarget};
         for (key, consolidation_action, forget_action) in [
             (
                 'y',
@@ -4035,41 +3936,34 @@ mod tests {
                     clock.clone(),
                 );
             state.focus = FocusState::Chat;
-            state.recipient_surface = Some(RecipientSurface {
-                target: RecipientSurfaceTarget::Item(
-                    crate::domain::models::ItemAddress::from_a2a_ingress(
-                        crate::domain::models::PeerId::from_public_key(&[91; 32]).unwrap(),
-                        crate::domain::models::ItemId::from_replay("review-opened"),
-                    ),
+            let address = crate::domain::models::ItemAddress::from_a2a_ingress(
+                crate::domain::models::PeerId::from_public_key(&[91; 32]).unwrap(),
+                crate::domain::models::ItemId::from_replay("review-opened"),
+            );
+            let mut inspector = ThreadInspectorState::new(
+                ThreadTarget::Item(address.clone()),
+                ThreadAccess::ReadOnly,
+                crate::domain::models::SemanticMessageType::Unknown,
+            );
+            inspector.root_id = Some("review-root".into());
+            inspector.first_non_pinned_ordinal = Some(3);
+            inspector.last_non_pinned_ordinal = Some(7);
+            inspector.omitted_before = 3;
+            inspector.item_state = Some("received");
+            inspector.viewer.top = 11;
+            inspector.fit.set((60, 20));
+            inspector.content = "reader body".into();
+            presentation::reducer::open_thread(
+                &mut state,
+                inspector,
+                crate::adapters::tui::thread_inspector::title(
+                    crate::domain::models::SemanticMessageType::Unknown,
                 ),
-                access: RecipientSurfaceAccess::ReadOnly,
-                can_toggle_target: false,
-                root_id: Some("review-root".into()),
-                first_non_pinned_ordinal: Some(3),
-                last_non_pinned_ordinal: Some(7),
-                omitted_before: 3,
-                omitted_after: 0,
-                node_id: None,
-                item_state: Some("received"),
-                context_available: false,
-                context_selected: false,
-                prior_focus: FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::History,
-                    selected: 2,
-                },
-                scroll_offset: 11,
-                viewport_rows: 20,
-                content: "reader body".into(),
-                message_type: crate::domain::models::SemanticMessageType::Unknown,
-                verdict_offer: crate::domain::models::VerdictOffer::None,
-                cached_width: 0,
-                cached_lines: Vec::new(),
-                cached_header: Vec::new(),
-                cached_footer: Vec::new(),
-                cached_action_mask: 0,
-                results: Vec::new(),
-            });
-            let target = state.recipient_surface.as_ref().unwrap().target.clone();
+            );
+            assert_eq!(
+                state.modal_stack.top().unwrap().surface,
+                Surface::ThreadInspector
+            );
             use crate::adapters::tui::decision_queue::{
                 self, PendingConsolidationCard, PendingForgetCard,
             };
@@ -4087,7 +3981,7 @@ mod tests {
             assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
             let modified =
                 story21_6_raw_key(KeyCode::Char(key), KeyModifiers::ALT, KeyEventKind::Press);
-            assert!(recipient_surface_ignores_raw_key(&state, &modified));
+            assert!(frame_ignores_raw_key(&state, &modified));
             decision_queue::note_painted(&mut state);
             clock.advance(decision_queue::INERT_AFTER_PAINT);
             assert_eq!(
@@ -4103,20 +3997,18 @@ mod tests {
                 "review-conversation"
             ));
             drop(state.decisions.take_resolved());
-            let surface = state.recipient_surface.as_ref().unwrap();
-            match (&surface.target, &target) {
-                (RecipientSurfaceTarget::Item(actual), RecipientSurfaceTarget::Item(expected)) => {
-                    assert_eq!(actual, expected);
-                }
-                _ => panic!("decision changed the pinned reader target"),
-            }
-            assert_eq!(surface.scroll_offset, 11);
+            let inspector = state.thread_inspector.as_ref().unwrap();
+            let ThreadTarget::Item(actual) = &inspector.target;
             assert_eq!(
-                surface.prior_focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::History,
-                    selected: 2,
-                }
+                actual, &address,
+                "decision changed the pinned reader target"
+            );
+            assert_eq!(inspector.viewer.top, 11);
+            // The frame never owned base focus, so the decision leaves it alone.
+            assert_eq!(state.focus, FocusState::Chat);
+            assert_eq!(
+                state.modal_stack.top().unwrap().surface,
+                Surface::ThreadInspector
             );
             decision_queue::raise_forget(
                 &mut state,
@@ -4127,8 +4019,9 @@ mod tests {
                 },
             );
             assert!(decision_queue::forget_pending(&state, "review"));
-            assert!(state.recipient_surface.is_some());
-            assert!(recipient_higher_confirmation_active(&state));
+            assert!(state.thread_inspector.is_some());
+            // Story 21.8: the presenting sweep survives as `higher_confirmation_presenting`.
+            assert!(decision_queue::higher_confirmation_presenting(&state));
             assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
             decision_queue::note_painted(&mut state);
             clock.advance(decision_queue::INERT_AFTER_PAINT);
@@ -4137,7 +4030,330 @@ mod tests {
                 forget_action
             );
             assert!(!decision_queue::forget_pending(&state, "review"));
-            assert_eq!(state.recipient_surface.as_ref().unwrap().scroll_offset, 11);
+            assert_eq!(state.thread_inspector.as_ref().unwrap().viewer.top, 11);
+        }
+    }
+
+    fn story21_8_base_focus(input: bool) -> FocusState {
+        if input {
+            FocusState::Input
+        } else {
+            FocusState::Chat
+        }
+    }
+
+    /// A local-host state whose only frame is a real S-THREAD window (opened by the reducer).
+    fn story21_8_thread_state(focus: FocusState) -> TuiState {
+        use crate::adapters::tui::state::{ThreadAccess, ThreadInspectorState, ThreadTarget};
+        let mut state = make_state();
+        state.focus = focus;
+        let address = crate::domain::models::ItemAddress::from_a2a_ingress(
+            crate::domain::models::PeerId::from_public_key(&[44; 32]).unwrap(),
+            crate::domain::models::ItemId::from_replay("thread-front-door"),
+        );
+        let inspector = ThreadInspectorState::new(
+            ThreadTarget::Item(address),
+            ThreadAccess::LocalOnly,
+            crate::domain::models::SemanticMessageType::Unknown,
+        );
+        // What the last paint fitted: 100 body rows in a 10-row viewport.
+        inspector.fit.set((100, 10));
+        presentation::reducer::open_thread(
+            &mut state,
+            inspector,
+            crate::adapters::tui::thread_inspector::title(
+                crate::domain::models::SemanticMessageType::Unknown,
+            ),
+        );
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::ThreadInspector
+        );
+        state
+    }
+
+    /// The local front door: the raw pre-filter, then the converted event.
+    fn story21_8_front_door(
+        state: &mut TuiState,
+        event: crossterm::event::Event,
+    ) -> Option<InputAction> {
+        let domain =
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default())
+                .expect("a key converts");
+        handle_operator_input(state, &event, &domain)
+    }
+
+    fn story21_8_plain(c: char) -> crossterm::event::Event {
+        story21_6_raw_key(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press)
+    }
+
+    fn story21_8_special(code: KeyCode) -> crossterm::event::Event {
+        story21_6_raw_key(code, KeyModifiers::NONE, KeyEventKind::Press)
+    }
+
+    fn story21_8_top(state: &TuiState) -> usize {
+        state.thread_inspector.as_ref().unwrap().viewer.top
+    }
+
+    /// AC4/K: `Ctrl+X` opens the leader over the thread, `n` opens S-LOG above it, and `Esc`
+    /// returns to the thread window with its slot and viewer intact.
+    #[test]
+    fn story21_8_local_leader_opens_log_over_thread_and_esc_returns() {
+        let mut state = story21_8_thread_state(FocusState::Input);
+        state.thread_inspector.as_mut().unwrap().viewer.top = 7;
+        assert!(state.pending_leader.is_none());
+        assert_eq!(
+            story21_8_front_door(&mut state, ctrl_key('x')),
+            Some(InputAction::Consumed)
+        );
+        assert!(state.pending_leader.is_some(), "Ctrl+X opens the leader");
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::ThreadInspector,
+            "the leader is a pending prefix, not a frame"
+        );
+        assert_eq!(
+            story21_8_front_door(&mut state, story21_8_plain('n')),
+            Some(InputAction::Consumed)
+        );
+        assert!(state.pending_leader.is_none());
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::NotificationLog
+        );
+        assert!(state.thread_inspector.is_some(), "the thread stays beneath");
+        story21_8_front_door(&mut state, story21_8_special(KeyCode::Esc));
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::ThreadInspector
+        );
+        assert_eq!(story21_8_top(&state), 7);
+        assert_eq!(state.focus, FocusState::Input);
+    }
+
+    /// AC4: `Ctrl+P` opens the palette over the thread; `Ctrl+Q` raises the quit request.
+    #[test]
+    fn story21_8_local_palette_and_quit_work_over_thread() {
+        let mut state = story21_8_thread_state(FocusState::Input);
+        assert_eq!(
+            story21_8_front_door(&mut state, ctrl_key('p')),
+            Some(InputAction::Consumed)
+        );
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::CommandPalette
+        );
+        assert!(state.thread_inspector.is_some());
+
+        let mut state = story21_8_thread_state(FocusState::Chat);
+        assert_eq!(
+            story21_8_front_door(&mut state, ctrl_key('q')),
+            Some(InputAction::Quit)
+        );
+        assert!(
+            state.thread_inspector.is_some(),
+            "the quit request keeps the window until the guard answers"
+        );
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::ThreadInspector
+        );
+    }
+
+    /// AC5: the body scroll keys move `viewer.top` by value; the sideways/toggle keys are
+    /// consumed no-ops at the root of a thread.
+    #[test]
+    fn story21_8_local_scroll_keys_change_viewer_top_by_value() {
+        let mut state = story21_8_thread_state(FocusState::Input);
+        // Rows 100, viewport 10: the clamp is 90, half a page is 5, a page is 9.
+        let table: [(crossterm::event::Event, usize, &str); 10] = [
+            (story21_8_plain('j'), 21, "j"),
+            (story21_8_plain('k'), 20, "k"),
+            (story21_8_special(KeyCode::Down), 21, "Down"),
+            (story21_8_special(KeyCode::Up), 20, "Up"),
+            (ctrl_key('d'), 25, "Ctrl+D"),
+            (ctrl_key('u'), 20, "Ctrl+U"),
+            (story21_8_special(KeyCode::PageDown), 29, "PageDown"),
+            (story21_8_special(KeyCode::PageUp), 20, "PageUp"),
+            (story21_8_plain('g'), 0, "g"),
+            (
+                story21_6_raw_key(KeyCode::Char('G'), KeyModifiers::SHIFT, KeyEventKind::Press),
+                90,
+                "G",
+            ),
+        ];
+        state.thread_inspector.as_mut().unwrap().viewer.top = 20;
+        for (event, expected, name) in table {
+            assert_eq!(
+                story21_8_front_door(&mut state, event),
+                Some(InputAction::Consumed),
+                "{name} is consumed"
+            );
+            assert_eq!(story21_8_top(&state), expected, "{name}");
+        }
+        assert!(
+            state.input_buffer.is_empty(),
+            "no scroll key reaches the composer"
+        );
+
+        // `G` followed the tail: start the dead-key sweep from a fresh viewer.
+        state.thread_inspector.as_mut().unwrap().viewer = Default::default();
+        state.thread_inspector.as_mut().unwrap().viewer.top = 20;
+        for (event, name) in [
+            (story21_8_plain('h'), "h"),
+            (story21_8_plain('0'), "0"),
+            (
+                story21_6_raw_key(KeyCode::Char('$'), KeyModifiers::SHIFT, KeyEventKind::Press),
+                "$",
+            ),
+            (story21_8_plain('v'), "v"),
+        ] {
+            assert_eq!(
+                story21_8_front_door(&mut state, event),
+                Some(InputAction::Consumed),
+                "{name} is consumed"
+            );
+            let inspector = state.thread_inspector.as_ref().unwrap();
+            assert_eq!(inspector.viewer.top, 20, "{name} does not scroll");
+            assert_eq!(inspector.viewer.h_off, 0, "{name} does not pan");
+            assert!(!inspector.viewer.follow, "{name} does not follow");
+        }
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::ThreadInspector
+        );
+    }
+
+    /// AC5: `p`/`l` ask for a page only while a page is omitted on that side.
+    #[test]
+    fn story21_8_local_paging_keys_request_only_an_omitted_page() {
+        let mut state = story21_8_thread_state(FocusState::Input);
+        for c in ['l', 'p'] {
+            assert_eq!(
+                story21_8_front_door(&mut state, story21_8_plain(c)),
+                Some(InputAction::Consumed),
+                "{c} with nothing omitted"
+            );
+        }
+        state.thread_inspector.as_mut().unwrap().omitted_after = 2;
+        assert_eq!(
+            story21_8_front_door(&mut state, story21_8_plain('l')),
+            Some(InputAction::ThreadPage { earlier: false })
+        );
+        assert_eq!(
+            story21_8_front_door(&mut state, story21_8_plain('p')),
+            Some(InputAction::Consumed),
+            "nothing omitted before"
+        );
+        let inspector = state.thread_inspector.as_mut().unwrap();
+        inspector.omitted_after = 0;
+        inspector.omitted_before = 1;
+        assert_eq!(
+            story21_8_front_door(&mut state, story21_8_plain('p')),
+            Some(InputAction::ThreadPage { earlier: true })
+        );
+        assert_eq!(
+            story21_8_front_door(&mut state, story21_8_plain('l')),
+            Some(InputAction::Consumed),
+            "nothing omitted after"
+        );
+    }
+
+    /// PC-14: a Repeat, a Release or a modified writer letter never reaches the window's
+    /// dispatcher; a registered chord or shifted printable resolves; unbound keys are consumed
+    /// and never typed into the composer.
+    #[test]
+    fn story21_8_local_press_only_rule_guards_the_writer_letters() {
+        let mut state = story21_8_thread_state(FocusState::Input);
+        for c in "rdbaysn123u".chars() {
+            for (modifiers, kind) in [
+                (KeyModifiers::NONE, KeyEventKind::Repeat),
+                (KeyModifiers::NONE, KeyEventKind::Release),
+                (KeyModifiers::ALT, KeyEventKind::Press),
+            ] {
+                let event = story21_6_raw_key(KeyCode::Char(c), modifiers, kind);
+                assert!(
+                    frame_ignores_raw_key(&state, &event),
+                    "{c:?} {modifiers:?} {kind:?}"
+                );
+                assert_eq!(story21_8_front_door(&mut state, event), None);
+            }
+            let plain = story21_8_plain(c);
+            assert!(!frame_ignores_raw_key(&state, &plain), "plain press {c:?}");
+            assert_eq!(
+                story21_8_front_door(&mut state, plain),
+                Some(InputAction::Consumed),
+                "a plain writer letter is consumed by the local window"
+            );
+        }
+        let shifted =
+            story21_6_raw_key(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Press);
+        assert!(frame_ignores_raw_key(&state, &shifted));
+        // Registered chords and shifted printables are not writer-letter guards.
+        for event in [
+            ctrl_key('d'),
+            ctrl_key('u'),
+            ctrl_key('c'),
+            ctrl_key('x'),
+            ctrl_key('p'),
+            ctrl_key('q'),
+            story21_6_raw_key(KeyCode::Char('G'), KeyModifiers::SHIFT, KeyEventKind::Press),
+            story21_6_raw_key(KeyCode::Char('$'), KeyModifiers::SHIFT, KeyEventKind::Press),
+        ] {
+            assert!(!frame_ignores_raw_key(&state, &event), "{event:?}");
+        }
+        // A released Ctrl+D is still a Release: ignored; the Press resolves and scrolls.
+        state.thread_inspector.as_mut().unwrap().viewer.top = 20;
+        let released = story21_6_raw_key(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+        assert!(frame_ignores_raw_key(&state, &released));
+        assert_eq!(story21_8_front_door(&mut state, released), None);
+        assert_eq!(story21_8_top(&state), 20);
+        assert_eq!(
+            story21_8_front_door(&mut state, ctrl_key('d')),
+            Some(InputAction::Consumed)
+        );
+        assert_eq!(story21_8_top(&state), 25);
+        // Unbound keys: consumed, never the composer.
+        state.input_buffer = "draft".into();
+        for c in ['x', 'z', 'w'] {
+            assert_eq!(
+                story21_8_front_door(&mut state, story21_8_plain(c)),
+                Some(InputAction::Consumed),
+                "{c:?}"
+            );
+        }
+        assert_eq!(state.input_buffer, "draft");
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::ThreadInspector
+        );
+    }
+
+    /// AC4: `Esc` and `Ctrl+C` back exactly one frame and never change the base focus.
+    #[test]
+    fn story21_8_local_back_leaves_base_focus_unchanged() {
+        for input in [true, false] {
+            for event in [story21_8_special(KeyCode::Esc), ctrl_key('c')] {
+                let mut state = story21_8_thread_state(story21_8_base_focus(input));
+                assert_eq!(state.focus, story21_8_base_focus(input));
+                state.input_buffer = "kept".into();
+                assert_eq!(
+                    story21_8_front_door(&mut state, event.clone()),
+                    Some(InputAction::Consumed)
+                );
+                assert!(state.modal_stack.is_empty(), "{event:?} closes the window");
+                assert!(state.thread_inspector.is_none(), "{event:?} frees the slot");
+                assert_eq!(
+                    state.focus,
+                    story21_8_base_focus(input),
+                    "{event:?} leaves the base focus"
+                );
+                assert_eq!(state.input_buffer, "kept");
+            }
         }
     }
 
@@ -5457,17 +5673,18 @@ mod tests {
         );
         assert!(state.decisions.holds(DecisionKind::Forget));
         assert!(!state.decisions.presenting(DecisionKind::Forget));
-        assert!(!recipient_higher_confirmation_active(&state));
+        assert!(!decision_queue::higher_confirmation_presenting(&state));
         decision_queue::raise(
             &mut state,
             DecisionDraft::new(DecisionKind::Forget, "here").conversation("here"),
             Arrival::Requested,
         );
         assert!(state.decisions.presenting(DecisionKind::Forget));
+        assert!(decision_queue::higher_confirmation_presenting(&state));
         decision_queue::withdraw_for(&mut state, DecisionKind::Forget, "here");
         assert!(state.decisions.holds(DecisionKind::Forget));
         assert!(!state.decisions.presenting(DecisionKind::Forget));
-        assert!(!recipient_higher_confirmation_active(&state));
+        assert!(!decision_queue::higher_confirmation_presenting(&state));
     }
 
     /// A deferred Forget must not hide or disable a reopened proposal frame.

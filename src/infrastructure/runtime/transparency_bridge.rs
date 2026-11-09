@@ -662,24 +662,17 @@ pub async fn team_command(
             read_team_thread(state, conversation_id, peer, item_id, app_state);
         }
         TeamCommandArgs::View { item_id } => {
-            if let Err(error) = super::recipient_surface::open_received_surface(
+            if let Err(error) = super::thread_open::open_received(
                 &app_state.compose_snapshot.workspace_path,
                 None,
                 &item_id,
                 state,
-                crate::adapters::tui::state::RecipientSurfaceAccess::LocalOnly,
+                crate::adapters::tui::state::ThreadAccess::LocalOnly,
                 super::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             {
-                crate::adapters::tui::views::show_view(
-                    &mut state.feedback_blocks,
-                    crate::adapters::tui::views::ViewKind::RecipientOutcome,
-                    "recipient-view",
-                    crate::domain::models::FeedbackLevel::Info,
-                    error.to_string(),
-                );
-                state.needs_redraw = true;
+                emit_team_warning(state, conversation_id, app_state, error.to_string());
             }
         }
         // Story 19.18 `AC9(b)` — answering an item needs the daemon that

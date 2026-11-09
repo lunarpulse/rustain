@@ -52,11 +52,35 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
     assert!(
         !matches!(
             surface,
-            Surface::Decision | Surface::ToolInspector(_) | Surface::BlockViewer(_)
+            Surface::Decision
+                | Surface::ToolInspector(_)
+                | Surface::BlockViewer(_)
+                | Surface::ThreadInspector
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
     open_frame(state, surface, None, None)
+}
+
+/// The thread window is one frame at a time (FR-21-8-a): opening another target truncates
+/// to it and retargets its payload and title in place. The payload slot is set here and
+/// cleared by `release_payload`, never elsewhere; the opening writes no base focus.
+pub fn open_thread(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::state::ThreadInspectorState,
+    title: String,
+) -> Opened {
+    state.thread_inspector = Some(payload);
+    let opened = open_frame(state, Surface::ThreadInspector, None, Some(title.clone()));
+    state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::ThreadInspector)
+        .expect("the thread frame was just opened")
+        .tool_title = Some(title);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
 }
 
 /// Exact-target reopen retains the frame and cache; a new target owns a fresh key.
@@ -511,7 +535,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::UsagePanel
         | Surface::Login
         | Surface::ToolInspector(_)
-        | Surface::BlockViewer(_) => {}
+        | Surface::BlockViewer(_)
+        | Surface::ThreadInspector => {}
     }
 }
 
@@ -697,6 +722,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::BlockViewer(key) => {
             state.block_viewers.remove(&key.0);
+            None
+        }
+        Surface::ThreadInspector => {
+            state.thread_inspector = None;
             None
         }
     };

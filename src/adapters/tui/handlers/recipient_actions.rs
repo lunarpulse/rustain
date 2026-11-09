@@ -1,7 +1,7 @@
 use crate::adapters::daemon::protocol::{
     ClientFrame, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
 };
-use crate::adapters::tui::state::{RecipientActionState, RecipientSurfaceTarget, TuiState};
+use crate::adapters::tui::state::{RecipientActionState, ThreadTarget, TuiState};
 use crate::domain::models::FeedbackLevel;
 use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
 use std::{borrow::Cow, collections::BTreeMap};
@@ -96,14 +96,14 @@ pub(crate) fn begin_action(state: &mut TuiState, frame: &ClientFrame, composed: 
 pub(crate) fn action_is_pending(
     state: &TuiState,
     action: RecipientAction,
-    target: &RecipientSurfaceTarget,
+    target: &ThreadTarget,
     node: Option<&str>,
 ) -> bool {
     state.recipient_actions.iter().any(|((pending_action, pending_target), phase)| {
         matches!(phase, RecipientActionState::Pending { .. })
             && *pending_action == action
             && match pending_target {
-                RecipientActionTarget::Item { item_id } => matches!(target, RecipientSurfaceTarget::Item(address) if address.item().as_str() == item_id),
+                RecipientActionTarget::Item { item_id } => matches!(target, ThreadTarget::Item(address) if address.item().as_str() == item_id),
                 RecipientActionTarget::Node { node_id } => node == Some(node_id.as_str()),
                 // A `/team` request key never names a recipient surface.
                 RecipientActionTarget::Request { .. } => false,
@@ -164,11 +164,11 @@ pub(crate) fn apply_action_result(
                 } else {
                     state.recipient_context_ids.remove(item_id);
                 }
-                if let Some(surface) = state.recipient_surface.as_mut()
-                    && matches!(&surface.target, RecipientSurfaceTarget::Item(address) if address.item().as_str() == item_id)
+                if let Some(inspector) = state.thread_inspector.as_mut()
+                    && matches!(&inspector.target, ThreadTarget::Item(address) if address.item().as_str() == item_id)
                 {
-                    surface.context_selected = selected;
-                    surface.cached_width = 0;
+                    inspector.context_selected = selected;
+                    inspector.invalidate();
                 }
             }
             if selected {
@@ -219,15 +219,14 @@ pub(crate) fn apply_context_state(
     show_inventory: bool,
 ) {
     state.recipient_context_ids = ids.into_iter().collect();
-    if let Some(surface) = state.recipient_surface.as_mut()
-        && let RecipientSurfaceTarget::Item(address) = &surface.target
-    {
+    if let Some(inspector) = state.thread_inspector.as_mut() {
+        let ThreadTarget::Item(address) = &inspector.target;
         let selected = state
             .recipient_context_ids
             .contains(address.item().as_str());
-        if surface.context_selected != selected {
-            surface.context_selected = selected;
-            surface.cached_width = 0;
+        if inspector.context_selected != selected {
+            inspector.context_selected = selected;
+            inspector.invalidate();
         }
     }
     if show_inventory {
@@ -328,7 +327,7 @@ fn action_notice<'a>(
 
 pub(crate) fn surface_action_notices<'a>(
     actions: &'a BTreeMap<(RecipientAction, RecipientActionTarget), RecipientActionState>,
-    surface: &'a RecipientSurfaceTarget,
+    surface: &'a ThreadTarget,
     node: Option<&'a str>,
 ) -> impl Iterator<Item = Cow<'a, str>> + 'a {
     actions
@@ -339,7 +338,7 @@ pub(crate) fn surface_action_notices<'a>(
 
 fn action_target_is_visible(state: &TuiState, target: &RecipientActionTarget) -> bool {
     state
-        .recipient_surface
+        .thread_inspector
         .as_ref()
         .is_some_and(|surface| surface_matches(&surface.target, surface.node_id.as_deref(), target))
 }
@@ -371,9 +370,9 @@ pub(crate) fn prune_retro_left_out(
 }
 
 pub(crate) fn refresh_action_notices(state: &mut TuiState, visible_changed: bool) {
-    if visible_changed && let Some(surface) = state.recipient_surface.as_mut() {
-        surface.cached_width = 0;
-        surface.scroll_offset = usize::MAX;
+    if visible_changed && let Some(inspector) = state.thread_inspector.as_mut() {
+        inspector.invalidate();
+        inspector.scroll_to_end();
     }
     let mut message = String::new();
     for ((action, target), phase) in &state.recipient_actions {
@@ -409,13 +408,13 @@ fn target_id(target: &RecipientActionTarget) -> &str {
 }
 
 fn surface_matches(
-    surface: &RecipientSurfaceTarget,
+    surface: &ThreadTarget,
     node: Option<&str>,
     target: &RecipientActionTarget,
 ) -> bool {
     match target {
         RecipientActionTarget::Item { item_id } => {
-            matches!(surface, RecipientSurfaceTarget::Item(address) if address.item().as_str() == item_id)
+            matches!(surface, ThreadTarget::Item(address) if address.item().as_str() == item_id)
         }
         RecipientActionTarget::Node { node_id } => node == Some(node_id.as_str()),
         RecipientActionTarget::Request { .. } => false,
@@ -425,26 +424,26 @@ fn surface_matches(
 const MAX_RECIPIENT_NOTICES: usize = 8;
 
 fn acknowledge_surface_item(state: &mut TuiState, target: &RecipientActionTarget) {
-    if let Some(surface) = state.recipient_surface.as_mut()
-        && surface_matches(&surface.target, surface.node_id.as_deref(), target)
+    if let Some(inspector) = state.thread_inspector.as_mut()
+        && surface_matches(&inspector.target, inspector.node_id.as_deref(), target)
     {
-        surface.item_state = Some("acknowledged");
+        inspector.item_state = Some("acknowledged");
         if let RecipientActionTarget::Item { item_id } = target {
             let prefix = format!("  {item_id} · received");
-            if let Some(header) = surface
+            if let Some(header) = inspector
                 .content
                 .lines()
                 .find(|line| line.starts_with(&prefix))
                 .map(str::to_owned)
             {
-                surface.content = surface.content.replacen(
+                inspector.content = inspector.content.replacen(
                     &header,
                     &header.replacen(" · received", " · acknowledged", 1),
                     1,
                 );
             }
         }
-        surface.cached_width = 0;
+        inspector.invalidate();
     }
 }
 
@@ -453,16 +452,17 @@ pub(crate) fn show_notice(
     target: Option<&RecipientActionTarget>,
     message: String,
 ) {
-    if let Some(surface) = state.recipient_surface.as_mut()
+    if let Some(inspector) = state.thread_inspector.as_mut()
         && target.is_none_or(|target| {
-            surface_matches(&surface.target, surface.node_id.as_deref(), target)
+            surface_matches(&inspector.target, inspector.node_id.as_deref(), target)
         })
     {
-        if surface.results.len() >= MAX_RECIPIENT_NOTICES {
-            surface.results.remove(0);
+        if inspector.results.len() >= MAX_RECIPIENT_NOTICES {
+            inspector.results.remove(0);
         }
-        surface.results.push(message);
-        surface.scroll_offset = usize::MAX;
+        inspector.results.push(message);
+        inspector.invalidate();
+        inspector.scroll_to_end();
     } else {
         crate::adapters::tui::views::show_view(
             &mut state.feedback_blocks,
@@ -479,6 +479,7 @@ pub(crate) fn show_notice(
 mod tests {
     use super::*;
     use crate::adapters::daemon::protocol::{PeerDraftAction, ProtocolError};
+    use crate::adapters::tui::state::ThreadInspectorState;
     use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
 
     #[test]
@@ -702,36 +703,25 @@ mod tests {
     #[test]
     fn reader_notices_keep_only_the_most_recent_bounded_history() {
         let mut state = TuiState::new(80, 24);
-        state.recipient_surface = Some(crate::adapters::tui::state::RecipientSurface {
-            target: RecipientSurfaceTarget::Node("node".to_owned()),
-            access: crate::adapters::tui::state::RecipientSurfaceAccess::LocalOnly,
-            can_toggle_target: false,
-            root_id: None,
-            first_non_pinned_ordinal: None,
-            last_non_pinned_ordinal: None,
-            omitted_before: 0,
-            omitted_after: 0,
-            node_id: None,
-            item_state: None,
-            context_available: false,
-            context_selected: false,
-            prior_focus: crate::domain::models::FocusState::Input,
-            scroll_offset: 0,
-            viewport_rows: 0,
-            content: String::new(),
-            message_type: crate::domain::models::SemanticMessageType::Unknown,
-            verdict_offer: crate::domain::models::VerdictOffer::None,
-            cached_width: 0,
-            cached_lines: Vec::new(),
-            cached_header: Vec::new(),
-            cached_footer: Vec::new(),
-            cached_action_mask: 0,
-            results: Vec::new(),
-        });
+        let item = crate::domain::models::ItemAddress::from_a2a_ingress(
+            crate::domain::models::PeerId::from_public_key(&[7; 32]).unwrap(),
+            crate::domain::models::ItemId::from_replay("notice-item"),
+        );
+        crate::adapters::tui::presentation::reducer::open_thread(
+            &mut state,
+            ThreadInspectorState::new(
+                ThreadTarget::Item(item),
+                crate::adapters::tui::state::ThreadAccess::LocalOnly,
+                crate::domain::models::SemanticMessageType::Unknown,
+            ),
+            crate::adapters::tui::thread_inspector::title(
+                crate::domain::models::SemanticMessageType::Unknown,
+            ),
+        );
         for index in 0..MAX_RECIPIENT_NOTICES + 1 {
             show_notice(&mut state, None, format!("notice {index}"));
         }
-        let results = &state.recipient_surface.as_ref().unwrap().results;
+        let results = &state.thread_inspector.as_ref().unwrap().results;
         assert_eq!(results.len(), MAX_RECIPIENT_NOTICES);
         assert_eq!(results.first().unwrap(), "notice 1");
         assert_eq!(results.last().unwrap(), "notice 8");

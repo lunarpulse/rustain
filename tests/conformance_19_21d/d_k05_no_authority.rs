@@ -120,7 +120,7 @@ async fn k05_listed_and_legacy_wait_arrival_open_ack_grant_nothing() {
         let state =
             super::k07_k08_recipient::local_view(recipient.daemon.journal.workspace.path(), item)
                 .await;
-        let surface = state.recipient_surface.expect("opened real received item");
+        let surface = state.thread_inspector.expect("opened real received item");
         assert_eq!(surface.item_state, Some("received"));
         assert!(surface.context_available && !surface.context_selected);
         assert_no_authority(&recipient.daemon, &mut recipient.client, item, "opening").await;
@@ -162,7 +162,7 @@ async fn k05_listed_and_legacy_wait_arrival_open_ack_grant_nothing() {
         let after =
             super::k07_k08_recipient::local_view(recipient.daemon.journal.workspace.path(), item)
                 .await
-                .recipient_surface
+                .thread_inspector
                 .expect("acknowledged item remains openable");
         assert_eq!(after.item_state, Some("acknowledged"));
         assert!(after.context_available && !after.context_selected);

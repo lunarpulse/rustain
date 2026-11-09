@@ -12,13 +12,13 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
 
-use super::k4_overlays::{cross_search_state, recipient};
+use super::k4_overlays::{cross_search_state, thread};
 use super::support::{fresh, press};
 
 /// Everything a surface can leave open, in one comparable string.
 fn open_surfaces(s: &TuiState) -> String {
     format!(
-        "{:?} help={} palette={} model={} profile={} usage={} reverse={} popup={} log={} surface={} frames={:?}",
+        "{:?} help={} palette={} model={} profile={} usage={} reverse={} popup={} log={} thread={} frames={:?}",
         s.focus,
         is_open(s, Surface::Help),
         is_open(s, Surface::CommandPalette),
@@ -28,7 +28,7 @@ fn open_surfaces(s: &TuiState) -> String {
         s.reverse_search.is_open(),
         s.autocomplete.is_open(),
         s.notification_log.is_some(),
-        s.recipient_surface.is_some(),
+        s.thread_inspector.is_some(),
         s.modal_stack.iter().collect::<Vec<_>>(),
     )
 }
@@ -121,7 +121,16 @@ const SURFACES: &[(&str, Open, Option<InputAction>)] = &[
         },
         None,
     ),
-    ("RecipientSurface", |s| *s = recipient(), None),
+    // The frame owns no focus: the case keeps the base focus a fresh state has.
+    (
+        "ThreadInspector",
+        |s| {
+            let focus = s.focus.clone();
+            *s = thread();
+            s.focus = focus;
+        },
+        None,
+    ),
 ];
 
 /// Regression: Help and ReverseSearch returned `CancelOrQuit` (stopping a turn or

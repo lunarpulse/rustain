@@ -12,8 +12,15 @@ async fn open_view(workspace: &Path, item_id: &str) -> TuiState {
     state
 }
 
-async fn open_view_recording(workspace: &Path, item_id: &str) -> (TuiState, RequestTrace) {
-    let (app, _events, requests) = app_state_recording(workspace);
+async fn open_view_recording(
+    workspace: &Path,
+    item_id: &str,
+) -> (
+    TuiState,
+    RequestTrace,
+    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) {
+    let (app, events, requests) = app_state_recording(workspace);
     let mut state = TuiState::new(130, 30);
     state.input_buffer = format!("/team view {item_id}");
     let InputAction::ExecuteCommand { name, args } = submit_message_for_test(&mut state) else {
@@ -21,7 +28,7 @@ async fn open_view_recording(workspace: &Path, item_id: &str) -> (TuiState, Requ
     };
     assert_eq!(name, "team");
     team_command(&mut state, "recipient-view", args.as_deref(), &app).await;
-    (state, requests)
+    (state, requests, events)
 }
 
 async fn received_id(journal: &Journal, body: &str) -> String {
@@ -228,7 +235,7 @@ async fn k07_view_discloses_unrecognized_type_from_http_ingress() {
     let id = received_id(&host.journal, body).await;
     let state = open_view(&host.journal.path, &id).await;
     let surface = state
-        .recipient_surface
+        .thread_inspector
         .expect("unknown semantic type does not hide received item");
     assert_eq!(
         surface.message_type,
@@ -246,7 +253,7 @@ async fn k07_view_pins_opened_older_item_and_bounds_newest_fifty_turns() {
     );
 
     let state = open_view(&host.journal.path, &opened_id).await;
-    let surface = state.recipient_surface.expect("older linked item opens");
+    let surface = state.thread_inspector.expect("older linked item opens");
     assert_eq!(surface.root_id.as_deref(), Some(root_id.as_str()));
     assert_ne!(root_id, opened_id);
     assert!(surface.omitted_before > 0);
@@ -291,7 +298,7 @@ async fn k07_view_bounds_newest_page_to_896_kibibytes() {
     );
 
     let state = open_view(&host.journal.path, &opened_id).await;
-    let surface = state.recipient_surface.expect("linked local thread opens");
+    let surface = state.thread_inspector.expect("linked local thread opens");
     assert_eq!(surface.root_id.as_deref(), Some(root_id.as_str()));
     assert!(
         surface.omitted_before > 0,
@@ -321,9 +328,10 @@ async fn k07_view_reads_http_received_type_and_raw_body_after_restart() {
     settle_send(&mut sender, &mut send_state).await;
 
     let id = received_id(&recipient.journal, body).await;
-    let (item, view_requests) = open_view_recording(&recipient.journal.path, &id).await;
+    let (item, view_requests, _view_events) =
+        open_view_recording(&recipient.journal.path, &id).await;
     let surface = item
-        .recipient_surface
+        .thread_inspector
         .expect("local View opens recipient surface");
     assert_eq!(
         surface.message_type,
@@ -357,19 +365,35 @@ async fn k07_view_reads_http_received_type_and_raw_body_after_restart() {
             .is_some_and(|root| root == id.as_str())
     );
 
-    let (missing, refused_view_requests) =
+    let (missing, refused_view_requests, mut refusal_events) =
         open_view_recording(&recipient.journal.path, "not-a-real-item").await;
     assert!(
-        missing.recipient_surface.is_none(),
+        missing.thread_inspector.is_none(),
         "unknown ids do not open a fabricated item"
     );
-    let newest = rustain::adapters::tui::views::in_render_order(&missing.feedback_blocks)
+    let mut warnings = Vec::new();
+    while let Ok(event) = refusal_events.try_recv() {
+        if let AppEvent::SystemNotice {
+            conversation_id,
+            level,
+            message,
+        } = event
+        {
+            warnings.push((conversation_id, level, message));
+        }
+    }
+    let (conversation_id, level, message) = warnings
         .last()
-        .expect("the refusal is shown as the newest view");
-    assert_eq!(newest.id, "recipient-view", "the refusal block's id");
+        .expect("the refusal is shown as a system warning notice");
+    assert_eq!(
+        conversation_id.as_deref(),
+        Some("recipient-view"),
+        "the refusal notice's conversation"
+    );
+    assert_eq!(*level, rustain::domain::models::NoticeLevel::Warning);
     assert!(
-        !newest.message.trim().is_empty(),
-        "the refusal block carries the refusal message"
+        !message.trim().is_empty(),
+        "the refusal notice carries the refusal message"
     );
     assert_eq!(
         refused_view_requests.lock().len(),
@@ -387,7 +411,7 @@ async fn k07_view_reads_http_received_type_and_raw_body_after_restart() {
     let legacy_id = received_id(&recipient.journal, legacy_body).await;
     let legacy = open_view(&recipient.journal.path, &legacy_id).await;
     let legacy = legacy
-        .recipient_surface
+        .thread_inspector
         .expect("untyped received item remains readable");
     assert_eq!(
         legacy.message_type,
@@ -397,7 +421,7 @@ async fn k07_view_reads_http_received_type_and_raw_body_after_restart() {
     let restarted = recipient.restart().await;
     let replayed = open_view(&restarted.journal.path, &id).await;
     let surface = replayed
-        .recipient_surface
+        .thread_inspector
         .expect("restarted production workspace replays received item");
     assert_eq!(
         surface.message_type,
@@ -429,7 +453,7 @@ async fn k07_view_includes_body_at_the_64_kibibyte_read_ceiling() {
 
     let id = received_id(&recipient.journal, &body).await;
     let state = open_view(&recipient.journal.path, &id).await;
-    let surface = state.recipient_surface.expect("received item opens");
+    let surface = state.thread_inspector.expect("received item opens");
     assert!(surface.content.contains("65536"));
     assert!(
         surface.content.contains(&body),
@@ -477,7 +501,7 @@ async fn k07_view_withholds_historical_received_body_over_64_kibibytes() {
         .expect("persist historical replay input");
     let state = open_view(&legacy.path, &id).await;
     let surface = state
-        .recipient_surface
+        .thread_inspector
         .expect("historical received item opens");
     assert!(surface.content.contains("65537"));
     assert!(!surface.content.contains(&body));
@@ -517,7 +541,7 @@ async fn k07_view_withholds_a_turn_over_448_kibibytes() {
     let id = received_id(&recipient.journal, &body).await;
     let state = open_view(&recipient.journal.path, &id).await;
     let surface = state
-        .recipient_surface
+        .thread_inspector
         .expect("large received item remains inspectable");
     assert!(surface.content.contains("65536"));
     assert!(!surface.content.contains("      p\n      \n"));
@@ -635,7 +659,7 @@ async fn k07_view_keeps_distinct_principals_and_unrelated_threads_separate() {
 
     let first_view = open_view(&recipient.journal.path, &first_id).await;
     let first_content = &first_view
-        .recipient_surface
+        .thread_inspector
         .expect("first received item local view")
         .content;
     assert!(first_content.contains(first_body));
@@ -654,7 +678,7 @@ async fn k07_view_keeps_distinct_principals_and_unrelated_threads_separate() {
 
     let unrelated_view = open_view(&recipient.journal.path, &unrelated_id).await;
     let unrelated_content = &unrelated_view
-        .recipient_surface
+        .thread_inspector
         .expect("same-principal second thread local view")
         .content;
     assert!(unrelated_content.contains(unrelated_body));
@@ -663,7 +687,7 @@ async fn k07_view_keeps_distinct_principals_and_unrelated_threads_separate() {
 
     let second_view = open_view(&recipient.journal.path, &second_id).await;
     let second_content = &second_view
-        .recipient_surface
+        .thread_inspector
         .expect("second principal local view")
         .content;
     assert!(second_content.contains(other_principal_body));
@@ -710,7 +734,7 @@ async fn k07_view_reports_content_unavailable_after_socket_removal() {
 
     let state = open_view(&recipient.journal.path, &id).await;
     let surface = state
-        .recipient_surface
+        .thread_inspector
         .expect("removed item remains inspectable");
     assert_eq!(surface.item_state, Some("removed"));
     assert!(

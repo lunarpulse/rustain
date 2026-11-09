@@ -1,7 +1,9 @@
 //! S-BLOCK (Story 21.13): horizontal block-local scrolling shared by every
 //! Markdown body window, and the commands of one inspected code block or table.
-//! Every row is local-only (D4); whether a row can change anything now is the
-//! surface's `applies` rule, so the rail never paints a key that does nothing.
+//! The Markdown body rows are both-host rows (Story 21.8: the attached host reaches them
+//! through the thread frame); the block-viewer rows are local-only (D4). Whether a row can
+//! change anything now is the surface's `applies` rule, so the rail never paints a key that
+//! does nothing.
 
 use super::model::{Binding, CommandId, Context, Key, bind};
 use super::table::GlobalCmd;
@@ -34,7 +36,6 @@ const fn m(keys: &'static [Key], command: ViewerCmd, label: &'static str) -> Bin
         CommandId::Viewer(command),
         label,
     )
-    .local()
 }
 
 const fn b(keys: &'static [Key], command: BlockCmd, label: &'static str) -> Binding {
@@ -47,7 +48,7 @@ pub const ROWS: &[Binding] = &[
     m(&[Key::Char('l')], ViewerCmd::ScrollRight, "Right").hint().does("Scroll wide rows right by one tab stop"),
     m(&[Key::Char('0')], ViewerCmd::LeftEdge, "Start").hint().does("Scroll wide rows to their first column"),
     m(&[Key::Char('$')], ViewerCmd::RightEdge, "End").hint().does("Scroll wide rows to their last column"),
-    bind(Context::MarkdownBody, &[Key::Char('v')], CommandId::Body(BodyCmd::ToggleMode), "View").hint().local().does("Switch the body between rendered markdown and its source"),
+    bind(Context::MarkdownBody, &[Key::Char('v')], CommandId::Body(BodyCmd::ToggleMode), "View").hint().does("Switch the body between rendered markdown and its source"),
     bind(Context::BlockViewer, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").hint().local().does("Search the displayed rows of the block"),
     b(&[Key::Char('n')], BlockCmd::NextMatch, "Next match").hint().does("Select the next search match, wrapping at the end"),
     b(&[Key::Char('N')], BlockCmd::PrevMatch, "Previous match").hint().does("Select the previous search match, wrapping at the start"),

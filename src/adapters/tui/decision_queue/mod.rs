@@ -87,8 +87,8 @@ pub use recipient::{
 };
 pub use reply::ReplyPayload;
 pub use retract::{
-    RetractTarget, TeamRetractPayload, confirmation_pending, raise_team_retract,
-    team_retract_pending, withdraw_team_retract_request,
+    RetractTarget, TeamRetractPayload, confirmation_pending, higher_confirmation_presenting,
+    raise_team_retract, team_retract_pending, withdraw_team_retract_request,
 };
 pub use skill_trust::{
     SkillOrigin, SkillTrustPayload, drain_skill_trust, inspect_target, open_inspect,
@@ -157,24 +157,14 @@ pub fn apply_resolved_action(state: &mut TuiState, action: InputAction) {
                 ));
             }
             if state.modal_stack.is_empty() {
-                let focus = if state.recipient_surface.is_some() {
-                    FocusState::Chat
-                } else {
-                    FocusState::Input
-                };
-                presentation::reducer::set_base(state, focus);
+                presentation::reducer::set_base(state, FocusState::Input);
             }
         }
         InputAction::ImageConfirmCancel => {
             drop(state.decisions.take_resolved());
             notifications::info(state, NoticeSource::Image, "Image attachment cancelled");
             if state.modal_stack.is_empty() {
-                let focus = if state.recipient_surface.is_some() {
-                    FocusState::Chat
-                } else {
-                    FocusState::Input
-                };
-                presentation::reducer::set_base(state, focus);
+                presentation::reducer::set_base(state, FocusState::Input);
             }
         }
         InputAction::CancelDelete => {
@@ -211,12 +201,7 @@ pub fn apply_resolved_action(state: &mut TuiState, action: InputAction) {
         ) => {
             drop(state.decisions.take_resolved());
             if state.modal_stack.is_empty() {
-                let focus = if state.recipient_surface.is_some() {
-                    FocusState::Chat
-                } else {
-                    FocusState::Input
-                };
-                presentation::reducer::set_base(state, focus);
+                presentation::reducer::set_base(state, FocusState::Input);
             }
         }
         _ => unreachable!("only state-only resolved pane actions enter this seam"),

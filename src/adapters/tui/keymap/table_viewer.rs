@@ -1,4 +1,5 @@
-//! RU-25 navigation, isolated from Chat and Global commands.
+//! RU-25 navigation, isolated from Chat and Global commands. Both-host rows: the attached
+//! host reaches them only through the thread frame (Story 21.8).
 
 use super::model::{Binding, CommandId, Context, Key, bind};
 use crate::adapters::tui::presentation::viewer::ViewerCmd;
@@ -10,7 +11,6 @@ const fn v(keys: &'static [Key], command: ViewerCmd, label: &'static str) -> Bin
         CommandId::Viewer(command),
         label,
     )
-    .local()
 }
 
 #[rustfmt::skip]

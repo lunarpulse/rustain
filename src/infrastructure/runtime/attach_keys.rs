@@ -3,7 +3,7 @@
 //! [`handle_attached_key`] is the one place `run_attached` sends EVERY key
 //! event. The shared presentation boundary owns S-QUIT, S-LOG and the minimum
 //! terminal size before the legacy overlays, team-retract card, approvals,
-//! proposals, recipient surface, peer card Tab and inline decision cards.
+//! proposals, the thread window, peer card Tab and inline decision cards.
 //! The attached client also supports:
 //!
 //! * the untimed `Ctrl+X` leader with the complete A5 follow-up table,
@@ -30,9 +30,8 @@ use tokio::sync::mpsc;
 
 use super::{
     AttachedTeamRequests, ComposerOutcome, SocketTurnDriver,
-    attached_composer_key_with_team_requests, attached_higher_confirmation,
-    dispatch_recipient_surface_key, open_response_surface, preview_line, recipient_surface_flash,
-    retractable_rows, system_message, take_current_peer_compose,
+    attached_composer_key_with_team_requests, open_thread_for_node, preview_line, retractable_rows,
+    system_message, take_current_peer_compose, thread_flash,
 };
 use crate::adapters::builtin_commands::{self, CommandHost};
 use crate::adapters::command_registry::{CommandRegistry, CommandSource};
@@ -309,10 +308,9 @@ impl KeyCtx<'_> {
         self.state.needs_redraw = true;
     }
 
-    /// A peer reply composition (or an open surface) owns the composer text.
+    /// A peer reply composition owns the composer text.
     fn composer_locked(&self) -> bool {
         crate::adapters::tui::handlers::recipient_actions::pending_composition(self.state).is_some()
-            || self.state.recipient_surface.is_some()
     }
 }
 
@@ -321,10 +319,7 @@ impl KeyCtx<'_> {
 /// and `[^X Enter] Send` while multi-line. The `^X menu` tail is painted by the
 /// status row itself, so it is not repeated here.
 pub(super) fn status_hint(state: &TuiState) -> Option<String> {
-    if !state.modal_stack.is_empty()
-        || state.pending_leader.is_some()
-        || state.recipient_surface.is_some()
-    {
+    if !state.modal_stack.is_empty() || state.pending_leader.is_some() {
         return None;
     }
     crate::adapters::tui::keymap::render_tips::attached_status_tip(
@@ -392,7 +387,6 @@ pub(super) fn handle_attached_paste(state: &mut TuiState, text: &str, card_pendi
     }
     if !card_pending
         && state.focus == FocusState::Input
-        && state.recipient_surface.is_none()
         && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
         && !crate::adapters::tui::decision_queue::team_retract_pending(state)
     {
@@ -464,7 +458,9 @@ fn invalid_decision_key(state: &TuiState, key: KeyEvent) -> bool {
 
 /// The attached key front door. Called by `run_attached` for every key event.
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    if invalid_decision_key(ctx.state, key) {
+    if invalid_decision_key(ctx.state, key)
+        || crate::adapters::tui::thread_inspector::ignores_raw_key(ctx.state, &key)
+    {
         return KeyFlow::Continue;
     }
     let owner_before = (
@@ -496,6 +492,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             KeyFlow::Continue
         }
         Some(RouteEffect::Leader) => leader_key(ctx, key).await,
+        Some(RouteEffect::Frame(Context::ThreadInspector)) => thread_key(ctx, key).await,
         Some(RouteEffect::Frame(context)) => unreachable!("attached frame context: {context:?}"),
         Some(RouteEffect::Action(_)) => unreachable!("local-only frame action in attached host"),
         Some(RouteEffect::Decision(
@@ -543,17 +540,16 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                 });
             if let Some(node) = node {
                 crate::adapters::tui::decision_queue::defer_focused(ctx.state);
-                if let Err(error) = open_response_surface(
+                if let Err(error) = open_thread_for_node(
                     ctx.workspace,
                     ctx.conversation,
                     &node,
                     ctx.state,
                     ctx.read_only,
-                    true,
                 )
                 .await
                 {
-                    recipient_surface_flash(ctx.state, error.to_string());
+                    thread_flash(ctx.state, error.to_string());
                 }
             }
             KeyFlow::Continue
@@ -847,9 +843,66 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     flow
 }
 
-async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    use crossterm::event::KeyEventKind;
+/// A key of the thread frame, the registry having resolved its context: the shared executor
+/// applies the state-only part (scrolling, closing, composer prefill, overlay toggles); this
+/// host loads pages and queues the writer frames.
+async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    use crate::adapters::tui::thread_inspector::{self, ThreadOutcome};
+    match thread_inspector::on_key(
+        ctx.state,
+        Key::from_crossterm(&key),
+        Host::Attached,
+        Some(&*ctx.conversation),
+    ) {
+        ThreadOutcome::Consumed => {}
+        ThreadOutcome::Page { earlier } => {
+            if let Err(error) = crate::infrastructure::runtime::thread_open::navigate(
+                ctx.workspace,
+                Some(&*ctx.conversation),
+                ctx.state,
+                earlier,
+            )
+            .await
+            {
+                thread_flash(ctx.state, error.to_string());
+            }
+        }
+        ThreadOutcome::Send { frame, joined } => {
+            if ctx.read_only {
+                return KeyFlow::Continue;
+            }
+            // The Busy fast path reuses the durable principal/task join, not the
+            // presentation sidecar as an item lookup authority.
+            #[cfg(feature = "a2a")]
+            if let Some((node, address)) = joined {
+                let found = match super::recipient_projection(ctx.workspace).await {
+                    Ok(projection) => crate::domain::models::AgentId::from_peer_path(&node)
+                        .ok()
+                        .and_then(|node| {
+                            crate::adapters::a2a::exec::recipient_item_for_node(&projection, &node)
+                        }),
+                    Err(error) => {
+                        thread_flash(ctx.state, error.to_string());
+                        return KeyFlow::Continue;
+                    }
+                };
+                if found.is_none_or(|item| item.address != address) {
+                    thread_flash(
+                        ctx.state,
+                        format!("recipient item '{}' not found", address.item().as_str()),
+                    );
+                    return KeyFlow::Continue;
+                }
+            }
+            #[cfg(not(feature = "a2a"))]
+            let _ = joined;
+            super::queue_recipient_action(ctx.state, frame, ctx.frame_tx, false);
+        }
+    }
+    KeyFlow::Continue
+}
 
+async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     if ctx.state.autocomplete.is_open()
         && ctx.state.focus == FocusState::Input
         && let Some(flow) = popup_key(ctx, key).await
@@ -857,32 +910,10 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         return flow;
     }
 
-    let higher_confirmation = attached_higher_confirmation(ctx.state);
-    if key.kind != KeyEventKind::Press
-        && (ctx.state.recipient_surface.is_some() || higher_confirmation)
-    {
-        return KeyFlow::Continue;
-    }
-    if dispatch_recipient_surface_key(
-        key,
-        higher_confirmation,
-        ctx.workspace,
-        ctx.conversation,
-        ctx.state,
-        (!ctx.read_only).then_some(ctx.frame_tx),
-    )
-    .await
-    {
-        return KeyFlow::Continue;
-    }
     // Any further keypress dismisses the retract confirmation.
     ctx.state.feedback_blocks.remove("peer-retract");
 
     let pressed = Key::from_crossterm(&key);
-    // An open peer surface owns every printable key.
-    if matches!(pressed, Key::Char(_)) && ctx.state.recipient_surface.is_some() {
-        return KeyFlow::Continue;
-    }
     let context = if ctx.state.focus == FocusState::Input {
         Context::Input
     } else {
@@ -1072,9 +1103,6 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
 
 /// Enter and its modified forms. Plain Enter is never mistaken for Ctrl+Enter.
 async fn enter_key(ctx: &mut KeyCtx<'_>, command: InputCmd) -> KeyFlow {
-    if ctx.state.recipient_surface.is_some() {
-        return KeyFlow::Continue;
-    }
     match command {
         InputCmd::InsertNewline => {
             if !ctx.composer_locked() {
@@ -1550,22 +1578,21 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         }
         ComposerOutcome::LocalView(item_id) => {
             let access = if ctx.read_only {
-                crate::adapters::tui::state::RecipientSurfaceAccess::ReadOnly
+                crate::adapters::tui::state::ThreadAccess::ReadOnly
             } else {
-                crate::adapters::tui::state::RecipientSurfaceAccess::Writer
+                crate::adapters::tui::state::ThreadAccess::Writer
             };
-            if let Err(error) =
-                crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                    ctx.workspace,
-                    Some(ctx.conversation),
-                    &item_id,
-                    ctx.state,
-                    access,
-                    crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-                )
-                .await
+            if let Err(error) = crate::infrastructure::runtime::thread_open::open_received(
+                ctx.workspace,
+                Some(ctx.conversation),
+                &item_id,
+                ctx.state,
+                access,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
             {
-                recipient_surface_flash(ctx.state, error.to_string());
+                notifications::warning(ctx.state, NoticeSource::Attached, error.to_string());
             }
             return KeyFlow::Continue;
         }
@@ -1576,7 +1603,7 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         Err(()) => {
             ctx.state.input_buffer = text;
             ctx.state.cursor_position = ctx.state.input_buffer.chars().count();
-            recipient_surface_flash(
+            thread_flash(
                 ctx.state,
                 "response already settled — your text was not sent".to_owned(),
             );
@@ -1727,8 +1754,9 @@ pub(crate) mod tests {
             self.raw_key(KeyEvent::new(code, modifiers)).await
         }
 
-        pub(crate) async fn raw_key(&mut self, key: KeyEvent) -> KeyFlow {
-            let mut ctx = KeyCtx {
+        /// The front door's context, borrowed field by field from the rig.
+        fn key_ctx(&mut self) -> KeyCtx<'_> {
+            KeyCtx {
                 workspace: self.workspace.path(),
                 read_only: self.read_only,
                 state: &mut self.state,
@@ -1744,13 +1772,51 @@ pub(crate) mod tests {
                 session_manager: &mut self.session_manager,
                 log_service: &self.log_service,
                 chrome: &mut self.chrome,
-            };
+            }
+        }
+
+        pub(crate) async fn raw_key(&mut self, key: KeyEvent) -> KeyFlow {
+            let mut ctx = self.key_ctx();
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 handle_attached_key(&mut ctx, key),
             )
             .await
             .expect("attached key deadline")
+        }
+
+        /// The composer's submission path (`Enter`) as the loop runs it, for a composer
+        /// line set while a frame owns the keys (a typed key would be the frame's).
+        async fn submit_composer(&mut self) -> KeyFlow {
+            let mut ctx = self.key_ctx();
+            tokio::time::timeout(std::time::Duration::from_secs(10), submit_enter(&mut ctx))
+                .await
+                .expect("attached submit deadline")
+        }
+
+        /// The scratch workspace whose journal the thread openers read.
+        pub(crate) fn workspace(&self) -> &std::path::Path {
+            self.workspace.path()
+        }
+
+        /// Open the one thread frame on `item_id` through the production opener and paint
+        /// it once, so the viewer has its fitted rows (a scroll key clamps against them).
+        async fn open_thread(
+            &mut self,
+            item_id: &str,
+            access: crate::adapters::tui::state::ThreadAccess,
+        ) {
+            crate::infrastructure::runtime::thread_open::open_received(
+                self.workspace.path(),
+                Some(&self.domain_tab.conversation),
+                item_id,
+                &mut self.state,
+                access,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .expect("open thread");
+            self.paint();
         }
 
         async fn ch(&mut self, c: char) -> KeyFlow {
@@ -3661,7 +3727,7 @@ pub(crate) mod tests {
                 "{painted}"
             );
             rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
-            assert!(rig.state.recipient_surface.is_none());
+            assert!(rig.state.thread_inspector.is_none());
             assert_eq!(rig.state.input_buffer, "retained draft");
             assert!(rig.frames().is_empty());
             assert!(decision_queue::open(&mut rig.state, &key));
@@ -5032,7 +5098,7 @@ pub(crate) mod tests {
         focus: FocusState,
         input: String,
         multiline: bool,
-        /// which-key, help, palette, S-LOG, S-QUIT, popup, recipient surface.
+        /// which-key, help, palette, S-LOG, S-QUIT, popup, thread window.
         surfaces: [bool; 7],
         scroll: (usize, bool),
         notices: usize,
@@ -5052,7 +5118,7 @@ pub(crate) mod tests {
                 presentation::is_open(state, Surface::NotificationLog),
                 presentation::is_open(state, Surface::QuitConfirm),
                 state.autocomplete.is_open(),
-                state.recipient_surface.is_some(),
+                state.thread_inspector.is_some(),
             ],
             scroll: (
                 rig.domain_tab.view_state.scroll_offset,
@@ -6152,82 +6218,184 @@ pub(crate) mod tests {
         witness_inert(Context::QuitConfirm, quit_rig, open_surface, |_| false).await;
     }
 
-    /// A node view at line 20 of an 11-row viewport over Chat (prior focus Input); read-only, so no action letter is live.
-    #[rustfmt::skip]
-    fn surface_rig(_: Key) -> Rig {
-        use crate::adapters::tui::state::{RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget};
-        use crate::domain::models::{SemanticMessageType, VerdictOffer};
+    fn thread_peer() -> crate::domain::models::PeerId {
+        crate::domain::models::PeerId::from_public_key(&[91; 32]).unwrap()
+    }
+
+    /// Journal one received item (the fixture of the opener, never a hand-built slot).
+    async fn seed_thread_item(
+        journal: &crate::infrastructure::subagent::node_journal::NodeJournal,
+        peer: &crate::domain::models::PeerId,
+        id: &str,
+        message_type: crate::domain::models::SemanticMessageType,
+        in_reply_to: Option<&str>,
+        content: &str,
+        stories: Option<crate::domain::models::ReceivedStories>,
+    ) -> crate::domain::models::ItemAddress {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, RoomEvent, SendAuthorization,
+        };
+        let address = ItemAddress::from_a2a_ingress(peer.clone(), ItemId::from_replay(id));
+        journal
+            .append_room(RoomEvent::RecipientItemReceived {
+                stories,
+                selected_for: None,
+                address: address.clone(),
+                task: format!("task-{id}"),
+                alias: Some("peer".to_owned()),
+                message_type,
+                content: content.to_owned(),
+                in_reply_to: in_reply_to.map(str::to_owned),
+                capability_hash: None,
+                reply_capability_matched: false,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            })
+            .await
+            .expect("append received item");
+        address
+    }
+
+    /// A read-only thread of one 200-line item, opened by the production opener over Chat
+    /// (draft in the composer) and scrolled to row 20: no action letter is live, and the
+    /// thread has no omitted page.
+    async fn thread_witness_rig(_: Key) -> Rig {
+        use crate::adapters::tui::state::ThreadAccess;
+        use crate::domain::models::SemanticMessageType;
         let mut rig = Rig::at(FocusState::Chat, "draft");
-        rig.state.recipient_surface = Some(RecipientSurface {
-            target: RecipientSurfaceTarget::Node("n".into()), access: RecipientSurfaceAccess::ReadOnly,
-            can_toggle_target: false, root_id: None, first_non_pinned_ordinal: None,
-            last_non_pinned_ordinal: None, omitted_before: 2, omitted_after: 3, node_id: None,
-            item_state: None, context_available: false, context_selected: false,
-            prior_focus: FocusState::Input, scroll_offset: 20, viewport_rows: 11, content: String::new(),
-            message_type: SemanticMessageType::Unknown, verdict_offer: VerdictOffer::None, cached_width: 0,
-            cached_lines: Vec::new(), cached_header: Vec::new(), cached_footer: Vec::new(),
-            cached_action_mask: 0, results: Vec::new(),
-        });
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            rig.workspace(),
+        )
+        .await
+        .unwrap();
+        let body = (0..200).map(|n| format!("line {n}\n")).collect::<String>();
+        seed_thread_item(
+            &journal,
+            &thread_peer(),
+            "ri-witness",
+            SemanticMessageType::Consultation,
+            None,
+            &body,
+            None,
+        )
+        .await;
+        drop(journal);
+        rig.open_thread("ri-witness", ThreadAccess::ReadOnly).await;
+        rig.state.thread_inspector.as_mut().unwrap().viewer.top = 20;
         rig
     }
 
     #[rustfmt::skip]
-    fn surface_digest(rig: &Rig) -> String {
-        let scroll = rig.state.recipient_surface.as_ref().map_or(0, |s| s.scroll_offset);
-        format!("surface={} scroll={scroll} {}", rig.state.recipient_surface.is_some(), open_surface(rig))
+    fn thread_digest(rig: &Rig) -> String {
+        let inspector = rig.state.thread_inspector.as_ref();
+        format!(
+            "thread={} top={} earlier={} later={} {}",
+            presentation::is_open(&rig.state, Surface::ThreadInspector),
+            inspector.map_or(0, |i| i.viewer.top),
+            inspector.is_some_and(|i| i.omitted_before > 0),
+            inspector.is_some_and(|i| i.omitted_after > 0),
+            open_surface(rig),
+        )
     }
 
-    /// Catches a surface row that closes into the wrong focus, pages the wrong way or skips the quit question, or a key leaking below.
-    // LIMITATION: `p`/`l` (thread paging) and `Tab` (item/node toggle) need an item thread window and an a2a
-    // workspace; on this node view they are only witnessed as "surface survives, nothing sent".
+    /// Catches a thread row that closes into the wrong focus, scrolls by the wrong step, pages
+    /// a page that is not there or skips the quit question, or a key leaking below. The body
+    /// (`InspectorBody`, `MarkdownBody`) rows are both-host rows resolved through the frame;
+    /// `h 0 $ v l` have nothing to act on at the root of a thread.
     #[rustfmt::skip]
     #[tokio::test]
-    async fn story21_3_attached_witness_recipient_surface() {
-        let up = |scroll: u8, focus: &str, surface: bool, quit: bool| format!("Continue | surface={surface} scroll={scroll} quit={quit} focus={focus} input=draft");
-        let cases = [
-            (Key::Char('p'), up(20, "Chat", true, false)), (Key::Char('l'), up(20, "Chat", true, false)), (Key::Tab, up(20, "Chat", true, false)),
-            (Key::Esc, up(0, "Input", false, false)), (Key::Ctrl('c'), up(0, "Input", false, false)),
-            (Key::PageUp, up(10, "Chat", true, false)), (Key::PageDown, up(30, "Chat", true, false)),
-            (Key::Ctrl('q'), up(20, "Chat", true, true)),
+    async fn story21_3_attached_witness_thread_inspector() {
+        let probe = thread_witness_rig(Key::Esc).await;
+        let (rows, viewport) = probe.state.thread_inspector.as_ref().unwrap().fit.get();
+        let max = rows.saturating_sub(viewport);
+        assert!(viewport >= 4 && max > 20 + viewport, "the fixture scrolls: rows={rows} viewport={viewport}");
+        let (half, page) = ((viewport / 2).max(1), viewport - 1);
+        let at = |top: usize, thread: bool, quit: bool| format!("Continue | thread={thread} top={top} earlier=false later=false quit={quit} focus=Chat input=draft");
+        let same = at(20, true, false);
+        let own = [
+            (Key::Esc, at(0, false, false)), (Key::Ctrl('c'), at(0, false, false)),
+            (Key::Ctrl('q'), at(20, true, true)),
+            (Key::Ctrl('x'), same.clone()), (Key::Ctrl('p'), same.clone()),
+            // No omitted page: both pagers are consumed no-ops; read-only: no action letter is live.
+            (Key::Char('p'), same.clone()), (Key::Char('l'), same.clone()),
+            (Key::Char('r'), same.clone()), (Key::Char('d'), same.clone()), (Key::Char('b'), same.clone()),
+            (Key::Char('a'), same.clone()), (Key::Char('y'), same.clone()), (Key::Char('s'), same.clone()),
+            (Key::Char('n'), same.clone()), (Key::Char('1'), same.clone()), (Key::Char('2'), same.clone()),
+            (Key::Char('3'), same.clone()), (Key::Char('u'), same.clone()),
         ];
-        let open = |k| std::future::ready(surface_rig(k));
-        witness_rows(Context::RecipientSurface, open, surface_digest, &cases).await;
-        // Ctrl+X passes through the surface to the leader (`dispatch_recipient_surface_key`): exempt, and checked here.
-        witness_inert(Context::RecipientSurface, open, surface_digest, |k| k == Key::Ctrl('x')).await;
-        let mut rig = surface_rig(Key::Esc);
+        witness_rows(Context::ThreadInspector, thread_witness_rig, thread_digest, &own).await;
+        let body = [
+            (Key::Char('j'), at(21, true, false)), (Key::Down, at(21, true, false)),
+            (Key::Char('k'), at(19, true, false)), (Key::Up, at(19, true, false)),
+            (Key::Ctrl('d'), at(20 + half, true, false)), (Key::Ctrl('u'), at(20 - half, true, false)),
+            (Key::PageDown, at(20 + page, true, false)), (Key::PageUp, at(20 - page, true, false)),
+            (Key::Char('g'), at(0, true, false)), (Key::Char('G'), at(max, true, false)),
+        ];
+        witness_rows(Context::InspectorBody, thread_witness_rig, thread_digest, &body).await;
+        let markdown = [
+            (Key::Char('h'), same.clone()), (Key::Char('l'), same.clone()), (Key::Char('0'), same.clone()),
+            (Key::Char('$'), same.clone()), (Key::Char('v'), same.clone()),
+        ];
+        witness_rows(Context::MarkdownBody, thread_witness_rig, thread_digest, &markdown).await;
+        witness_inert(
+            Context::ThreadInspector,
+            thread_witness_rig,
+            thread_digest,
+            |k| matches!(
+                k,
+                Key::Char('j' | 'k' | 'g' | 'G' | 'h' | '0' | '$' | 'v')
+                    | Key::Down | Key::Up | Key::PageDown | Key::PageUp | Key::Ctrl('d' | 'u')
+            ),
+        ).await;
+        let mut rig = thread_witness_rig(Key::Esc).await;
         rig.ctrl('x').await;
-        assert!(rig.state.pending_leader.is_some() && rig.state.recipient_surface.is_some());
+        assert!(rig.state.pending_leader.is_some() && rig.state.thread_inspector.is_some());
         assert!(rig.frames().is_empty());
     }
 
-    /// Catches a writer's item-surface action key (a named exclusion of the table) that sends nothing or the wrong frame.
+    /// Catches a writer's thread action key that sends nothing or the wrong frame, and the
+    /// old `c` context key that no longer has a row.
     #[tokio::test]
-    async fn story21_3_attached_recipient_action_key_sends_its_frame() {
-        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
-        use crate::domain::models::{ItemAddress, ItemId, PeerId};
-        let mut rig = surface_rig(Key::Esc);
-        let peer = PeerId::from_public_key(&[91; 32]).unwrap();
-        let surface = rig.state.recipient_surface.as_mut().unwrap();
-        surface.target = RecipientSurfaceTarget::Item(ItemAddress::from_a2a_ingress(
-            peer,
-            ItemId::from_replay("ri-writer"),
-        ));
-        surface.access = RecipientSurfaceAccess::Writer;
-        surface.context_available = true;
+    async fn story21_3_attached_thread_action_key_sends_its_frame() {
+        use crate::adapters::tui::state::ThreadAccess;
+        use crate::domain::models::SemanticMessageType;
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+            rig.workspace(),
+        )
+        .await
+        .unwrap();
+        seed_thread_item(
+            &journal,
+            &thread_peer(),
+            "ri-writer",
+            SemanticMessageType::ArchitectureUpdate,
+            None,
+            "body",
+            None,
+        )
+        .await;
+        drop(journal);
+        rig.open_thread("ri-writer", ThreadAccess::Writer).await;
         assert_eq!(rig.key(Key::Char('x')).await, KeyFlow::Continue);
         assert!(
             rig.frames().is_empty(),
             "a letter with no action sends nothing"
         );
         assert_eq!(rig.key(Key::Char('c')).await, KeyFlow::Continue);
+        assert!(
+            rig.frames().is_empty(),
+            "`c` has no row in the thread frame"
+        );
+        assert_eq!(rig.key(Key::Char('u')).await, KeyFlow::Continue);
         let frames = rig.frames();
         assert!(
             matches!(frames.as_slice(), [ClientFrame::SetRecipientContext { item_id, selected: true }] if item_id == "ri-writer"),
             "{frames:?}"
         );
         assert!(
-            rig.state.recipient_surface.is_some(),
-            "the surface stays open while the daemon answers"
+            rig.state.thread_inspector.is_some(),
+            "the thread stays open while the daemon answers"
         );
     }
 
@@ -6487,6 +6655,9 @@ pub(crate) mod tests {
                     | Surface::ToolInspector(_)
                     | Surface::BlockViewer(_)
                     | Surface::Login => unreachable!("surface not offered attached"),
+                    Surface::ThreadInspector => unreachable!(
+                        "the thread frame owns its keys by value: story21_8_attached_thread_frame_keys_act_by_value"
+                    ),
                 }
                 let before = (
                     rig.state.input_buffer.clone(),
@@ -8267,5 +8438,1294 @@ pub(crate) mod tests {
             reached, 24,
             "all three production paths and control combinations are reached"
         );
+    }
+
+    // ── Story 21.8 (slice 8-A): the attached halves of the S-THREAD keystones ────────────
+    // Real key events through `handle_attached_key`, a real frame receiver, the production
+    // opener over a scratch journal, and cells painted through `paint_attached`.
+
+    #[cfg(all(unix, feature = "a2a"))]
+    mod story21_8_thread {
+        use super::*;
+        use crate::adapters::a2a::exec::{SubmitterKey, mint_inbound_node_id};
+        use crate::adapters::daemon::protocol::{
+            RecipientAction, RecipientActionOutcome, RecipientActionTarget,
+        };
+        use crate::adapters::tui::notifications::NoticeSeverity;
+        use crate::adapters::tui::state::{ThreadAccess, ThreadTarget};
+        use crate::domain::models::{
+            ChatMessage, PeerRowControl, PeerRowStage, ReceivedStories, ReceivedStory, RoomEvent,
+            SemanticMessageType, StoryHolder, StoryKey,
+        };
+        use crate::infrastructure::subagent::node_journal::NodeJournal;
+        use crossterm::event::KeyEventKind;
+
+        const WRITER_KEYS: [char; 11] = ['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u'];
+
+        async fn journal_of(rig: &Rig) -> NodeJournal {
+            NodeJournal::open_workspace(rig.workspace())
+                .await
+                .expect("scratch journal")
+        }
+
+        /// One journal-backed received item `ri-1`, opened through the production opener
+        /// over Chat. `with_node` pins a settled response row whose node answers the item,
+        /// so the Busy key takes its durable join.
+        async fn item_rig(
+            read_only: bool,
+            message_type: SemanticMessageType,
+            stories: Option<ReceivedStories>,
+            acknowledged: bool,
+            with_node: bool,
+        ) -> Rig {
+            let mut rig = Rig::new(read_only);
+            rig.state.focus = FocusState::Chat;
+            let submitter = SubmitterKey::loopback();
+            let journal = journal_of(&rig).await;
+            let address = seed_thread_item(
+                &journal,
+                &submitter.pseudonymous_peer_id(),
+                "ri-1",
+                message_type,
+                None,
+                "please look at this",
+                stories,
+            )
+            .await;
+            if acknowledged {
+                journal
+                    .append_room(RoomEvent::RecipientItemAcknowledged {
+                        address: address.clone(),
+                        alias: None,
+                    })
+                    .await
+                    .expect("append acknowledgement");
+            }
+            drop(journal);
+            if with_node {
+                rig.domain_tab.conversation.messages.push(ChatMessage {
+                    id: "row".to_owned(),
+                    content: "settled response".to_owned(),
+                    ..Default::default()
+                });
+                rig.domain_tab.conversation.peer_row_controls.insert(
+                    "row".to_owned(),
+                    PeerRowControl {
+                        node_id: mint_inbound_node_id(&submitter, "task-ri-1")
+                            .as_str()
+                            .to_owned(),
+                        item_address: Some(address),
+                        stories: None,
+                        status: None,
+                        retro: None,
+                        selected_for: None,
+                        message_type,
+                        sender_label: "peer".to_owned(),
+                        stage: PeerRowStage::Settled,
+                        node_resolvable: false,
+                    },
+                );
+            }
+            let access = if read_only {
+                ThreadAccess::ReadOnly
+            } else {
+                ThreadAccess::Writer
+            };
+            rig.open_thread("ri-1", access).await;
+            rig
+        }
+
+        /// A thread over the response bound: a root, 128 chained 8 KiB replies and the
+        /// opened item, so an earlier page exists and the newest page has no later one. A
+        /// queued reply decision gives `Ctrl+X q` a queue to open. Chat focus, `draft`
+        /// in the composer, writer access.
+        async fn long_thread_rig(draft: &str) -> Rig {
+            let mut rig = Rig::at(FocusState::Chat, draft);
+            let peer = thread_peer();
+            let journal = journal_of(&rig).await;
+            seed_thread_item(
+                &journal,
+                &peer,
+                "t-root",
+                SemanticMessageType::Consultation,
+                None,
+                "root body",
+                None,
+            )
+            .await;
+            let mut previous = "t-root".to_owned();
+            for index in 0..128 {
+                let id = format!("t-{index}");
+                seed_thread_item(
+                    &journal,
+                    &peer,
+                    &id,
+                    SemanticMessageType::Consultation,
+                    Some(&previous),
+                    &"x".repeat(8 * 1024),
+                    None,
+                )
+                .await;
+                previous = id;
+            }
+            seed_thread_item(
+                &journal,
+                &peer,
+                "t-open",
+                SemanticMessageType::Consultation,
+                Some(&previous),
+                "opened body",
+                None,
+            )
+            .await;
+            drop(journal);
+            decision_queue::reply::observe(&mut rig.state, "principal", "roster", "ri_1", 1);
+            rig.open_thread("t-open", ThreadAccess::Writer).await;
+            rig
+        }
+
+        fn thread_frames(rig: &Rig) -> usize {
+            rig.state
+                .modal_stack
+                .iter()
+                .filter(|frame| frame.surface == Surface::ThreadInspector)
+                .count()
+        }
+
+        fn top_surface(rig: &Rig) -> Option<Surface> {
+            rig.state.modal_stack.top().map(|frame| frame.surface)
+        }
+
+        fn viewer_top(rig: &Rig) -> usize {
+            rig.state
+                .thread_inspector
+                .as_ref()
+                .expect("thread open")
+                .viewer
+                .top
+        }
+
+        /// Everything a key that must not touch the page leaves alone.
+        fn page_state(rig: &Rig) -> String {
+            let i = rig.state.thread_inspector.as_ref().expect("thread open");
+            let ThreadTarget::Item(address) = &i.target;
+            format!(
+                "{:?}",
+                (
+                    i.viewer.top,
+                    i.omitted_before,
+                    i.omitted_after,
+                    i.first_non_pinned_ordinal,
+                    i.last_non_pinned_ordinal,
+                    &i.root_id,
+                    address.item().as_str(),
+                    i.results.len(),
+                    &rig.state.input_buffer,
+                    &rig.state.focus,
+                )
+            )
+        }
+
+        fn notice_with(rig: &Rig, severity: NoticeSeverity, text: &str) -> bool {
+            rig.state.notifications.records().any(|record| {
+                record.source == NoticeSource::Attached
+                    && record.severity == severity
+                    && record.message.contains(text)
+            })
+        }
+
+        fn snapshot(rig: &Rig) -> String {
+            let i = rig.state.thread_inspector.as_ref().expect("thread open");
+            let ThreadTarget::Item(address) = &i.target;
+            format!(
+                "{} | {:?} | {} | {:?}",
+                rig.state.modal_stack.top().expect("a frame").title(),
+                i.access,
+                address.item().as_str(),
+                i.message_type
+            )
+        }
+
+        fn set_composer(rig: &mut Rig, text: &str) {
+            rig.state.input_buffer = text.to_owned();
+            rig.state.cursor_position = text.chars().count();
+        }
+
+        async fn seed_two_items(rig: &Rig) {
+            let journal = journal_of(rig).await;
+            let peer = thread_peer();
+            seed_thread_item(
+                &journal,
+                &peer,
+                "ri-a",
+                SemanticMessageType::Consultation,
+                None,
+                "first body",
+                None,
+            )
+            .await;
+            seed_thread_item(
+                &journal,
+                &peer,
+                "ri-b",
+                SemanticMessageType::ArchitectureUpdate,
+                None,
+                "second body",
+                None,
+            )
+            .await;
+        }
+
+        /// K1: the composer front door `/team view <id>` opens ONE thread frame for the
+        /// writer and the read-only mirror alike; an unknown id warns and opens nothing; a
+        /// second view retargets the same frame.
+        #[tokio::test]
+        async fn story21_8_attached_view_command_opens_one_thread_frame_for_writer_and_read_only() {
+            for read_only in [false, true] {
+                let mut rig = Rig::new(read_only);
+                seed_two_items(&rig).await;
+                set_composer(&mut rig, "/team view ri-a");
+                assert_eq!(rig.enter().await, KeyFlow::Continue);
+                assert_eq!(rig.state.modal_stack.len(), 1, "read_only={read_only}");
+                assert_eq!(thread_frames(&rig), 1);
+                assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+                assert_eq!(
+                    rig.state.modal_stack.top().unwrap().title(),
+                    "Thread · consultation"
+                );
+                let inspector = rig.state.thread_inspector.as_ref().expect("the slot");
+                assert_eq!(
+                    inspector.access,
+                    if read_only {
+                        ThreadAccess::ReadOnly
+                    } else {
+                        ThreadAccess::Writer
+                    }
+                );
+                assert!(
+                    rig.state.input_buffer.is_empty(),
+                    "the command was consumed"
+                );
+                assert_eq!(
+                    rig.state.focus,
+                    FocusState::Input,
+                    "opening writes no base focus"
+                );
+                assert!(rig.frames().is_empty(), "a read is never a daemon frame");
+                let painted = screen(&mut rig);
+                assert!(painted.contains("Thread · consultation"), "{painted}");
+                assert!(painted.contains("item actions · ri-a"), "{painted}");
+                assert_eq!(
+                    painted.contains("read-only — view only"),
+                    read_only,
+                    "the rail names the access: {painted}"
+                );
+                assert_eq!(painted.contains("[r] Respond"), !read_only, "{painted}");
+
+                // A second view retargets the one frame (the loop's submit path; a typed key
+                // would belong to the open frame).
+                set_composer(&mut rig, "/team view ri-b");
+                assert_eq!(rig.submit_composer().await, KeyFlow::Continue);
+                assert_eq!(rig.state.modal_stack.len(), 1, "retarget keeps one frame");
+                assert_eq!(thread_frames(&rig), 1);
+                assert_eq!(
+                    rig.state.modal_stack.top().unwrap().title(),
+                    "Thread · architecture_update"
+                );
+                let painted = screen(&mut rig);
+                assert!(painted.contains("item actions · ri-b"), "{painted}");
+                assert!(!painted.contains("item actions · ri-a"), "{painted}");
+                assert!(rig.frames().is_empty());
+
+                assert_eq!(rig.esc().await, KeyFlow::Continue);
+                assert!(rig.state.modal_stack.is_empty() && rig.state.thread_inspector.is_none());
+                assert_eq!(rig.state.focus, FocusState::Input);
+            }
+
+            // An unknown id: Warning notice, empty stack, empty slot.
+            let mut rig = Rig::new(false);
+            seed_two_items(&rig).await;
+            set_composer(&mut rig, "/team view nope");
+            assert_eq!(rig.enter().await, KeyFlow::Continue);
+            assert!(rig.state.modal_stack.is_empty() && rig.state.thread_inspector.is_none());
+            assert!(
+                notice_with(
+                    &rig,
+                    NoticeSeverity::Warning,
+                    "recipient item 'nope' not found"
+                ),
+                "{:?}",
+                rig.state
+                    .notifications
+                    .records()
+                    .map(|r| r.message.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(rig.frames().is_empty());
+            // Positive control: the same rig opens a known id.
+            set_composer(&mut rig, "/team view ri-a");
+            rig.enter().await;
+            assert_eq!(thread_frames(&rig), 1);
+        }
+
+        /// K1: the 21-6 `[v] View item` defers the decision (it stays queued) and opens the
+        /// same frame the command opens; a node without an item address has nothing to view.
+        #[tokio::test]
+        async fn story21_8_attached_item_view_key_defers_the_decision_and_opens_the_same_frame() {
+            let mut rig = Rig::new(false);
+            let submitter = SubmitterKey::loopback();
+            let journal = journal_of(&rig).await;
+            let address = seed_thread_item(
+                &journal,
+                &submitter.pseudonymous_peer_id(),
+                "ri-v",
+                SemanticMessageType::Consultation,
+                None,
+                "viewed body",
+                None,
+            )
+            .await;
+            drop(journal);
+            rig.domain_tab.conversation.messages.push(ChatMessage {
+                id: "row".to_owned(),
+                content: "original draft".to_owned(),
+                ..Default::default()
+            });
+            rig.domain_tab.conversation.peer_row_controls.insert(
+                "row".to_owned(),
+                PeerRowControl {
+                    node_id: mint_inbound_node_id(&submitter, "task-ri-v")
+                        .as_str()
+                        .to_owned(),
+                    item_address: Some(address),
+                    stories: None,
+                    status: None,
+                    retro: None,
+                    selected_for: None,
+                    message_type: SemanticMessageType::Consultation,
+                    sender_label: "peer".to_owned(),
+                    stage: PeerRowStage::Ready,
+                    node_resolvable: true,
+                },
+            );
+            decision_queue::sync_recipient_drafts(
+                &mut rig.state,
+                &rig.domain_tab.conversation,
+                false,
+            );
+            rig.open_kind(DecisionKind::RecipientDraftApproval);
+            assert!(presentation::is_open(&rig.state, Surface::Decision));
+            assert_eq!(rig.ch('v').await, KeyFlow::Continue);
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert_eq!(thread_frames(&rig), 1);
+            assert!(
+                !presentation::is_open(&rig.state, Surface::Decision),
+                "the decision was deferred"
+            );
+            assert_eq!(decision_queue::waiting(&rig.state), 1, "still queued");
+            assert!(
+                rig.state
+                    .decisions
+                    .holds(DecisionKind::RecipientDraftApproval)
+            );
+            assert!(rig.frames().is_empty(), "viewing decides nothing");
+            let from_key = snapshot(&rig);
+            assert_eq!(
+                rig.state.modal_stack.top().unwrap().title(),
+                "Thread · consultation"
+            );
+
+            // The command opens the same frame on a fresh rig over the same journal shape.
+            let mut other = Rig::new(false);
+            let journal = journal_of(&other).await;
+            seed_thread_item(
+                &journal,
+                &submitter.pseudonymous_peer_id(),
+                "ri-v",
+                SemanticMessageType::Consultation,
+                None,
+                "viewed body",
+                None,
+            )
+            .await;
+            drop(journal);
+            set_composer(&mut other, "/team view ri-v");
+            other.enter().await;
+            assert_eq!(snapshot(&other), from_key);
+
+            // Esc closes the frame; the deferred decision is still there.
+            rig.esc().await;
+            assert!(rig.state.thread_inspector.is_none());
+            assert_eq!(decision_queue::waiting(&rig.state), 1);
+
+            // An address-less node has no item to view: Info notice, no frame, still queued.
+            let mut bare = story21_6_attached_recipient_rig();
+            assert_eq!(bare.ch('v').await, KeyFlow::Continue);
+            assert!(bare.state.thread_inspector.is_none());
+            assert_eq!(thread_frames(&bare), 0);
+            assert!(notice_with(
+                &bare,
+                NoticeSeverity::Info,
+                "no item to view — answer it in the decision"
+            ));
+            assert!(bare.frames().is_empty());
+            assert_eq!(decision_queue::waiting(&bare.state), 1);
+        }
+
+        /// K2: with the frame open every key acts by value. Scroll keys move the viewer, `h 0 $
+        /// v` and an unavailable `l` are consumed no-ops, a Repeat/Release/modified writer
+        /// letter and an unbound key send nothing, Chat `Tab`/`Enter` are consumed, paste is
+        /// consumed, and the stack chords reach their frames and return to the same page.
+        #[tokio::test]
+        async fn story21_8_attached_thread_frame_keys_act_by_value() {
+            let mut rig = long_thread_rig("draft").await;
+            let (rows, viewport) = rig.state.thread_inspector.as_ref().unwrap().fit.get();
+            let max = rows.saturating_sub(viewport);
+            assert!(
+                viewport >= 4 && max > 4 * viewport,
+                "rows={rows} viewport={viewport}"
+            );
+            {
+                let i = rig.state.thread_inspector.as_ref().unwrap();
+                assert!(
+                    i.omitted_before > 0 && i.omitted_after == 0,
+                    "the fixture has an earlier page only"
+                );
+            }
+            let (half, page) = ((viewport / 2).max(1), viewport - 1);
+            let at = |rig: &mut Rig, top: usize| {
+                assert_eq!(viewer_top(rig), top);
+                assert!(rig.frames().is_empty());
+            };
+
+            // Scroll keys, by value.
+            assert_eq!(viewer_top(&rig), 0);
+            for (key, top) in [
+                (Key::Char('j'), 1),
+                (Key::Char('k'), 0),
+                (Key::Down, 1),
+                (Key::Up, 0),
+                (Key::PageDown, page),
+                (Key::PageUp, 0),
+                (Key::Ctrl('d'), half),
+                (Key::Ctrl('u'), 0),
+                (Key::Char('G'), max),
+                (Key::Char('g'), 0),
+            ] {
+                assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
+                at(&mut rig, top);
+            }
+
+            // Consumed no-ops: nothing at the root of a thread, no omitted later page, no row,
+            // Chat `Tab`/`Enter`. Each leaves the page, the composer and the focus alone.
+            rig.key(Key::PageDown).await;
+            let before = page_state(&rig);
+            assert_ne!(viewer_top(&rig), 0, "positive control: the viewer scrolled");
+            for key in [
+                Key::Char('h'),
+                Key::Char('0'),
+                Key::Char('$'),
+                Key::Char('v'),
+                Key::Char('l'),
+                Key::Char('z'),
+                Key::Alt('b'),
+                Key::Tab,
+                Key::Enter,
+            ] {
+                assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
+                assert_eq!(page_state(&rig), before, "{key:?} must not touch the page");
+                assert_eq!(rig.state.focus, FocusState::Chat);
+                assert!(rig.frames().is_empty(), "{key:?} sends nothing");
+            }
+            for (code, modifiers, kind) in [
+                (KeyCode::Char('b'), KeyModifiers::NONE, KeyEventKind::Repeat),
+                (
+                    KeyCode::Char('a'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release,
+                ),
+                (KeyCode::Char('N'), KeyModifiers::SHIFT, KeyEventKind::Press),
+            ] {
+                rig.raw_key(KeyEvent::new_with_kind(code, modifiers, kind))
+                    .await;
+                assert_eq!(page_state(&rig), before, "{code:?} {kind:?}");
+                assert!(rig.frames().is_empty(), "{code:?} {kind:?} sends nothing");
+            }
+            rig.paste("pasted text").await;
+            assert_eq!(page_state(&rig), before, "paste is consumed by the frame");
+            assert_eq!(rig.state.input_buffer, "draft");
+            assert!(rig.frames().is_empty());
+
+            // The stack chords reach their frames and Esc returns to the same page/viewer.
+            rig.ctrl('x').await;
+            rig.ch('n').await;
+            assert_eq!(top_surface(&rig), Some(Surface::NotificationLog));
+            assert!(
+                rig.state.thread_inspector.is_some(),
+                "S-LOG opened over the thread"
+            );
+            rig.esc().await;
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert_eq!(page_state(&rig), before);
+            rig.ctrl('x').await;
+            rig.ch('?').await;
+            assert_eq!(top_surface(&rig), Some(Surface::Help));
+            rig.esc().await;
+            assert_eq!(page_state(&rig), before);
+            rig.ctrl('x').await;
+            rig.ch('q').await;
+            assert_eq!(top_surface(&rig), Some(Surface::DecisionQueue));
+            rig.esc().await;
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert_eq!(page_state(&rig), before);
+            rig.ctrl('p').await;
+            assert_eq!(top_surface(&rig), Some(Surface::CommandPalette));
+            rig.esc().await;
+            assert_eq!(page_state(&rig), before);
+            rig.ctrl('q').await;
+            assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+            assert_eq!(top_surface(&rig), Some(Surface::QuitConfirm));
+            rig.ch('n').await;
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert_eq!(page_state(&rig), before);
+            assert!(rig.frames().is_empty());
+
+            // `l` acts once an omitted later page exists.
+            rig.ch('p').await;
+            assert!(rig.state.thread_inspector.as_ref().unwrap().omitted_after > 0);
+            let earlier_first = rig
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .first_non_pinned_ordinal;
+            rig.ch('l').await;
+            assert_ne!(
+                rig.state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .first_non_pinned_ordinal,
+                earlier_first,
+                "`l` loads the newer page"
+            );
+
+            // Esc and Ctrl+C go back exactly one frame and never touch the base focus.
+            for key in [Key::Esc, Key::Ctrl('c')] {
+                let mut rig =
+                    item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+                set_composer(&mut rig, "draft");
+                rig.ctrl('x').await;
+                rig.ch('n').await;
+                assert_eq!(top_surface(&rig), Some(Surface::NotificationLog));
+                assert_eq!(rig.key(key).await, KeyFlow::Continue);
+                assert_eq!(
+                    top_surface(&rig),
+                    Some(Surface::ThreadInspector),
+                    "{key:?} closes the log only"
+                );
+                assert_eq!(rig.key(key).await, KeyFlow::Continue);
+                assert!(
+                    rig.state.modal_stack.is_empty() && rig.state.thread_inspector.is_none(),
+                    "{key:?}"
+                );
+                assert_eq!(rig.state.focus, FocusState::Chat, "{key:?}");
+                assert_eq!(rig.state.input_buffer, "draft");
+                assert!(
+                    rig.frames().is_empty(),
+                    "{key:?} neither interrupts nor sends"
+                );
+            }
+        }
+
+        /// What a writer key did to the world: nothing, the composer line it prefilled, or
+        /// the one frame it queued.
+        #[derive(Debug, PartialEq)]
+        enum Effect {
+            Nothing,
+            Prefill(String),
+            Frame(String),
+        }
+
+        fn frame_effect(frame: ClientFrame) -> Effect {
+            Effect::Frame(format!("{frame:?}"))
+        }
+
+        async fn press_effect(rig: &mut Rig, key: char) -> Effect {
+            let composer = rig.state.input_buffer.clone();
+            assert_eq!(rig.key(Key::Char(key)).await, KeyFlow::Continue);
+            let frames = rig.frames();
+            assert!(
+                !frames
+                    .iter()
+                    .any(|frame| matches!(frame, ClientFrame::ResolvePeerDraft { .. })),
+                "S-THREAD never resolves a peer draft: {frames:?}"
+            );
+            match frames.as_slice() {
+                [] if rig.state.input_buffer != composer => {
+                    Effect::Prefill(rig.state.input_buffer.clone())
+                }
+                [] => Effect::Nothing,
+                [one] => Effect::Frame(format!("{one:?}")),
+                many => panic!("`{key}` sent more than one frame: {many:?}"),
+            }
+        }
+
+        const RAIL: [(char, &str); 9] = [
+            ('r', "[r] Respond"),
+            ('d', "[d] Discuss"),
+            ('b', "[b] Busy"),
+            ('a', "[a] Acknowledge"),
+            ('y', "[y] Accept"),
+            ('s', "[s] Share"),
+            ('n', "[n] Decline"),
+            ('1', "[1-3] Leave out"),
+            ('u', "[u] "),
+        ];
+
+        fn painted_keys(painted: &str) -> BTreeSet<char> {
+            RAIL.iter()
+                .filter(|(_, label)| painted.contains(label))
+                .map(|(key, _)| *key)
+                .collect()
+        }
+
+        /// K5: the painted rail keys equal the applicable rows; each painted key does exactly
+        /// its effect once; each unpainted writer key does nothing and leaves the frame open.
+        async fn assert_rail<F, Fut>(
+            name: &str,
+            make: F,
+            painted: &[char],
+            effects: &[(char, Effect)],
+        ) where
+            F: Fn() -> Fut,
+            Fut: Future<Output = Rig>,
+        {
+            let mut rig = make().await;
+            let shown = painted_keys(&screen(&mut rig));
+            assert_eq!(
+                shown,
+                painted.iter().copied().collect::<BTreeSet<_>>(),
+                "{name}: painted rail keys"
+            );
+            assert_eq!(
+                effects.iter().map(|(key, _)| *key).collect::<BTreeSet<_>>(),
+                painted.iter().copied().collect::<BTreeSet<_>>(),
+                "{name}: every painted key has an expected effect"
+            );
+            for key in WRITER_KEYS {
+                let mut rig = make().await;
+                screen(&mut rig);
+                let effect = press_effect(&mut rig, key).await;
+                match effects.iter().find(|(painted_key, _)| *painted_key == key) {
+                    Some((_, expected)) => {
+                        assert_eq!(&effect, expected, "{name}: painted `{key}`");
+                        if matches!(effect, Effect::Frame(_)) {
+                            assert!(
+                                rig.state.thread_inspector.is_some(),
+                                "{name}: `{key}` keeps the frame open"
+                            );
+                            assert_eq!(
+                                press_effect(&mut rig, key).await,
+                                Effect::Nothing,
+                                "{name}: `{key}` is sent once while in flight"
+                            );
+                        }
+                    }
+                    None => {
+                        assert_eq!(
+                            effect,
+                            Effect::Nothing,
+                            "{name}: unpainted `{key}` must do nothing"
+                        );
+                        assert!(
+                            rig.state.thread_inspector.is_some(),
+                            "{name}: `{key}` keeps the frame open"
+                        );
+                    }
+                }
+            }
+        }
+
+        const REPLY: &str = "/team reply ri-1 ";
+
+        fn defer() -> Effect {
+            frame_effect(ClientFrame::DeferRecipientItem {
+                item_id: "ri-1".to_owned(),
+            })
+        }
+
+        fn acknowledge() -> Effect {
+            frame_effect(ClientFrame::AcknowledgeRecipientItem {
+                item_id: "ri-1".to_owned(),
+            })
+        }
+
+        fn context(selected: bool) -> Effect {
+            frame_effect(ClientFrame::SetRecipientContext {
+                item_id: "ri-1".to_owned(),
+                selected,
+            })
+        }
+
+        async fn busy_in_flight_rig() -> Rig {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, true).await;
+            screen(&mut rig);
+            assert_eq!(rig.ch('b').await, KeyFlow::Continue);
+            assert_eq!(rig.frames().len(), 1, "the Busy key queued its one frame");
+            rig
+        }
+
+        /// K5: rail truth for a consultation writer, an architecture update, an acknowledged
+        /// item, a story list offering Accept, the read-only mirror and an in-flight Busy.
+        #[tokio::test]
+        async fn story21_8_attached_rail_keys_equal_the_applicable_rows_and_send_their_frames() {
+            use crate::adapters::daemon::protocol::ReplyVerdict;
+            use SemanticMessageType::{ArchitectureUpdate, Consultation, StoryAssignment};
+            assert_rail(
+                "consultation writer",
+                || item_rig(false, Consultation, None, false, true),
+                &['r', 'b', 'u'],
+                &[
+                    ('r', Effect::Prefill(REPLY.to_owned())),
+                    ('b', defer()),
+                    ('u', context(true)),
+                ],
+            )
+            .await;
+            assert_rail(
+                "architecture update",
+                || item_rig(false, ArchitectureUpdate, None, false, false),
+                &['d', 'a', 'u'],
+                &[
+                    ('d', Effect::Prefill(REPLY.to_owned())),
+                    ('a', acknowledge()),
+                    ('u', context(true)),
+                ],
+            )
+            .await;
+            assert_rail(
+                "acknowledged item",
+                || item_rig(false, ArchitectureUpdate, None, true, false),
+                &['d', 'u'],
+                &[
+                    ('d', Effect::Prefill(REPLY.to_owned())),
+                    ('u', context(true)),
+                ],
+            )
+            .await;
+            let list = || {
+                Some(ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("S1").unwrap(),
+                        holder: StoryHolder::You,
+                    }],
+                })
+            };
+            assert_rail(
+                "story assignment offering Accept",
+                move || item_rig(false, StoryAssignment, list(), false, false),
+                &['d', 'a', 'y', 'u'],
+                &[
+                    (
+                        'd',
+                        Effect::Prefill("/team reply --discuss ri-1 ".to_owned()),
+                    ),
+                    ('a', acknowledge()),
+                    (
+                        'y',
+                        frame_effect(ClientFrame::ReplyToRecipientItem {
+                            item_id: "ri-1".to_owned(),
+                            text: String::new(),
+                            verdict: Some(ReplyVerdict::Accept),
+                        }),
+                    ),
+                    ('u', context(true)),
+                ],
+            )
+            .await;
+            assert_rail(
+                "read-only mirror",
+                || item_rig(true, Consultation, None, false, false),
+                &[],
+                &[],
+            )
+            .await;
+            let mut mirror = item_rig(true, Consultation, None, false, false).await;
+            let painted = screen(&mut mirror);
+            assert!(painted.contains("read-only — view only"), "{painted}");
+            assert_rail(
+                "Busy in flight",
+                busy_in_flight_rig,
+                &['r', 'u'],
+                &[
+                    ('r', Effect::Prefill(REPLY.to_owned())),
+                    ('u', context(true)),
+                ],
+            )
+            .await;
+        }
+
+        /// K6: `u` queues the context frame; the rail and the identity row change only after
+        /// the correlated outcome; `u` again removes; `c` has no row.
+        #[tokio::test]
+        async fn story21_8_attached_context_key_toggles_on_the_correlated_outcome() {
+            let mut rig = item_rig(
+                false,
+                SemanticMessageType::ArchitectureUpdate,
+                None,
+                false,
+                false,
+            )
+            .await;
+            let target = || RecipientActionTarget::Item {
+                item_id: "ri-1".to_owned(),
+            };
+            let before = screen(&mut rig);
+            assert!(before.contains("[u] Use as context"), "{before}");
+            assert!(!before.contains("peer-tainted"), "{before}");
+
+            assert_eq!(rig.ch('u').await, KeyFlow::Continue);
+            let frames = rig.frames();
+            assert!(
+                matches!(frames.as_slice(), [ClientFrame::SetRecipientContext { item_id, selected: true }] if item_id == "ri-1"),
+                "{frames:?}"
+            );
+            let during = screen(&mut rig);
+            assert!(
+                !during.contains("[u] Use as context") && !during.contains("Stop using as context"),
+                "no context key while the daemon answers: {during}"
+            );
+            assert!(
+                !during.contains("peer-tainted"),
+                "the mark waits for the outcome: {during}"
+            );
+            rig.ch('u').await;
+            assert!(rig.frames().is_empty(), "in flight: the key is withheld");
+
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut rig.state,
+                RecipientAction::ContextSelect,
+                target(),
+                RecipientActionOutcome::ContextSelection {
+                    selected: true,
+                    changed: true,
+                },
+            );
+            let after = screen(&mut rig);
+            assert!(after.contains("[u] Stop using as context"), "{after}");
+            assert!(after.contains(" · peer-tainted"), "{after}");
+            assert!(rig.state.recipient_context_ids.contains("ri-1"));
+
+            let state = page_state(&rig);
+            assert_eq!(rig.ch('c').await, KeyFlow::Continue);
+            assert!(rig.frames().is_empty(), "`c` sends nothing");
+            assert_eq!(page_state(&rig), state);
+
+            assert_eq!(rig.ch('u').await, KeyFlow::Continue);
+            let frames = rig.frames();
+            assert!(
+                matches!(frames.as_slice(), [ClientFrame::SetRecipientContext { item_id, selected: false }] if item_id == "ri-1"),
+                "{frames:?}"
+            );
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut rig.state,
+                RecipientAction::ContextRemove,
+                target(),
+                RecipientActionOutcome::ContextSelection {
+                    selected: false,
+                    changed: true,
+                },
+            );
+            let removed = screen(&mut rig);
+            assert!(removed.contains("[u] Use as context"), "{removed}");
+            assert!(!removed.contains("peer-tainted"), "{removed}");
+            assert!(!rig.state.recipient_context_ids.contains("ri-1"));
+        }
+
+        /// K7: `p`/`l` retain root and item and put the viewer back at the top; the pager is
+        /// painted, and acts, only when an omitted page exists.
+        #[tokio::test]
+        async fn story21_8_attached_paging_retains_root_and_item_and_paints_only_with_an_omitted_page()
+         {
+            // No omitted page: nothing painted, both keys are consumed no-ops.
+            let mut short =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            let painted = screen(&mut short);
+            assert!(
+                !painted.contains("[p] Earlier") && !painted.contains("[l] Newer"),
+                "{painted}"
+            );
+            let state = page_state(&short);
+            for key in ['p', 'l'] {
+                assert_eq!(short.ch(key).await, KeyFlow::Continue);
+                assert_eq!(page_state(&short), state, "`{key}` without a page");
+                assert!(short.frames().is_empty());
+            }
+
+            let mut rig = long_thread_rig("").await;
+            let painted = screen(&mut rig);
+            assert!(painted.contains("[p] Earlier"), "{painted}");
+            assert!(!painted.contains("[l] Newer"), "{painted}");
+            assert!(
+                painted.contains("item actions · t-open")
+                    && painted.contains("thread root · t-root"),
+                "{painted}"
+            );
+            let first = {
+                let i = rig.state.thread_inspector.as_ref().unwrap();
+                (
+                    i.first_non_pinned_ordinal.expect("a linked turn"),
+                    i.omitted_before,
+                )
+            };
+            rig.key(Key::PageDown).await;
+            assert_ne!(
+                viewer_top(&rig),
+                0,
+                "positive control: scrolled before paging"
+            );
+
+            assert_eq!(rig.ch('p').await, KeyFlow::Continue);
+            assert!(rig.frames().is_empty(), "paging is a read, never a frame");
+            let earlier = {
+                let i = rig.state.thread_inspector.as_ref().unwrap();
+                assert_eq!(i.root_id.as_deref(), Some("t-root"), "the root is retained");
+                let ThreadTarget::Item(address) = &i.target;
+                assert_eq!(
+                    address.item().as_str(),
+                    "t-open",
+                    "the opened item is retained"
+                );
+                assert_eq!(i.viewer.top, 0, "back at the top");
+                assert!(i.omitted_after > 0, "a later page now exists");
+                let ordinal = i.first_non_pinned_ordinal.expect("a linked turn");
+                assert!(
+                    ordinal < first.0 && i.omitted_before < first.1,
+                    "a real earlier page"
+                );
+                i.last_non_pinned_ordinal.expect("a linked turn")
+            };
+            assert_eq!(thread_frames(&rig), 1);
+            let painted = screen(&mut rig);
+            assert!(painted.contains("[l] Newer"), "{painted}");
+            assert!(
+                painted.contains("item actions · t-open")
+                    && painted.contains("thread root · t-root"),
+                "{painted}"
+            );
+
+            rig.key(Key::PageDown).await;
+            assert_ne!(viewer_top(&rig), 0);
+            assert_eq!(rig.ch('l').await, KeyFlow::Continue);
+            assert!(rig.frames().is_empty());
+            let i = rig.state.thread_inspector.as_ref().unwrap();
+            assert_eq!(i.root_id.as_deref(), Some("t-root"));
+            let ThreadTarget::Item(address) = &i.target;
+            assert_eq!(address.item().as_str(), "t-open");
+            assert_eq!(i.viewer.top, 0, "back at the top");
+            assert!(
+                i.first_non_pinned_ordinal
+                    .is_some_and(|ordinal| ordinal > earlier),
+                "the newer page follows the earlier one"
+            );
+            assert!(i.omitted_before > 0);
+        }
+
+        fn full_composer() -> String {
+            (0..12)
+                .map(|n| format!("composer line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// 8A-L1-01 (attached half), one item kind: with the terminal at the 60x16 floor and
+        /// a grown composer, a writer key sends a frame only if its hint is PAINTED (read
+        /// from the painted cells); every other writer key sends ZERO frames and changes
+        /// nothing. The positive control is the same item on the roomy 80x24 terminal.
+        async fn assert_floor_rail<F, Fut>(
+            name: &str,
+            make: F,
+            roomy: &[(char, Effect)],
+            floor_painted: Option<&[char]>,
+        ) where
+            F: Fn() -> Fut,
+            Fut: Future<Output = Rig>,
+        {
+            assert!(!roomy.is_empty(), "{name}: the control must send frames");
+            for (key, expected) in roomy {
+                let mut rig = make().await;
+                let painted = screen(&mut rig);
+                assert!(
+                    painted_keys(&painted).contains(key),
+                    "{name}: roomy control paints `{key}`: {painted}"
+                );
+                assert_eq!(
+                    &press_effect(&mut rig, *key).await,
+                    expected,
+                    "{name}: roomy `{key}`"
+                );
+            }
+            let composer = full_composer();
+            for key in WRITER_KEYS {
+                let mut rig = make().await;
+                rig.state.terminal_width = 60;
+                rig.state.terminal_height = 16;
+                set_composer(&mut rig, &composer);
+                let painted = screen(&mut rig);
+                let shown = painted_keys(&painted);
+                assert!(painted.contains("Thread · "), "{name}: the title row");
+                assert!(
+                    painted.contains("Close"),
+                    "{name}: the reader rail: {painted}"
+                );
+                let inspector = rig.state.thread_inspector.as_ref().unwrap();
+                assert!(inspector.fit.get().1 >= 1, "{name}: a body row is painted");
+                assert_eq!(
+                    inspector.rail_live.get().0,
+                    !shown.is_empty(),
+                    "{name}: the writer rail is live exactly when it is painted: {painted}"
+                );
+                if let Some(expected) = floor_painted {
+                    assert_eq!(
+                        shown,
+                        expected.iter().copied().collect::<BTreeSet<_>>(),
+                        "{name}: painted writer keys at the floor: {painted}"
+                    );
+                }
+                let effect = press_effect(&mut rig, key).await;
+                match roomy.iter().find(|(frame_key, _)| *frame_key == key) {
+                    Some((_, expected)) if shown.contains(&key) => {
+                        assert_eq!(&effect, expected, "{name}: painted `{key}` at the floor");
+                    }
+                    _ => assert_eq!(
+                        effect,
+                        Effect::Nothing,
+                        "{name}: `{key}` is not a painted frame key at the floor: zero frames"
+                    ),
+                }
+                assert!(rig.state.thread_inspector.is_some(), "{name}: `{key}`");
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_unpainted_writer_keys_send_no_frame_at_the_floor_with_a_full_composer()
+         {
+            use crate::adapters::daemon::protocol::ReplyVerdict;
+            use SemanticMessageType::{ArchitectureUpdate, Consultation, StoryAssignment};
+            assert_floor_rail(
+                "consultation writer",
+                || item_rig(false, Consultation, None, false, true),
+                &[('b', defer()), ('u', context(true))],
+                None,
+            )
+            .await;
+            assert_floor_rail(
+                "architecture update",
+                || item_rig(false, ArchitectureUpdate, None, false, false),
+                &[('a', acknowledge()), ('u', context(true))],
+                None,
+            )
+            .await;
+            let list = || {
+                Some(ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("S1").unwrap(),
+                        holder: StoryHolder::You,
+                    }],
+                })
+            };
+            // `[d] .. [a] .. [y] .. [u]` wraps to two rows: with the reader rail it does not fit
+            // the three inner rows, so none of its keys is painted and none may send.
+            assert_floor_rail(
+                "story assignment offering Accept",
+                move || item_rig(false, StoryAssignment, list(), false, false),
+                &[
+                    ('a', acknowledge()),
+                    (
+                        'y',
+                        frame_effect(ClientFrame::ReplyToRecipientItem {
+                            item_id: "ri-1".to_owned(),
+                            text: String::new(),
+                            verdict: Some(ReplyVerdict::Accept),
+                        }),
+                    ),
+                    ('u', context(true)),
+                ],
+                Some(&[]),
+            )
+            .await;
+
+            // The pager obeys the same truth: `p` pages exactly when `[p] Earlier` is painted.
+            {
+                let mut rig = long_thread_rig("").await;
+                let painted = screen(&mut rig);
+                assert!(painted.contains("[p] Earlier"), "{painted}");
+                let before = page_state(&rig);
+                assert_eq!(rig.ch('p').await, KeyFlow::Continue);
+                assert_ne!(page_state(&rig), before, "positive control: p pages");
+            }
+            let mut rig = long_thread_rig("").await;
+            rig.state.terminal_width = 60;
+            rig.state.terminal_height = 16;
+            set_composer(&mut rig, &full_composer());
+            let painted = screen(&mut rig);
+            assert!(painted.contains("Close"), "{painted}");
+            let hint = painted.contains("[p] Earlier");
+            assert_eq!(
+                rig.state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .rail_live
+                    .get()
+                    .1,
+                hint,
+                "the pager is live exactly when its hint is painted"
+            );
+            let before = page_state(&rig);
+            assert_eq!(rig.ch('p').await, KeyFlow::Continue);
+            assert_eq!(
+                page_state(&rig) != before,
+                hint,
+                "p pages iff [p] is painted at the floor: {painted}"
+            );
+            assert!(rig.frames().is_empty(), "paging is a read, never a frame");
+        }
+
+        /// 8A-L2-03(iii), attached host: a wheel event through the shared route boundary
+        /// scrolls the thread body by the clamp and reaches neither the composer, the Stage
+        /// view nor the daemon; with no frame open the same wheel scrolls the Stage.
+        #[tokio::test]
+        async fn story21_8_attached_wheel_scrolls_the_thread_body_and_reaches_nothing_else() {
+            use crossterm::event::{MouseEvent, MouseEventKind};
+            let wheel = |kind| {
+                Event::Mouse(MouseEvent {
+                    kind,
+                    column: 1,
+                    row: 2,
+                    modifiers: KeyModifiers::NONE,
+                })
+            };
+            let mut rig = long_thread_rig("draft").await;
+            for n in 0..60 {
+                rig.domain_tab.conversation.messages.push(ChatMessage {
+                    id: format!("stage-{n}"),
+                    content: format!("stage row {n}"),
+                    ..Default::default()
+                });
+            }
+            screen(&mut rig);
+            let (rows, viewport) = rig.state.thread_inspector.as_ref().unwrap().fit.get();
+            let max = rows.saturating_sub(viewport);
+            assert!(max > 1, "the thread spans several pages");
+            let notch = usize::from(MouseConfig::default().wheel_lines.max(1));
+            let untouched = |rig: &Rig| {
+                format!(
+                    "{:?}",
+                    (
+                        &rig.state.input_buffer,
+                        rig.state.cursor_position,
+                        &rig.state.focus,
+                        rig.domain_tab.view_state.scroll_offset,
+                        rig.domain_tab.view_state.mode.clone(),
+                    )
+                )
+            };
+            let before = untouched(&rig);
+            let step = |rig: &mut Rig, kind| {
+                assert_eq!(
+                    handle_attached_mouse(
+                        &mut rig.state,
+                        &mut rig.domain_tab.view_state,
+                        &wheel(kind)
+                    ),
+                    Some(RouteEffect::Consumed),
+                    "the frame owns the wheel"
+                );
+            };
+            step(&mut rig, MouseEventKind::ScrollDown);
+            assert_eq!(
+                viewer_top(&rig),
+                notch.min(max),
+                "one notch scrolls by wheel_lines"
+            );
+            for _ in 0..max.div_ceil(notch) + 2 {
+                step(&mut rig, MouseEventKind::ScrollDown);
+            }
+            assert_eq!(
+                viewer_top(&rig),
+                max,
+                "the wheel clamps at the last painted row"
+            );
+            step(&mut rig, MouseEventKind::ScrollUp);
+            assert_eq!(viewer_top(&rig), max.saturating_sub(notch));
+            for _ in 0..max.div_ceil(notch) + 2 {
+                step(&mut rig, MouseEventKind::ScrollUp);
+            }
+            assert_eq!(viewer_top(&rig), 0, "the wheel clamps at the first row");
+            assert_eq!(
+                untouched(&rig),
+                before,
+                "composer, focus and Stage view untouched"
+            );
+            assert!(rig.frames().is_empty(), "a wheel never reaches the daemon");
+            assert_eq!(thread_frames(&rig), 1);
+
+            // Positive control: with no frame open the same wheel scrolls the Stage.
+            assert_eq!(rig.esc().await, KeyFlow::Continue);
+            assert!(rig.state.modal_stack.is_empty());
+            screen(&mut rig);
+            let stage_before = untouched(&rig);
+            assert_eq!(
+                handle_attached_mouse(
+                    &mut rig.state,
+                    &mut rig.domain_tab.view_state,
+                    &wheel(MouseEventKind::ScrollUp)
+                ),
+                None,
+                "with no frame open the route releases the wheel"
+            );
+            assert_ne!(untouched(&rig), stage_before, "the Stage view scrolled");
+        }
+
+        /// A Busy whose node no longer joins the item (the journal no longer maps that node to
+        /// this item) sends nothing and says why in the frame; the real join sends the Defer.
+        #[tokio::test]
+        async fn story21_8_attached_busy_with_a_stale_node_join_sends_nothing_and_flashes_not_found()
+         {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, true).await;
+            screen(&mut rig);
+            assert_eq!(
+                press_effect(&mut rig, 'b').await,
+                defer(),
+                "positive control: the real join sends the Defer"
+            );
+
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, true).await;
+            screen(&mut rig);
+            let stale = mint_inbound_node_id(&SubmitterKey::loopback(), "task-gone")
+                .as_str()
+                .to_owned();
+            rig.state
+                .thread_inspector
+                .as_mut()
+                .expect("thread open")
+                .node_id = Some(stale);
+            assert_eq!(
+                press_effect(&mut rig, 'b').await,
+                Effect::Nothing,
+                "a stale join queues no frame"
+            );
+            assert!(rig.state.thread_inspector.is_some(), "the frame stays open");
+            let painted = screen(&mut rig);
+            assert!(
+                painted.contains("recipient item 'ri-1' not found"),
+                "the refusal is shown in the frame: {painted}"
+            );
+        }
     }
 }

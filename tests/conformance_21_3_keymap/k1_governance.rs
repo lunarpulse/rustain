@@ -392,10 +392,13 @@ fn every_command_a_surface_displays_is_a_registered_row() {
     validate(table(), &shipped(), &displayed).expect("every displayed command is registered");
 }
 
-/// Shared-body coverage is registered once, through the concrete local frame.
-/// Attached has no S-TOOL surface or inherited body route (FR-21-5-b).
+/// Shared-body coverage is registered once, through the concrete local frame. The S-TOOL
+/// frame's own rows stay local-only (FR-21-5-b: attached has no tool surface), while the
+/// shared InspectorBody rows are both-host rows: the attached host reaches them through
+/// the thread frame (Story 21.8), so they resolve there but never through the tool frame's
+/// own context.
 #[test]
-fn tool_inspector_cases_cover_both_contexts_once_and_remain_local_only() {
+fn tool_inspector_cases_cover_both_contexts_once_and_only_the_shared_rows_reach_attached() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve, resolve::rows_of};
 
     let cases = super::k9_tool::cases();
@@ -420,23 +423,43 @@ fn tool_inspector_cases_cover_both_contexts_once_and_remain_local_only() {
         let local = rows_of(case.context, Host::Local).collect::<Vec<_>>();
         assert!(
             !local.is_empty(),
-            "the attached n/a assertion has a local control"
+            "the attached assertions have a local control"
         );
-        assert_eq!(rows_of(case.context, Host::Attached).count(), 0);
-        for row in local {
-            assert!(matches!(
-                resolve(case.surface, Host::Local, row.keys),
-                Resolved::Hit(_)
-            ));
-            assert!(
-                matches!(
-                    resolve(case.surface, Host::Attached, row.keys),
-                    Resolved::Miss
-                ),
-                "attached must not inherit {:?} from {:?}",
-                row.keys,
-                case.context
+        if case.context == Context::InspectorBody {
+            assert_eq!(
+                rows_of(case.context, Host::Attached).count(),
+                local.len(),
+                "every shared viewer row is a both-host row"
             );
+            for row in local {
+                for surface in [Context::ToolInspector, Context::ThreadInspector] {
+                    for host in [Host::Local, Host::Attached] {
+                        assert!(
+                            matches!(resolve(surface, host, row.keys),
+                                Resolved::Hit(hit) if hit.context == Context::InspectorBody),
+                            "{host:?} {surface:?} must inherit {:?}",
+                            row.keys
+                        );
+                    }
+                }
+            }
+        } else {
+            assert_eq!(rows_of(case.context, Host::Attached).count(), 0);
+            for row in local {
+                assert!(matches!(
+                    resolve(case.surface, Host::Local, row.keys),
+                    Resolved::Hit(_)
+                ));
+                assert!(
+                    !matches!(
+                        resolve(case.surface, Host::Attached, row.keys),
+                        Resolved::Hit(hit) if hit.context == case.context
+                    ),
+                    "attached must not reach {:?} owned by {:?}",
+                    row.keys,
+                    case.context
+                );
+            }
         }
     }
 }

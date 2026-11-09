@@ -76,15 +76,17 @@ pub struct LogAwarenessView {
     pub presented: Vec<crate::domain::models::LogVisitCandidate>,
 }
 
-/// Explicit native recipient focus target; arrivals never change this identity.
+/// What the thread window shows. Slice 8-A opens a received item; the node, sent-thread and
+/// log views are later slices of Story 21.8.
 #[derive(Debug, Clone)]
-pub enum RecipientSurfaceTarget {
+pub enum ThreadTarget {
     Item(crate::domain::models::ItemAddress),
-    Node(String),
 }
 
+/// What the opening host may do with the thread: act on it (attached writer), only read it
+/// (attached observer), or read it without any daemon (the local host).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecipientSurfaceAccess {
+pub enum ThreadAccess {
     Writer,
     ReadOnly,
     LocalOnly,
@@ -100,11 +102,25 @@ pub enum RecipientActionState {
     },
 }
 
-/// Journal/card data owned by an explicitly opened non-Input surface.
-pub struct RecipientSurface {
-    pub target: RecipientSurfaceTarget,
-    pub access: RecipientSurfaceAccess,
-    pub can_toggle_target: bool,
+/// Rows laid out for one (width, content generation, retrospective overlay) and the footer
+/// rail for one (width, rail facts): bounded work per repaint, recomputed only when the key
+/// changes.
+#[derive(Default)]
+pub struct ThreadLayoutCache {
+    pub body_key: Option<(u16, u64, u32)>,
+    pub body: Vec<ratatui::text::Line<'static>>,
+    pub header: Vec<ratatui::text::Line<'static>>,
+    pub footer_key: Option<(u16, u32)>,
+    pub footer_info: Vec<ratatui::text::Line<'static>>,
+    pub footer_reader: Vec<ratatui::text::Line<'static>>,
+}
+
+/// Journal/card data owned by the thread frame (the reducer sets and clears the slot with
+/// the frame). Painting reads it through `&TuiState`, so what a paint learns (the fitted
+/// row and viewport counts, the layout cache) lives in cells.
+pub struct ThreadInspectorState {
+    pub target: ThreadTarget,
+    pub access: ThreadAccess,
     pub root_id: Option<String>,
     pub first_non_pinned_ordinal: Option<usize>,
     pub last_non_pinned_ordinal: Option<usize>,
@@ -114,22 +130,67 @@ pub struct RecipientSurface {
     pub item_state: Option<&'static str>,
     pub context_available: bool,
     pub context_selected: bool,
-    pub prior_focus: FocusState,
-    pub scroll_offset: usize,
-    pub viewport_rows: usize,
+    pub viewer: crate::adapters::tui::presentation::viewer::Viewer,
     pub content: String,
     pub message_type: crate::domain::models::SemanticMessageType,
     /// Story 19.22 `AC4(c)` — whether the opened item carries a story list and
     /// which verdicts it offers; `VerdictOffer::None` elsewhere.
     pub verdict_offer: crate::domain::models::VerdictOffer,
-    pub cached_width: u16,
-    pub cached_lines: Vec<ratatui::text::Line<'static>>,
-    pub cached_header: Vec<ratatui::text::Line<'static>>,
-    pub cached_footer: Vec<ratatui::text::Line<'static>>,
-    /// Story 19.22 — widened to `u32`: action bits from 0 plus five flag
-    /// bits at 27–31; Story 19.25 adds the retrospective overlay at 23–26.
-    pub cached_action_mask: u32,
     pub results: Vec<String>,
+    /// Bumped by every change the painted body depends on besides the width.
+    pub generation: u64,
+    /// `(rows, viewport)` of the last paint: the row list the viewer clamps against is the
+    /// one that was painted.
+    pub fit: std::cell::Cell<(usize, usize)>,
+    /// `(writer rail painted whole, page rail painted whole)` at the last paint: a key whose
+    /// hint was not painted is inert (`true, true` before the first paint).
+    pub rail_live: std::cell::Cell<(bool, bool)>,
+    pub layout: std::cell::RefCell<ThreadLayoutCache>,
+    /// How many body layouts the cache has computed (a repaint at the same key adds none).
+    pub layouts_built: std::cell::Cell<usize>,
+}
+
+impl ThreadInspectorState {
+    pub fn new(
+        target: ThreadTarget,
+        access: ThreadAccess,
+        message_type: crate::domain::models::SemanticMessageType,
+    ) -> Self {
+        Self {
+            target,
+            access,
+            root_id: None,
+            first_non_pinned_ordinal: None,
+            last_non_pinned_ordinal: None,
+            omitted_before: 0,
+            omitted_after: 0,
+            node_id: None,
+            item_state: None,
+            context_available: false,
+            context_selected: false,
+            viewer: Default::default(),
+            content: String::new(),
+            message_type,
+            verdict_offer: crate::domain::models::VerdictOffer::None,
+            results: Vec::new(),
+            generation: 0,
+            fit: std::cell::Cell::new((0, 0)),
+            rail_live: std::cell::Cell::new((true, true)),
+            layout: std::cell::RefCell::new(ThreadLayoutCache::default()),
+            layouts_built: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Something the painted body depends on changed.
+    pub fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Show the newest rows (a fresh outcome line): painting clamps the offset.
+    pub fn scroll_to_end(&mut self) {
+        self.viewer.top = usize::MAX;
+        self.viewer.follow = false;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2253,7 +2314,7 @@ impl WaveViewState {
 pub struct TuiState {
     pub active_tab_id: TabId,
     pub focus: FocusState,
-    pub recipient_surface: Option<RecipientSurface>,
+    pub thread_inspector: Option<ThreadInspectorState>,
     pub pinned_peer_compose: Option<PinnedPeerCompose>,
     pub recipient_actions: BTreeMap<
         (
@@ -2809,7 +2870,7 @@ impl TuiState {
         Self {
             active_tab_id: 0,
             focus: super::presentation::reducer::initial_base(),
-            recipient_surface: None,
+            thread_inspector: None,
             pinned_peer_compose: None,
             recipient_actions: BTreeMap::new(),
             recipient_context_ids: std::collections::BTreeSet::new(),

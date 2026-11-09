@@ -55,12 +55,9 @@ use crate::adapters::daemon::protocol::{
 };
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource, NotificationStore};
-use crate::adapters::tui::state::{AttachInfo, RecipientSurfaceTarget, TabRenderState, TuiState};
+use crate::adapters::tui::state::{AttachInfo, TabRenderState, TuiState};
 use crate::adapters::tui::terminal;
-use crate::adapters::tui::widgets::recipient_surface::{
-    RecipientSurfaceAction, pinned_response, recipient_surface_actions, render_recipient_surface,
-    retro_overlay,
-};
+use crate::adapters::tui::thread_inspector::pinned_response;
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::ChunkAction;
@@ -394,143 +391,60 @@ async fn recipient_projection(
     Ok(crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries))
 }
 
-async fn open_response_surface(
+/// `[v] View item` on a peer draft: the thread of the item the pinned node answers, in the
+/// one thread frame. A node without an item address has no item to view (the node view is a
+/// later slice of Story 21.8).
+async fn open_thread_for_node(
     workspace: &Path,
     conversation: &Conversation,
     node: &str,
     state: &mut TuiState,
     read_only: bool,
-    prefer_item: bool,
 ) -> Result<()> {
-    use crate::adapters::tui::state::{
-        RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget,
-    };
+    use crate::adapters::tui::state::ThreadAccess;
 
-    let (message, control) = pinned_response(conversation, node)
+    let (_, control) = pinned_response(conversation, node)
         .ok_or_else(|| anyhow!("response already settled — no action applied"))?;
-    let access = if read_only {
-        RecipientSurfaceAccess::ReadOnly
-    } else {
-        RecipientSurfaceAccess::Writer
+    let Some(address) = &control.item_address else {
+        notifications::info(
+            state,
+            NoticeSource::Attached,
+            "no item to view — answer it in the decision",
+        );
+        return Ok(());
     };
-    if let Some(address) = &control.item_address {
-        #[cfg(feature = "a2a")]
-        {
-            let projection = recipient_projection(workspace).await?;
-            let item = crate::adapters::a2a::exec::recipient_item_for_node(
-                &projection,
-                &crate::domain::models::AgentId::from_peer_path(node)?,
-            )
-            .filter(|item| &item.address == address);
-            if item.is_none() {
-                return Err(anyhow!(
-                    "recipient item '{}' not found",
-                    address.item().as_str()
-                ));
-            }
-        }
-        if prefer_item {
-            return super::recipient_surface::open_received_surface(
-                workspace,
-                Some(conversation),
-                address.item().as_str(),
-                state,
-                access,
-                super::recipient_view::ReceivedThreadWindow::Newest,
-            )
-            .await;
-        }
-    }
-    let content = legacy_response_content(message, control);
-    let (prior_focus, root_id) = match state.recipient_surface.take() {
-        Some(surface) => (
-            surface.prior_focus,
-            if surface.node_id.as_deref() == Some(node) {
-                surface.root_id
-            } else {
-                None
-            },
-        ),
-        None => (
-            crate::adapters::tui::presentation::reducer::replace_base(state, FocusState::Chat),
-            None,
-        ),
-    };
-    crate::adapters::tui::presentation::reducer::set_base(state, FocusState::Chat);
-    state.recipient_surface = Some(RecipientSurface {
-        target: RecipientSurfaceTarget::Node(node.to_owned()),
-        access,
-        can_toggle_target: control.item_address.is_some(),
-        root_id,
-        first_non_pinned_ordinal: None,
-        last_non_pinned_ordinal: None,
-        omitted_before: 0,
-        omitted_after: 0,
-        node_id: Some(node.to_owned()),
-        item_state: None,
-        context_available: false,
-        context_selected: false,
-        prior_focus,
-        scroll_offset: 0,
-        viewport_rows: 0,
-        content,
-        message_type: control.message_type,
-        // Story 19.22 — verdict offers are item facts; a node surface has none.
-        verdict_offer: crate::domain::models::VerdictOffer::None,
-        cached_width: 0,
-        cached_lines: Vec::new(),
-        cached_header: Vec::new(),
-        cached_footer: Vec::new(),
-        cached_action_mask: 0,
-        results: Vec::new(),
-    });
-    state.needs_redraw = true;
-    Ok(())
-}
-
-fn legacy_response_content(
-    message: &ChatMessage,
-    control: &crate::domain::models::PeerRowControl,
-) -> String {
-    use crate::domain::models::PeerRowStage;
-    use crate::domain::services::transparency::sanitize_disclosable;
-    let body = match (control.stage, control.node_resolvable) {
-        (PeerRowStage::AwaitingOperator, true) => "Peer is waiting for your response.",
-        (PeerRowStage::Drafting, true) => "Agent is drafting a reply to the peer…",
-        (PeerRowStage::Ready, _) => message
-            .content
-            .strip_prefix(crate::adapters::daemon::response_modes::DRAFT_APPROVAL_PREFIX)
-            .unwrap_or(&message.content),
-        (PeerRowStage::Settled, _) => &message.content,
-        (_, false) => "response already settled — no action applied",
-    };
-    let mut content = format!(
-        "  {} · {}\n",
-        crate::domain::models::semantic_message_type_metadata(control.message_type).operator_noun,
-        sanitize_disclosable(&control.sender_label, control.sender_label.len()),
-    );
-    if let Some(summary) = &control.stories {
-        content.push_str("  ");
-        content.push_str(&summary.0);
-        content.push('\n');
-    }
-    if let Some(selection) = &control.selected_for {
-        content.push_str("  ");
-        content.push_str(&selection.0);
-        content.push('\n');
-    }
-    if super::recipient_view::safe_display_len(body)
-        > crate::domain::services::recipient_thread_bounds::MAX_THREAD_TURN_BYTES
-            .saturating_sub(content.len())
+    #[cfg(feature = "a2a")]
     {
-        content.push_str("      turn content withheld · exceeds 448 KiB");
-    } else {
-        super::recipient_view::append_safe_body(&mut content, body);
+        let projection = recipient_projection(workspace).await?;
+        let item = crate::adapters::a2a::exec::recipient_item_for_node(
+            &projection,
+            &crate::domain::models::AgentId::from_peer_path(node)?,
+        )
+        .filter(|item| &item.address == address);
+        if item.is_none() {
+            return Err(anyhow!(
+                "recipient item '{}' not found",
+                address.item().as_str()
+            ));
+        }
     }
-    content
+    let access = if read_only {
+        ThreadAccess::ReadOnly
+    } else {
+        ThreadAccess::Writer
+    };
+    super::thread_open::open_received(
+        workspace,
+        Some(conversation),
+        address.item().as_str(),
+        state,
+        access,
+        super::recipient_view::ReceivedThreadWindow::Newest,
+    )
+    .await
 }
 
-fn recipient_surface_flash(state: &mut TuiState, message: String) {
+fn thread_flash(state: &mut TuiState, message: String) {
     crate::adapters::tui::handlers::recipient_actions::show_notice(state, None, message);
 }
 
@@ -566,331 +480,6 @@ fn queue_recipient_action(
         return false;
     }
     true
-}
-
-/// Route an owned surface key, or leave it to a higher/lower-priority owner.
-async fn dispatch_recipient_surface_key(
-    key: crossterm::event::KeyEvent,
-    higher_confirmation: bool,
-    workspace: &Path,
-    conversation: &Conversation,
-    state: &mut TuiState,
-    write_frames: Option<&mpsc::UnboundedSender<ClientFrame>>,
-) -> bool {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    if state.recipient_surface.is_none()
-        || higher_confirmation
-        || (key.code, key.modifiers) == (KeyCode::Char('x'), KeyModifiers::CONTROL)
-    {
-        return false;
-    }
-    recipient_surface_key(key, workspace, conversation, state, write_frames).await;
-    true
-}
-async fn recipient_surface_key(
-    key: crossterm::event::KeyEvent,
-    _workspace: &Path,
-    conversation: &Conversation,
-    state: &mut TuiState,
-    write_frames: Option<&mpsc::UnboundedSender<ClientFrame>>,
-) {
-    use crate::adapters::daemon::protocol::PeerDraftAction;
-    use crate::adapters::tui::state::{
-        PeerComposeAction, PinnedPeerCompose, RecipientSurfaceTarget,
-    };
-    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-    if key.kind != KeyEventKind::Press {
-        return;
-    }
-    // Ctrl+C is "back one frame" (RU-20): it closes this surface exactly like
-    // Esc. Ctrl+D is inert here. Neither ever detaches the client.
-    let key = if (key.code, key.modifiers) == (KeyCode::Char('c'), KeyModifiers::CONTROL) {
-        crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
-    } else {
-        key
-    };
-    if (key.code, key.modifiers) == (KeyCode::Char('d'), KeyModifiers::CONTROL) {
-        return;
-    }
-    if key.modifiers != KeyModifiers::NONE {
-        return;
-    }
-    match key.code {
-        KeyCode::Esc => {
-            if let Some(surface) = state.recipient_surface.take() {
-                crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);
-            }
-            crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
-            state.needs_redraw = true;
-            return;
-        }
-        KeyCode::PageUp | KeyCode::PageDown => {
-            if let Some(surface) = state.recipient_surface.as_mut() {
-                surface.scroll_offset = if key.code == KeyCode::PageUp {
-                    surface
-                        .scroll_offset
-                        .saturating_sub(surface.viewport_rows.saturating_sub(1).max(1))
-                } else {
-                    surface
-                        .scroll_offset
-                        .saturating_add(surface.viewport_rows.saturating_sub(1).max(1))
-                };
-            }
-            state.needs_redraw = true;
-            return;
-        }
-        KeyCode::Tab => {
-            let Some(surface) = state
-                .recipient_surface
-                .as_ref()
-                .filter(|surface| surface.can_toggle_target)
-            else {
-                return;
-            };
-            let target = match &surface.target {
-                RecipientSurfaceTarget::Item(_) => surface.node_id.clone(),
-                RecipientSurfaceTarget::Node(node) => Some(node.clone()),
-            };
-            if let Some(node) = target {
-                let prefer_item = matches!(surface.target, RecipientSurfaceTarget::Node(_));
-                if let Err(error) = open_response_surface(
-                    _workspace,
-                    conversation,
-                    &node,
-                    state,
-                    write_frames.is_none(),
-                    prefer_item,
-                )
-                .await
-                {
-                    recipient_surface_flash(state, error.to_string());
-                }
-            }
-            return;
-        }
-        KeyCode::Char('p' | 'l') => {
-            if let Err(error) = super::recipient_surface::navigate_received_surface(
-                _workspace,
-                Some(conversation),
-                state,
-                key.code == KeyCode::Char('p'),
-            )
-            .await
-            {
-                recipient_surface_flash(state, error.to_string());
-            }
-            return;
-        }
-        _ => {}
-    }
-    let read_only = write_frames.is_none();
-    let Some(surface) = state.recipient_surface.as_ref() else {
-        return;
-    };
-    let Some(action) = recipient_surface_actions(state, conversation, read_only)
-        .into_iter()
-        .flatten()
-        .find(|action| matches!(key.code, KeyCode::Char(c) if action.accepts(c)))
-    else {
-        return;
-    };
-    let Some(frame_tx) = write_frames else {
-        return;
-    };
-    match action {
-        RecipientSurfaceAction::Respond
-        | RecipientSurfaceAction::Discuss
-        // Story 19.22 `AC4(c)` — `[d] Discuss concerns` composes a typed
-        // verdict reply; the pending compose is tracked on submit like any
-        // `/team reply` line.
-        | RecipientSurfaceAction::DiscussConcerns
-        | RecipientSurfaceAction::Edit => {
-            if !state.input_buffer.is_empty() {
-                recipient_surface_flash(state,
-                    "input already contains text — close this view and finish or clear it before composing a reply".to_owned());
-                return;
-            }
-            if action == RecipientSurfaceAction::Edit {
-                let Some(node) = surface.node_id.as_deref() else {
-                    return;
-                };
-                let Some((message, _)) = pinned_response(conversation, node) else {
-                    return;
-                };
-                state.input_buffer = message
-                    .content
-                    .strip_prefix(crate::adapters::daemon::response_modes::DRAFT_APPROVAL_PREFIX)
-                    .unwrap_or(&message.content)
-                    .to_owned();
-                state.pinned_peer_compose = Some(PinnedPeerCompose::new(
-                    node.to_owned(),
-                    PeerComposeAction::Edit,
-                ));
-            } else {
-                match &surface.target {
-                    RecipientSurfaceTarget::Item(address) => {
-                        let item_id = address.item().as_str();
-                        state.input_buffer = if action == RecipientSurfaceAction::DiscussConcerns {
-                            format!("/team reply --discuss {item_id} ")
-                        } else {
-                            format!("/team reply {item_id} ")
-                        };
-                        state.pinned_peer_compose = None;
-                    }
-                    RecipientSurfaceTarget::Node(node) => {
-                        state.pinned_peer_compose = Some(PinnedPeerCompose::new(
-                            node.clone(),
-                            PeerComposeAction::Respond,
-                        ));
-                    }
-                }
-            }
-            state.recipient_surface = None;
-            state.cursor_position = state.input_buffer.chars().count();
-            state.input_scroll_offset = 0;
-            crate::adapters::tui::presentation::reducer::set_base(state, FocusState::Input);
-            crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
-        }
-        // Story 19.22 `AC4(c)` — `[y] Accept` queues the verdict frame
-        // directly: empty text (the daemon normalizes `Accepted.`) and an
-        // Accept verdict, through the same correlated Reply slot as a typed
-        // reply.
-        RecipientSurfaceAction::Accept => {
-            let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return;
-            };
-            let frame = ClientFrame::ReplyToRecipientItem {
-                item_id: address.item().as_str().to_owned(),
-                text: String::new(),
-                verdict: Some(crate::adapters::daemon::protocol::ReplyVerdict::Accept),
-            };
-            queue_recipient_action(state, frame, frame_tx, false);
-        }
-        RecipientSurfaceAction::Busy | RecipientSurfaceAction::Acknowledge => {
-            let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return;
-            };
-            if action == RecipientSurfaceAction::Busy {
-                // The card fast path reuses the durable principal/task join,
-                // not its presentation sidecar as an item lookup authority.
-                #[cfg(feature = "a2a")]
-                if let Some(node) = surface.node_id.as_deref() {
-                    let joined = match recipient_projection(_workspace).await {
-                        Ok(projection) => crate::domain::models::AgentId::from_peer_path(node)
-                            .ok()
-                            .and_then(|node| {
-                                crate::adapters::a2a::exec::recipient_item_for_node(
-                                    &projection,
-                                    &node,
-                                )
-                            }),
-                        Err(error) => {
-                            recipient_surface_flash(state, error.to_string());
-                            return;
-                        }
-                    };
-                    if joined.is_none_or(|item| &item.address != address) {
-                        recipient_surface_flash(
-                            state,
-                            format!("recipient item '{}' not found", address.item().as_str()),
-                        );
-                        return;
-                    }
-                }
-            }
-            let item_id = address.item().as_str().to_owned();
-            let frame = if action == RecipientSurfaceAction::Busy {
-                ClientFrame::DeferRecipientItem { item_id }
-            } else {
-                ClientFrame::AcknowledgeRecipientItem { item_id }
-            };
-            queue_recipient_action(state, frame, frame_tx, false);
-        }
-        RecipientSurfaceAction::ShareStatus | RecipientSurfaceAction::DeclineStatus => {
-            let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return;
-            };
-            let frame = ClientFrame::ShareRecipientStatus {
-                item_id: address.item().as_str().to_owned(),
-                decline: action == RecipientSurfaceAction::DeclineStatus,
-            };
-            queue_recipient_action(state, frame, frame_tx, false);
-        }
-        // Story 19.25 `AC3` — Share sends the stored overlay as its leave-out
-        // list; Decline sends no fields (the daemon refuses decline + fields).
-        RecipientSurfaceAction::RetroShare | RecipientSurfaceAction::RetroDecline => {
-            let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return;
-            };
-            let item_id = address.item().as_str().to_owned();
-            let decline = action == RecipientSurfaceAction::RetroDecline;
-            let leave_out = if decline {
-                Vec::new()
-            } else {
-                state
-                    .retro_left_out
-                    .get(&item_id)
-                    .map(|set| set.iter().copied().collect())
-                    .unwrap_or_default()
-            };
-            let frame = ClientFrame::ShareRecipientRetro {
-                item_id,
-                leave_out,
-                decline,
-            };
-            queue_recipient_action(state, frame, frame_tx, false);
-        }
-        // Story 19.25 `AC3` — a digit toggles one field of this client's
-        // overlay; the card and the surface re-render from it.
-        RecipientSurfaceAction::RetroLeaveOut => {
-            let (RecipientSurfaceTarget::Item(address), KeyCode::Char(digit)) =
-                (&surface.target, key.code)
-            else {
-                return;
-            };
-            let Some(field) =
-                crate::adapters::tui::widgets::recipient_surface::retro_field_for_key(digit)
-            else {
-                return;
-            };
-            let item_id = address.item().as_str().to_owned();
-            let set = state.retro_left_out.entry(item_id.clone()).or_default();
-            if !set.insert(field) {
-                set.remove(&field);
-            }
-            if set.is_empty() {
-                state.retro_left_out.remove(&item_id);
-            }
-        }
-        RecipientSurfaceAction::Context => {
-            let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return;
-            };
-            let frame = ClientFrame::SetRecipientContext {
-                item_id: address.item().as_str().to_owned(),
-                selected: !surface.context_selected,
-            };
-            queue_recipient_action(state, frame, frame_tx, false);
-        }
-        RecipientSurfaceAction::Approve
-        | RecipientSurfaceAction::Reject
-        | RecipientSurfaceAction::Decline => {
-            let Some(node) = surface.node_id.as_ref() else {
-                return;
-            };
-            let action = if action == RecipientSurfaceAction::Approve {
-                PeerDraftAction::Approve
-            } else {
-                PeerDraftAction::Reject
-            };
-            let frame = ClientFrame::ResolvePeerDraft {
-                node: node.clone(),
-                action,
-            };
-            queue_recipient_action(state, frame, frame_tx, false);
-        }
-    }
-    state.needs_redraw = true;
 }
 
 fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
@@ -1553,23 +1142,6 @@ fn begin_attached_team_send(
         action: None,
         message_type,
     }
-}
-
-fn attached_decision_pending(state: &TuiState) -> bool {
-    use crate::adapters::tui::presentation::{self, Surface};
-    presentation::is_open(state, Surface::Decision)
-        || presentation::is_open(state, Surface::DecisionQueue)
-}
-
-fn attached_higher_confirmation(state: &TuiState) -> bool {
-    attached_decision_pending(state)
-        || state
-            .decisions
-            .presenting(crate::adapters::tui::decision_queue::DecisionKind::Permission)
-        || state
-            .decisions
-            .presenting(crate::adapters::tui::decision_queue::DecisionKind::Consent)
-        || crate::adapters::tui::app::recipient_higher_confirmation_active(state)
 }
 
 /// Apply approval frames while keeping incomplete input outside the decision queue.
@@ -2431,6 +2003,9 @@ fn paint_attached(
         return None;
     };
     let mut shell = crate::adapters::tui::presentation::Shell::new(area, &layout);
+    // The attached client shows exactly one conversation: the thread frame's eligibility
+    // facts (`thread_inspector::actions`) are read from it.
+    shell.stage = Some((conversation, &[]));
     state
         .notifications
         .set_capacity(crate::adapters::tui::widgets::toast_layer::capacity_for(
@@ -2484,24 +2059,6 @@ fn paint_attached(
                 .map(|compose| compose.label.as_str())
         },
     );
-    let actions = recipient_surface_actions(state, conversation, read_only);
-    let retro_left_out = &state.retro_left_out;
-    let retro = state
-        .recipient_surface
-        .as_ref()
-        .and_then(|surface| retro_overlay(conversation, surface, retro_left_out));
-    if let Some(surface) = state.recipient_surface.as_mut() {
-        opaque.host(render_recipient_surface(
-            f,
-            layout.chat_pane,
-            surface,
-            &state.recipient_actions,
-            &actions,
-            retro,
-            read_only,
-            &state.theme,
-        ));
-    }
     // Inline cards can leave fewer than five rows; paging must not skip visible content.
     state.viewport_height = transcript_area.height;
     let paint_status = |f: &mut ratatui::Frame<'_>| {
@@ -2769,19 +2326,8 @@ pub async fn run_attached(
             frame = read_frame::<_, DaemonFrame>(&mut read_half) => {
                 match frame {
                         Ok(Some(DaemonFrame::PeerRowOperation(operation))) => {
-                            let refresh_node = state.recipient_surface.as_ref().is_some_and(|surface| {
-                                let RecipientSurfaceTarget::Node(node) = &surface.target else { return false };
-                                let (row_id, new_control) = match operation.as_ref() {
-                                    crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
-                                        (message.id.as_str(), control.as_ref()),
-                                    crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
-                                        (row_id.as_str(), None),
-                                };
-                                new_control.or_else(|| conversation.peer_row_controls.get(row_id))
-                                    .is_some_and(|control| &control.node_id == node)
-                            });
-                            let refresh_item = state.recipient_surface.as_ref().is_some_and(|surface| {
-                                let RecipientSurfaceTarget::Item(address) = &surface.target else { return false };
+                            let refresh_item = state.thread_inspector.as_ref().is_some_and(|inspector| {
+                                let crate::adapters::tui::state::ThreadTarget::Item(address) = &inspector.target;
                                 let (row_id, new_control) = match operation.as_ref() {
                                     crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
                                         (message.id.as_str(), control.as_ref()),
@@ -2794,20 +2340,8 @@ pub async fn run_attached(
                             });
                             if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
                                 crate::adapters::tui::decision_queue::sync_recipient_drafts(&mut state, conversation, read_only);
-                                if refresh_node && let Some(surface) = state.recipient_surface.as_mut()
-                                    && let RecipientSurfaceTarget::Node(node) = &surface.target
-                                {
-                                    if let Some((message, control)) = pinned_response(conversation, node) {
-                                        surface.content = legacy_response_content(message, control);
-                                        surface.can_toggle_target = control.item_address.is_some();
-                                    } else {
-                                        surface.content = "response already settled — no action applied".to_owned();
-                                        surface.can_toggle_target = false;
-                                    }
-                                    surface.cached_width = 0;
-                                }
                                 if refresh_item {
-                                    super::recipient_surface::reconcile_item_surface(&mut state, conversation);
+                                    super::thread_open::reconcile_item_thread(&mut state, conversation);
                                 }
                                 state.needs_redraw = true;
                             }
@@ -2876,7 +2410,7 @@ pub async fn run_attached(
                     | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
                         if !read_only || !matches!(&frame, DaemonFrame::TeamRetractPreviewed { .. }) {
                             let confirmation_busy =
-                                crate::adapters::tui::app::recipient_higher_confirmation_active(&state)
+                                crate::adapters::tui::decision_queue::higher_confirmation_presenting(&state)
                                     || state.decisions.presenting(crate::adapters::tui::decision_queue::DecisionKind::Consent);
                             let _ = apply_attached_team_frame(
                                 &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
@@ -2964,6 +2498,7 @@ mod inspect_hint_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::tui::thread_inspector::{self, ThreadAction};
     use crate::domain::models::{NoticeLevel, StopReason, StreamChunk};
     use std::time::Instant;
     use tokio::net::UnixStream;
@@ -4320,7 +3855,7 @@ mod tests {
 
         #[tokio::test]
         async fn story21_6_attached_review_restores_received_surface_and_transcript_position() {
-            use crate::adapters::tui::state::RecipientSurfaceAccess;
+            use crate::adapters::tui::state::ThreadAccess;
             let workspace = tempfile::tempdir().unwrap();
             let journal =
                 crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
@@ -4339,12 +3874,12 @@ mod tests {
             key(&mut surface, KeyCode::Esc).await;
             surface.domain_tab.view_state.scroll_offset = 100;
             surface.domain_tab.view_state.mode = crate::domain::models::AnchorMode::Reading;
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
+            crate::infrastructure::runtime::thread_open::open_received(
                 workspace.path(),
                 None,
                 address.item().as_str(),
                 &mut surface.state,
-                RecipientSurfaceAccess::Writer,
+                ThreadAccess::Writer,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
@@ -4373,7 +3908,7 @@ mod tests {
             assert!(surface.frames().is_empty());
             key(&mut surface, KeyCode::Esc).await;
             key(&mut surface, KeyCode::Esc).await;
-            assert!(surface.state.recipient_surface.is_some());
+            assert!(surface.state.thread_inspector.is_some());
             assert_eq!(surface.domain_tab.view_state.scroll_offset, before);
             assert!(surface.frames().is_empty());
         }
@@ -4896,7 +4431,7 @@ mod tests {
 
     #[tokio::test]
     async fn story19_23_design_update_acknowledgement_changes_only_slot_one_while_received() {
-        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::SemanticMessageType;
         let workspace = tempfile::tempdir().unwrap();
         let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
@@ -4913,28 +4448,28 @@ mod tests {
         .await;
         let conversation = Conversation::default();
         let mut state = TuiState::new(80, 24);
-        super::super::recipient_surface::open_received_surface(
+        super::super::thread_open::open_received(
             workspace.path(),
             Some(&conversation),
             address.item().as_str(),
             &mut state,
-            RecipientSurfaceAccess::Writer,
+            ThreadAccess::Writer,
             super::super::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
         .unwrap();
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
-        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::Unknown;
-        let baseline = recipient_surface_actions(&state, &conversation, false);
+        let actions = thread_inspector::actions(&state, Some(&conversation));
+        assert_eq!(actions[1], Some(ThreadAction::Acknowledge));
+        state.thread_inspector.as_mut().unwrap().message_type = SemanticMessageType::Unknown;
+        let baseline = thread_inspector::actions(&state, Some(&conversation));
         for index in [0, 2, 3, 4, 5] {
             assert_eq!(actions[index], baseline[index]);
         }
-        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::DesignUpdate;
+        state.thread_inspector.as_mut().unwrap().message_type = SemanticMessageType::DesignUpdate;
         for item_state in ["acknowledged", "removed"] {
-            state.recipient_surface.as_mut().unwrap().item_state = Some(item_state);
+            state.thread_inspector.as_mut().unwrap().item_state = Some(item_state);
             assert_eq!(
-                recipient_surface_actions(&state, &conversation, false)[1],
+                thread_inspector::actions(&state, Some(&conversation))[1],
                 None
             );
         }
@@ -4942,7 +4477,7 @@ mod tests {
 
     #[tokio::test]
     async fn story19_24_status_surface_slots_and_access_boundaries() {
-        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::{
             PeerRowStage, SemanticMessageType, StatusDisclosure, StatusPreview,
         };
@@ -4968,12 +4503,12 @@ mod tests {
             ..Default::default()
         };
         let mut state = TuiState::new(80, 24);
-        super::super::recipient_surface::open_received_surface(
+        super::super::thread_open::open_received(
             workspace.path(),
             Some(&conversation),
             address.item().as_str(),
             &mut state,
-            RecipientSurfaceAccess::Writer,
+            ThreadAccess::Writer,
             super::super::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
@@ -4994,7 +4529,7 @@ mod tests {
                 PeerRowStage::Settled,
             ] {
                 for resolvable in [false, true] {
-                    state.recipient_surface.as_mut().unwrap().message_type = message_type;
+                    state.thread_inspector.as_mut().unwrap().message_type = message_type;
                     let control = conversation
                         .peer_row_controls
                         .get_mut("status-row")
@@ -5003,13 +4538,13 @@ mod tests {
                     control.stage = stage;
                     control.node_resolvable = resolvable;
                     control.status = None;
-                    let baseline = recipient_surface_actions(&state, &conversation, false);
+                    let baseline = thread_inspector::actions(&state, Some(&conversation));
                     conversation
                         .peer_row_controls
                         .get_mut("status-row")
                         .unwrap()
                         .status = Some(StatusPreview::new(StatusDisclosure::None, &[]));
-                    let actions = recipient_surface_actions(&state, &conversation, false);
+                    let actions = thread_inspector::actions(&state, Some(&conversation));
                     // A restored (unresolvable) card keeps the status acts,
                     // as it keeps `[r] Respond`; the daemon's orphan arm answers.
                     if message_type == SemanticMessageType::StatusRequest
@@ -5018,11 +4553,11 @@ mod tests {
                         assert!(
                             actions
                                 == [
-                                    Some(RecipientSurfaceAction::Respond),
-                                    Some(RecipientSurfaceAction::Busy),
-                                    Some(RecipientSurfaceAction::ShareStatus),
+                                    Some(ThreadAction::Respond),
+                                    Some(ThreadAction::Busy),
+                                    Some(ThreadAction::ShareStatus),
                                     None,
-                                    Some(RecipientSurfaceAction::DeclineStatus),
+                                    Some(ThreadAction::DeclineStatus),
                                     baseline[5],
                                 ]
                         );
@@ -5032,98 +4567,84 @@ mod tests {
                 }
             }
         }
-        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::StatusRequest;
+        state.thread_inspector.as_mut().unwrap().message_type = SemanticMessageType::StatusRequest;
         let control = conversation
             .peer_row_controls
             .get_mut("status-row")
             .unwrap();
         control.stage = PeerRowStage::AwaitingOperator;
         control.node_resolvable = true;
-        for access in [
-            RecipientSurfaceAccess::ReadOnly,
-            RecipientSurfaceAccess::LocalOnly,
-        ] {
-            state.recipient_surface.as_mut().unwrap().access = access;
+        // Positive control: the writer slot of this exact state offers the status acts.
+        let writer = thread_inspector::actions(&state, Some(&conversation));
+        assert!(writer.contains(&Some(ThreadAction::ShareStatus)));
+        assert!(writer.contains(&Some(ThreadAction::DeclineStatus)));
+        for access in [ThreadAccess::ReadOnly, ThreadAccess::LocalOnly] {
+            state.thread_inspector.as_mut().unwrap().access = access;
             assert!(
-                recipient_surface_actions(&state, &conversation, false)
+                thread_inspector::actions(&state, Some(&conversation))
                     .iter()
                     .all(Option::is_none)
             );
         }
-        state.recipient_surface.as_mut().unwrap().access = RecipientSurfaceAccess::Writer;
-        assert!(
-            recipient_surface_actions(&state, &conversation, true)
-                .iter()
-                .all(Option::is_none)
-        );
-        state.recipient_surface.as_mut().unwrap().item_state = Some("removed");
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::ShareStatus)));
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::DeclineStatus)));
-        state.recipient_surface.as_mut().unwrap().item_state = Some("received");
-        state.recipient_surface.as_mut().unwrap().target =
-            RecipientSurfaceTarget::Node("status-node".to_owned());
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::ShareStatus)));
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::DeclineStatus)));
+        state.thread_inspector.as_mut().unwrap().access = ThreadAccess::Writer;
+        state.thread_inspector.as_mut().unwrap().item_state = Some("removed");
+        let actions = thread_inspector::actions(&state, Some(&conversation));
+        assert!(!actions.contains(&Some(ThreadAction::ShareStatus)));
+        assert!(!actions.contains(&Some(ThreadAction::DeclineStatus)));
     }
 
     #[tokio::test]
     async fn story19_24_status_keys_correlate_suppress_duplicates_and_release_failed_enqueue() {
         use crate::adapters::daemon::protocol::{RecipientAction, RecipientActionTarget};
-        use crate::adapters::tui::state::{RecipientActionState, RecipientSurfaceAccess};
+        use crate::adapters::tui::state::{RecipientActionState, ThreadAccess};
         use crate::domain::models::{
             PeerRowStage, SemanticMessageType, StatusDisclosure, StatusPreview,
         };
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
-        let address = append_received_test_item(
-            &journal,
-            "ri_status_keys",
-            SemanticMessageType::StatusRequest,
-            "status request",
-        )
-        .await;
-        let mut control = peer_control("status-node", PeerRowStage::AwaitingOperator);
-        control.item_address = Some(address.clone());
-        control.message_type = SemanticMessageType::StatusRequest;
-        control.status = Some(StatusPreview::new(StatusDisclosure::None, &[]));
-        let conversation = Conversation {
-            messages: vec![peer_row("status-row", "waiting")],
-            peer_row_controls: [("status-row".to_owned(), control)].into_iter().collect(),
-            ..Default::default()
-        };
         for (key, decline) in [('s', false), ('n', true)] {
-            let mut state = TuiState::new(80, 24);
-            super::super::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
+            // The keys go through the attached front door of a real receiver rig.
+            let mut rig = attach_keys::tests::Rig::new(false);
+            let workspace = rig.workspace().to_path_buf();
+            let journal =
+                crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
+                    &workspace,
+                )
+                .await
+                .unwrap();
+            let address = append_received_test_item(
+                &journal,
+                "ri_status_keys",
+                SemanticMessageType::StatusRequest,
+                "status request",
+            )
+            .await;
+            let mut control = peer_control("status-node", PeerRowStage::AwaitingOperator);
+            control.item_address = Some(address.clone());
+            control.message_type = SemanticMessageType::StatusRequest;
+            control.status = Some(StatusPreview::new(StatusDisclosure::None, &[]));
+            rig.domain_tab.conversation = Conversation {
+                messages: vec![peer_row("status-row", "waiting")],
+                peer_row_controls: [("status-row".to_owned(), control)].into_iter().collect(),
+                ..Default::default()
+            };
+            super::super::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
                 address.item().as_str(),
-                &mut state,
-                RecipientSurfaceAccess::Writer,
+                &mut rig.state,
+                ThreadAccess::Writer,
                 super::super::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
-            state.input_buffer = "unfinished operator text".to_owned();
-            state.cursor_position = state.input_buffer.chars().count();
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
-            assert!(matches!(rx.try_recv().unwrap(),
-                ClientFrame::ShareRecipientStatus { item_id, decline: actual }
-                    if item_id == "ri_status_keys" && actual == decline));
+            rig.state.input_buffer = "unfinished operator text".to_owned();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
+            rig.raw_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+                .await;
+            let frames = rig.frames();
+            assert!(matches!(frames.as_slice(),
+                [ClientFrame::ShareRecipientStatus { item_id, decline: actual }]
+                    if item_id == "ri_status_keys" && *actual == decline));
             let action_key = (
                 RecipientAction::ShareStatus,
                 RecipientActionTarget::Item {
@@ -5131,50 +4652,44 @@ mod tests {
                 },
             );
             assert!(matches!(
-                state.recipient_actions.get(&action_key),
+                rig.state.recipient_actions.get(&action_key),
                 Some(RecipientActionState::Pending { .. })
             ));
-            let surface = state.recipient_surface.as_ref().unwrap();
+            let inspector = rig.state.thread_inspector.as_ref().unwrap();
             let notices =
                 crate::adapters::tui::handlers::recipient_actions::surface_action_notices(
-                    &state.recipient_actions,
-                    &surface.target,
-                    surface.node_id.as_deref(),
+                    &rig.state.recipient_actions,
+                    &inspector.target,
+                    inspector.node_id.as_deref(),
                 )
                 .map(|notice| notice.into_owned())
                 .collect::<Vec<_>>();
             assert_eq!(notices, vec!["applying status reply for ri_status_keys…"]);
-            let actions = recipient_surface_actions(&state, &conversation, false);
+            let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
             assert!(actions[2].is_none() && actions[4].is_none());
             for duplicate in ['s', 'n'] {
-                recipient_surface_key(
-                    KeyEvent::new(KeyCode::Char(duplicate), KeyModifiers::NONE),
-                    workspace.path(),
-                    &conversation,
-                    &mut state,
-                    Some(&tx),
-                )
-                .await;
+                rig.raw_key(KeyEvent::new(KeyCode::Char(duplicate), KeyModifiers::NONE))
+                    .await;
             }
-            assert!(rx.try_recv().is_err());
-            assert_eq!(state.input_buffer, "unfinished operator text");
-            state.recipient_actions.clear();
-            drop(rx);
+            assert!(rig.frames().is_empty());
+            assert_eq!(rig.state.input_buffer, "unfinished operator text");
+            rig.state.recipient_actions.clear();
+            rig.close_receiver();
             assert!(!queue_recipient_action(
-                &mut state,
+                &mut rig.state,
                 ClientFrame::ShareRecipientStatus {
                     item_id: "ri_status_keys".to_owned(),
                     decline
                 },
-                &tx,
+                &rig.tx,
                 false,
             ));
-            assert!(matches!(state.recipient_actions.get(&action_key),
+            assert!(matches!(rig.state.recipient_actions.get(&action_key),
                 Some(RecipientActionState::Completed { notice }) if !notice.is_empty()));
-            let actions = recipient_surface_actions(&state, &conversation, false);
-            assert!(actions[2] == Some(RecipientSurfaceAction::ShareStatus));
-            assert!(actions[4] == Some(RecipientSurfaceAction::DeclineStatus));
-            assert_eq!(state.input_buffer, "unfinished operator text");
+            let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+            assert!(actions[2] == Some(ThreadAction::ShareStatus));
+            assert!(actions[4] == Some(ThreadAction::DeclineStatus));
+            assert_eq!(rig.state.input_buffer, "unfinished operator text");
         }
     }
 
@@ -5189,17 +4704,17 @@ mod tests {
         }
     }
 
-    /// Story 19.25 fixture: a journal-backed `retro_request` item, its pinned
-    /// AwaitingOperator card with a stored preview, and a Writer surface.
-    async fn open_retro_surface(item_id: &str) -> (tempfile::TempDir, Conversation, TuiState) {
-        use crate::adapters::tui::state::RecipientSurfaceAccess;
+    /// Story 19.25 fixture: a journal-backed `retro_request` item in `workspace` and its
+    /// pinned AwaitingOperator card with a stored preview.
+    async fn retro_fixture(
+        workspace: &Path,
+        item_id: &str,
+    ) -> (Conversation, crate::domain::models::ItemAddress) {
         use crate::domain::models::{PeerRowStage, SemanticMessageType};
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(workspace)
+                .await
+                .unwrap();
         let address = append_received_test_item(
             &journal,
             item_id,
@@ -5216,13 +4731,22 @@ mod tests {
             peer_row_controls: [("retro-row".to_owned(), control)].into_iter().collect(),
             ..Default::default()
         };
+        (conversation, address)
+    }
+
+    /// Story 19.25 fixture: the retro item opened (by the production opener) as a Writer
+    /// thread frame on a bare state.
+    async fn open_retro_surface(item_id: &str) -> (tempfile::TempDir, Conversation, TuiState) {
+        use crate::adapters::tui::state::ThreadAccess;
+        let workspace = tempfile::tempdir().unwrap();
+        let (conversation, address) = retro_fixture(workspace.path(), item_id).await;
         let mut state = TuiState::new(100, 40);
-        super::super::recipient_surface::open_received_surface(
+        super::super::thread_open::open_received(
             workspace.path(),
             Some(&conversation),
             address.item().as_str(),
             &mut state,
-            RecipientSurfaceAccess::Writer,
+            ThreadAccess::Writer,
             super::super::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
@@ -5230,27 +4754,38 @@ mod tests {
         (workspace, conversation, state)
     }
 
-    async fn press_surface_key(
-        key: char,
-        workspace: &Path,
-        conversation: &Conversation,
-        state: &mut TuiState,
-        tx: &mpsc::UnboundedSender<ClientFrame>,
-    ) {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
-            workspace,
-            conversation,
-            state,
-            Some(tx),
+    /// The same fixture on the attached front-door rig (journal in the rig's workspace).
+    async fn open_retro_rig(item_id: &str) -> attach_keys::tests::Rig {
+        use crate::adapters::tui::state::ThreadAccess;
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let (conversation, address) = retro_fixture(&workspace, item_id).await;
+        rig.domain_tab.conversation = conversation;
+        rig.state.terminal_width = 100;
+        rig.state.terminal_height = 40;
+        super::super::thread_open::open_received(
+            &workspace,
+            Some(&rig.domain_tab.conversation),
+            address.item().as_str(),
+            &mut rig.state,
+            ThreadAccess::Writer,
+            super::super::recipient_view::ReceivedThreadWindow::Newest,
         )
-        .await;
+        .await
+        .unwrap();
+        rig
+    }
+
+    /// One printable key through the attached front door.
+    async fn press_surface_key(rig: &mut attach_keys::tests::Rig, key: char) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        rig.raw_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .await;
     }
 
     #[tokio::test]
     async fn story19_25_retro_surface_slots_per_stage_type_and_restored_card() {
-        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::{PeerRowStage, SemanticMessageType};
         let (_workspace, mut conversation, mut state) = open_retro_surface("ri_retro_slots").await;
         // Compare against the unchanged no-preview surface at every other stage/type.
@@ -5270,19 +4805,19 @@ mod tests {
                 PeerRowStage::Settled,
             ] {
                 for resolvable in [false, true] {
-                    state.recipient_surface.as_mut().unwrap().message_type = message_type;
+                    state.thread_inspector.as_mut().unwrap().message_type = message_type;
                     let control = conversation.peer_row_controls.get_mut("retro-row").unwrap();
                     control.message_type = message_type;
                     control.stage = stage;
                     control.node_resolvable = resolvable;
                     control.retro = None;
-                    let baseline = recipient_surface_actions(&state, &conversation, false);
+                    let baseline = thread_inspector::actions(&state, Some(&conversation));
                     conversation
                         .peer_row_controls
                         .get_mut("retro-row")
                         .unwrap()
                         .retro = Some(retro_test_preview());
-                    let actions = recipient_surface_actions(&state, &conversation, false);
+                    let actions = thread_inspector::actions(&state, Some(&conversation));
                     // A restored (unresolvable) card keeps the retro acts,
                     // as it keeps `[r] Respond` (19-24 BH-1).
                     if message_type == SemanticMessageType::RetroRequest
@@ -5291,11 +4826,11 @@ mod tests {
                         assert_eq!(
                             actions,
                             [
-                                Some(RecipientSurfaceAction::Respond),
-                                Some(RecipientSurfaceAction::Busy),
-                                Some(RecipientSurfaceAction::RetroShare),
-                                Some(RecipientSurfaceAction::RetroLeaveOut),
-                                Some(RecipientSurfaceAction::RetroDecline),
+                                Some(ThreadAction::Respond),
+                                Some(ThreadAction::Busy),
+                                Some(ThreadAction::RetroShare),
+                                Some(ThreadAction::RetroLeaveOut),
+                                Some(ThreadAction::RetroDecline),
                                 baseline[5],
                             ],
                             "resolvable: {resolvable}"
@@ -5309,62 +4844,44 @@ mod tests {
                 }
             }
         }
-        state.recipient_surface.as_mut().unwrap().message_type = SemanticMessageType::RetroRequest;
+        state.thread_inspector.as_mut().unwrap().message_type = SemanticMessageType::RetroRequest;
         let control = conversation.peer_row_controls.get_mut("retro-row").unwrap();
         control.message_type = SemanticMessageType::RetroRequest;
         control.stage = PeerRowStage::AwaitingOperator;
         control.node_resolvable = true;
         let no_overlay = std::collections::HashMap::new();
         assert!(
-            retro_overlay(
+            thread_inspector::retro_overlay(
                 &conversation,
-                state.recipient_surface.as_ref().unwrap(),
+                state.thread_inspector.as_ref().unwrap(),
                 &no_overlay
             )
             .is_some_and(|overlay| overlay.left_out.is_none())
         );
-        for access in [
-            RecipientSurfaceAccess::ReadOnly,
-            RecipientSurfaceAccess::LocalOnly,
-        ] {
-            state.recipient_surface.as_mut().unwrap().access = access;
+        // Positive control: the writer slot of this exact state offers the retro acts.
+        let retro_acts = [
+            Some(ThreadAction::RetroShare),
+            Some(ThreadAction::RetroLeaveOut),
+            Some(ThreadAction::RetroDecline),
+        ];
+        let writer = thread_inspector::actions(&state, Some(&conversation));
+        assert!(retro_acts.iter().all(|act| writer.contains(act)));
+        for access in [ThreadAccess::ReadOnly, ThreadAccess::LocalOnly] {
+            state.thread_inspector.as_mut().unwrap().access = access;
             assert!(
-                recipient_surface_actions(&state, &conversation, false)
+                thread_inspector::actions(&state, Some(&conversation))
                     .iter()
                     .all(Option::is_none)
             );
         }
-        state.recipient_surface.as_mut().unwrap().access = RecipientSurfaceAccess::Writer;
-        assert!(
-            recipient_surface_actions(&state, &conversation, true)
-                .iter()
-                .all(Option::is_none)
-        );
-        let retro_acts = [
-            Some(RecipientSurfaceAction::RetroShare),
-            Some(RecipientSurfaceAction::RetroLeaveOut),
-            Some(RecipientSurfaceAction::RetroDecline),
-        ];
-        state.recipient_surface.as_mut().unwrap().item_state = Some("removed");
-        let actions = recipient_surface_actions(&state, &conversation, false);
+        state.thread_inspector.as_mut().unwrap().access = ThreadAccess::Writer;
+        state.thread_inspector.as_mut().unwrap().item_state = Some("removed");
+        let actions = thread_inspector::actions(&state, Some(&conversation));
         assert!(retro_acts.iter().all(|act| !actions.contains(act)));
         assert!(
-            retro_overlay(
+            thread_inspector::retro_overlay(
                 &conversation,
-                state.recipient_surface.as_ref().unwrap(),
-                &no_overlay
-            )
-            .is_none()
-        );
-        state.recipient_surface.as_mut().unwrap().item_state = Some("received");
-        state.recipient_surface.as_mut().unwrap().target =
-            RecipientSurfaceTarget::Node("retro-node".to_owned());
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert!(retro_acts.iter().all(|act| !actions.contains(act)));
-        assert!(
-            retro_overlay(
-                &conversation,
-                state.recipient_surface.as_ref().unwrap(),
+                state.thread_inspector.as_ref().unwrap(),
                 &no_overlay
             )
             .is_none()
@@ -5382,70 +4899,71 @@ mod tests {
         use crate::adapters::tui::state::RecipientActionState;
         use crate::domain::models::{PeerRowStage, RetroField, RetroFieldSet};
         let item = "ri_retro_keys";
-        let (workspace, mut conversation, mut state) = open_retro_surface(item).await;
-        let workspace = workspace.path();
-        state.input_buffer = "unfinished operator text".to_owned();
-        state.cursor_position = state.input_buffer.chars().count();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let card = |conversation: &Conversation, state: &mut TuiState| {
-            recipient_body(conversation, state, 60).join("\n")
+        let mut rig = open_retro_rig(item).await;
+        rig.state.input_buffer = "unfinished operator text".to_owned();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
+        let card = |rig: &mut attach_keys::tests::Rig| {
+            recipient_body(&rig.domain_tab.conversation, &mut rig.state, 60).join("\n")
+        };
+        let paint = |rig: &mut attach_keys::tests::Rig| {
+            paint_surface(&mut rig.state, &rig.domain_tab.conversation, 100, 40)
         };
         let overlay = |state: &TuiState| state.retro_left_out.get(item).cloned();
         let set = |fields: &[RetroField]| fields.iter().copied().collect::<RetroFieldSet>();
 
-        assert!(card(&conversation, &mut state).contains("[2] reply times: 3 replies, median 25m"));
-        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        assert!(card(&mut rig).contains("[2] reply times: 3 replies, median 25m"));
+        let painted = paint(&mut rig);
         assert!(painted.contains("Shares (last 14 days):"), "{painted}");
         assert!(painted.contains("[s] Share") && !painted.contains("with redactions"));
         assert!(painted.contains("[1-3] Leave out") && painted.contains("[n] Decline"));
 
         // `[2]` leaves reply times out: the frame body and surface both reflect the overlay.
-        press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
-        assert!(rx.try_recv().is_err());
-        assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
-        let text = card(&conversation, &mut state);
+        press_surface_key(&mut rig, '2').await;
+        assert!(rig.frames().is_empty());
+        assert_eq!(overlay(&rig.state), Some(set(&[RetroField::ReplyTimes])));
+        let text = card(&mut rig);
         assert!(text.contains("[2] reply times: left out"), "{text}");
         assert!(
             text.contains("Not shared: reply times · message content"),
             "{text}"
         );
-        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        let painted = paint(&mut rig);
         assert!(painted.contains("[2] reply times: left out"), "{painted}");
         assert!(painted.contains("Not shared: reply times · message content"));
         assert!(painted.contains("[s] Share with redactions"), "{painted}");
 
         // Toggling back empties (and drops) the overlay.
-        press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
-        assert!(!state.retro_left_out.contains_key(item));
-        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        press_surface_key(&mut rig, '2').await;
+        assert!(!rig.state.retro_left_out.contains_key(item));
+        let painted = paint(&mut rig);
         assert!(!painted.contains("with redactions") && !painted.contains("left out"));
 
         // A field-level change under a non-empty overlay still re-renders.
-        press_surface_key('1', workspace, &conversation, &mut state, &tx).await;
-        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        press_surface_key(&mut rig, '1').await;
+        let painted = paint(&mut rig);
         assert!(painted.contains("[1] received items: left out"));
-        press_surface_key('3', workspace, &conversation, &mut state, &tx).await;
-        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        press_surface_key(&mut rig, '3').await;
+        let painted = paint(&mut rig);
         assert!(
             painted.contains("[3] acknowledgement times: left out"),
             "{painted}"
         );
         assert!(painted.contains("[2] reply times: 3 replies, median 25m"));
         for unowned in ['0', '4', '9'] {
-            press_surface_key(unowned, workspace, &conversation, &mut state, &tx).await;
+            press_surface_key(&mut rig, unowned).await;
         }
         assert_eq!(
-            overlay(&state),
+            overlay(&rig.state),
             Some(set(&[RetroField::Received, RetroField::AckTimes]))
         );
-        assert!(rx.try_recv().is_err());
+        assert!(rig.frames().is_empty());
 
         // `[s]` sends the overlay as the leave-out list, correlated.
-        press_surface_key('s', workspace, &conversation, &mut state, &tx).await;
-        assert!(matches!(rx.try_recv().unwrap(),
-            ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: false }
+        press_surface_key(&mut rig, 's').await;
+        assert!(matches!(rig.frames().as_slice(),
+            [ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: false }]
                 if item_id == item
-                    && leave_out == vec![RetroField::Received, RetroField::AckTimes]));
+                    && *leave_out == vec![RetroField::Received, RetroField::AckTimes]));
         let action_key = (
             RecipientAction::ShareRetro,
             RecipientActionTarget::Item {
@@ -5453,14 +4971,14 @@ mod tests {
             },
         );
         assert!(matches!(
-            state.recipient_actions.get(&action_key),
+            rig.state.recipient_actions.get(&action_key),
             Some(RecipientActionState::Pending { .. })
         ));
-        let surface = state.recipient_surface.as_ref().unwrap();
+        let inspector = rig.state.thread_inspector.as_ref().unwrap();
         let notices = surface_action_notices(
-            &state.recipient_actions,
-            &surface.target,
-            surface.node_id.as_deref(),
+            &rig.state.recipient_actions,
+            &inspector.target,
+            inspector.node_id.as_deref(),
         )
         .map(|notice| notice.into_owned())
         .collect::<Vec<_>>();
@@ -5469,76 +4987,77 @@ mod tests {
             vec!["applying retrospective reply for ri_retro_keys…"]
         );
         // Pending suppresses all three retro acts, toggles included.
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert_eq!(actions[1], Some(RecipientSurfaceAction::Busy));
+        let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+        assert_eq!(actions[1], Some(ThreadAction::Busy));
         assert!(actions[2].is_none() && actions[3].is_none() && actions[4].is_none());
         for duplicate in ['2', 's', 'n'] {
-            press_surface_key(duplicate, workspace, &conversation, &mut state, &tx).await;
+            press_surface_key(&mut rig, duplicate).await;
         }
-        assert!(rx.try_recv().is_err());
+        assert!(rig.frames().is_empty());
         assert_eq!(
-            overlay(&state),
+            overlay(&rig.state),
             Some(set(&[RetroField::Received, RetroField::AckTimes]))
         );
-        assert_eq!(state.input_buffer, "unfinished operator text");
+        assert_eq!(rig.state.input_buffer, "unfinished operator text");
 
         // Settling releases the overlay and the acts.
         apply_action_result(
-            &mut state,
+            &mut rig.state,
             RecipientAction::ShareRetro,
             action_key.1.clone(),
             RecipientActionOutcome::Applied { reply: None },
         );
-        assert!(state.retro_left_out.is_empty());
-        assert!(!card(&conversation, &mut state).contains("left out"));
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert_eq!(actions[2], Some(RecipientSurfaceAction::RetroShare));
+        assert!(rig.state.retro_left_out.is_empty());
+        assert!(!card(&mut rig).contains("left out"));
+        let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+        assert_eq!(actions[2], Some(ThreadAction::RetroShare));
 
         // `[n]` declines with no fields even over a non-empty overlay, which
         // a refusal keeps for the retry.
-        press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
-        press_surface_key('n', workspace, &conversation, &mut state, &tx).await;
-        assert!(matches!(rx.try_recv().unwrap(),
-            ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: true }
+        press_surface_key(&mut rig, '2').await;
+        press_surface_key(&mut rig, 'n').await;
+        assert!(matches!(rig.frames().as_slice(),
+            [ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: true }]
                 if item_id == item && leave_out.is_empty()));
         apply_action_result(
-            &mut state,
+            &mut rig.state,
             RecipientAction::ShareRetro,
             action_key.1.clone(),
             RecipientActionOutcome::Refused {
                 error: ProtocolError::ReadOnly,
             },
         );
-        assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
+        assert_eq!(overlay(&rig.state), Some(set(&[RetroField::ReplyTimes])));
 
         // A failed enqueue releases the pending key, not the overlay.
-        drop(rx);
+        rig.close_receiver();
         assert!(!queue_recipient_action(
-            &mut state,
+            &mut rig.state,
             ClientFrame::ShareRecipientRetro {
                 item_id: item.to_owned(),
                 leave_out: vec![RetroField::ReplyTimes],
                 decline: false,
             },
-            &tx,
+            &rig.tx,
             false,
         ));
-        assert!(matches!(state.recipient_actions.get(&action_key),
+        assert!(matches!(rig.state.recipient_actions.get(&action_key),
             Some(RecipientActionState::Completed { notice }) if !notice.is_empty()));
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert_eq!(actions[2], Some(RecipientSurfaceAction::RetroShare));
-        assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
-        assert_eq!(state.input_buffer, "unfinished operator text");
+        let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+        assert_eq!(actions[2], Some(ThreadAction::RetroShare));
+        assert_eq!(overlay(&rig.state), Some(set(&[RetroField::ReplyTimes])));
+        assert_eq!(rig.state.input_buffer, "unfinished operator text");
 
         // The card leaving takes the overlay and the surface preview with it.
-        conversation
+        rig.domain_tab
+            .conversation
             .peer_row_controls
             .get_mut("retro-row")
             .unwrap()
             .stage = PeerRowStage::Settled;
-        prune_retro_left_out(&mut state, &conversation);
-        assert!(state.retro_left_out.is_empty());
-        let painted = paint_surface(&mut state, &conversation, 100, 40);
+        prune_retro_left_out(&mut rig.state, &rig.domain_tab.conversation);
+        assert!(rig.state.retro_left_out.is_empty());
+        let painted = paint(&mut rig);
         assert!(!painted.contains("Shares (last 14 days):"), "{painted}");
         assert!(!painted.contains("[s] Share"));
     }
@@ -5591,7 +5110,7 @@ mod tests {
 
     #[tokio::test]
     async fn story19_22_verdict_surface_slots_per_stage_and_offer() {
-        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::{PeerRowStage, SemanticMessageType, StoryHolder, VerdictOffer};
         let workspace = tempfile::tempdir().unwrap();
         let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
@@ -5607,29 +5126,29 @@ mod tests {
         )
         .await;
         let mut state = TuiState::new(80, 24);
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+        crate::infrastructure::runtime::thread_open::open_received(
             workspace.path(),
             None,
             you.item().as_str(),
             &mut state,
-            RecipientSurfaceAccess::Writer,
+            ThreadAccess::Writer,
             crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
         .unwrap();
-        let surface = state.recipient_surface.as_ref().unwrap();
+        let surface = state.thread_inspector.as_ref().unwrap();
         assert_eq!(surface.verdict_offer, VerdictOffer::AcceptOrDiscuss);
         // Writer, non-removed, no live draft: slots 0/1/2 per AC4(c).
-        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
-        assert_eq!(actions[0], Some(RecipientSurfaceAction::DiscussConcerns));
-        assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
-        assert_eq!(actions[2], Some(RecipientSurfaceAction::Accept));
+        let actions = thread_inspector::actions(&state, Some(&Conversation::default()));
+        assert_eq!(actions[0], Some(ThreadAction::DiscussConcerns));
+        assert_eq!(actions[1], Some(ThreadAction::Acknowledge));
+        assert_eq!(actions[2], Some(ThreadAction::Accept));
 
-        state.recipient_surface.as_mut().unwrap().node_id = Some("verdict-node".to_owned());
+        state.thread_inspector.as_mut().unwrap().node_id = Some("verdict-node".to_owned());
         // Drafting: no verdict acts at all, the acknowledgement stays.
         for offer in [VerdictOffer::AcceptOrDiscuss, VerdictOffer::DiscussOnly] {
-            state.recipient_surface.as_mut().unwrap().verdict_offer = offer;
-            state.recipient_surface.as_mut().unwrap().item_state = Some("received");
+            state.thread_inspector.as_mut().unwrap().verdict_offer = offer;
+            state.thread_inspector.as_mut().unwrap().item_state = Some("received");
             let mut conversation = Conversation {
                 messages: vec![peer_row("verdict-row", "incoming")],
                 peer_row_controls: [(
@@ -5645,14 +5164,15 @@ mod tests {
                 .get_mut("verdict-row")
                 .unwrap()
                 .item_address = Some(you.clone());
-            let actions = recipient_surface_actions(&state, &conversation, false);
+            let actions = thread_inspector::actions(&state, Some(&conversation));
             assert_eq!(actions[0], None, "Drafting offers no verdict");
-            assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
+            assert_eq!(actions[1], Some(ThreadAction::Acknowledge));
             assert_eq!(actions[2], None, "Drafting offers no accept");
         }
 
-        // Ready keeps Approve/Edit/Reject; Accept never survives it (M11).
-        state.recipient_surface.as_mut().unwrap().verdict_offer = VerdictOffer::AcceptOrDiscuss;
+        // Ready never offers Accept (M11); its draft-review decision (Approve/Edit/Reject)
+        // belongs to 21-6's RecipientDraft decision frame, not the thread window.
+        state.thread_inspector.as_mut().unwrap().verdict_offer = VerdictOffer::AcceptOrDiscuss;
         let mut conversation = Conversation {
             messages: vec![peer_row("verdict-row", "incoming")],
             peer_row_controls: [(
@@ -5668,49 +5188,41 @@ mod tests {
             .get_mut("verdict-row")
             .unwrap()
             .item_address = Some(you.clone());
-        let actions = recipient_surface_actions(&state, &conversation, false);
-        assert_eq!(actions[2], Some(RecipientSurfaceAction::Approve));
-        assert_eq!(actions[3], Some(RecipientSurfaceAction::Edit));
-        assert_eq!(actions[4], Some(RecipientSurfaceAction::Reject));
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::Accept)));
+        let actions = thread_inspector::actions(&state, Some(&conversation));
+        assert_eq!(actions[1], Some(ThreadAction::Acknowledge));
+        assert!(!actions.contains(&Some(ThreadAction::Accept)));
         conversation
             .peer_row_controls
             .get_mut("verdict-row")
             .unwrap()
             .node_resolvable = false;
-        let actions = recipient_surface_actions(&state, &conversation, false);
+        let actions = thread_inspector::actions(&state, Some(&conversation));
         assert!(
-            !actions.contains(&Some(RecipientSurfaceAction::Accept)),
+            !actions.contains(&Some(ThreadAction::Accept)),
             "Ready never offers Accept, including an orphan control"
         );
 
         // DiscussOnly offers concerns but no accept.
-        state.recipient_surface.as_mut().unwrap().verdict_offer = VerdictOffer::DiscussOnly;
-        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
-        assert_eq!(actions[0], Some(RecipientSurfaceAction::DiscussConcerns));
+        state.thread_inspector.as_mut().unwrap().verdict_offer = VerdictOffer::DiscussOnly;
+        let actions = thread_inspector::actions(&state, Some(&Conversation::default()));
+        assert_eq!(actions[0], Some(ThreadAction::DiscussConcerns));
         assert_eq!(actions[2], None);
 
         // Offer None restores today's slot 0 by type.
-        state.recipient_surface.as_mut().unwrap().verdict_offer = VerdictOffer::None;
+        state.thread_inspector.as_mut().unwrap().verdict_offer = VerdictOffer::None;
         for (message_type, expected) in [
             (
                 SemanticMessageType::ArchitectureUpdate,
-                RecipientSurfaceAction::Discuss,
+                ThreadAction::Discuss,
             ),
-            (
-                SemanticMessageType::BugReport,
-                RecipientSurfaceAction::Discuss,
-            ),
-            (
-                SemanticMessageType::Consultation,
-                RecipientSurfaceAction::Respond,
-            ),
+            (SemanticMessageType::BugReport, ThreadAction::Discuss),
+            (SemanticMessageType::Consultation, ThreadAction::Respond),
         ] {
-            state.recipient_surface.as_mut().unwrap().message_type = message_type;
-            let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+            state.thread_inspector.as_mut().unwrap().message_type = message_type;
+            let actions = thread_inspector::actions(&state, Some(&Conversation::default()));
             assert_eq!(actions[0], Some(expected), "{message_type:?}");
         }
-        state.recipient_surface.as_mut().unwrap().message_type =
+        state.thread_inspector.as_mut().unwrap().message_type =
             SemanticMessageType::StoryAssignment;
 
         // Scope change received: slot 1 acknowledges (M12).
@@ -5721,68 +5233,75 @@ mod tests {
             vec![StoryHolder::NoHolder],
         )
         .await;
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
+        crate::infrastructure::runtime::thread_open::open_received(
             workspace.path(),
             None,
             scope.item().as_str(),
             &mut state,
-            RecipientSurfaceAccess::Writer,
+            ThreadAccess::Writer,
             crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
         .unwrap();
         assert_eq!(
-            state.recipient_surface.as_ref().unwrap().verdict_offer,
+            state.thread_inspector.as_ref().unwrap().verdict_offer,
             VerdictOffer::DiscussOnly,
             "a released list offers discuss only"
         );
-        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
-        assert_eq!(actions[1], Some(RecipientSurfaceAction::Acknowledge));
+        let actions = thread_inspector::actions(&state, Some(&Conversation::default()));
+        assert_eq!(actions[1], Some(ThreadAction::Acknowledge));
 
         // Removed items and non-writer access offer nothing.
-        state.recipient_surface.as_mut().unwrap().item_state = Some("removed");
-        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
+        state.thread_inspector.as_mut().unwrap().item_state = Some("removed");
+        let actions = thread_inspector::actions(&state, Some(&Conversation::default()));
         assert!(actions[0].is_none() && actions[1].is_none() && actions[2].is_none());
-        state.recipient_surface.as_mut().unwrap().item_state = Some("received");
-        for access in [
-            RecipientSurfaceAccess::ReadOnly,
-            RecipientSurfaceAccess::LocalOnly,
-        ] {
-            state.recipient_surface.as_mut().unwrap().access = access;
+        state.thread_inspector.as_mut().unwrap().item_state = Some("received");
+        for access in [ThreadAccess::ReadOnly, ThreadAccess::LocalOnly] {
+            state.thread_inspector.as_mut().unwrap().access = access;
             assert!(
-                recipient_surface_actions(&state, &Conversation::default(), false)
+                thread_inspector::actions(&state, Some(&Conversation::default()))
                     .iter()
                     .all(Option::is_none)
             );
         }
-        state.recipient_surface.as_mut().unwrap().access = RecipientSurfaceAccess::Writer;
+        // Positive control: the same state at Writer access offers the acts again.
+        state.thread_inspector.as_mut().unwrap().access = ThreadAccess::Writer;
         assert!(
-            recipient_surface_actions(&state, &Conversation::default(), true)
-                .iter()
-                .all(Option::is_none)
+            thread_inspector::actions(&state, Some(&Conversation::default()))[1]
+                == Some(ThreadAction::Acknowledge)
         );
-        // A node target never offers verdict acts.
-        state.recipient_surface.as_mut().unwrap().target =
-            RecipientSurfaceTarget::Node("verdict-node".to_owned());
-        let actions = recipient_surface_actions(&state, &Conversation::default(), false);
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::Accept)));
-        assert!(!actions.contains(&Some(RecipientSurfaceAction::DiscussConcerns)));
     }
 
     #[tokio::test]
     async fn story19_22_verdict_keys_queue_frames_and_pending_suppresses_across_pages() {
         use crate::adapters::daemon::protocol::{RecipientAction, ReplyVerdict};
         use crate::adapters::tui::handlers::recipient_actions::action_is_pending;
-        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::adapters::tui::state::{ThreadAccess, ThreadTarget};
         use crate::domain::models::{PeerRowStage, SemanticMessageType, StoryHolder};
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        async fn reopen(
+            rig: &mut attach_keys::tests::Rig,
+            workspace: &Path,
+            address: &crate::domain::models::ItemAddress,
+        ) {
+            crate::infrastructure::runtime::thread_open::open_received(
+                workspace,
+                Some(&rig.domain_tab.conversation),
+                address.item().as_str(),
+                &mut rig.state,
+                ThreadAccess::Writer,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(&workspace)
+                .await
+                .unwrap();
         let address = append_story_list_item(
             &journal,
             "ri_verdict_keys",
@@ -5792,62 +5311,46 @@ mod tests {
         .await;
         let mut control = peer_control("verdict-node", PeerRowStage::Settled);
         control.item_address = Some(address.clone());
-        let conversation = Conversation {
+        rig.domain_tab.conversation = Conversation {
             messages: vec![peer_row("verdict-row", "incoming")],
             peer_row_controls: [("verdict-row".to_owned(), control)].into_iter().collect(),
             ..Default::default()
         };
-        let mut state = TuiState::new(80, 24);
-        state.input_buffer = String::new();
-        state.cursor_position = state.input_buffer.chars().count();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let open = async |state: &mut TuiState| {
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
-                address.item().as_str(),
-                state,
-                RecipientSurfaceAccess::Writer,
-                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-            )
-            .await
-        };
-        open(&mut state).await.unwrap();
+        rig.state.input_buffer = String::new();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
+        reopen(&mut rig, &workspace, &address).await;
         let opened_id = address.item().as_str().to_owned();
 
         // `[y] Accept` queues the verdict frame with empty text.
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
+        press_surface_key(&mut rig, 'y').await;
         assert!(matches!(
-            rx.try_recv().unwrap(),
-            ClientFrame::ReplyToRecipientItem { item_id, text, verdict: Some(ReplyVerdict::Accept) }
-                if item_id == opened_id && text.is_empty()
+            rig.frames().as_slice(),
+            [ClientFrame::ReplyToRecipientItem { item_id, text, verdict: Some(ReplyVerdict::Accept) }]
+                if *item_id == opened_id && text.is_empty()
         ));
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::Reply,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &ThreadTarget::Item(address.clone()),
             None,
         ));
 
         // A pending Reply suppresses both verdict acts; the suppression
         // survives context selection and a newer page (cache re-render).
-        let actions = recipient_surface_actions(&state, &conversation, false);
+        let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
         assert_eq!(actions[0], None, "pending Reply suppresses DiscussConcerns");
         assert_eq!(actions[2], None, "pending Reply suppresses Accept");
-        state.recipient_surface.as_mut().unwrap().context_selected = true;
-        state.recipient_context_ids.insert(opened_id.clone());
-        let suppressed = recipient_surface_actions(&state, &conversation, false);
+        rig.state
+            .thread_inspector
+            .as_mut()
+            .unwrap()
+            .context_selected = true;
+        rig.state.recipient_context_ids.insert(opened_id.clone());
+        let suppressed = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
         assert_eq!(suppressed[0], None);
         assert_eq!(suppressed[2], None);
-        let painted = paint_received_surface(&mut state);
-        assert!(painted.contains("[c] Stop using as context"));
+        let painted = paint_received_surface(&mut rig.state);
+        assert!(painted.contains("[u] Stop using as context"), "{painted}");
         assert!(!painted.contains("[y] Accept"));
         assert!(!painted.contains("[d] Discuss concerns"));
 
@@ -5870,44 +5373,37 @@ mod tests {
             })
             .await
             .unwrap();
-        open(&mut state).await.unwrap();
+        reopen(&mut rig, &workspace, &address).await;
         assert!(
-            state
-                .recipient_surface
+            rig.state
+                .thread_inspector
                 .as_ref()
                 .unwrap()
                 .content
                 .contains("newer turn arrived")
         );
-        let painted = paint_received_surface(&mut state);
+        let painted = paint_received_surface(&mut rig.state);
         assert!(!painted.contains("[y] Accept"));
         assert!(!painted.contains("[d] Discuss concerns"));
 
         // A newer page repaints with the verdict acts restored once the
         // pending action clears — the widened u32 mask tracks both.
-        state.recipient_actions.clear();
-        open(&mut state).await.unwrap();
-        let painted = paint_received_surface(&mut state);
-        assert!(painted.contains("[y] Accept"));
+        rig.state.recipient_actions.clear();
+        reopen(&mut rig, &workspace, &address).await;
+        let painted = paint_received_surface(&mut rig.state);
+        assert!(painted.contains("[y] Accept"), "{painted}");
         assert!(painted.contains("[d] Discuss concerns"));
         assert!(painted.contains("[a] Acknowledge"));
 
         // `[d] Discuss concerns` prefills the typed verdict line.
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
+        press_surface_key(&mut rig, 'd').await;
         assert_eq!(
-            state.input_buffer,
+            rig.state.input_buffer,
             format!("/team reply --discuss {opened_id} "),
             "Discuss concerns prefills the typed verdict form"
         );
-        assert!(state.recipient_surface.is_none());
-        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
+        assert!(rig.state.thread_inspector.is_none());
+        assert_eq!(rig.state.focus, crate::domain::models::FocusState::Input);
     }
 
     #[test]
@@ -6270,115 +5766,102 @@ mod tests {
         address
     }
 
+    /// Replaces `explicit_response_focus_freezes_input_and_filters_action_events` (node
+    /// surface: Reject-by-`n` on an explicit node target and the FIFO-head retarget check
+    /// are DELETED, PC-13 — 21-6's decision frame owns draft decisions). What stays is the
+    /// raw-key filter and the frozen composer, now on the thread frame.
     #[tokio::test]
-    async fn explicit_response_focus_freezes_input_and_filters_action_events() {
+    async fn thread_frame_freezes_input_and_filters_raw_action_events() {
+        use crate::adapters::tui::presentation::{self, Surface};
+        use crate::adapters::tui::state::ThreadAccess;
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-        let workspace = tempfile::tempdir().unwrap();
-        let mut conversation = Conversation {
-            messages: vec![peer_row("row-a", "incoming")],
-            peer_row_controls: [(
-                "row-a".to_owned(),
-                peer_control(
-                    "node-a",
-                    crate::domain::models::PeerRowStage::AwaitingOperator,
-                ),
-            )]
-            .into_iter()
-            .collect(),
-            ..Default::default()
-        };
-        let mut state = TuiState::new(80, 24);
-        state.focus = FocusState::Input;
-        state.input_buffer = "unfinished operator text".to_owned();
-        state.cursor_position = state.input_buffer.chars().count();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        open_response_surface(
-            workspace.path(),
-            &conversation,
-            "node-a",
-            &mut state,
-            false,
-            true,
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(&workspace)
+                .await
+                .unwrap();
+        let address = append_received_test_item(
+            &journal,
+            "ri_raw_filter",
+            crate::domain::models::SemanticMessageType::Consultation,
+            "A locally journaled consultation.",
+        )
+        .await;
+        let item_id = address.item().as_str().to_owned();
+        crate::infrastructure::runtime::thread_open::open_received(
+            &workspace,
+            Some(&rig.domain_tab.conversation),
+            &item_id,
+            &mut rig.state,
+            ThreadAccess::Writer,
+            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
         .unwrap();
+        assert!(presentation::is_open(&rig.state, Surface::ThreadInspector));
+        presentation::reducer::set_base(&mut rig.state, FocusState::Input);
+        // Positive control for the filter below: the offered writer action is `[r] Respond`.
         assert_eq!(
-            state.focus,
-            FocusState::Chat,
-            "opening the scoped response surface takes non-Input focus"
+            thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation))[0],
+            Some(ThreadAction::Respond)
         );
         for key in [
-            KeyEvent::new_with_kind(KeyCode::Char('n'), KeyModifiers::NONE, KeyEventKind::Repeat),
+            KeyEvent::new_with_kind(KeyCode::Char('r'), KeyModifiers::NONE, KeyEventKind::Repeat),
             KeyEvent::new_with_kind(
-                KeyCode::Char('n'),
+                KeyCode::Char('r'),
                 KeyModifiers::NONE,
                 KeyEventKind::Release,
             ),
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::SHIFT),
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
         ] {
-            recipient_surface_key(key, workspace.path(), &conversation, &mut state, Some(&tx))
-                .await;
+            rig.raw_key(key).await;
         }
         assert!(
-            rx.try_recv().is_err(),
+            rig.frames().is_empty(),
             "non-Press and ineligible keys cannot dispatch"
         );
-        assert_eq!(state.input_buffer, "unfinished operator text");
+        assert_eq!(
+            rig.state.input_buffer, "",
+            "no filtered key reaches the composer or prefills a reply"
+        );
+        assert!(presentation::is_open(&rig.state, Surface::ThreadInspector));
+
+        // A Press of the same key acts: the composer is non-empty, so it refuses and the
+        // frame stays open with the text intact.
+        rig.state.input_buffer = "unfinished operator text".to_owned();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
+        rig.raw_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
+        assert!(rig.frames().is_empty());
+        assert_eq!(rig.state.input_buffer, "unfinished operator text");
         assert!(
-            state.recipient_surface.is_some(),
-            "nonempty compose refusal retains focus"
+            presentation::is_open(&rig.state, Surface::ThreadInspector),
+            "nonempty compose refusal retains the frame"
         );
-        conversation
-            .messages
-            .insert(0, peer_row("row-b", "later arrival"));
-        conversation.peer_row_controls.insert(
-            "row-b".to_owned(),
-            peer_control("node-b", crate::domain::models::PeerRowStage::Ready),
-        );
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(
-            matches!(rx.try_recv().unwrap(), ClientFrame::ResolvePeerDraft {
-            node, action: crate::adapters::daemon::protocol::PeerDraftAction::Reject
-        } if node == "node-a"),
-            "a new FIFO head cannot retarget explicit focus"
-        );
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(state.recipient_surface.is_none());
-        assert_eq!(state.focus, FocusState::Input);
-        assert_eq!(state.input_buffer, "unfinished operator text");
+        rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(rig.state.thread_inspector.is_none());
+        assert!(!presentation::is_open(&rig.state, Surface::ThreadInspector));
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert_eq!(rig.state.input_buffer, "unfinished operator text");
     }
 
     #[tokio::test]
     async fn answerable_other_and_unknown_items_respond_without_discuss() {
-        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
-        use crate::adapters::tui::widgets::recipient_surface::RecipientSurfaceAction;
+        use crate::adapters::tui::presentation::{self, Surface};
+        use crate::adapters::tui::state::{ThreadAccess, ThreadTarget};
         use crate::domain::models::{PeerRowStage, SemanticMessageType};
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(&workspace)
+                .await
+                .unwrap();
         let mut conversation = Conversation::default();
         let items = [
             ("ri_story_assignment", SemanticMessageType::StoryAssignment),
@@ -6415,109 +5898,97 @@ mod tests {
             addresses.push(address);
         }
 
-        let mut state = TuiState::new(80, 24);
-        state.input_buffer = String::new();
-        state.cursor_position = state.input_buffer.chars().count();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        rig.domain_tab.conversation = conversation;
+        rig.state.input_buffer = String::new();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
+        presentation::reducer::set_base(&mut rig.state, FocusState::Input);
         for address in addresses {
-            state.input_buffer.push_str("unfinished operator text");
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
+            rig.state.input_buffer.push_str("unfinished operator text");
+            crate::infrastructure::runtime::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
                 address.item().as_str(),
-                &mut state,
-                RecipientSurfaceAccess::Writer,
+                &mut rig.state,
+                ThreadAccess::Writer,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
-            let surface = state.recipient_surface.as_ref().unwrap();
+            let surface = rig.state.thread_inspector.as_ref().unwrap();
             assert!(matches!(
                 &surface.target,
-                RecipientSurfaceTarget::Item(opened) if opened == &address
+                ThreadTarget::Item(opened) if opened == &address
             ));
-            assert_eq!(state.focus, FocusState::Chat);
-            assert_eq!(state.input_buffer, "unfinished operator text");
-            let actions = recipient_surface_actions(&state, &conversation, false);
-            assert!(matches!(actions[0], Some(RecipientSurfaceAction::Respond)));
+            assert!(presentation::is_open(&rig.state, Surface::ThreadInspector));
+            assert_eq!(
+                rig.state.focus,
+                FocusState::Input,
+                "opening the thread frame never writes base focus"
+            );
+            assert_eq!(rig.state.input_buffer, "unfinished operator text");
+            let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+            assert!(matches!(actions[0], Some(ThreadAction::Respond)));
             assert!(
-                !actions.contains(&Some(RecipientSurfaceAction::Discuss)),
+                !actions.contains(&Some(ThreadAction::Discuss)),
                 "other and unknown semantic types have no Discuss action"
             );
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
+            press_surface_key(&mut rig, 'r').await;
             assert!(
-                rx.try_recv().is_err(),
+                rig.frames().is_empty(),
                 "nonempty input must be preserved rather than overwritten"
             );
-            assert_eq!(state.input_buffer, "unfinished operator text");
-            assert!(state.recipient_surface.is_some());
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
+            assert_eq!(rig.state.input_buffer, "unfinished operator text");
+            assert!(rig.state.thread_inspector.is_some());
+            rig.raw_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))
             .await;
-            assert!(state.recipient_surface.is_none());
-            assert_eq!(state.focus, FocusState::Input);
-            assert_eq!(state.input_buffer, "unfinished operator text");
+            assert!(rig.state.thread_inspector.is_none());
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert_eq!(rig.state.input_buffer, "unfinished operator text");
 
-            state.input_buffer.clear();
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
+            rig.state.input_buffer.clear();
+            crate::infrastructure::runtime::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
                 address.item().as_str(),
-                &mut state,
-                RecipientSurfaceAccess::Writer,
+                &mut rig.state,
+                ThreadAccess::Writer,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
-            let actions = recipient_surface_actions(&state, &conversation, false);
-            assert!(matches!(actions[0], Some(RecipientSurfaceAction::Respond)));
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
-            assert!(rx.try_recv().is_err());
+            let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+            assert!(matches!(actions[0], Some(ThreadAction::Respond)));
+            press_surface_key(&mut rig, 'r').await;
+            assert!(rig.frames().is_empty());
             assert_eq!(
-                state.input_buffer,
+                rig.state.input_buffer,
                 format!("/team reply {} ", address.item().as_str())
             );
-            assert!(state.recipient_surface.is_none());
-            assert_eq!(state.focus, FocusState::Input);
-            assert!(state.pinned_peer_compose.is_none());
-            state.input_buffer.clear();
+            assert!(rig.state.thread_inspector.is_none());
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert!(rig.state.pinned_peer_compose.is_none());
+            rig.state.input_buffer.clear();
         }
     }
 
     #[tokio::test]
     async fn story_assignment_surface_a_key_dispatches_ack_only_for_received_writer() {
         use crate::adapters::daemon::protocol::ClientFrame;
-        use crate::adapters::tui::state::RecipientSurfaceAccess;
-        use crate::adapters::tui::widgets::recipient_surface::RecipientSurfaceAction;
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::SemanticMessageType;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         for message_type in [
             SemanticMessageType::StoryAssignment,
             SemanticMessageType::BugReport,
         ] {
-            let workspace = tempfile::tempdir().unwrap();
+            let mut rig = attach_keys::tests::Rig::new(false);
+            let workspace = rig.workspace().to_path_buf();
             let journal =
                 crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-                    workspace.path(),
+                    &workspace,
                 )
                 .await
                 .unwrap();
@@ -6529,7 +6000,7 @@ mod tests {
             )
             .await;
             let row_id = "story-assignment-row".to_owned();
-            let conversation = Conversation {
+            rig.domain_tab.conversation = Conversation {
                 messages: vec![peer_row(&row_id, "pending story assignment")],
                 peer_row_controls: [(
                     row_id,
@@ -6550,71 +6021,49 @@ mod tests {
                 .collect(),
                 ..Conversation::default()
             };
-            let mut state = TuiState::new(80, 24);
-            state.input_buffer = String::new();
-            state.cursor_position = state.input_buffer.chars().count();
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            rig.state.input_buffer = String::new();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
 
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
+            crate::infrastructure::runtime::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
                 address.item().as_str(),
-                &mut state,
-                RecipientSurfaceAccess::Writer,
+                &mut rig.state,
+                ThreadAccess::Writer,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
-            let actions = recipient_surface_actions(&state, &conversation, false);
-            assert!(actions.contains(&Some(RecipientSurfaceAction::Acknowledge)));
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
+            let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+            assert!(actions.contains(&Some(ThreadAction::Acknowledge)));
+            rig.raw_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .await;
             assert!(
-                rx.try_recv().is_err(),
+                rig.frames().is_empty(),
                 "opening/viewing a received story assignment does not acknowledge it"
             );
 
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
+            press_surface_key(&mut rig, 'a').await;
             assert!(matches!(
-                rx.try_recv(),
-                Ok(ClientFrame::AcknowledgeRecipientItem { item_id })
+                rig.frames().as_slice(),
+                [ClientFrame::AcknowledgeRecipientItem { item_id }]
                     if item_id == address.item().as_str()
             ));
             assert!(
-                recipient_surface_actions(&state, &conversation, false)
-                    .contains(&Some(RecipientSurfaceAction::Context)),
-                "after acknowledgement, the open surface still offers [c] Use as context"
+                thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation))
+                    .contains(&Some(ThreadAction::Context)),
+                "after acknowledgement, the open surface still offers [u] Use as context"
             );
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
+            press_surface_key(&mut rig, 'u').await;
             assert!(matches!(
-                rx.try_recv(),
-                Ok(ClientFrame::SetRecipientContext {
+                rig.frames().as_slice(),
+                [ClientFrame::SetRecipientContext {
                     item_id,
                     selected: true
-                }) if item_id == address.item().as_str()
+                }] if item_id == address.item().as_str()
             ));
             crate::adapters::tui::handlers::recipient_actions::apply_action_result(
-                &mut state,
+                &mut rig.state,
                 crate::adapters::daemon::protocol::RecipientAction::ContextSelect,
                 crate::adapters::daemon::protocol::RecipientActionTarget::Item {
                     item_id: address.item().as_str().to_owned(),
@@ -6624,61 +6073,51 @@ mod tests {
                     changed: true,
                 },
             );
-            recipient_surface_key(
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
-                workspace.path(),
-                &conversation,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
+            press_surface_key(&mut rig, 'u').await;
             assert!(matches!(
-                rx.try_recv(),
-                Ok(ClientFrame::SetRecipientContext {
+                rig.frames().as_slice(),
+                [ClientFrame::SetRecipientContext {
                     item_id,
                     selected: false
-                }) if item_id == address.item().as_str()
+                }] if item_id == address.item().as_str()
             ));
-
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
+            crate::infrastructure::runtime::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
                 address.item().as_str(),
-                &mut state,
-                RecipientSurfaceAccess::ReadOnly,
+                &mut rig.state,
+                ThreadAccess::ReadOnly,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
             assert!(
-                state
-                    .recipient_surface
-                    .as_ref()
-                    .is_some_and(|surface| surface.can_toggle_target),
-                "read-only item surface retains its [Tab] View item control"
-            );
-            assert!(
-                !recipient_surface_actions(&state, &conversation, true)
-                    .contains(&Some(RecipientSurfaceAction::Acknowledge)),
+                !thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation))
+                    .contains(&Some(ThreadAction::Acknowledge)),
                 "read-only item surfaces do not offer acknowledgement"
             );
+            press_surface_key(&mut rig, 'a').await;
+            assert!(
+                rig.frames().is_empty(),
+                "the acknowledgement key is a consumed no-op in a read-only thread"
+            );
 
-            crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                workspace.path(),
-                Some(&conversation),
+            crate::infrastructure::runtime::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
                 address.item().as_str(),
-                &mut state,
-                RecipientSurfaceAccess::Writer,
+                &mut rig.state,
+                ThreadAccess::Writer,
                 crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
             )
             .await
             .unwrap();
-            if let Some(surface) = state.recipient_surface.as_mut() {
+            if let Some(surface) = rig.state.thread_inspector.as_mut() {
                 surface.item_state = Some("removed");
             }
             assert!(
-                !recipient_surface_actions(&state, &conversation, false)
-                    .contains(&Some(RecipientSurfaceAction::Acknowledge)),
+                !thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation))
+                    .contains(&Some(ThreadAction::Acknowledge)),
                 "removed items do not offer acknowledgement"
             );
         }
@@ -6686,16 +6125,14 @@ mod tests {
 
     #[tokio::test]
     async fn story19_20_bug_report_discuss_survives_settled_or_absent_control() {
-        use crate::adapters::tui::state::RecipientSurfaceAccess;
-        use crate::adapters::tui::widgets::recipient_surface::RecipientSurfaceAction;
+        use crate::adapters::tui::state::ThreadAccess;
         use crate::domain::models::{PeerRowControl, PeerRowStage, SemanticMessageType};
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(&workspace)
+                .await
+                .unwrap();
         let address = append_received_test_item(
             &journal,
             "ri_bug_discuss",
@@ -6728,50 +6165,43 @@ mod tests {
                     },
                 );
             }
+            rig.domain_tab.conversation = conversation;
             for access in [
-                RecipientSurfaceAccess::Writer,
-                RecipientSurfaceAccess::ReadOnly,
-                RecipientSurfaceAccess::LocalOnly,
+                ThreadAccess::Writer,
+                ThreadAccess::ReadOnly,
+                ThreadAccess::LocalOnly,
             ] {
-                let mut state = TuiState::new(80, 24);
-                crate::infrastructure::runtime::recipient_surface::open_received_surface(
-                    workspace.path(),
-                    Some(&conversation),
+                crate::infrastructure::runtime::thread_open::open_received(
+                    &workspace,
+                    Some(&rig.domain_tab.conversation),
                     address.item().as_str(),
-                    &mut state,
+                    &mut rig.state,
                     access,
                     crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
                 )
                 .await
                 .unwrap();
-                let actions = recipient_surface_actions(&state, &conversation, false);
-                if access != RecipientSurfaceAccess::Writer {
+                let actions =
+                    thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
+                if access != ThreadAccess::Writer {
                     assert!(actions.iter().all(Option::is_none));
                     continue;
                 }
-                assert!(matches!(
-                    actions[1],
-                    Some(RecipientSurfaceAction::Acknowledge)
-                ));
+                assert!(matches!(actions[1], Some(ThreadAction::Acknowledge)));
                 if stage == Some(PeerRowStage::Drafting) {
                     assert!(actions[0].is_none());
                     continue;
                 }
-                assert!(matches!(actions[0], Some(RecipientSurfaceAction::Discuss)));
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                state.input_buffer = String::new();
-                state.cursor_position = state.input_buffer.chars().count();
-                recipient_surface_key(
-                    KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-                    workspace.path(),
-                    &conversation,
-                    &mut state,
-                    Some(&tx),
-                )
-                .await;
-                assert_eq!(state.input_buffer, "/team reply ri_bug_discuss ");
-                assert!(rx.try_recv().is_err(), "Discuss composes, it does not send");
-                assert!(state.recipient_surface.is_none());
+                assert!(matches!(actions[0], Some(ThreadAction::Discuss)));
+                rig.state.input_buffer = String::new();
+                rig.state.cursor_position = rig.state.input_buffer.chars().count();
+                press_surface_key(&mut rig, 'd').await;
+                assert_eq!(rig.state.input_buffer, "/team reply ri_bug_discuss ");
+                assert!(
+                    rig.frames().is_empty(),
+                    "Discuss composes, it does not send"
+                );
+                assert!(rig.state.thread_inspector.is_none());
             }
         }
     }
@@ -6822,34 +6252,37 @@ mod tests {
         paint_surface(state, &Conversation::default(), 80, 24)
     }
 
-    /// Paints through the production overlay lookup; the surface's own cache
-    /// persists across calls, as across frames.
+    /// Paints the thread frame through the production attached compositor (`paint_attached`
+    /// → `presentation::compose`); the frame's layout cache persists across calls, as across
+    /// frames.
     fn paint_surface(
         state: &mut TuiState,
         conversation: &Conversation,
         width: u16,
         height: u16,
     ) -> String {
+        state.terminal_width = width;
+        state.terminal_height = height;
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let actions = recipient_surface_actions(state, conversation, false);
+        let tab =
+            crate::domain::models::tab::TabState::from_conversation(0, Conversation::default());
+        let mut render_state = TabRenderState::default();
         terminal
             .draw(|frame| {
-                let area = frame.area();
-                let retro_left_out = &state.retro_left_out;
-                let retro = state
-                    .recipient_surface
-                    .as_ref()
-                    .and_then(|surface| retro_overlay(conversation, surface, retro_left_out));
-                let _ = render_recipient_surface(
+                let _ = paint_attached(
                     frame,
-                    area,
-                    state.recipient_surface.as_mut().unwrap(),
-                    &state.recipient_actions,
-                    &actions,
-                    retro,
-                    false,
-                    &state.theme,
+                    state,
+                    conversation,
+                    &tab.streaming,
+                    &tab.view_state,
+                    &mut render_state,
+                    &HashMap::new(),
+                    crate::domain::models::PermissionMode::Normal,
+                    &crate::adapters::tui::state::AttachInfo {
+                        read_only: false,
+                        channel_count: 1,
+                    },
                 );
             })
             .unwrap();
@@ -6870,18 +6303,17 @@ mod tests {
         use crate::adapters::tui::handlers::recipient_actions::{
             action_is_pending, apply_action_result, surface_action_notices,
         };
-        use crate::adapters::tui::state::{
-            RecipientActionState, RecipientSurfaceAccess, RecipientSurfaceTarget,
-        };
+        use crate::adapters::tui::presentation::{self, Surface};
+        use crate::adapters::tui::state::{RecipientActionState, ThreadAccess, ThreadTarget};
         use crate::domain::models::SemanticMessageType;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(&workspace)
+                .await
+                .unwrap();
         let address = append_received_test_item(
             &journal,
             "ri_busy_context",
@@ -6889,139 +6321,105 @@ mod tests {
             "A real journal-backed consultation body.",
         )
         .await;
-        let mut state = TuiState::new(80, 24);
-        state.input_buffer = "unsent local composition".to_owned();
-        state.cursor_position = state.input_buffer.chars().count();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            None,
-            address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::Writer,
-            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-        )
-        .await
-        .unwrap();
+        rig.state.input_buffer = "unsent local composition".to_owned();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
+        let open = async |rig: &mut attach_keys::tests::Rig| {
+            crate::infrastructure::runtime::thread_open::open_received(
+                &workspace,
+                Some(&rig.domain_tab.conversation),
+                address.item().as_str(),
+                &mut rig.state,
+                ThreadAccess::Writer,
+                crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
+            )
+            .await
+            .unwrap();
+        };
+        open(&mut rig).await;
         let target = RecipientActionTarget::Item {
             item_id: address.item().as_str().to_owned(),
         };
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
-            workspace.path(),
-            &Conversation::default(),
-            &mut state,
-            Some(&tx),
-        )
-        .await;
+        press_surface_key(&mut rig, 'b').await;
         assert!(matches!(
-            rx.try_recv().unwrap(),
-            ClientFrame::DeferRecipientItem { item_id }
+            rig.frames().as_slice(),
+            [ClientFrame::DeferRecipientItem { item_id }]
                 if item_id == address.item().as_str()
         ));
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::Defer,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &ThreadTarget::Item(address.clone()),
             None,
         ));
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            workspace.path(),
-            &Conversation::default(),
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        assert!(state.feedback_blocks.contains_key("recipient-actions"));
-        assert_eq!(state.recipient_actions.len(), 1);
-        assert_eq!(state.input_buffer, "unsent local composition");
+        rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(rig.state.thread_inspector.is_none());
+        assert!(rig.state.feedback_blocks.contains_key("recipient-actions"));
+        assert_eq!(rig.state.recipient_actions.len(), 1);
+        assert_eq!(rig.state.input_buffer, "unsent local composition");
 
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            None,
-            address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::Writer,
-            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-        )
-        .await
-        .unwrap();
-        assert!(!paint_received_surface(&mut state).contains("peer-tainted"));
+        open(&mut rig).await;
+        assert!(!paint_received_surface(&mut rig.state).contains("peer-tainted"));
         let notices_before_modal = surface_action_notices(
-            &state.recipient_actions,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &rig.state.recipient_actions,
+            &ThreadTarget::Item(address.clone()),
             None,
         )
         .count();
-        let modal_key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        // A modal owner above the thread frame keeps the key from it (the registry resolves
+        // against the TOP frame only).
+        presentation::reducer::open(&mut rig.state, Surface::Help);
+        assert!(presentation::is_open(&rig.state, Surface::Help));
+        press_surface_key(&mut rig, 'u').await;
         assert!(
-            !dispatch_recipient_surface_key(
-                modal_key,
-                true,
-                workspace.path(),
-                &Conversation::default(),
-                &mut state,
-                Some(&tx),
-            )
-            .await,
-            "a modal owner keeps the key from the surface"
-        );
-        assert!(
-            rx.try_recv().is_err(),
+            rig.frames().is_empty(),
             "modal-owned Context key cannot send a mutation"
         );
         assert!(matches!(
-            &state.recipient_surface.as_ref().unwrap().target,
-            RecipientSurfaceTarget::Item(opened) if opened == &address
+            &rig.state.thread_inspector.as_ref().unwrap().target,
+            ThreadTarget::Item(opened) if opened == &address
         ));
-        assert_eq!(state.input_buffer, "unsent local composition");
+        assert_eq!(rig.state.input_buffer, "unsent local composition");
         assert_eq!(
             surface_action_notices(
-                &state.recipient_actions,
-                &RecipientSurfaceTarget::Item(address.clone()),
+                &rig.state.recipient_actions,
+                &ThreadTarget::Item(address.clone()),
                 None,
             )
             .count(),
             notices_before_modal,
             "the modal-owned key leaves the busy notice intact"
         );
-        assert!(
-            dispatch_recipient_surface_key(
-                modal_key,
-                false,
-                workspace.path(),
-                &Conversation::default(),
-                &mut state,
-                Some(&tx),
-            )
-            .await,
-            "without a modal owner the surface takes the key"
-        );
+        // Positive control: once the modal closes the thread frame takes the same key.
+        rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(!presentation::is_open(&rig.state, Surface::Help));
+        assert!(presentation::is_open(&rig.state, Surface::ThreadInspector));
+        press_surface_key(&mut rig, 'u').await;
         assert!(matches!(
-            rx.try_recv().unwrap(),
-            ClientFrame::SetRecipientContext {
+            rig.frames().as_slice(),
+            [ClientFrame::SetRecipientContext {
                 item_id,
                 selected: true,
-            } if item_id == address.item().as_str()
+            }] if item_id == address.item().as_str()
         ));
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::Defer,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &ThreadTarget::Item(address.clone()),
             None,
         ));
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::ContextSelect,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &ThreadTarget::Item(address.clone()),
             None,
         ));
-        assert_eq!(state.recipient_actions.len(), 2);
-        assert_eq!(state.input_buffer, "unsent local composition");
+        assert_eq!(rig.state.recipient_actions.len(), 2);
+        assert_eq!(rig.state.input_buffer, "unsent local composition");
 
         apply_action_result(
-            &mut state,
+            &mut rig.state,
             RecipientAction::ContextSelect,
             target.clone(),
             RecipientActionOutcome::ContextSelection {
@@ -7030,41 +6428,34 @@ mod tests {
             },
         );
         assert!(
-            state
+            rig.state
                 .recipient_context_ids
                 .contains(address.item().as_str())
         );
-        let surface = state.recipient_surface.as_ref().unwrap();
+        let surface = rig.state.thread_inspector.as_ref().unwrap();
         assert!(surface.context_selected);
         assert!(
-            paint_received_surface(&mut state).contains("peer-tainted"),
+            paint_received_surface(&mut rig.state).contains("peer-tainted"),
             "actual cached header must repaint after correlated selection"
         );
-        assert_eq!(state.input_buffer, "unsent local composition");
+        assert_eq!(rig.state.input_buffer, "unsent local composition");
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::Defer,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &ThreadTarget::Item(address.clone()),
             None,
         ));
 
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
-            workspace.path(),
-            &Conversation::default(),
-            &mut state,
-            Some(&tx),
-        )
-        .await;
+        press_surface_key(&mut rig, 'u').await;
         assert!(matches!(
-            rx.try_recv().unwrap(),
-            ClientFrame::SetRecipientContext {
+            rig.frames().as_slice(),
+            [ClientFrame::SetRecipientContext {
                 item_id,
                 selected: false,
-            } if item_id == address.item().as_str()
+            }] if item_id == address.item().as_str()
         ));
         apply_action_result(
-            &mut state,
+            &mut rig.state,
             RecipientAction::ContextRemove,
             target,
             RecipientActionOutcome::ContextSelection {
@@ -7073,25 +6464,25 @@ mod tests {
             },
         );
         assert!(
-            !state
+            !rig.state
                 .recipient_context_ids
                 .contains(address.item().as_str())
         );
-        let surface = state.recipient_surface.as_ref().unwrap();
+        let surface = rig.state.thread_inspector.as_ref().unwrap();
         assert!(!surface.context_selected);
         assert!(
-            !paint_received_surface(&mut state).contains("peer-tainted"),
+            !paint_received_surface(&mut rig.state).contains("peer-tainted"),
             "actual cached header must repaint after correlated removal"
         );
-        assert_eq!(state.input_buffer, "unsent local composition");
+        assert_eq!(rig.state.input_buffer, "unsent local composition");
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::Defer,
-            &RecipientSurfaceTarget::Item(address.clone()),
+            &ThreadTarget::Item(address.clone()),
             None,
         ));
         assert!(matches!(
-            state.recipient_actions.get(&(
+            rig.state.recipient_actions.get(&(
                 RecipientAction::Defer,
                 RecipientActionTarget::Item {
                     item_id: address.item().as_str().to_owned(),
@@ -7100,37 +6491,21 @@ mod tests {
             Some(RecipientActionState::Pending { .. })
         ));
 
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            workspace.path(),
-            &Conversation::default(),
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            None,
-            address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::Writer,
-            crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
-        )
-        .await
-        .unwrap();
+        rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        open(&mut rig).await;
         assert!(action_is_pending(
-            &state,
+            &rig.state,
             RecipientAction::Defer,
-            &RecipientSurfaceTarget::Item(address),
+            &ThreadTarget::Item(address),
             None,
         ));
-        assert_eq!(state.input_buffer, "unsent local composition");
+        assert_eq!(rig.state.input_buffer, "unsent local composition");
     }
 
     #[tokio::test]
     async fn explicit_legacy_compose_keeps_its_node_and_commands_take_precedence() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let workspace = tempfile::tempdir().unwrap();
+        use crossterm::event::KeyCode;
         let mut conversation = Conversation {
             messages: vec![peer_row("row-a", "incoming")],
             peer_row_controls: [(
@@ -7144,33 +6519,12 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        let mut state = TuiState::new(80, 24);
-        state.input_buffer = String::new();
-        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        open_response_surface(
-            workspace.path(),
-            &conversation,
-            "node-a",
-            &mut state,
-            false,
-            true,
-        )
-        .await
-        .unwrap();
-        recipient_surface_key(
-            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
-            workspace.path(),
-            &conversation,
-            &mut state,
-            Some(&tx),
-        )
-        .await;
-        let compose = state.pinned_peer_compose.as_ref().unwrap();
-        assert_eq!(compose.node_id, "node-a");
-        assert!(
-            rx.try_recv().is_err(),
-            "Respond opens compose without sending"
+        // The pinned compose is built directly: the node surface that used to arm it by
+        // `[r] Respond` is gone (PC-13, 21-6's decision frame owns that path).
+        let compose = crate::adapters::tui::state::PinnedPeerCompose::new(
+            "node-a".to_owned(),
+            crate::adapters::tui::state::PeerComposeAction::Respond,
         );
         conversation
             .messages
@@ -7179,13 +6533,13 @@ mod tests {
             "row-b".to_owned(),
             peer_control("node-b", crate::domain::models::PeerRowStage::Ready),
         );
-        assert!(pinned_compose_is_current(&conversation, compose));
+        assert!(pinned_compose_is_current(&conversation, &compose));
         conversation
             .peer_row_controls
             .get_mut("row-a")
             .unwrap()
             .stage = crate::domain::models::PeerRowStage::Settled;
-        assert!(!pinned_compose_is_current(&conversation, compose));
+        assert!(!pinned_compose_is_current(&conversation, &compose));
         conversation
             .peer_row_controls
             .get_mut("row-a")
@@ -9500,15 +8854,16 @@ mod tests {
     // RU-3/RU-20 make Ctrl+C "back one frame" and Ctrl+D inert — never a detach.
     #[tokio::test]
     async fn story21_2_scoped_surface_ctrl_c_closes_and_ctrl_d_is_inert_never_detach() {
-        use crate::adapters::tui::state::RecipientSurfaceAccess;
+        use crate::adapters::tui::presentation::{self, Surface};
+        use crate::adapters::tui::state::ThreadAccess;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let workspace = tempfile::tempdir().unwrap();
-        let journal = crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(
-            workspace.path(),
-        )
-        .await
-        .unwrap();
+        let mut rig = attach_keys::tests::Rig::new(false);
+        let workspace = rig.workspace().to_path_buf();
+        let journal =
+            crate::infrastructure::subagent::node_journal::NodeJournal::open_workspace(&workspace)
+                .await
+                .unwrap();
         let address = append_received_test_item(
             &journal,
             "ri_detach_surface",
@@ -9516,52 +8871,40 @@ mod tests {
             "A received item for scoped detach control.",
         )
         .await;
-        let mut state = TuiState::new(80, 24);
-        crate::infrastructure::runtime::recipient_surface::open_received_surface(
-            workspace.path(),
-            None,
+        crate::infrastructure::runtime::thread_open::open_received(
+            &workspace,
+            Some(&rig.domain_tab.conversation),
             address.item().as_str(),
-            &mut state,
-            RecipientSurfaceAccess::Writer,
+            &mut rig.state,
+            ThreadAccess::Writer,
             crate::infrastructure::runtime::recipient_view::ReceivedThreadWindow::Newest,
         )
         .await
         .unwrap();
-        state.input_buffer = "preserved local input".to_owned();
-        state.cursor_position = state.input_buffer.chars().count();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        rig.state.input_buffer = "preserved local input".to_owned();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
         let key = |chord| KeyEvent::new(KeyCode::Char(chord), KeyModifiers::CONTROL);
-        assert!(
-            dispatch_recipient_surface_key(
-                key('d'),
-                false,
-                workspace.path(),
-                &Conversation::default(),
-                &mut state,
-                Some(&tx),
-            )
-            .await,
-            "the surface owns Ctrl+D (and swallows it)"
-        );
-        assert!(state.recipient_surface.is_some(), "Ctrl+D is inert");
-        assert!(
-            dispatch_recipient_surface_key(
-                key('c'),
-                false,
-                workspace.path(),
-                &Conversation::default(),
-                &mut state,
-                Some(&tx),
-            )
-            .await,
-            "the surface owns Ctrl+C"
+        assert_eq!(
+            rig.raw_key(key('d')).await,
+            attach_keys::KeyFlow::Continue,
+            "Ctrl+D never detaches"
         );
         assert!(
-            state.recipient_surface.is_none(),
+            presentation::is_open(&rig.state, Surface::ThreadInspector),
+            "Ctrl+D is inert for the frame (a viewer scroll, never a close)"
+        );
+        assert_eq!(
+            rig.raw_key(key('c')).await,
+            attach_keys::KeyFlow::Continue,
+            "Ctrl+C never detaches"
+        );
+        assert!(
+            rig.state.thread_inspector.is_none()
+                && !presentation::is_open(&rig.state, Surface::ThreadInspector),
             "Ctrl+C is back one frame: it closes the surface like Esc"
         );
-        assert_eq!(state.input_buffer, "preserved local input");
-        assert!(rx.try_recv().is_err(), "neither chord is a peer action");
+        assert_eq!(rig.state.input_buffer, "preserved local input");
+        assert!(rig.frames().is_empty(), "neither chord is a peer action");
     }
 }
 
@@ -9621,6 +8964,8 @@ mod attached_parity_tests {
             crate::adapters::daemon::protocol::ProposalToken(1),
             Vec::new(),
         );
+        // Positive control: the raised consolidation presents before it is deferred.
+        assert!(decision_queue::higher_confirmation_presenting(&state));
         app::handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
         assert!(
             state
@@ -9629,7 +8974,10 @@ mod attached_parity_tests {
         );
         let mut requests = AttachedTeamRequests::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let busy = attached_higher_confirmation(&state);
+        // `attached_higher_confirmation` is gone; its presenting sweep is
+        // `decision_queue::higher_confirmation_presenting`.
+        let busy = decision_queue::higher_confirmation_presenting(&state);
+        assert!(!busy, "a deferred consolidation is not presenting");
         preview(&mut state, &mut requests, true, busy, &tx);
         assert!(decision_queue::team_retract_pending(&state));
         assert_eq!(requests.open_retract.as_deref(), Some("retract"));

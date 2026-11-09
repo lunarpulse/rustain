@@ -201,9 +201,7 @@ mod tests {
                 ] {
                     let event = Event::Key(KeyEvent::new_with_kind(code, modifiers, kind));
                     assert_eq!(
-                        crate::adapters::tui::app::recipient_surface_ignores_raw_key(
-                            &state, &event
-                        ),
+                        crate::adapters::tui::app::frame_ignores_raw_key(&state, &event),
                         (kind != KeyEventKind::Press || modifiers != KeyModifiers::NONE)
                             // a plain Ctrl+X press is the leader chord, never ignored-as-modified
                             && !(code == KeyCode::Char('x')

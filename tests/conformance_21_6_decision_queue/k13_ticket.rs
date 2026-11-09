@@ -177,7 +177,7 @@ fn story21_6_local_ticket_and_reply_raw_ctrl_x_opens_leader_and_queue() {
             (KeyCode::Char('q'), KeyModifiers::NONE),
         ] {
             let raw = Event::Key(KeyEvent::new(code, modifiers));
-            assert!(!app::recipient_surface_ignores_raw_key(&state, &raw));
+            assert!(!app::frame_ignores_raw_key(&state, &raw));
             let input = app::convert_crossterm_event(&raw, &Default::default()).unwrap();
             let result = presentation::route(&mut state, &input, Host::Local, &facts("c1"));
             if modifiers == KeyModifiers::CONTROL {

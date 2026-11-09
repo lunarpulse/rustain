@@ -20,6 +20,7 @@ pub mod table_nav;
 pub mod table_overlay;
 pub mod table_panels;
 pub mod table_permission;
+pub mod table_thread;
 pub mod table_tool;
 pub mod table_viewer;
 pub mod text_edit;

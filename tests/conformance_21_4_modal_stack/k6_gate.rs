@@ -223,22 +223,9 @@ fn scope(code: &str, at: usize) -> String {
     name
 }
 
-// Only the exact recipient-surface prior slots owned by 21-8 remain.
-#[rustfmt::skip]
-const PINS: &[Pin<'_>] = &[
-    ("src/adapters/tui/app.rs", "21-8", &[
-        r###"prior|exec_recipient|reducer::set_base(state, surface.prior_focus);"###,
-    ]),
-    ("src/adapters/tui/state.rs", "21-8", &[
-        r###"prior|RecipientSurface|pub prior_focus: FocusState,"###,
-    ]),
-    ("src/infrastructure/runtime/attach_loop.rs", "21-8", &[
-        r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###,
-    ]),
-    ("src/infrastructure/runtime/recipient_surface.rs", "21-8", &[
-        r###"prior|open_received_surface|let (prior_focus, results) = match old {"###, r###"prior|open_received_surface|surface.prior_focus,"###, r###"prior|open_received_surface|prior_focus,"###,
-    ]),
-];
+// No pin remains: Story 21-8 slice 8-A removed the last recipient-surface prior-focus slots
+// (the thread window never owns or restores base focus). Every new hit fails.
+const PINS: &[Pin<'_>] = &[];
 
 const RULES: &[(&str, &str)] = &[
     ("focus-write", r###"\.\s*focus\s*="###),
@@ -310,6 +297,15 @@ const RULES: &[(&str, &str)] = &[
     (
         "decision-21-6-e",
         r"\b(?:pending_team_proposals|team_proposal_visible|team_proposal_reviews|team_proposal_scroll(?:_max)?|team_proposal_footer_visible|team_proposal_viewport_rows|pending_peer_card|peer_response_card_lines|render_bottom_anchored_decision_card|proposal_higher_confirmation_active|visible_team_proposal|card_cue)\b|\bContext\s*::\s*Card\b|\bCardCmd\s*::\s*Cue\b",
+    ),
+    // Story 21.8 slice 8-A (A17): the recipient surface, its trap, its direct paint and its
+    // prior-focus slot are gone; the S-THREAD frame replaces them. Field/type/fn accesses and
+    // the retired action literals, never module paths. Scanned with string literals kept
+    // (`[c] Use as context` lives only in a literal); `recipient_surface_flash` is a longer
+    // identifier and stays out of scope.
+    (
+        "thread-21-8-a",
+        r"\bContext\s*::\s*RecipientSurface\b|\bOverlayCmd\s*::\s*Recipient\w*|\b(?:recipient_higher_confirmation_active|attached_higher_confirmation|recipient_surface_key|dispatch_recipient_surface_key|render_recipient_surface|recipient_surface_ignores_raw_key|exec_recipient|recipient_blocked)\b|\bRecipientSurface(?:Target|Access|Action)?\b|\brecipient_surface\b|\[c\] Use as context|\[c\] Stop using as context",
     ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
@@ -483,7 +479,10 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             if rule.starts_with("tool-line-") && !path.starts_with("src/adapters/tui/widgets/") {
                 continue;
             }
-            let haystack = if *rule == "osc8-encoder" || rule.starts_with("tool-line-") {
+            let haystack = if *rule == "osc8-encoder"
+                || *rule == "thread-21-8-a"
+                || rule.starts_with("tool-line-")
+            {
                 &literal
             } else {
                 &code
@@ -563,6 +562,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "decision-21-6-c",
                     "decision-21-6-d",
                     "decision-21-6-e",
+                    "thread-21-8-a",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -746,13 +746,7 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
         0,
         "4-C removes the final 109 slice pins; no 21-4 exemption remains"
     );
-    assert_eq!(
-        PINS.iter().map(|(_, _, sites)| sites.len()).sum::<usize>(),
-        9
-    );
-    assert!(PINS.iter().all(|(_, owner, sites)| {
-        *owner == "21-8" && sites.iter().all(|site| site.starts_with("prior|"))
-    }));
+    assert_eq!(PINS.len(), 0, "21-8 slice 8-A leaves no pin");
     for (path, count) in [
         ("src/adapters/tui/app.rs", 0),
         ("src/adapters/tui/state.rs", 0),
@@ -813,6 +807,34 @@ fn k6_same_scanner_rejects_each_forbidden_mechanism() {
         ("decision-21-6-a", "let p = Placement::StageBottom;"),
         ("decision-21-6-a", "s.pending_large_image = Some(image);"),
         ("decision-21-6-a", "let t = s.pending_delete.take();"),
+        ("thread-21-8-a", "let c = Context::RecipientSurface;"),
+        ("thread-21-8-a", "let c = OverlayCmd::RecipientPageUp;"),
+        ("thread-21-8-a", "let c = OverlayCmd::RecipientToggle;"),
+        (
+            "thread-21-8-a",
+            "if recipient_higher_confirmation_active(s) {}",
+        ),
+        ("thread-21-8-a", "if attached_higher_confirmation(s) {}"),
+        ("thread-21-8-a", "recipient_surface_key(k, w, c, s, t);"),
+        (
+            "thread-21-8-a",
+            "dispatch_recipient_surface_key(k, w, c, s, t);",
+        ),
+        ("thread-21-8-a", "render_recipient_surface(f, r, s, c);"),
+        (
+            "thread-21-8-a",
+            "if recipient_surface_ignores_raw_key(s, e) {}",
+        ),
+        ("thread-21-8-a", "exec_recipient(s, c, k);"),
+        ("thread-21-8-a", "let s: RecipientSurface = make();"),
+        ("thread-21-8-a", "let t = RecipientSurfaceTarget::Item(a);"),
+        ("thread-21-8-a", "let a = RecipientSurfaceAccess::Writer;"),
+        ("thread-21-8-a", "let a = RecipientSurfaceAction::Respond;"),
+        ("thread-21-8-a", "let r = s.recipient_surface.take();"),
+        ("thread-21-8-a", "recipient_surface::render(f, r, s, c);"),
+        ("thread-21-8-a", "let b = recipient_blocked(s);"),
+        ("thread-21-8-a", "let t = \"[c] Use as context\";"),
+        ("thread-21-8-a", "let t = \"[c] Stop using as context\";"),
     ];
     for (rule, text) in cases
         .into_iter()
@@ -2359,9 +2381,77 @@ fn k11e_proposal_and_peer_card_symbols_are_unpinnable_and_reused_apis_pass() {
             .iter()
             .all(|s| !s.contains("decision-21-6-e|"))
     );
-    // Every remaining pin belongs to 21-8: the 21-6 allowlist is empty.
+    // Slice 8-A removed the last 21-8 pins: none remains.
+    assert_eq!(PINS.len(), 0, "a pin survives");
+}
+
+/// Story 21.8 slice 8-A (A17): each retired recipient-surface symbol is rejected in
+/// production, cannot be pinned (the pin goes stale and the hit still fails), while the
+/// S-THREAD frame's own identifiers, test-only items, comments and unrelated recipient
+/// names (`Context::RecipientDraft`, `thread_flash`) pass.
+#[test]
+fn k6_story21_8_retired_recipient_surface_symbols_are_unpinnable_and_thread_apis_pass() {
+    for text in [
+        "let c = Context::RecipientSurface;",
+        "let c = OverlayCmd::RecipientPrev;",
+        "let c = OverlayCmd::RecipientNext;",
+        "let c = OverlayCmd::RecipientClose;",
+        "let c = OverlayCmd::RecipientPageUp;",
+        "let c = OverlayCmd::RecipientPageDown;",
+        "let c = OverlayCmd::RecipientToggle;",
+        "if recipient_higher_confirmation_active(s) {}",
+        "if attached_higher_confirmation(s) {}",
+        "recipient_surface_key(k, w, c, s, t);",
+        "dispatch_recipient_surface_key(k, w, c, s, t);",
+        "render_recipient_surface(f, r, s, c);",
+        "if recipient_surface_ignores_raw_key(s, e) {}",
+        "exec_recipient(s, c, k);",
+        "let s: RecipientSurface = make();",
+        "let t = RecipientSurfaceTarget::Item(a);",
+        "let a = RecipientSurfaceAccess::Writer;",
+        "let a = RecipientSurfaceAction::Respond;",
+        "let r = s.recipient_surface.take();",
+        "let b = recipient_blocked(s);",
+        "let t = \"[c] Use as context\";",
+        "let t = \"[c] Stop using as context\";",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("thread-21-8-a|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("thread-21-8-a|")),
+            "{text}: {errors:?}"
+        );
+    }
+    let legal = "fn real() { let _ = Context::ThreadInspector; let _ = Context::RecipientDraft; \
+        let _ = OverlayCmd::QuitRequest; reducer::open_thread(s, p, t); \
+        widgets::thread_inspector::render(f, r, s, c, t); thread_flash(s, m); \
+        let _ = \"[u] Use as context\"; let _ = \"Use as context\"; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
     assert!(
-        PINS.iter().all(|(_, owner, _)| *owner == "21-8"),
-        "a 21-6 pin survives"
+        !errors.iter().any(|s| s.contains("thread-21-8-a|")),
+        "{errors:?}"
+    );
+    let masked = "// RecipientSurface recipient_surface prior_focus\n\
+        #[cfg(test)] mod tests { fn t(s: &mut S) { s.recipient_surface = None; } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("thread-21-8-a|"))
     );
 }

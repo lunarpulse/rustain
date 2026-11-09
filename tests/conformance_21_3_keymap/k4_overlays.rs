@@ -1,7 +1,7 @@
 //! Story 21.3 conformance leg K4 (overlay contexts): every own row of Help,
 //! CommandPalette, ModelSelector, ProfileSwitcher, UsagePanel, CrossSearch,
 //! ReverseSearch, Autocomplete, NotificationLog, QuitConfirm, Decision,
-//! RecipientSurface and Login BY VALUE through the real local front door
+//! ThreadInspector and Login BY VALUE through the real local front door
 //! (`app::handle_input`; S-LOG and the decision frame through the host-neutral
 //! handler the event loop calls first), plus the harness's negative sweep.
 
@@ -15,7 +15,7 @@ use rustain::adapters::tui::decision_queue::{
     self, Arrival, DecisionDraft, DecisionKind, INERT_AFTER_PAINT,
 };
 use rustain::adapters::tui::keymap::resolve::rows_of;
-use rustain::adapters::tui::keymap::{Context, Host, Key};
+use rustain::adapters::tui::keymap::{Context, Host, Key, Resolved};
 use rustain::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use rustain::adapters::tui::notifications::{
     self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource, NotificationStore,
@@ -23,8 +23,8 @@ use rustain::adapters::tui::notifications::{
 use rustain::adapters::tui::presentation::{self, RouteEffect, Surface, is_open};
 use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
 use rustain::adapters::tui::state::{
-    ContextWarning, LoginOrigin, LoginSection, OverlayMode, ProviderColumn, RecipientSurface,
-    RecipientSurfaceAccess, RecipientSurfaceTarget, RunningLogin, TuiState,
+    ContextWarning, LoginOrigin, LoginSection, OverlayMode, ProviderColumn, RunningLogin,
+    ThreadAccess, ThreadInspectorState, ThreadTarget, TuiState,
 };
 use rustain::domain::clock::MockClock;
 use rustain::domain::events::LoginTargetRow;
@@ -33,8 +33,8 @@ use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope
 use rustain::domain::models::provider::ModelDescriptor;
 use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{
-    AdapterRef, FocusState, NotificationsConfig, PortDimension, ProfileDescriptor,
-    ProfileIdentityColor, ProfileSelection, ProfileSource, SemanticMessageType, VerdictOffer,
+    AdapterRef, FocusState, ItemAddress, ItemId, NotificationsConfig, PeerId, PortDimension,
+    ProfileDescriptor, ProfileIdentityColor, ProfileSelection, ProfileSource, SemanticMessageType,
 };
 use rustain::domain::services::cross_search::CrossSearchResult;
 use tokio_util::sync::CancellationToken;
@@ -648,43 +648,144 @@ fn quit_confirm_rows_by_value_and_every_other_key_is_swallowed() {
 }
 
 #[rustfmt::skip]
-const RECIPIENT: &[W] = &[
-    w(&[Key::Char('p')], "RecipientThreadPage { earlier: true } | surface=true focus=Chat scroll=20"),
-    w(&[Key::Char('l')], "RecipientThreadPage { earlier: false } | surface=true focus=Chat scroll=20"),
-    w(&[Key::Esc], "Consumed | surface=false focus=Input scroll=0"),
-    w(&[Key::Ctrl('c')], "Consumed | surface=false focus=Input scroll=0"),
-    w(&[Key::PageUp], "Consumed | surface=true focus=Chat scroll=10"),
-    w(&[Key::PageDown], "Consumed | surface=true focus=Chat scroll=30"),
-    w(&[Key::Ctrl('q')], "Quit | surface=true focus=Chat scroll=20"),
+const THREAD: &[W] = &[
+    w(&[Key::Char('p')], "ThreadPage { earlier: true } | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('l')], "ThreadPage { earlier: false } | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Esc], "Consumed | frame=false focus=Chat top=0 pal=false leader=false"),
+    w(&[Key::Ctrl('c')], "Consumed | frame=false focus=Chat top=0 pal=false leader=false"),
+    w(&[Key::Ctrl('x')], "Consumed | frame=true focus=Chat top=20 pal=false leader=true"),
+    w(&[Key::Ctrl('p')], "Consumed | frame=true focus=Chat top=20 pal=true leader=false"),
+    w(&[Key::Ctrl('q')], "Quit | frame=true focus=Chat top=20 pal=false leader=false"),
 ];
 
-/// A node view with an earlier and a later part of the thread, at line 20 of an 11-row viewport.
+/// The shared viewer and markdown-body rows the thread frame inherits (the local host
+/// reaches them through the thread frame): scrolling clamps against the painted fit
+/// (100 rows, 11-row viewport, top 20), and the sideways/toggle rows are consumed no-ops.
 #[rustfmt::skip]
-pub(super) fn recipient() -> TuiState {
+const THREAD_INHERITED: &[W] = &[
+    w(&[Key::Char('j')], "Consumed | frame=true focus=Chat top=21 pal=false leader=false"),
+    w(&[Key::Down], "Consumed | frame=true focus=Chat top=21 pal=false leader=false"),
+    w(&[Key::Char('k')], "Consumed | frame=true focus=Chat top=19 pal=false leader=false"),
+    w(&[Key::Up], "Consumed | frame=true focus=Chat top=19 pal=false leader=false"),
+    w(&[Key::Ctrl('d')], "Consumed | frame=true focus=Chat top=25 pal=false leader=false"),
+    w(&[Key::Ctrl('u')], "Consumed | frame=true focus=Chat top=15 pal=false leader=false"),
+    w(&[Key::PageDown], "Consumed | frame=true focus=Chat top=30 pal=false leader=false"),
+    w(&[Key::PageUp], "Consumed | frame=true focus=Chat top=10 pal=false leader=false"),
+    w(&[Key::Char('g')], "Consumed | frame=true focus=Chat top=0 pal=false leader=false"),
+    w(&[Key::Char('G')], "Consumed | frame=true focus=Chat top=89 pal=false leader=false"),
+    w(&[Key::Char('h')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('0')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('$')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('v')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+];
+
+/// The thread window over a base focus of Chat, opened by the production reducer: an earlier
+/// and a later page exist, the painted body fit is 100 rows in an 11-row viewport, line 20.
+pub(super) fn thread() -> TuiState {
     let mut s = fresh();
     s.focus = FocusState::Chat;
-    s.recipient_surface = Some(RecipientSurface {
-        target: RecipientSurfaceTarget::Node("n".into()), access: RecipientSurfaceAccess::LocalOnly,
-        can_toggle_target: false, root_id: None, first_non_pinned_ordinal: None,
-        last_non_pinned_ordinal: None, omitted_before: 2, omitted_after: 3, node_id: None,
-        item_state: None, context_available: false, context_selected: false,
-        prior_focus: FocusState::Input, scroll_offset: 20, viewport_rows: 11, content: String::new(),
-        message_type: SemanticMessageType::Unknown, verdict_offer: VerdictOffer::None, cached_width: 0,
-        cached_lines: Vec::new(), cached_header: Vec::new(), cached_footer: Vec::new(),
-        cached_action_mask: 0, results: Vec::new(),
-    });
+    let address = ItemAddress::from_a2a_ingress(
+        PeerId::from_public_key(&[3; 32]).expect("fixed key"),
+        ItemId::from_replay("ri_k4_thread"),
+    );
+    let mut payload = ThreadInspectorState::new(
+        ThreadTarget::Item(address),
+        ThreadAccess::LocalOnly,
+        SemanticMessageType::Unknown,
+    );
+    payload.omitted_before = 2;
+    payload.omitted_after = 3;
+    payload.viewer.top = 20;
+    payload.fit.set((100, 11));
+    let _ = presentation::reducer::open_thread(&mut s, payload, "Thread · unknown type".into());
     s
 }
 
-/// Catches a close that loses the prior focus, a page key that scrolls the wrong way, and a key leaking to the chat below.
+/// Catches a close that moves the base focus, a pager key that pages the wrong way or is not
+/// offered, a scroll that ignores the painted fit, and a key leaking to the chat below.
 #[test]
 #[rustfmt::skip]
-fn recipient_surface_rows_by_value_and_every_other_key_is_swallowed() {
+fn thread_inspector_rows_by_value_and_every_other_key_is_swallowed() {
     let salient = |s: &TuiState| {
-        let scroll = s.recipient_surface.as_ref().map_or(0, |r| r.scroll_offset);
-        format!("surface={} focus={:?} scroll={scroll}", s.recipient_surface.is_some(), s.focus)
+        let top = s.thread_inspector.as_ref().map_or(0, |t| t.viewer.top);
+        format!(
+            "frame={} focus={:?} top={top} pal={} leader={}",
+            is_open(s, Surface::ThreadInspector), s.focus,
+            is_open(s, Surface::CommandPalette), s.pending_leader.is_some()
+        )
     };
-    run(&local(Context::RecipientSurface, recipient, salient, RECIPIENT));
+    run(&Case {
+        inherited: THREAD_INHERITED,
+        ..local(Context::ThreadInspector, thread, salient, THREAD)
+    });
+}
+
+/// Catches a writer letter that resolves in the local host (the local host has no daemon to
+/// act through), a paging/closing row missing from either host, and a widened viewer row
+/// that stays local-only (the attached host reaches it through the thread frame).
+#[test]
+fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts() {
+    use rustain::adapters::tui::keymap::{resolve, resolve::rows_of};
+    let both = [
+        Key::Char('p'),
+        Key::Char('l'),
+        Key::Esc,
+        Key::Ctrl('c'),
+        Key::Ctrl('x'),
+        Key::Ctrl('p'),
+        Key::Ctrl('q'),
+    ];
+    let viewer = [
+        Key::Char('j'),
+        Key::Down,
+        Key::Char('k'),
+        Key::Up,
+        Key::Ctrl('d'),
+        Key::Ctrl('u'),
+        Key::PageDown,
+        Key::PageUp,
+        Key::Char('g'),
+        Key::Char('G'),
+        Key::Char('h'),
+        Key::Char('0'),
+        Key::Char('$'),
+        Key::Char('v'),
+    ];
+    let writer = ['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u'];
+    for host in [Host::Local, Host::Attached] {
+        for key in both {
+            let Resolved::Hit(row) = resolve(Context::ThreadInspector, host, &[key]) else {
+                panic!("{host:?}: {key:?} must resolve in the thread context");
+            };
+            assert_eq!(row.context, Context::ThreadInspector, "{host:?} {key:?}");
+        }
+        for key in viewer {
+            assert!(
+                matches!(
+                    resolve(Context::ThreadInspector, host, &[key]),
+                    Resolved::Hit(_)
+                ),
+                "{host:?}: viewer row {key:?} must resolve in the thread context"
+            );
+        }
+    }
+    for letter in writer {
+        let key = Key::Char(letter);
+        let Resolved::Hit(row) = resolve(Context::ThreadInspector, Host::Attached, &[key]) else {
+            panic!("attached: writer letter {letter} must resolve");
+        };
+        assert_eq!(row.context, Context::ThreadInspector, "attached {letter}");
+        assert!(
+            matches!(
+                resolve(Context::ThreadInspector, Host::Local, &[key]),
+                Resolved::Miss
+            ),
+            "local: writer letter {letter} must not resolve"
+        );
+    }
+    let own = |host| rows_of(Context::ThreadInspector, host).count();
+    assert_eq!(own(Host::Local), both.len());
+    assert_eq!(own(Host::Attached), both.len() + writer.len());
 }
 
 fn typed(s: &mut TuiState) {

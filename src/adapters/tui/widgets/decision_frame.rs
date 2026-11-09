@@ -501,7 +501,7 @@ fn recipient_lines(
             .as_ref()
             .and_then(|address| state.retro_left_out.get(address.item().as_str()));
         lines.extend(
-            super::recipient_surface::retro_preview_lines(retro, overlay)
+            crate::adapters::tui::thread_inspector::retro_preview_lines(retro, overlay)
                 .into_iter()
                 .take(40)
                 .map(|line| Line::from(safe(&line))),

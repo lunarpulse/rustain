@@ -595,7 +595,7 @@ async fn k07_local_view_opens_assignment_without_acknowledging() {
 
     let state = local_view(recipient.journal.workspace.path(), &item_id).await;
     let surface = state
-        .recipient_surface
+        .thread_inspector
         .expect("production /team view opens a received recipient surface");
     assert_eq!(
         surface.message_type,
@@ -828,7 +828,7 @@ async fn k08_arrival_view_ack_do_not_select_context_and_selection_oracle_can_fir
 
     let local = local_view(recipient.journal.workspace.path(), &item_id).await;
     let surface = local
-        .recipient_surface
+        .thread_inspector
         .expect("production /team view opens the received item surface");
     assert_eq!(surface.item_state, Some("received"));
     assert!(surface.context_available && !surface.context_selected);
@@ -837,7 +837,7 @@ async fn k08_arrival_view_ack_do_not_select_context_and_selection_oracle_can_fir
     acknowledge(&mut attached, &item_id).await;
     let after_ack = local_view(recipient.journal.workspace.path(), &item_id).await;
     let surface = after_ack
-        .recipient_surface
+        .thread_inspector
         .expect("fresh Local View opens the acknowledged item surface");
     assert_eq!(surface.item_state, Some("acknowledged"));
     assert!(

@@ -272,16 +272,16 @@ Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `j` | Scroll the inspector down one line | local | portable |  |
-| `Down` | Scroll the inspector down one line | local | portable |  |
-| `k` | Scroll the inspector up one line | local | portable |  |
-| `Up` | Scroll the inspector up one line | local | portable |  |
-| `Ctrl+D` | Scroll the inspector down half a page | local | portable |  |
-| `Ctrl+U` | Scroll the inspector up half a page | local | portable |  |
-| `PgDn` | Scroll the inspector down one page | local | portable |  |
-| `PgUp` | Scroll the inspector up one page | local | portable |  |
-| `g` | Jump to the first inspector row | local | portable |  |
-| `G` | Jump to the last inspector row | local | portable |  |
+| `j` | Scroll the inspector down one line | local, attached | portable |  |
+| `Down` | Scroll the inspector down one line | local, attached | portable |  |
+| `k` | Scroll the inspector up one line | local, attached | portable |  |
+| `Up` | Scroll the inspector up one line | local, attached | portable |  |
+| `Ctrl+D` | Scroll the inspector down half a page | local, attached | portable |  |
+| `Ctrl+U` | Scroll the inspector up half a page | local, attached | portable |  |
+| `PgDn` | Scroll the inspector down one page | local, attached | portable |  |
+| `PgUp` | Scroll the inspector up one page | local, attached | portable |  |
+| `g` | Jump to the first inspector row | local, attached | portable |  |
+| `G` | Jump to the last inspector row | local, attached | portable |  |
 
 ## Markdown body
 
@@ -289,11 +289,11 @@ Also inherits: Inspector body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `h` | Scroll wide rows left by one tab stop | local | portable |  |
-| `l` | Scroll wide rows right by one tab stop | local | portable |  |
-| `0` | Scroll wide rows to their first column | local | portable |  |
-| `$` | Scroll wide rows to their last column | local | portable |  |
-| `v` | Switch the body between rendered markdown and its source | local | portable |  |
+| `h` | Scroll wide rows left by one tab stop | local, attached | portable |  |
+| `l` | Scroll wide rows right by one tab stop | local, attached | portable |  |
+| `0` | Scroll wide rows to their first column | local, attached | portable |  |
+| `$` | Scroll wide rows to their last column | local, attached | portable |  |
+| `v` | Switch the body between rendered markdown and its source | local, attached | portable |  |
 
 ## Block viewer
 
@@ -672,20 +672,30 @@ Also inherits: Caret text field.
 | `Ctrl+C` | Close the list (back one frame) | local, attached | portable |  |
 | `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
 
-## Recipient surface
+## Thread inspector
 
-A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit, use as context) depend on the received item and are listed in the view's own footer; they are not rows here.
+Also inherits: Markdown body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `p` | Show the earlier part of the thread | local, attached | portable |  |
 | `l` | Show the later part of the thread | local, attached | portable |  |
-| `Esc` | Close the recipient view | local, attached | portable |  |
-| `Ctrl+C` | Close the recipient view (back one frame) | local, attached | portable |  |
-| `PgUp` | Scroll the recipient view up one page | local, attached | portable |  |
-| `PgDn` | Scroll the recipient view down one page | local, attached | portable |  |
-| `Tab` | Switch between the item and the node view | attached | portable |  |
-| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
+| `Esc` | Close the thread window | local, attached | portable |  |
+| `Ctrl+C` | Close the thread window (back one frame) | local, attached | portable |  |
+| `Ctrl+X` | Open the menu above the thread window | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above the thread window | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the thread window | local, attached | portable |  |
+| `r` | Reply to the opened item; the reply is typed in the composer | attached | portable |  |
+| `d` | Discuss the opened item (or discuss concerns about its story list) in a typed reply | attached | portable |  |
+| `b` | Tell the sender you are busy and defer the item for 30 minutes | attached | portable |  |
+| `a` | Acknowledge the item: a receipt only, not an answer | attached | portable |  |
+| `y` | Accept the story assigned to you in the opened item | attached | portable |  |
+| `s` | Share the status or retrospective preview the item asks for | attached | portable |  |
+| `n` | Decline the status or retrospective request | attached | portable |  |
+| `1` | Leave the first retrospective field out of what is shared, or put it back | attached | portable |  |
+| `2` | Leave the second retrospective field out of what is shared, or put it back | attached | portable |  |
+| `3` | Leave the third retrospective field out of what is shared, or put it back | attached | portable |  |
+| `u` | Use the opened item as peer context for this conversation, or stop using it | attached | portable |  |
 
 ## Login
 

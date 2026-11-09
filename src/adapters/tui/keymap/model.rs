@@ -18,6 +18,7 @@ use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use super::table_overlay::OverlayCmd;
 use super::table_panels::PanelCmd;
 use super::table_permission::PermissionCmd;
+use super::table_thread::ThreadCmd;
 use super::table_tool::ToolCmd;
 use crate::adapters::tui::presentation::viewer::ViewerCmd;
 
@@ -400,7 +401,9 @@ pub enum Context {
     Decision,
     /// The Needs-you list (S-QUEUE): select, open, back.
     DecisionQueue,
-    RecipientSurface,
+    /// The A2A thread inspector (S-THREAD): a received item's thread, paged and scrolled
+    /// in its own frame; the writer rows are the attached host's.
+    ThreadInspector,
     Login,
     /// A decision frame's own text field (Deny + feedback, the question answer):
     /// readline editing, never the composer.
@@ -477,7 +480,7 @@ impl Context {
         Context::QuitConfirm,
         Context::Decision,
         Context::DecisionQueue,
-        Context::RecipientSurface,
+        Context::ThreadInspector,
         Context::Login,
         Context::DecisionCompose,
         Context::Question,
@@ -544,7 +547,7 @@ impl Context {
             Context::QuitConfirm => "Quit confirmation",
             Context::Decision => "Decisions",
             Context::DecisionQueue => "Needs-you list",
-            Context::RecipientSurface => "Recipient surface",
+            Context::ThreadInspector => "Thread inspector",
             Context::Login => "Login",
             Context::DecisionCompose => "Decision field",
             Context::Question => "Question",
@@ -587,7 +590,6 @@ impl Context {
             | Context::NotificationLog
             | Context::QuitConfirm
             | Context::Decision
-            | Context::RecipientSurface
             | Context::Login => &[],
             // The decision frames: the parent owns Esc (defer), Ctrl+C (back), Ctrl+Q
             // (quit), `c` (copy) and PgUp/PgDn (scroll).
@@ -607,7 +609,7 @@ impl Context {
             | Context::ExportOverwrite => &[Context::Decision],
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
-            Context::ToolInspector => &[Context::MarkdownBody],
+            Context::ToolInspector | Context::ThreadInspector => &[Context::MarkdownBody],
             // The 6-E decision frames: the parent owns Esc, Ctrl+C, Ctrl+Q, `c` and scroll.
             Context::TeamProposal
             | Context::RecipientDraft
@@ -768,6 +770,7 @@ pub enum CommandId {
     Card(CardCmd),
     Viewer(ViewerCmd),
     Tool(ToolCmd),
+    Thread(ThreadCmd),
     Block(BlockCmd),
     Body(BodyCmd),
 }
@@ -797,6 +800,7 @@ command_from!(
     Card(CardCmd),
     Viewer(ViewerCmd),
     Tool(ToolCmd),
+    Thread(ThreadCmd),
     Block(BlockCmd),
     Body(BodyCmd),
 );

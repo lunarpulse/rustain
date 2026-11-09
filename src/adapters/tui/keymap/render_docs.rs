@@ -65,16 +65,6 @@ fn availability_note(row: &Binding) -> String {
     notes.join("; ")
 }
 
-/// Keys a context leaves out of the table on purpose (a named, documented exclusion).
-fn exclusion(context: Context) -> Option<&'static str> {
-    match context {
-        Context::RecipientSurface => Some(
-            "A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit, use as context) depend on the received item and are listed in the view's own footer; they are not rows here.",
-        ),
-        _ => None,
-    }
-}
-
 /// `docs/keyboard.md`, generated from the registry (all contexts, both hosts).
 pub fn markdown_reference() -> String {
     if let Err(defects) = validate_rows(table()) {
@@ -102,9 +92,6 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
         if !context.parents().is_empty() {
             let parents: Vec<&str> = context.parents().iter().map(|p| p.name()).collect();
             let _ = writeln!(out, "Also inherits: {}.\n", parents.join(", "));
-        }
-        if let Some(note) = exclusion(context) {
-            let _ = writeln!(out, "{note}\n");
         }
         out.push_str("| Keys | Does | Hosts | Reach | Notes |\n|---|---|---|---|---|\n");
         for row in rows {

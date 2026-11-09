@@ -162,7 +162,7 @@ async fn v_k03_scope_change_carries_story_lists() {
     )
     .await;
     let content = page
-        .recipient_surface
+        .thread_inspector
         .expect("served /team view page")
         .content;
     assert!(
@@ -283,7 +283,7 @@ async fn v_k03_scope_change_carries_story_lists() {
         super::k07_k08_recipient::local_view(b.journal.workspace.path(), b_address.item().as_str())
             .await;
     let b_content = b_page
-        .recipient_surface
+        .thread_inspector
         .expect("B's served /team view page")
         .content;
     assert!(
@@ -317,7 +317,7 @@ async fn v_k03_scope_change_carries_story_lists() {
     )
     .await;
     let bare_content = bare_page
-        .recipient_surface
+        .thread_inspector
         .expect("bare story_assignment page")
         .content;
     assert!(

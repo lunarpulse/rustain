@@ -20,6 +20,9 @@ pub enum Surface {
     CrossSearch,
     ToolInspector(crate::adapters::tui::tool_inspector::ToolFrameKey),
     BlockViewer(crate::adapters::tui::block_viewer::BlockFrameKey),
+    /// The A2A thread inspector (S-THREAD, Story 21.8): global, one at a time; its payload
+    /// is `TuiState.thread_inspector` and its painted title is the frame's `tool_title`.
+    ThreadInspector,
 }
 
 impl Surface {
@@ -42,6 +45,7 @@ impl Surface {
             Self::CrossSearch => "Cross-Search",
             Self::ToolInspector(_) => "Tool",
             Self::BlockViewer(_) => "Block",
+            Self::ThreadInspector => "Thread",
         }
     }
 
@@ -64,6 +68,7 @@ impl Surface {
             Self::CrossSearch => Context::CrossSearch,
             Self::ToolInspector(_) => Context::ToolInspector,
             Self::BlockViewer(_) => Context::BlockViewer,
+            Self::ThreadInspector => Context::ThreadInspector,
         }
     }
 
@@ -81,6 +86,7 @@ impl Surface {
                 | Self::CrossSearch
                 | Self::ToolInspector(_)
                 | Self::BlockViewer(_)
+                | Self::ThreadInspector
         )
     }
 }

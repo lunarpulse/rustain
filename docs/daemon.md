@@ -739,7 +739,7 @@ Each recipient receives only its own keys through `x-rustain-selected-for`,
 never on a follow-up. A selection is a sending-host statement, not an assignment
 or an execution grant; arrival, View and Acknowledge start no work.
 `design_update` adds the received-only Acknowledge slot, still receipt only.
-Comparison is explicit `[c] Use as context` plus a local turn; questions are
+Comparison is explicit `[u] Use as context` plus a local turn; questions are
 ordinary consultation sends. Older attach versions are refused before proof
 verification because they could silently discard the selector.
 See [Sending to story holders](a2a.md#sending-to-story-holders-story-1923).

@@ -277,7 +277,7 @@ async fn k04_card_and_opened_view_use_the_carrier_not_the_body() {
             address.item().as_str(),
         )
         .await;
-        let page = state.recipient_surface.expect("production /team view page");
+        let page = state.thread_inspector.expect("production /team view page");
         assert_eq!(page.item_state, Some("received"));
         for line in body.lines() {
             assert!(page.content.contains(line), "the peer body remains visible");

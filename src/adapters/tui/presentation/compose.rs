@@ -103,6 +103,13 @@ pub fn compose(
                 modal.title(),
                 show_caret,
             ),
+            Surface::ThreadInspector => crate::adapters::tui::widgets::thread_inspector::render(
+                frame,
+                rect,
+                state,
+                shell.stage.map(|(conversation, _)| conversation),
+                modal.title(),
+            ),
             Surface::Search => {
                 rect = Rect::new(
                     shell.chat_pane.x,
@@ -254,7 +261,8 @@ pub fn compose(
                 | Surface::UsagePanel
                 | Surface::Login
                 | Surface::ToolInspector(_)
-                | Surface::BlockViewer(_) => theme.colors.accent,
+                | Surface::BlockViewer(_)
+                | Surface::ThreadInspector => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

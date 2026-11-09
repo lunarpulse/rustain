@@ -124,6 +124,7 @@ pub fn consistent(state: &TuiState) -> bool {
                                     == Some(block.target.conversation_id.as_str())
                             })
                     }
+                    Surface::ThreadInspector => frame.tool_title.is_some(),
                     _ => frame.tool_title.is_none(),
                 }
         })
@@ -142,6 +143,7 @@ pub fn consistent(state: &TuiState) -> bool {
             })
         && is_open(state, Surface::NotificationLog) == state.notification_log.is_some()
         && is_open(state, Surface::QuitConfirm) == state.quit_confirm.is_some()
+        && is_open(state, Surface::ThreadInspector) == state.thread_inspector.is_some()
         // In-place stepping may coincide targets; each frame still owns one payload.
         && state.tool_inspectors.keys().all(|id| {
             stack
