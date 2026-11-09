@@ -564,6 +564,13 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                     self, DecisionEffect as Effect, DecisionSubject, RetractTarget,
                 };
                 let mut settle = false;
+                // These answers leave a transcript view block (retract receipt, send
+                // rows, dismissal row) below the newest row; a transcript scrolled up
+                // by the user would hide the result of the decision just made.
+                let shows_view = matches!(
+                    subject,
+                    DecisionSubject::TeamProposal(_) | DecisionSubject::TeamRetract(_)
+                );
                 let frame = match (subject, effect) {
                     (
                         DecisionSubject::Consolidation(_)
@@ -802,6 +809,13 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                 }
                 if settle {
                     decision_queue::settle_sent(ctx.state, &log_facts(&ctx.conversation.id), &key);
+                    if shows_view {
+                        crate::adapters::tui::handlers::scroll::dispatch_scroll(
+                            ctx.view,
+                            ctx.state,
+                            crate::domain::models::view_state::ScrollDelta::ResumeFollowing,
+                        );
+                    }
                 }
             }
             KeyFlow::Continue
@@ -3495,6 +3509,102 @@ pub(crate) mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The retract decision's `y` sends the frame AND leaves the "Retracted. Marked in
+    /// your log" block where the user can read it: stored by the key itself, not
+    /// dismissed by the settle, and painted even when the user had scrolled the
+    /// transcript up before choosing (Story 19.20a native smoke waits for that text).
+    #[tokio::test]
+    async fn story21_6_attached_auto_response_retract_keeps_and_paints_its_feedback_block() {
+        use crate::adapters::tui::keymap::Key;
+        let mut rig = Rig::new(false);
+        for row in 0..40 {
+            rig.domain_tab
+                .conversation
+                .messages
+                .push(system_message(format!("retract-prior-{row:02}")));
+        }
+        rig.retractable("peer-response-node-a", "auto reply");
+        screen(&mut rig);
+        for _ in 0..3 {
+            rig.key(Key::PageUp).await;
+            screen(&mut rig);
+        }
+        assert!(
+            !screen(&mut rig).contains("auto reply"),
+            "the transcript is scrolled up"
+        );
+        rig.ctrl('p').await;
+        rig.type_text("retract").await;
+        rig.enter().await;
+        rig.open_kind(DecisionKind::TeamRetract);
+        rig.ch('y').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::RetractAutoResponse { message_id, target_seq: None }]
+                if message_id == "peer-response-node-a"
+        ));
+        assert!(!decision_queue::team_retract_pending(&rig.state));
+        assert!(
+            rig.feedback("peer-retract")
+                .is_some_and(|message| message.starts_with("Retracted. Marked in your log")),
+            "the settle must not drop the retract block"
+        );
+        let painted = screen(&mut rig);
+        assert!(
+            painted
+                .split_whitespace()
+                .collect::<String>()
+                .contains("Retracted.Markedinyourlog"),
+            "the retract block must be painted:\n{painted}"
+        );
+    }
+
+    /// Same rule for the team proposal answers: the dismissal row (and the send rows)
+    /// are blocks below the newest row and must be painted for a scrolled-up reader.
+    #[tokio::test]
+    async fn story21_6_attached_proposal_dismissal_row_is_painted_for_a_scrolled_up_transcript() {
+        use crate::adapters::tui::keymap::Key;
+        let mut rig = Rig::new(false);
+        for row in 0..40 {
+            rig.domain_tab
+                .conversation
+                .messages
+                .push(system_message(format!("proposal-prior-{row:02}")));
+        }
+        screen(&mut rig);
+        for _ in 0..3 {
+            rig.key(Key::PageUp).await;
+            screen(&mut rig);
+        }
+        let conversation = rig.domain_tab.conversation.id.clone();
+        super::super::apply_attached_proposal_frame(
+            &mut rig.state,
+            false,
+            &mut rig.team_requests,
+            &conversation,
+            DaemonFrame::TeamProposal {
+                proposal: "p".into(),
+                recipients: vec!["peer".into()],
+                message_type: crate::domain::models::SemanticMessageType::ArchitectureUpdate,
+                body: "review".into(),
+            },
+        );
+        rig.open_kind(DecisionKind::TeamProposal);
+        rig.ch('n').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::TeamProposalDecision { proposal, .. }] if proposal == "p"
+        ));
+        let painted = screen(&mut rig);
+        assert!(
+            painted
+                .split_whitespace()
+                .collect::<String>()
+                .contains("Proposaldismissed.Nothingwassent."),
+            "the dismissal row must be painted:\n{painted}"
+        );
     }
 
     #[tokio::test]
