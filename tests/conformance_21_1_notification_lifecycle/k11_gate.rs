@@ -230,10 +230,10 @@ fn k11_positive_control_the_scanner_sees_what_it_bans() {
     assert!(scan(&in_tests).is_empty());
 }
 
-// ── class-V views keep their order and their commit-on-present ────────────────
+// ── class-V views keep their render order ─────────────────────────────────────
 
 #[test]
-fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_ids_in_order() {
+fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use rustain::adapters::tui::state::TabRenderState;
@@ -264,10 +264,9 @@ fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_id
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     let conversation = Conversation::default();
     let theme = Theme::dark();
-    let mut visible = Vec::new();
     terminal
         .draw(|frame| {
-            let result = chat_pane::render(
+            chat_pane::render(
                 frame,
                 frame.area(),
                 &conversation,
@@ -278,11 +277,6 @@ fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_id
                 &mut TabRenderState::default(),
                 &blocks,
             );
-            visible = result
-                .visible_feedback_rows
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
         })
         .unwrap();
     let buffer = terminal.backend().buffer().clone();
@@ -302,9 +296,4 @@ fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_id
         .position(|r| r.contains("SECOND view"))
         .expect("second painted");
     assert!(first < second, "the newest view renders last: {rows:#?}");
-    assert_eq!(
-        visible,
-        ["z-first", "a-second"],
-        "commit-on-present sees them in order"
-    );
 }

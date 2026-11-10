@@ -644,17 +644,17 @@ mod local_occlusion {
     use crate::e2e_harness::TestHarness;
     use arc_swap::ArcSwap;
     use clap::Parser;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use rustain::adapters::noop::*;
     use rustain::adapters::tui::{
         decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
+        keymap::Host,
         notifications::{self, NoticeSeverity, NoticeSource},
-        views::{self, ViewKind},
-        widgets::feedback_block,
+        presentation::{self, Shell},
     };
     use rustain::domain::models::{
-        AppConfig, Direction, FeedbackLevel, JournalRecord, LogVisitCandidate, PeerId,
-        RejectReason, RoomEvent, SandboxPolicy, TabManager,
+        AppConfig, Direction, JournalRecord, LogVisitCandidate, PeerId, RejectReason, RoomEvent,
+        SandboxPolicy, TabManager,
     };
     use rustain::infrastructure::{
         composition::ComposeContext,
@@ -665,8 +665,6 @@ mod local_occlusion {
         transparency::TransparencyService,
     };
     use tokio_util::sync::CancellationToken;
-
-    const LOG: &str = rustain::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID;
 
     struct Visit {
         h: TestHarness,
@@ -790,12 +788,6 @@ mod local_occlusion {
             tabs.active_tab_mut().conversation = h.conversation.clone();
             h.state.active_tab_id = tabs.active_tab_id();
             h.state.focus = FocusState::Chat;
-            // Read from the top so a block starting on the final screen row
-            // is genuinely clipped to one row, not silently moved to bottom.
-            tabs.active_tab_mut().view_state.scroll_offset = usize::MAX;
-            tabs.active_tab_mut().view_state.mode = rustain::domain::models::AnchorMode::Reading;
-            h.state.set_scroll_offset(usize::MAX);
-            h.state.set_auto_scroll(false);
             Self {
                 h,
                 tabs,
@@ -820,6 +812,33 @@ mod local_occlusion {
             render_runtime(&mut self.h, &mut self.tabs, &self.app.agent_core)
         }
 
+        /// Paint through the shared compositor and model the host's draw result.
+        fn compose_log(&mut self, complete: bool) -> String {
+            let layout = super::super::k3_compose::layout(&self.h.state);
+            let state = &self.h.state;
+            self.h
+                .terminal
+                .draw(|frame| {
+                    presentation::compose(
+                        frame,
+                        state,
+                        &Shell::new(frame.area(), &layout),
+                        Host::Local,
+                        &LogFacts::default(),
+                        &mut presentation::occlusion::OpaqueRects::new(layout.chat_pane),
+                        |_| {},
+                    );
+                })
+                .unwrap();
+            let screen = self.h.screen_text();
+            if complete {
+                self.h.state.log_visits_presented();
+            } else {
+                self.h.state.restore_unflushed_log_visits();
+            }
+            screen
+        }
+
         async fn read(&mut self) -> LogVisitCandidate {
             transparency_bridge::team_command(
                 &mut self.h.state,
@@ -837,60 +856,15 @@ mod local_occlusion {
                 visit.seen_through >= 2,
                 "snapshot came from the durable journal"
             );
-            assert!(
-                self.h.state.feedback_blocks[LOG]
-                    .message
-                    .contains("K12-log-marker")
+            assert_eq!(
+                self.h.state.modal_stack.top().unwrap().surface,
+                Surface::ThreadInspector
             );
             visit
         }
 
         fn pane(&self) -> Rect {
             super::super::k3_compose::layout(&self.h.state).chat_pane
-        }
-
-        /// Produce and paint the log at an observed screen row. Compare EVERY
-        /// projected line to the actual block renderer, including clipped ends.
-        async fn place(&mut self, y: u16) -> Vec<u16> {
-            let pane = self.pane();
-            assert!((pane.y..pane.bottom()).contains(&y));
-            self.h.state.feedback_blocks.clear();
-            if y > pane.y {
-                views::show_view(
-                    &mut self.h.state.feedback_blocks,
-                    ViewKind::TeamStatus,
-                    "k12-padding",
-                    FeedbackLevel::Info,
-                    vec!["padding"; usize::from(y - pane.y)].join("\n"),
-                );
-            }
-            let visit = self.read().await;
-            let expected = feedback_block::render_feedback_lines(
-                &self.h.state.feedback_blocks[LOG],
-                pane.width,
-                &self.h.state.theme,
-            );
-            assert!(
-                expected.len() > 1,
-                "independent multirow control is reachable"
-            );
-            self.draw();
-            let rows: Vec<_> = (y..pane.bottom()).take(expected.len()).collect();
-            assert!(!rows.is_empty());
-            for (&row, line) in rows.iter().zip(&expected) {
-                let text: String = line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect();
-                assert!(
-                    self.row(row).starts_with(&text),
-                    "actual projected feedback {row}: {:?}, expected {text:?}",
-                    self.row(row),
-                );
-            }
-            self.acknowledged(visit);
-            rows
         }
 
         fn row(&self, y: u16) -> String {
@@ -907,123 +881,53 @@ mod local_occlusion {
             assert_eq!(
                 self.h.state.pending_log_visit,
                 Some(visit),
-                "M12: actual opaque paint covered every projected feedback row; the visit must remain pending",
+                "the log was not presented; the visit must remain pending",
             );
             assert_eq!(self.h.state.log_awareness.presented.len(), presented);
         }
-
-        /// Recover geometry from actual painted rails, not a second copy of
-        /// the host's layout arithmetic. Require both closing corners.
-        fn painted_box(&self, title: &str) -> Rect {
-            let buffer = self.h.terminal.backend().buffer();
-            for y in buffer.area.y..buffer.area.bottom() {
-                let text = super::super::k3_compose::row(buffer, buffer.area, y);
-                if !text.contains(title) {
-                    continue;
-                }
-                let x = (0..buffer.area.width)
-                    .find(|&x| buffer[(x, y)].symbol() == "┌")
-                    .expect("painted opening rail");
-                let right = (x + 1..buffer.area.right())
-                    .find(|&x| buffer[(x, y)].symbol() == "┐")
-                    .expect("painted top right");
-                let bottom = (y + 1..buffer.area.bottom())
-                    .find(|&bottom| {
-                        buffer[(x, bottom)].symbol() == "└"
-                            && buffer[(right, bottom)].symbol() == "┘"
-                    })
-                    .expect("painted closing rail");
-                return Rect::new(x, y, right - x + 1, bottom - y + 1);
-            }
-            panic!("actual draw did not paint {title:?}");
-        }
     }
 
-    /// M12: a narrow centered frame still covers the ENTIRE logical row for
-    /// acknowledgement. Surviving text to its left is not a visible-row escape.
+    /// A higher Help frame prevents a visit even when the log was painted beneath it.
     pub(super) async fn fully_occluded_block_is_not_presented() {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             let mut f = Visit::new(width, height).await;
-            f.place(f.pane().y).await;
-            press(&mut f.h.state, Key::Ctrl('x'));
-            press(&mut f.h.state, Key::Char('?'));
-            f.draw();
-            let rect = f.painted_box("Help");
-            assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
-            let rows = f.place(rect.y.max(f.pane().y)).await;
-            assert!(rows.iter().all(|&y| y >= rect.y && y < rect.bottom()));
-            let left: Vec<_> = rows
-                .iter()
-                .map(|&y| {
-                    f.h.terminal.backend().buffer()[(f.pane().x, y)]
-                        .symbol()
-                        .to_owned()
-                })
-                .collect();
             let visit = f.read().await;
             let presented = f.h.state.log_awareness.presented.len();
             press(&mut f.h.state, Key::Ctrl('x'));
             press(&mut f.h.state, Key::Char('?'));
-            f.draw();
-            assert_eq!(f.painted_box("Help"), rect);
-            assert!(rect.x < f.pane().right() && rect.right() > f.pane().x);
-            if width == 130 {
-                assert!(rect.x > f.pane().x && rect.right() < f.pane().right());
-                for (&y, marker) in rows.iter().zip(&left) {
-                    assert_eq!(
-                        f.h.terminal.backend().buffer()[(f.pane().x, y)].symbol(),
-                        marker
-                    );
-                }
-            }
+            let screen = f.compose_log(true);
+            assert!(screen.contains("Help"), "{screen}");
             f.retained(visit, presented);
-            press(&mut f.h.state, Key::Esc);
-            f.draw();
+            assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
+            let screen = f.compose_log(true);
+            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("refused"), "{screen}");
             f.acknowledged(visit);
         }
     }
 
     #[tokio::test]
     async fn streaming_indicator_does_not_present_an_overwritten_log_row() {
-        for (streaming, surviving) in [(true, false), (true, true), (false, false)] {
+        for streaming in [false, true] {
             let mut f = Visit::new(80, 24).await;
-            let last = f.pane().bottom() - 1;
-            // Observe the actual legacy streaming prefix before placing the
-            // feedback. Merely toggling streaming after place shifts the block
-            // entirely offscreen and would make a retention assertion vacuous.
-            f.h.streaming.is_streaming = streaming;
-            f.draw();
-            let prefix = if streaming {
-                u16::try_from(f.h.state.total_content_height).unwrap()
-                    + f.h.state.theme.spacing.normal
-            } else {
-                0
-            };
-            f.h.streaming.is_streaming = false;
-            let y = last - u16::from(surviving);
-            let rows = f.place(y - prefix).await;
-            assert_eq!(rows[0] + prefix, y);
-            let first = f.row(rows[0]);
             let visit = f.read().await;
             let presented = f.h.state.log_awareness.presented.len();
             f.h.streaming.is_streaming = streaming;
-            f.draw();
-            if streaming {
-                assert!(f.row(last).contains("New content below"));
-            } else {
-                assert_eq!(f.row(last), first);
-            }
-            if streaming && !surviving {
-                f.retained(visit, presented);
-                f.h.streaming.is_streaming = false;
-                f.draw();
-                f.acknowledged(visit);
-            } else {
-                if surviving {
-                    assert_eq!(f.row(y), first);
-                }
-                f.acknowledged(visit);
-            }
+            let layout = super::super::k3_compose::layout(&f.h.state);
+            let area = f.h.terminal.backend().buffer().area;
+            let rect = presentation::geometry::frame_rect(presentation::geometry::modal_region(
+                &layout, area,
+            ));
+            // A Stage indicator no longer owns the log. A failed draw cannot commit it.
+            let screen = f.compose_log(false);
+            assert!(screen.contains("A2A log"), "{screen}");
+            let buffer = f.h.terminal.backend().buffer();
+            assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
+            assert_eq!(buffer[(rect.right() - 1, rect.bottom() - 1)].symbol(), "┘");
+            f.retained(visit, presented);
+            let screen = f.draw();
+            assert!(screen.contains("A2A log"), "{screen}");
+            f.acknowledged(visit);
         }
     }
 
@@ -1681,29 +1585,24 @@ mod local_occlusion {
     async fn one_uncovered_projected_row_acknowledges_despite_inline_search() {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             let mut f = Visit::new(width, height).await;
-            let rows = f.place(f.pane().y).await;
-            assert!(rows.len() >= 2);
-            let last = f.row(*rows.last().unwrap());
             let visit = f.read().await;
-            assert_eq!(press(&mut f.h.state, Key::Char('i')), InputAction::Consumed);
-            assert_eq!(f.h.state.focus, FocusState::Input);
-            let action = press(&mut f.h.state, Key::Ctrl('f'));
-            assert_eq!(action, InputAction::OpenSearch);
-            rustain::adapters::tui::handlers::search::handle_search_action(
-                &mut f.tabs,
-                &mut f.h.state,
-                &f.h.conversation,
-                &action,
-            );
+            let presented = f.h.state.log_awareness.presented.len();
+            let initial = f.compose_log(false);
+            assert!(initial.contains("Search"), "{initial}");
+            f.retained(visit, presented);
+            // Search moved from the Stage's Ctrl+F frame to the log's own `/` field.
+            assert_eq!(press(&mut f.h.state, Key::Char('/')), InputAction::Consumed);
+            assert!(f.h.state.thread_inspector.as_ref().unwrap().search.editing);
             assert_eq!(
                 f.h.state.modal_stack.top().unwrap().surface,
-                Surface::Search
+                Surface::ThreadInspector
             );
-            let screen = f.draw();
-            assert!(screen.contains("Search:"));
-            assert_ne!(f.row(rows[0]).chars().next(), Some('│'));
-            assert_eq!(f.row(*rows.last().unwrap()), last);
+            let screen = f.compose_log(true);
+            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Keep filter"), "{screen}");
             f.acknowledged(visit);
+            assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
+            assert!(!f.h.state.thread_inspector.as_ref().unwrap().search.editing);
         }
     }
 
@@ -1711,24 +1610,25 @@ mod local_occlusion {
     async fn absent_and_not_painted_log_blocks_do_not_acknowledge() {
         for too_small in [false, true] {
             let mut f = Visit::new(80, 24).await;
-            f.place(f.pane().y).await;
             let visit = f.read().await;
             let presented = f.h.state.log_awareness.presented.len();
             if too_small {
                 f.h.terminal = Terminal::new(TestBackend::new(59, 15)).unwrap();
+                let screen = f.draw();
+                assert!(screen.contains("Terminal too small"), "{screen}");
             } else {
-                f.h.state.feedback_blocks.remove(LOG).unwrap();
+                reducer::close(&mut f.h.state, Surface::ThreadInspector);
+                let screen = f.compose_log(true);
+                assert!(!screen.contains("A2A log"), "{screen}");
             }
-            let screen = f.draw();
-            assert!(!screen.contains("K12-log-marker"));
             f.retained(visit, presented);
             if too_small {
                 f.h.terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             } else {
-                // A fresh real read, not injected acknowledgement identifiers.
-                f.read().await;
+                assert_eq!(f.read().await, visit);
             }
-            f.draw();
+            let screen = f.compose_log(true);
+            assert!(screen.contains("A2A log"), "{screen}");
             f.acknowledged(visit);
         }
     }
@@ -1738,27 +1638,6 @@ mod local_occlusion {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             for decision in [false, true] {
                 let mut f = Visit::new(width, height).await;
-                let clock = Arc::new(rustain::domain::clock::MockClock::new(
-                    std::time::Instant::now(),
-                ));
-                f.h.state.notifications = notifications::NotificationStore::from_config(
-                    &rustain::domain::models::NotificationsConfig::default(),
-                    clock.clone(),
-                );
-                // old -> new: the decision pane was bottom-anchored over the chat pane, so
-                // the chat pane's last row was always under it; the frame is the Standard
-                // `frame_rect` (a margin around it at >= 100 columns), so the decision
-                // case places its row on the frame's own last row.
-                let y = if decision {
-                    use rustain::adapters::tui::presentation::geometry;
-                    let layout = super::super::k3_compose::layout(&f.h.state);
-                    let region = geometry::modal_region(&layout, Rect::new(0, 0, width, height));
-                    // The projected block is three rows: it must lie wholly inside the frame.
-                    geometry::frame_rect(region).bottom() - 3
-                } else {
-                    f.pane().bottom() - 1
-                };
-                assert_eq!(f.place(y).await[0], y);
                 let visit = f.read().await;
                 let presented = f.h.state.log_awareness.presented.len();
                 if decision {
@@ -1775,25 +1654,23 @@ mod local_occlusion {
                     press(&mut f.h.state, Key::Ctrl('x'));
                     assert!(f.h.state.pending_leader.is_some());
                 }
-                f.draw();
-                let rect = f.painted_box(if decision { "Daily budget" } else { "Ctrl+X" });
-                assert!(rect.y <= y && y < rect.bottom());
-                assert!(rect.x < f.pane().right() && rect.right() > f.pane().x);
-                if decision && width >= 100 {
-                    // old -> new: the bottom-anchored pane left no uncovered feedback row under
-                    // its box; the centered frame leaves the rows above it visible, so the
-                    // visit is genuinely presented (the 60/80 sheets still hide every row).
-                    f.acknowledged(visit);
-                } else {
-                    f.retained(visit, presented);
-                }
+                let screen = f.compose_log(true);
+                assert!(
+                    screen.contains(if decision { "Daily budget" } else { "Ctrl+X" }),
+                    "{screen}"
+                );
+                f.retained(visit, presented);
                 if decision {
-                    clock.advance(decision_queue::INERT_AFTER_PAINT);
+                    f.ready();
                 }
                 assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
-                assert!(f.h.state.modal_stack.is_empty());
+                assert_eq!(
+                    f.h.state.modal_stack.top().unwrap().surface,
+                    Surface::ThreadInspector
+                );
                 assert!(f.h.state.pending_leader.is_none());
-                f.draw();
+                let screen = f.compose_log(true);
+                assert!(screen.contains("A2A log"), "{screen}");
                 f.acknowledged(visit);
             }
         }
@@ -1803,39 +1680,26 @@ mod local_occlusion {
     async fn permission_frame_covers_the_actual_clipped_row() {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             let mut f = Visit::new(width, height).await;
-            let clock = Arc::new(rustain::domain::clock::MockClock::new(
-                std::time::Instant::now(),
-            ));
-            f.h.state.notifications = notifications::NotificationStore::from_config(
-                &rustain::domain::models::NotificationsConfig::default(),
-                clock.clone(),
-            );
-            let layout = super::super::k3_compose::layout(&f.h.state);
-            let region = rustain::adapters::tui::presentation::geometry::modal_region(
-                &layout,
-                Rect::new(0, 0, width, height),
-            );
-            let y = rustain::adapters::tui::presentation::geometry::frame_rect(region).bottom() - 3;
-            assert_eq!(f.place(y).await[0], y);
             let visit = f.read().await;
             let presented = f.h.state.log_awareness.presented.len();
             let mut approvals = Approvals::new();
             let (id, mut response) = approvals.request(&mut f.h.state).await;
-            let screen = f.draw();
+            let item = f.h.state.decisions.items().next().unwrap();
+            let key = decision_queue::DecisionKey {
+                kind: item.kind,
+                source: item.source.clone(),
+                conversation_id: item.conversation_id.clone(),
+            };
+            assert!(decision_queue::open(&mut f.h.state, &key));
+            let screen = f.compose_log(true);
             assert!(decision_queue::holds_request(&f.h.state, &id));
-            let rect = f.painted_box("Decision: Permission");
-            assert!(rect.y <= y && y < rect.bottom(), "{screen}");
             assert!(
                 screen.contains("Allow") && screen.contains("Deny"),
                 "{screen}"
             );
             assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
-            if width >= 100 {
-                f.acknowledged(visit);
-            } else {
-                f.retained(visit, presented);
-            }
-            clock.advance(decision_queue::INERT_AFTER_PAINT);
+            f.retained(visit, presented);
+            f.ready();
             let action = press(&mut f.h.state, Key::Char('n'));
             approval_bridge::handle_action(&mut f.h.state, &action, &approvals.runtime).await;
             assert_eq!(
@@ -1843,7 +1707,8 @@ mod local_occlusion {
                 ApprovalOutcome::Reject { feedback: None }
             );
             approvals.apply_resolution(&mut f.h.state, &id);
-            f.draw();
+            let screen = f.compose_log(true);
+            assert!(screen.contains("A2A log"), "{screen}");
             f.acknowledged(visit);
         }
     }
@@ -1852,10 +1717,6 @@ mod local_occlusion {
     async fn dim_and_toast_paint_do_not_occlude_projected_rows() {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             let mut f = Visit::new(width, height).await;
-            // A single clipped row under actual bottom-anchored toast paint:
-            // treating toast rectangles as opaque would lose this visit.
-            let y = f.pane().bottom() - 1;
-            assert_eq!(f.place(y).await, vec![y]);
             let visit = f.read().await;
             notifications::notify(
                 &mut f.h.state,
@@ -1863,44 +1724,70 @@ mod local_occlusion {
                 NoticeSeverity::Error,
                 "K12-toast",
             );
-            let screen = f.draw();
-            assert!(screen.contains("K12-toast"), "{screen}");
-            if width < 100 {
+            let layout = super::super::k3_compose::layout(&f.h.state);
+            let area = f.h.terminal.backend().buffer().area;
+            let rect = presentation::geometry::frame_rect(presentation::geometry::modal_region(
+                &layout, area,
+            ));
+            // Paint the same live toast separately to locate actual cells before
+            // compose puts the Log frame over the toast layer.
+            let mut toast_terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            toast_terminal
+                .draw(|frame| {
+                    rustain::adapters::tui::widgets::toast_layer::render(
+                        frame,
+                        layout.chat_pane,
+                        &f.h.state.notifications,
+                        &f.h.state.theme,
+                        &LogFacts::default(),
+                    );
+                })
+                .unwrap();
+            let toast = toast_terminal.backend().buffer();
+            let toast_screen = (0..height)
+                .map(|y| super::super::k3_compose::row(toast, area, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(toast_screen.contains("K12-toast"), "{toast_screen}");
+            let overlap: Vec<_> = (rect.y..rect.bottom())
+                .flat_map(|y| {
+                    (rect.x..rect.right())
+                        .filter_map(move |x| (toast[(x, y)].symbol() != " ").then_some((x, y)))
+                })
+                .collect();
+            assert!(
+                !overlap.is_empty(),
+                "painted toast cells intersect the log frame: {toast_screen}"
+            );
+            assert!(f.h.state.pending_leader.is_none());
+            assert_eq!(
+                f.h.state.modal_stack.top().unwrap().surface,
+                Surface::ThreadInspector
+            );
+            let screen = f.compose_log(true);
+            let composed = f.h.terminal.backend().buffer();
+            assert!(
+                overlap
+                    .iter()
+                    .any(|&(x, y)| composed[(x, y)].symbol() != toast[(x, y)].symbol()),
+                "the frame actually covers toast cells: {screen}"
+            );
+            if width >= 100 {
+                use ratatui::style::Modifier;
                 assert!(
-                    f.row(y).contains("K12-toast"),
-                    "toast overlaps the only projected row"
-                );
-            } else {
-                assert!(
-                    f.row(y).ends_with('┘'),
-                    "wide toast's actual bottom rail overlaps the row"
+                    (layout.chat_pane.y..layout.chat_pane.bottom()).any(|y| {
+                        (layout.chat_pane.x..layout.chat_pane.right()).any(|x| {
+                            (x < rect.x || x >= rect.right() || y < rect.y || y >= rect.bottom())
+                                && toast[(x, y)].symbol() != " "
+                                && composed[(x, y)].symbol() == toast[(x, y)].symbol()
+                                && composed[(x, y)].modifier.contains(Modifier::DIM)
+                        })
+                    }),
+                    "the toast outside the centered frame is genuinely dimmed: {screen}"
                 );
             }
+            assert!(screen.contains("A2A log"), "{screen}");
             f.acknowledged(visit);
-
-            if width == 130 {
-                // Help dims its whole region, including rows outside the
-                // centered opaque box. Only those exterior rows are projected.
-                let mut f = Visit::new(width, height).await;
-                f.place(f.pane().y).await;
-                press(&mut f.h.state, Key::Ctrl('x'));
-                press(&mut f.h.state, Key::Char('?'));
-                f.draw();
-                let rect = f.painted_box("Help");
-                press(&mut f.h.state, Key::Esc);
-                let y = rect.bottom();
-                let rows = f.place(y).await;
-                assert!(rows.iter().all(|&y| y >= rect.bottom()));
-                let visit = f.read().await;
-                press(&mut f.h.state, Key::Ctrl('x'));
-                press(&mut f.h.state, Key::Char('?'));
-                f.draw();
-                assert_eq!(f.painted_box("Help"), rect);
-                let buffer = f.h.terminal.backend().buffer();
-                assert_eq!(buffer[(f.pane().x, y)].symbol(), "│");
-                assert!(buffer[(f.pane().x, y)].modifier.contains(Modifier::DIM));
-                f.acknowledged(visit);
-            }
         }
     }
 }

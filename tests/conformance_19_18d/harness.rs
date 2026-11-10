@@ -83,15 +83,14 @@ use rustain::adapters::noop::{
 };
 use rustain::adapters::rap::{AgentSigner, IdentityKeyStore};
 use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
-use rustain::adapters::tui::handlers::team_command::TEAM_THREAD_BLOCK_ID;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::capability_registry::CapabilityRegistry;
 use rustain::domain::models::{
     A2aPeerSource, A2aPeerSpec, AppConfig, ApprovalOutcome, ApprovalScope, CompletionOptions,
-    Conversation, EffectivePolicy, FeedbackLevel, JournalRecord, Message, PeerId, ResponseMode,
-    RoomEvent, SemanticMessageType, StopReason, StreamChunk,
+    Conversation, EffectivePolicy, JournalRecord, Message, PeerId, ResponseMode, RoomEvent,
+    SemanticMessageType, StopReason, StreamChunk,
 };
 use rustain::domain::ports::{
     DeliveryPolicy, EffectiveDeliveryPolicy, PeerResponsePolicy, RoomJournal, RoomJournalReader,
@@ -1704,23 +1703,28 @@ impl Sender {
     ) -> String {
         self.type_command(state, &format!("/team thread {peer} {item}"))
             .await;
-        assert_eq!(
-            state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "  reading…",
-            "the stable block shows its pending line before the read lands"
+        let frame = state.thread_inspector.as_ref().expect("sent thread frame");
+        assert!(
+            matches!(&frame.target, rustain::adapters::tui::state::ThreadTarget::Sent { peer: p, item: i } if p == peer && i == item)
         );
+        assert_eq!(frame.content, "  reading…");
         let event = self.next_event().await;
         let AppEvent::TeamThreadReady {
             conversation_id,
+            generation,
             message,
         } = event
         else {
             panic!("a thread read publishes TeamThreadReady, got {event:?}");
         };
-        let mut tabs = rustain::domain::models::tab::TabManager::new(CancellationToken::new());
-        team_thread_ready("conv", state, &mut tabs, &conversation_id, message);
-        let block = &state.feedback_blocks[TEAM_THREAD_BLOCK_ID];
-        assert_eq!(block.level, FeedbackLevel::Info);
-        block.message.clone()
+        team_thread_ready(state, &conversation_id, generation, &message);
+        assert!(!state.feedback_blocks.contains_key("team-thread"));
+        state
+            .thread_inspector
+            .as_ref()
+            .expect("sent thread frame")
+            .content
+            .clone()
     }
 }
 

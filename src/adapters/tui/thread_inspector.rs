@@ -310,6 +310,9 @@ pub(crate) fn identity_text(inspector: &ThreadInspectorState) -> String {
             "response actions · {node}\n{}",
             type_token(inspector.message_type),
         ),
+        // The sent thread and the log carry their identity in the first body line and the
+        // title; they pin no rows of their own.
+        ThreadTarget::Sent { .. } | ThreadTarget::Log { .. } => return String::new(),
     };
     if inspector.context_selected {
         heading.push_str(" · peer-tainted");
@@ -341,6 +344,30 @@ pub(crate) fn title(message_type: SemanticMessageType) -> String {
 /// The frame's painted title on the response view of a peer node.
 pub(crate) fn node_title() -> String {
     "Thread · response".to_owned()
+}
+
+/// A peer alias as painted in a title: sanitized, bounded and with bidi characters shown as
+/// visible escapes (the operator typed it, but an attached request can carry anything).
+fn painted_peer(peer: &str) -> String {
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+    crate::infrastructure::runtime::recipient_view::escape_disclosable(&sanitize_disclosable(
+        peer,
+        MAX_PEER_ID_BYTES,
+    ))
+}
+
+/// The frame's painted title on the thread of an item this host sent.
+pub(crate) fn sent_title(peer: &str) -> String {
+    format!("Thread · sent · {}", painted_peer(peer))
+}
+
+/// The frame's painted title on the A2A log.
+pub(crate) fn log_title(filtered: bool) -> String {
+    if filtered {
+        "A2A log · filtered".to_owned()
+    } else {
+        "A2A log".to_owned()
+    }
 }
 
 /// Whether the thread's reply field holds text that quitting would lose.
@@ -513,6 +540,80 @@ fn page_rail_live(state: &TuiState) -> bool {
         .is_some_and(|inspector| inspector.rail_live.get().1)
 }
 
+/// What `x` retracts, decided by facts: the opened sent item (through the confirm-time read
+/// of `/team retract <peer> <item>`) or the newest auto-sent reply of the opened received item
+/// (through the retract confirmation of that one message).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RetractPlan {
+    Item { peer: String, item: String },
+    Reply { message_id: String, at: String },
+}
+
+impl RetractPlan {
+    /// The item-derived words of the rail entry (the key comes from the registry).
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Item { .. } => "Retract".to_owned(),
+            Self::Reply { at, .. } => format!("Retract auto-sent reply {at}"),
+        }
+    }
+}
+
+/// `HH:MM` (UTC) of a message time in seconds, from the time of day.
+fn clock_label(created_at: i64) -> String {
+    let seconds = created_at.rem_euclid(86_400);
+    format!("{:02}:{:02}", seconds / 3_600, (seconds % 3_600) / 60)
+}
+
+/// The auto-sent reply `conversation` can still retract for the received item `address`
+/// (the newest one): a row `retractable_rows` lists (automatic, unretracted, settled) that
+/// answers this item, by its peer-row control or by its node.
+fn newest_retractable_reply(
+    conversation: &Conversation,
+    address: &crate::domain::models::ItemAddress,
+    node: Option<&str>,
+) -> Option<RetractPlan> {
+    crate::infrastructure::runtime::attach_loop::retractable_rows(conversation)
+        .find(|row| {
+            conversation
+                .peer_row_controls
+                .get(&row.id)
+                .is_some_and(|control| control.item_address.as_ref() == Some(address))
+                || node.is_some_and(|node| row.id.strip_prefix("peer-response-") == Some(node))
+        })
+        .map(|row| RetractPlan::Reply {
+            message_id: row.id.clone(),
+            at: clock_label(row.created_at),
+        })
+}
+
+/// What `x` would retract now (Story 21.8 A14), `None` when nothing is eligible. Writers only
+/// (an observer or a local reader never paints it); a badge alone is never a fact: the sent
+/// item must be this host's own per the completed read and not yet retracted, the reply must
+/// be a row `retractable_rows` lists for the attached conversation.
+pub(crate) fn retract_plan(
+    state: &TuiState,
+    conversation: Option<&Conversation>,
+) -> Option<RetractPlan> {
+    let inspector = state.thread_inspector.as_ref()?;
+    if inspector.access != ThreadAccess::Writer || state.local_read_only {
+        return None;
+    }
+    match &inspector.target {
+        ThreadTarget::Sent { peer, item } => {
+            let sent = inspector.sent.as_ref()?;
+            (!sent.loading && sent.mine && !sent.retracted).then(|| RetractPlan::Item {
+                peer: peer.clone(),
+                item: item.clone(),
+            })
+        }
+        ThreadTarget::Item(address) => {
+            newest_retractable_reply(conversation?, address, inspector.node_id.as_deref())
+        }
+        ThreadTarget::Node(_) | ThreadTarget::Log { .. } => None,
+    }
+}
+
 /// The queued 21-6 draft decision of the node the response view shows, if the decision queue
 /// would open it now (`decision_queue::can_open`: queued, decidable on this tab, no text field
 /// or quit guard on top). Never `holds`: a decision of another tab or a stale one is not offered.
@@ -559,10 +660,11 @@ pub(crate) fn offered(
         | ThreadCmd::LeaveViewport => true,
         ThreadCmd::Earlier => inspector.omitted_before > 0,
         ThreadCmd::Newer => inspector.omitted_after > 0,
-        ThreadCmd::Copy => true,
+        ThreadCmd::Copy => !matches!(inspector.target, ThreadTarget::Log { .. }),
         ThreadCmd::Toggle => inspector.can_toggle && inspector.access != ThreadAccess::LocalOnly,
         ThreadCmd::OpenDecision => open_decision_key(state, conversation).is_some(),
         ThreadCmd::Viewport => inspector.wide_fit.get().0 > 0,
+        ThreadCmd::Retract => retract_plan(state, conversation).is_some(),
         _ => actions(state, conversation)
             .into_iter()
             .flatten()
@@ -592,6 +694,10 @@ pub(crate) fn applies(
         | ThreadCmd::Toggle
         | ThreadCmd::OpenDecision
         | ThreadCmd::Viewport => inspector.rail_live.get().1 && offered(state, conversation, cmd),
+        // `x` is painted in the writer rail section: live when that section is.
+        ThreadCmd::Retract => {
+            inspector.rail_live.get().0 && offered(state, conversation, ThreadCmd::Retract)
+        }
         _ => action_for(state, conversation, cmd).is_some(),
     }
 }
@@ -612,6 +718,8 @@ pub(crate) enum ThreadOutcome {
         frame: ClientFrame,
         joined: Option<(String, crate::domain::models::ItemAddress)>,
     },
+    /// `x`: raise the retract confirmation of this plan (21-6's decision on L3).
+    Retract(RetractPlan),
 }
 
 /// The key context of the thread frame now: the reply field and the filter field are text
@@ -698,7 +806,13 @@ pub(crate) fn on_key(
             ThreadOutcome::Consumed
         }
         CommandId::Body(BodyCmd::ToggleMode) => {
-            if context == Context::ThreadInspector && page_rail_live(state) {
+            if context == Context::ThreadInspector
+                && page_rail_live(state)
+                && !state
+                    .thread_inspector
+                    .as_ref()
+                    .is_some_and(|inspector| matches!(inspector.target, ThreadTarget::Log { .. }))
+            {
                 if let Some(inspector) = state.thread_inspector.as_mut() {
                     inspector.mode = inspector.mode.toggled();
                     inspector.invalidate();
@@ -735,6 +849,15 @@ pub(crate) fn on_key(
                 crate::adapters::tui::decision_queue::open(state, &key);
             }
             ThreadOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::Retract) => {
+            match applies(state, conversation, ThreadCmd::Retract)
+                .then(|| retract_plan(state, conversation))
+                .flatten()
+            {
+                Some(plan) => ThreadOutcome::Retract(plan),
+                None => ThreadOutcome::Consumed,
+            }
         }
         CommandId::Thread(ThreadCmd::Toggle) => {
             if applies(state, conversation, ThreadCmd::Toggle) {
@@ -1009,7 +1132,9 @@ pub(crate) fn accept_search(state: &mut TuiState) {
 
 /// The writer action letters (and `o`): a Repeat, a Release or a modified variant of one
 /// never acts.
-const WRITER_LETTERS: &[char] = &['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u', 'o'];
+const WRITER_LETTERS: &[char] = &[
+    'r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u', 'o', 'x',
+];
 
 /// The raw press-only rule of the thread frame (PC-14): conversion discards kind and
 /// modifiers, so each host's raw pre-filter asks this before converting. Only the writer
@@ -1035,7 +1160,7 @@ pub(crate) fn ignores_raw_key(state: &TuiState, key: &crossterm::event::KeyEvent
     if key.kind != KeyEventKind::Press {
         return true;
     }
-    let registered_chord = key.modifiers == KeyModifiers::CONTROL && matches!(c, 'd' | 'u');
+    let registered_chord = key.modifiers == KeyModifiers::CONTROL && matches!(c, 'd' | 'u' | 'x');
     !key.modifiers.is_empty() && !registered_chord
 }
 
@@ -1741,7 +1866,7 @@ mod tests {
             Some("received"),
         );
         let none = KeyModifiers::NONE;
-        for c in "rdbaysn123uo".chars() {
+        for c in "rdbaysn123uox".chars() {
             let code = KeyCode::Char(c);
             assert!(
                 !ignores_raw_key(&state, &key(code, none, KeyEventKind::Press)),
@@ -1760,8 +1885,8 @@ mod tests {
                 KeyModifiers::SHIFT,
                 KeyModifiers::CONTROL,
             ] {
-                // Only `Ctrl+D` / `Ctrl+U` are registered chords.
-                let chord = modifiers == KeyModifiers::CONTROL && matches!(c, 'd' | 'u');
+                // Ctrl+D / Ctrl+U and the Ctrl+X leader are registered chords.
+                let chord = modifiers == KeyModifiers::CONTROL && matches!(c, 'd' | 'u' | 'x');
                 assert_eq!(
                     ignores_raw_key(&state, &key(code, modifiers, KeyEventKind::Press)),
                     !chord,
@@ -1774,6 +1899,10 @@ mod tests {
             &state,
             &key(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Press)
         ));
+        assert!(ignores_raw_key(
+            &state,
+            &key(KeyCode::Char('X'), KeyModifiers::SHIFT, KeyEventKind::Press)
+        ));
         // A Release of a registered chord is still a Release.
         assert!(ignores_raw_key(
             &state,
@@ -1783,12 +1912,29 @@ mod tests {
                 KeyEventKind::Release
             )
         ));
+        // `x` is a writer letter (retract): a Press of the registered leader chord Ctrl+X
+        // resolves, its Release is ignored like any Release of a letter.
+        assert!(!ignores_raw_key(
+            &state,
+            &key(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            )
+        ));
+        assert!(ignores_raw_key(
+            &state,
+            &key(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release
+            )
+        ));
         // Everything else resolves normally, whatever the kind.
         for (code, modifiers) in [
             (KeyCode::Char('j'), none),
             (KeyCode::Char('G'), KeyModifiers::SHIFT),
             (KeyCode::Char('$'), KeyModifiers::SHIFT),
-            (KeyCode::Char('x'), KeyModifiers::CONTROL),
             (KeyCode::Char('p'), KeyModifiers::CONTROL),
             (KeyCode::Char('q'), KeyModifiers::CONTROL),
             (KeyCode::Char('c'), KeyModifiers::CONTROL),

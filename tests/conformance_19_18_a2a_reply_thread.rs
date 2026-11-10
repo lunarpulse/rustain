@@ -58,14 +58,13 @@ use rustain::adapters::noop::{
 };
 use rustain::adapters::rap::{AgentSigner, IdentityKeyStore};
 use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
-use rustain::adapters::tui::handlers::team_command::TEAM_THREAD_BLOCK_ID;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::capability_registry::CapabilityRegistry;
 use rustain::domain::models::{
     A2aPeerSource, A2aPeerSpec, AppConfig, Authorship, CompletionOptions, Conversation,
-    FeedbackLevel, JournalRecord, Message, ResponseMode, RoomEvent, StopReason, StreamChunk,
+    JournalRecord, Message, ResponseMode, RoomEvent, StopReason, StreamChunk,
 };
 use rustain::domain::ports::{
     DeliveryPolicy, RoomJournal, RoomJournalError, RoomJournalReader, SecurityPort, StoragePort,
@@ -765,23 +764,28 @@ async fn read_thread_block(
     sender
         .type_command(state, &format!("/team thread {peer} {item}"))
         .await;
-    assert_eq!(
-        state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "  reading…",
-        "the stable block shows its pending line before the read lands"
+    let frame = state.thread_inspector.as_ref().expect("sent thread frame");
+    assert!(
+        matches!(&frame.target, rustain::adapters::tui::state::ThreadTarget::Sent { peer: p, item: i } if p == peer && i == item)
     );
+    assert_eq!(frame.content, "  reading…");
     let event = next_event(sender).await;
     let AppEvent::TeamThreadReady {
         conversation_id,
+        generation,
         message,
     } = event
     else {
         panic!("a thread read publishes TeamThreadReady, got {event:?}");
     };
-    let mut tabs = rustain::domain::models::tab::TabManager::new(CancellationToken::new());
-    team_thread_ready("conv", state, &mut tabs, &conversation_id, message);
-    let block = &state.feedback_blocks[TEAM_THREAD_BLOCK_ID];
-    assert_eq!(block.level, FeedbackLevel::Info);
-    block.message.clone()
+    team_thread_ready(state, &conversation_id, generation, &message);
+    assert!(!state.feedback_blocks.contains_key("team-thread"));
+    state
+        .thread_inspector
+        .as_ref()
+        .expect("sent thread frame")
+        .content
+        .clone()
 }
 
 /// `/team board <peer>` through the operator's rail, rendered.
@@ -1084,7 +1088,7 @@ async fn the_reply_round_trip_through_every_front_door() {
     settle_send(&mut sender, &mut state).await;
     assert_eq!(
         state.feedback_blocks["team-send-1"].message,
-        "  ● b  delivered"
+        "Send · ● b delivered"
     );
     let items = received(&room_events(&b.journal).await);
     let (_, task_q, _) = items[0].clone();
@@ -1191,7 +1195,7 @@ async fn the_reply_round_trip_through_every_front_door() {
     settle_send(&mut sender, &mut state).await;
     assert_eq!(
         state.feedback_blocks["team-send-2"].message,
-        "  ● b  delivered"
+        "Send · ● b delivered"
     );
     let b_rows = room_events(&b.journal).await;
     let follow = b_rows
@@ -1225,6 +1229,14 @@ async fn the_reply_round_trip_through_every_front_door() {
 
     // ── K09 + K10: the asker reads the four-turn thread. ──
     let block = read_thread_block(&mut sender, &mut state, "b", &ri_q).await;
+    let first_read = state
+        .thread_inspector
+        .as_ref()
+        .unwrap()
+        .sent
+        .as_ref()
+        .unwrap()
+        .clone();
     assert_eq!(
         block,
         format!(
@@ -1248,19 +1260,56 @@ async fn the_reply_round_trip_through_every_front_door() {
     );
     let again = read_thread_block(&mut sender, &mut state, "b", &ri_f).await;
     assert_eq!(again, block, "any member reads the same thread");
+    let current_read = state
+        .thread_inspector
+        .as_ref()
+        .unwrap()
+        .sent
+        .as_ref()
+        .unwrap()
+        .clone();
+    team_thread_ready(
+        &mut state,
+        &first_read.origin,
+        first_read.generation,
+        "stale completion",
+    );
+    team_thread_ready(
+        &mut state,
+        "other-origin",
+        current_read.generation,
+        "foreign completion",
+    );
+    assert_eq!(state.thread_inspector.as_ref().unwrap().content, again);
     assert_eq!(
         observed(&room_events(&sender.journal).await).len(),
         2,
         "a second read journals nothing (`M18`)"
     );
+    assert!(matches!(
+        &state.thread_inspector.as_ref().expect("retargeted frame").target,
+        rustain::adapters::tui::state::ThreadTarget::Sent { peer, item }
+            if peer == "b" && item == &ri_f
+    ));
+    for prefix in ["team-thread", "team-log"] {
+        assert_eq!(
+            state
+                .feedback_blocks
+                .keys()
+                .filter(|id| id.starts_with(prefix))
+                .count(),
+            0
+        );
+    }
     assert_eq!(
         state
-            .feedback_blocks
-            .keys()
-            .filter(|id| id.starts_with("team-thread"))
+            .modal_stack
+            .iter()
+            .filter(|frame| frame.surface
+                == rustain::adapters::tui::presentation::Surface::ThreadInspector)
             .count(),
         1,
-        "one block, replaced (`M17`)"
+        "retargeting retains exactly one Sent frame"
     );
     let log = rustain::domain::services::transparency::fold_transparency(
         &RoomJournalReader::load_entries(sender.journal.node.as_ref())
@@ -2002,7 +2051,7 @@ async fn a_bad_reference_mints_nothing() {
     settle_send(&mut sender, &mut state).await;
     assert_eq!(
         state.feedback_blocks["team-send-1"].message,
-        "    b  no usable answer — '/team board' shows whether it arrived"
+        "Send · b no usable answer — '/team board' shows whether it arrived"
     );
     assert!(room_events(&b.journal).await.is_empty(), "B wrote nothing");
     let rows = room_events(&sender.journal).await;
@@ -2523,7 +2572,7 @@ async fn thread_access_is_off_by_default_for_api_key_callers() {
                 settle_send(&mut asker, &mut state).await;
                 assert_eq!(
                     state.feedback_blocks["team-send-1"].message,
-                    "  ✗ b  declined"
+                    "Send · ✗ b declined"
                 );
                 assert_eq!(received(&room_events(&b.journal).await).len(), minted);
             }

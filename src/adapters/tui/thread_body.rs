@@ -118,6 +118,117 @@ pub fn split_segments(
     (segments, marks)
 }
 
+/// A completed sent-thread read as the window's page (Story 21.8 A12) with what it says about
+/// the opened item.
+#[derive(Debug, Clone)]
+pub struct SentPage {
+    pub content: String,
+    pub segments: Vec<ThreadSegment>,
+    pub turns: Vec<TurnMark>,
+    /// The opened item's turn is labelled `you`: this host's own item.
+    pub mine: bool,
+    /// The opened item's turn carries the `[retracted …]` mark.
+    pub retracted: bool,
+}
+
+/// Turn header lines of the sender-side projection start with two spaces and a label; the
+/// root turn's `N earlier turns not shown` line shares that indent but is not a turn.
+fn is_turn_header(line: &str) -> bool {
+    line.starts_with("  ")
+        && !line[2..].starts_with(' ')
+        && !line.contains(" earlier turns not shown — the full thread is on ")
+}
+
+/// Split the sender-side projection (`render_team_thread`, the one string both hosts receive:
+/// every peer-influenced field already passed `sanitize_disclosable`; bodies sit behind a
+/// six-space indent so a body line can never forge a header) into segments. The visible escape
+/// (controls and bidi characters) is applied here exactly once over the whole text, so no bidi
+/// character of a peer-chosen label, id or body can reach a cell.
+pub fn sent_page(message: &str, item: &str) -> SentPage {
+    let content = crate::infrastructure::runtime::recipient_view::escape_disclosable(message);
+    let item_mark = format!("  {item}");
+    let mut bodies: Vec<Range<usize>> = Vec::new();
+    let mut turn_starts: Vec<(usize, bool)> = Vec::new();
+    let (mut mine, mut retracted) = (false, false);
+    let mut item_matches = 0usize;
+    let mut body: Option<Range<usize>> = None;
+    let mut at = 0;
+    for line in content.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        if !turn_starts.is_empty()
+            && let Some(rest) = text.strip_prefix(GUTTER_TEXT)
+        {
+            let end = start + GUTTER + rest.len();
+            body = Some(
+                body.take()
+                    .map_or(start + GUTTER..end, |range| range.start..end),
+            );
+            continue;
+        }
+        bodies.extend(body.take());
+        if is_turn_header(text) {
+            // Every place the header carries the opened item's id (an exact, delimited match).
+            // Peer-chosen turn ids and aliases can imitate it, so the `you` / retracted facts
+            // are trusted only when the whole projection names the item exactly once; any
+            // duplicate or embedded copy fails closed (no facts, no retract offer).
+            let matches: Vec<usize> = text
+                .match_indices(&item_mark)
+                .map(|(at, _)| at)
+                .filter(|at| {
+                    text[at + item_mark.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| next == ' ')
+                })
+                .collect();
+            let opened = matches.first().copied();
+            item_matches += matches.len();
+            if let Some(at) = opened {
+                mine = text[2..at].trim() == "you";
+                retracted = text[at + item_mark.len()..].contains("[retracted ");
+            }
+            turn_starts.push((start, turn_starts.is_empty() || opened.is_some()));
+        }
+    }
+    bodies.extend(body);
+    if item_matches != 1 {
+        (mine, retracted) = (false, false);
+    }
+    let (segments, turns) = split_segments(&content, &bodies, &turn_starts);
+    SentPage {
+        content,
+        segments,
+        turns,
+        mine,
+        retracted,
+    }
+}
+
+/// A page of whole text blocks, each one filterable turn (the A2A log's rows); the last block
+/// stays under every filter when `keep_last` (the log's closing claim).
+pub fn block_page(
+    blocks: &[String],
+    keep_last: bool,
+) -> (String, Vec<ThreadSegment>, Vec<TurnMark>) {
+    let mut content = String::new();
+    let mut segments = Vec::with_capacity(blocks.len());
+    let mut turns = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            content.push('\n');
+        }
+        content.push_str(block);
+        turns.push(TurnMark {
+            first_segment: segments.len(),
+            keep: keep_last && index + 1 == blocks.len(),
+        });
+        segments.push(ThreadSegment::Text(block.clone()));
+    }
+    (content, segments, turns)
+}
+
 /// The segments of turn `index`.
 fn turn_range(inspector: &ThreadInspectorState, index: usize) -> Range<usize> {
     let end = inspector
@@ -259,6 +370,80 @@ pub fn build(inspector: &ThreadInspectorState, theme: &Theme, width: usize) -> B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn story21_8_actual_sent_renderer_ambiguous_headers_fail_closed() {
+        use crate::adapters::a2a::send::{ServedThread, ServedTurn, ThreadRead};
+        use crate::adapters::tui::handlers::team_command::render_team_thread;
+        use crate::domain::models::{Authorship, ReplyKind};
+        let turn = |id: &str, reply: bool| ServedTurn {
+            turn_id: id.into(),
+            reply,
+            task: None,
+            in_reply_to: None,
+            removed: false,
+            content: Some("body".into()),
+            content_hash: None,
+            kind: ReplyKind::Answer,
+            status: None,
+            retro: None,
+            authorship: Authorship::Unknown,
+            retracted_at_ms: None,
+        };
+        for (alias, id) in [
+            ("ada", "ri_open"),
+            ("ada", "ri_open  [retracted 99:99]"),
+            ("you", "ri_open"),
+            ("ada  ri_open", "other"),
+        ] {
+            let projection = render_team_thread(
+                alias,
+                "ri_open",
+                &ThreadRead::Read {
+                    thread: ServedThread {
+                        root: "ri_open".into(),
+                        turns: vec![turn("ri_open", false), turn(id, true)],
+                        omitted_before: 0,
+                        principal_collapsed: false,
+                        principal_bound: true,
+                    },
+                    mine: vec![true, false],
+                },
+                true,
+            );
+            let page = sent_page(&projection, "ri_open");
+            assert!(!page.mine && !page.retracted, "{projection}");
+        }
+    }
+
+    #[test]
+    fn story21_8_sent_projection_ambiguous_headers_fail_closed() {
+        let original = "thread · ada · ri_open\n  you       ri_open\n      body";
+        let page = sent_page(original, "ri_open");
+        assert!(page.mine && !page.retracted);
+        let page = sent_page(
+            &original.replace(
+                "ri_open\n      body",
+                "ri_open  [retracted 12:34]\n      body",
+            ),
+            "ri_open",
+        );
+        assert!(page.mine && page.retracted);
+        let body =
+            format!("{original}\n  ada       other\n        you       ri_open  [retracted 99:99]");
+        let page = sent_page(&body, "ri_open");
+        assert!(page.mine && !page.retracted);
+        for header in [
+            "  ada       ri_open",
+            "  ada       ri_open  [retracted 99:99]",
+            "  you       ri_open",
+            "  ada  ri_open       other",
+        ] {
+            let page = sent_page(&format!("{original}\n{header}\n      reply"), "ri_open");
+            assert!(!page.mine && !page.retracted, "{header}");
+        }
+    }
 
     #[test]
     fn story21_8_split_segments_round_trips_the_legacy_content() {

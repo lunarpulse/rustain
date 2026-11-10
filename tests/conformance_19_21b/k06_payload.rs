@@ -124,9 +124,12 @@ async fn k06_approved_proposal_preserves_boundary_payload_bytes() {
         proposal_board.contains("lena-po") && proposal_board.contains("jun-dev"),
         "board --last projection: {proposal_board}"
     );
-    let proposal_log = &fixture.state.feedback_blocks
-        [rustain::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID]
-        .message;
+    let frame = fixture.state.thread_inspector.as_ref().expect("log frame");
+    assert!(matches!(
+        frame.target,
+        rustain::adapters::tui::state::ThreadTarget::Log { filtered: false }
+    ));
+    let proposal_log = &frame.content;
     assert_eq!(
         proposal_log.matches("[agent-composed]").count(),
         2,
@@ -324,9 +327,12 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
     );
 
     fixture.typed("/team log").await;
-    let log = &fixture.state.feedback_blocks
-        [rustain::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID]
-        .message;
+    let frame = fixture.state.thread_inspector.as_ref().expect("log frame");
+    assert!(matches!(
+        frame.target,
+        rustain::adapters::tui::state::ThreadTarget::Log { filtered: false }
+    ));
+    let log = &frame.content;
     assert_eq!(
         log.matches("[agent-composed]").count(),
         2,
@@ -340,7 +346,7 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
 fn rendered_send_rows(fixture: &ProposalFixture, block_id: &str) -> Vec<(String, &'static str)> {
     fixture.state.feedback_blocks[block_id]
         .message
-        .lines()
+        .split(" · ")
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let icon = fields.next()?;

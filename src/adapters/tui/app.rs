@@ -46,6 +46,11 @@ pub enum InputAction {
     ThreadPage {
         earlier: bool,
     },
+    /// `x` on a sent thread (local host): the `/team retract <peer> <item>` preview.
+    ThreadRetract {
+        peer: String,
+        item: String,
+    },
     /// Enter pressed with this text (buffer already cleared by handle_input).
     SubmitMessage(String),
     /// User wants to exit.

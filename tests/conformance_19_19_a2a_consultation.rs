@@ -931,8 +931,16 @@ async fn k01_typed_operator_fanout_preserves_bytes_policy_and_unknown_refusal() 
         "K01: canonical typed fanout must start both recipient outcomes, not a local refusal: {:?}",
         state.feedback_blocks
     );
+    assert_eq!(
+        state.feedback_blocks[&pending_id].message,
+        "Send · consultation · first sending… · second sending…"
+    );
     settle_send(&mut sender, &mut state).await;
     settle_send(&mut sender, &mut state).await;
+    let summary = &state.feedback_blocks[&pending_id].message;
+    assert_eq!(summary.lines().count(), 1);
+    assert!(summary.starts_with("Send · consultation · "));
+    assert!(summary.find("first").unwrap() < summary.find("second").unwrap());
     for host in [&first, &second] {
         let rows = room_events(&host.journal).await;
         let root = rows
@@ -2741,24 +2749,28 @@ async fn k03_socket_defer_is_durable_and_does_not_consume_the_answer() {
         .expect("thread-read event");
     let AppEvent::TeamThreadReady {
         conversation_id,
+        generation,
         message,
     } = viewed
     else {
         panic!("thread view publishes TeamThreadReady: {viewed:?}");
     };
-    let mut tabs = rustain::domain::models::tab::TabManager::new(CancellationToken::new());
     rustain::infrastructure::runtime::transparency_bridge::team_thread_ready(
-        "conv",
         &mut state,
-        &mut tabs,
         &conversation_id,
-        message,
+        generation,
+        &message,
     );
-    let rendered = &state.feedback_blocks["team-thread"];
-    assert!(rendered.message.contains(&item_id));
-    assert!(rendered.message.contains("defer"));
-    assert!(rendered.message.contains("30"));
-    assert!(rendered.message.contains("answer"));
+    assert!(!state.feedback_blocks.contains_key("team-thread"));
+    let rendered = &state
+        .thread_inspector
+        .as_ref()
+        .expect("sent thread frame")
+        .content;
+    assert!(rendered.contains(&item_id));
+    assert!(rendered.contains("defer"));
+    assert!(rendered.contains("30"));
+    assert!(rendered.contains("answer"));
     assert_eq!(
         room_events(&restarted.journal)
             .await

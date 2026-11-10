@@ -248,6 +248,9 @@ pub fn route(
                 crate::adapters::tui::thread_inspector::ThreadOutcome::Page { earlier } => {
                     InputAction::ThreadPage { earlier }
                 }
+                crate::adapters::tui::thread_inspector::ThreadOutcome::Retract(
+                    crate::adapters::tui::thread_inspector::RetractPlan::Item { peer, item },
+                ) => InputAction::ThreadRetract { peer, item },
                 _ => InputAction::Consumed,
             },
         ),

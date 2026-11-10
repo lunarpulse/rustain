@@ -43,21 +43,24 @@ async fn thread(sender: &mut Sender, state: &mut TuiState, peer: &str, item: &st
         .unwrap();
     let AppEvent::TeamThreadReady {
         conversation_id,
+        generation,
         message,
     } = event
     else {
         panic!("thread front door must publish its settled result: {event:?}");
     };
-    let mut tabs = rustain::domain::models::tab::TabManager::new(CancellationToken::new());
     rustain::infrastructure::runtime::transparency_bridge::team_thread_ready(
-        "conv",
         state,
-        &mut tabs,
         &conversation_id,
-        message,
+        generation,
+        &message,
     );
-    state.feedback_blocks[rustain::adapters::tui::handlers::team_command::TEAM_THREAD_BLOCK_ID]
-        .message
+    assert!(!state.feedback_blocks.contains_key("team-thread"));
+    state
+        .thread_inspector
+        .as_ref()
+        .expect("sent thread frame")
+        .content
         .clone()
 }
 

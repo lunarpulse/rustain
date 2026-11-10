@@ -201,10 +201,6 @@ pub struct RenderResult {
     pub user_message_boundaries: Vec<usize>,
     /// Stage item id (tool call or code/table block) that holds focus this frame.
     pub focused_item_id: Option<String>,
-    /// Feedback ids and exact clipped screen-row ranges painted by the chat.
-    /// Hosts filter opaque coverage after all overlays, before acknowledging a
-    /// successful draw. Offscreen and zero-height projections are absent.
-    pub visible_feedback_rows: Vec<(String, std::ops::Range<u16>)>,
 }
 
 /// Compute the `scroll_offset` value needed to bring `target_message_idx`
@@ -2016,7 +2012,6 @@ fn render_with_search_impl(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_item_id: None,
-        visible_feedback_rows: Vec::new(),
     };
 
     // Empty state: no messages, no open turn, no streaming, no feedback blocks
@@ -2866,7 +2861,6 @@ fn render_with_search_impl(
     }
 
     // Feedback blocks at bottom
-    let mut visible_feedback_rows = Vec::new();
     if !feedback_blocks.is_empty() {
         if line_offset > 0 {
             let spacing_end = line_offset + spacing;
@@ -2888,16 +2882,6 @@ fn render_with_search_impl(
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
             if fb_end > visible_start && line_offset < visible_end {
-                let start = area
-                    .y
-                    .saturating_add((line_offset.max(visible_start) - visible_start) as u16);
-                let end = area
-                    .y
-                    .saturating_add((fb_end.min(visible_end) - visible_start) as u16)
-                    .min(area.bottom());
-                if start < end {
-                    visible_feedback_rows.push((fb.id.clone(), start..end));
-                }
                 for (j, line) in fb_lines.into_iter().enumerate() {
                     let abs_line = line_offset + j;
                     if abs_line >= visible_start && abs_line < visible_end {
@@ -2936,11 +2920,6 @@ fn render_with_search_impl(
         lines[last] = indicator_line;
         // The indicator replaced that row: any run on it is gone.
         placed_runs.retain(|run| run.line != last);
-        let indicator_row = area.y.saturating_add(last as u16);
-        visible_feedback_rows.retain_mut(|(_, rows)| {
-            rows.end = rows.end.min(indicator_row);
-            rows.start < rows.end
-        });
     }
 
     // Stage items (tool calls and code/table blocks) sit in render order.
@@ -3032,7 +3011,6 @@ fn render_with_search_impl(
         message_boundaries,
         user_message_boundaries,
         focused_item_id,
-        visible_feedback_rows,
     }
 }
 
@@ -5493,25 +5471,21 @@ mod parts_aware_tests {
     fn feedback_projection(
         area: Rect,
         view: &ViewState,
-    ) -> (
-        ratatui::Terminal<ratatui::backend::TestBackend>,
-        RenderResult,
-    ) {
+    ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         let mut blocks = BTreeMap::new();
         crate::adapters::tui::views::show_view(
             &mut blocks,
-            crate::adapters::tui::views::ViewKind::TeamLog,
+            crate::adapters::tui::views::ViewKind::TeamStatus,
             "projection",
             crate::domain::models::FeedbackLevel::Info,
             "projection-0\nprojection-1\nprojection-2",
         );
         let mut cache = TabRenderState::default();
-        let mut result = None;
         terminal
             .draw(|frame| {
-                result = Some(render_attached(
+                render_attached(
                     frame,
                     area,
                     &Conversation::default(),
@@ -5521,14 +5495,14 @@ mod parts_aware_tests {
                     &mut cache,
                     &blocks,
                     &HashMap::new(),
-                ));
+                );
             })
             .unwrap();
-        (terminal, result.expect("the actual painter ran"))
+        terminal
     }
 
     #[test]
-    fn story21_4_feedback_ranges_are_clipped_screen_rows_with_visible_controls() {
+    fn story21_4_feedback_blocks_are_clipped_to_screen_rows_with_visible_controls() {
         for following in [false, true] {
             let view = ViewState {
                 mode: if following {
@@ -5539,10 +5513,7 @@ mod parts_aware_tests {
                 scroll_offset: if following { 0 } else { usize::MAX },
                 ..Default::default()
             };
-            let (terminal, result) = feedback_projection(Rect::new(3, 4, 20, 2), &view);
-            assert_eq!(result.visible_feedback_rows.len(), 1);
-            assert_eq!(result.visible_feedback_rows[0].0, "projection");
-            assert_eq!(result.visible_feedback_rows[0].1, 4..6);
+            let terminal = feedback_projection(Rect::new(3, 4, 20, 2), &view);
             let row = |y| {
                 (0..80)
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())
@@ -5560,11 +5531,19 @@ mod parts_aware_tests {
             }));
             assert!(!row(3).contains("projection"));
             assert!(!row(6).contains("projection"));
+            let buffer = terminal.backend().buffer();
+            for y in 0..24 {
+                for x in 0..80 {
+                    if !(3..23).contains(&x) || !(4..6).contains(&y) {
+                        assert_eq!(buffer[(x, y)].symbol(), " ", "{following}: ({x}, {y})");
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn story21_4_zero_height_or_width_never_reports_feedback_rows() {
+    fn story21_4_zero_height_or_width_paints_no_feedback() {
         for following in [false, true] {
             let view = ViewState {
                 mode: if following {
@@ -5576,11 +5555,17 @@ mod parts_aware_tests {
                 ..Default::default()
             };
             for area in [Rect::new(3, 4, 20, 0), Rect::new(3, 4, 0, 2)] {
-                let (_, result) = feedback_projection(area, &view);
-                assert!(
-                    result.visible_feedback_rows.is_empty(),
-                    "{following}: {area:?}"
-                );
+                let terminal = feedback_projection(area, &view);
+                let buffer = terminal.backend().buffer();
+                for y in 0..24 {
+                    for x in 0..80 {
+                        assert_eq!(
+                            buffer[(x, y)].symbol(),
+                            " ",
+                            "{following}: {area:?} at ({x}, {y})"
+                        );
+                    }
+                }
             }
         }
     }

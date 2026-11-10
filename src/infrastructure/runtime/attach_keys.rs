@@ -295,19 +295,6 @@ impl KeyCtx<'_> {
         notifications::info(self.state, NoticeSource::Attached, message);
     }
 
-    /// A class-V view block (the peer-retract receipt): not a notice, so it
-    /// keeps its `feedback_blocks` row until the next key.
-    fn view_block(&mut self, id: &str, message: &str) {
-        crate::adapters::tui::views::show_view(
-            &mut self.state.feedback_blocks,
-            crate::adapters::tui::views::ViewKind::PeerRetract,
-            id,
-            FeedbackLevel::Info,
-            message,
-        );
-        self.state.needs_redraw = true;
-    }
-
     /// A peer reply composition owns the composer text.
     fn composer_locked(&self) -> bool {
         crate::adapters::tui::handlers::recipient_actions::pending_composition(self.state).is_some()
@@ -784,12 +771,12 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                                 let sent = ctx
                                     .frame_tx
                                     .send(ClientFrame::RetractAutoResponse {
-                                        message_id,
+                                        message_id: message_id.clone(),
                                         target_seq: None,
                                     })
                                     .is_ok();
                                 if sent {
-                                    ctx.view_block("peer-retract", "Retracted. Marked in your log — never deleted.\nWhat was already read, was read.");
+                                    retract_landed(ctx, &message_id);
                                     settle = true;
                                 }
                                 None
@@ -851,7 +838,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
 /// applies the state-only part (scrolling, closing, composer prefill, overlay toggles); this
 /// host loads pages and queues the writer frames.
 async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    use crate::adapters::tui::thread_inspector::{self, ThreadOutcome};
+    use crate::adapters::tui::thread_inspector::{self, RetractPlan, ThreadOutcome};
     match thread_inspector::on_key(
         ctx.state,
         Key::from_crossterm(&key),
@@ -876,6 +863,8 @@ async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
                 let node = match &inspector.target {
                     crate::adapters::tui::state::ThreadTarget::Item(_) => inspector.node_id.clone(),
                     crate::adapters::tui::state::ThreadTarget::Node(node) => Some(node.clone()),
+                    crate::adapters::tui::state::ThreadTarget::Sent { .. }
+                    | crate::adapters::tui::state::ThreadTarget::Log { .. } => None,
                 }?;
                 Some((
                     node,
@@ -897,6 +886,29 @@ async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
                 .await
             {
                 thread_flash(ctx.state, error.to_string());
+            }
+        }
+        // `x`: the retract confirmation is 21-6's decision on L3; nothing is retracted here.
+        // The press re-checks the writer boundary (an observer never retracts).
+        ThreadOutcome::Retract(plan) => {
+            if ctx.read_only {
+                return KeyFlow::Continue;
+            }
+            match plan {
+                RetractPlan::Reply { message_id, .. } => begin_retract(ctx, Some(&message_id)),
+                RetractPlan::Item { peer, item } => {
+                    let request = ctx.team_requests.mint();
+                    super::enqueue_attached_team_frame(
+                        ctx.state,
+                        ctx.team_requests,
+                        ClientFrame::TeamRetractPreview {
+                            request,
+                            peer,
+                            item_id: item,
+                        },
+                        ctx.frame_tx,
+                    );
+                }
             }
         }
         ThreadOutcome::Send { frame, joined } => {
@@ -979,9 +991,6 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
     {
         return flow;
     }
-
-    // Any further keypress dismisses the retract confirmation.
-    ctx.state.feedback_blocks.remove("peer-retract");
 
     let pressed = Key::from_crossterm(&key);
     let context = if ctx.state.focus == FocusState::Input {
@@ -1301,7 +1310,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
         LeaderCmd::A2aLog => {
             // The existing attached `/team log` local read.
             let args = crate::adapters::tui::handlers::team_command::TeamLogArgs::default();
-            run_team_log(ctx, &args).await;
+            open_team_log(ctx, &args).await;
         }
         LeaderCmd::Notifications => {
             // S-LOG pushes above the exact frame that started this leader.
@@ -1373,7 +1382,7 @@ fn apply_log_outcome(ctx: &mut KeyCtx<'_>, outcome: LogOutcome) -> KeyFlow {
     KeyFlow::Continue
 }
 
-async fn run_team_log(
+async fn open_team_log(
     ctx: &mut KeyCtx<'_>,
     args: &crate::adapters::tui::handlers::team_command::TeamLogArgs,
 ) {
@@ -1542,6 +1551,38 @@ fn begin_retract(ctx: &mut KeyCtx<'_>, message_id: Option<&str>) {
     ctx.state.needs_redraw = true;
 }
 
+/// The retract of an auto-sent reply was sent: its result lands in the outcomes of the thread
+/// window of the item the reply answered (an ambient Info notice too when that window is not on
+/// top), else as one Info notice (Story 21.8 A14; never a transcript row).
+fn retract_landed(ctx: &mut KeyCtx<'_>, message_id: &str) {
+    use crate::adapters::daemon::protocol::RecipientActionTarget;
+    const RESULT: &str =
+        "Retracted. Marked in your log — never deleted. What was already read, was read.";
+    let item = ctx
+        .conversation
+        .peer_row_controls
+        .get(message_id)
+        .and_then(|control| control.item_address.as_ref())
+        .map(|address| address.item().as_str().to_owned())
+        .or_else(|| {
+            // A reply row without a control is tied to its item by its node.
+            let node = message_id.strip_prefix("peer-response-")?;
+            let inspector = ctx.state.thread_inspector.as_ref()?;
+            (inspector.node_id.as_deref() == Some(node))
+                .then(|| inspector.item_address())
+                .flatten()
+                .map(|address| address.item().as_str().to_owned())
+        });
+    match item {
+        Some(item_id) => crate::adapters::tui::handlers::recipient_actions::show_notice(
+            ctx.state,
+            Some(&RecipientActionTarget::Item { item_id }),
+            RESULT.to_owned(),
+        ),
+        None => notifications::info(ctx.state, NoticeSource::Team, RESULT),
+    }
+}
+
 // ── submission ───────────────────────────────────────────────────────────────
 
 /// Attached-local presentation slash commands, answered before the composer
@@ -1636,7 +1677,7 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         }
         // Story 19.16g — a user-initiated log may scroll its own result into view.
         ComposerOutcome::LocalLog(args) => {
-            run_team_log(ctx, &args).await;
+            open_team_log(ctx, &args).await;
             return KeyFlow::Continue;
         }
         ComposerOutcome::LocalView(item_id) => {
@@ -1920,12 +1961,8 @@ pub(crate) mod tests {
                     );
                 })
                 .unwrap();
-            if let Some(result) = rendered {
-                super::super::after_attached_draw(
-                    &mut self.state,
-                    true,
-                    &result.visible_feedback_rows,
-                );
+            if rendered.is_some() {
+                super::super::after_attached_draw(&mut self.state, true);
             }
             terminal
         }
@@ -2130,10 +2167,22 @@ pub(crate) mod tests {
         let mut typed = Rig::new(false);
         typed.type_text("/team log").await;
         typed.enter().await;
-        // `/team log` paints its view as the stable `team-log` feedback block.
-        let log_view = |rig: &Rig| rig.feedback("team-log").map(str::to_owned);
-        assert!(log_view(&leader).is_some(), "`l` produced the log read");
+        let log_view = |rig: &Rig| {
+            let frame = rig.state.modal_stack.top().expect("log frame");
+            assert_eq!(frame.surface, Surface::ThreadInspector);
+            assert_eq!(frame.title(), "A2A log");
+            let inspector = rig.state.thread_inspector.as_ref().unwrap();
+            assert!(matches!(
+                inspector.target,
+                crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
+            ));
+            inspector.content.clone()
+        };
         assert_eq!(log_view(&leader), log_view(&typed));
+        assert!(screen(&mut leader).contains("A2A log"));
+        assert!(screen(&mut typed).contains("A2A log"));
+        assert!(leader.feedback("team-log").is_none());
+        assert!(typed.feedback("team-log").is_none());
         assert!(leader.frames().is_empty(), "the log is a local read");
         exercised.insert("L".to_owned());
 
@@ -3589,12 +3638,9 @@ pub(crate) mod tests {
             .join("\n")
     }
 
-    /// The retract decision's `y` sends the frame AND leaves the "Retracted. Marked in
-    /// your log" block where the user can read it: stored by the key itself, not
-    /// dismissed by the settle, and painted even when the user had scrolled the
-    /// transcript up before choosing (Story 19.20a native smoke waits for that text).
+    /// Palette retract posts one ambient result notice even over a scrolled transcript.
     #[tokio::test]
-    async fn story21_6_attached_auto_response_retract_keeps_and_paints_its_feedback_block() {
+    async fn story21_6_attached_auto_response_retract_keeps_and_paints_its_notice() {
         use crate::adapters::tui::keymap::Key;
         let mut rig = Rig::new(false);
         for row in 0..40 {
@@ -3624,18 +3670,35 @@ pub(crate) mod tests {
                 if message_id == "peer-response-node-a"
         ));
         assert!(!decision_queue::team_retract_pending(&rig.state));
-        assert!(
-            rig.feedback("peer-retract")
-                .is_some_and(|message| message.starts_with("Retracted. Marked in your log")),
-            "the settle must not drop the retract block"
-        );
+        let notices: Vec<_> = rig
+            .state
+            .notifications
+            .records()
+            .filter(|record| {
+                record.source == NoticeSource::Team
+                    && record.message.starts_with("Retracted. Marked in your log")
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "settlement posts exactly one result");
+        assert!(rig.feedback("peer-retract").is_none());
         let painted = screen(&mut rig);
         assert!(
             painted
                 .split_whitespace()
                 .collect::<String>()
                 .contains("Retracted.Markedinyourlog"),
-            "the retract block must be painted:\n{painted}"
+            "the retract notice must be painted:\n{painted}"
+        );
+        rig.ch('j').await;
+        assert_eq!(
+            rig.state
+                .notifications
+                .records()
+                .filter(|record| record.source == NoticeSource::Team
+                    && record.message.starts_with("Retracted. Marked in your log"))
+                .count(),
+            1,
+            "the next key does not clear the result"
         );
     }
 
@@ -5308,7 +5371,23 @@ pub(crate) mod tests {
                     assert_eq!(rig.state.focus, FocusState::Input, "{label}");
                 }
                 LeaderCmd::A2aLog => {
-                    assert!(rig.feedback("team-log").is_some(), "{label}");
+                    assert_eq!(
+                        rig.state.modal_stack.top().map(|frame| frame.surface),
+                        Some(Surface::ThreadInspector),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        rig.state.modal_stack.top().unwrap().title(),
+                        "A2A log",
+                        "{label}"
+                    );
+                    assert!(
+                        matches!(
+                            rig.state.thread_inspector.as_ref().unwrap().target,
+                            crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
+                        ),
+                        "{label}"
+                    );
                     assert!(rig.frames().is_empty(), "{label}: a local read");
                     assert_eq!(rig.state.input_buffer, "draft", "{label}");
                 }
@@ -6340,7 +6419,7 @@ pub(crate) mod tests {
             (Key::Char('r'), same.clone()), (Key::Char('d'), same.clone()), (Key::Char('b'), same.clone()),
             (Key::Char('a'), same.clone()), (Key::Char('y'), same.clone()), (Key::Char('s'), same.clone()),
             (Key::Char('n'), same.clone()), (Key::Char('1'), same.clone()), (Key::Char('2'), same.clone()),
-            (Key::Char('3'), same.clone()), (Key::Char('u'), same.clone()),
+            (Key::Char('3'), same.clone()), (Key::Char('u'), same.clone()), (Key::Char('x'), same.clone()),
         ];
         witness_rows(Context::ThreadInspector, thread_witness_rig, thread_digest, &own).await;
         let body = [
@@ -8384,6 +8463,9 @@ pub(crate) mod tests {
                         let frames = rig.frames();
                         if command == "/team log" {
                             assert!(frames.is_empty(), "local log never sends");
+                            assert_eq!(rig.state.modal_stack.top().unwrap().title(), "A2A log");
+                            assert!(screen(&mut rig).contains("A2A log"));
+                            rig.esc().await;
                         } else if command == "r5 model" {
                             assert_eq!(
                                 frames.iter().filter_map(user_text).collect::<Vec<_>>(),
@@ -8528,6 +8610,297 @@ pub(crate) mod tests {
             };
             rig.open_thread("ri-1", access).await;
             rig
+        }
+
+        async fn retract_reply_rig(read_only: bool) -> Rig {
+            let mut rig = item_rig(
+                read_only,
+                SemanticMessageType::Consultation,
+                None,
+                false,
+                true,
+            )
+            .await;
+            rig.state.terminal_width = 130;
+            rig.state.terminal_height = 30;
+            let template = rig.domain_tab.conversation.peer_row_controls["row"].clone();
+            for (node, timestamp) in [("old", 9 * 3600), ("new", 10 * 3600 + 42 * 60)] {
+                let id = format!("peer-response-{node}");
+                let mut row = system_message(format!("[auto-sent] {node} reply"));
+                row.id = id.clone();
+                row.created_at = timestamp;
+                row.send_authorization = SendAuthorization::Automatic;
+                rig.domain_tab.conversation.messages.push(row);
+                let mut control = template.clone();
+                control.node_id = node.to_owned();
+                rig.domain_tab
+                    .conversation
+                    .peer_row_controls
+                    .insert(id, control);
+            }
+            rig
+        }
+
+        fn assert_no_retract_decision(rig: &Rig) {
+            assert!(!rig.state.decisions.holds(DecisionKind::TeamRetract));
+        }
+
+        fn open_sent_retract(rig: &mut Rig, projection: Option<&str>) {
+            let generation = crate::infrastructure::runtime::thread_open::open_sent(
+                &mut rig.state,
+                ThreadAccess::Writer,
+                "peer-b",
+                "ri-sent",
+                "origin",
+            );
+            if let Some(projection) = projection {
+                assert!(crate::infrastructure::runtime::thread_open::fill_sent(
+                    &mut rig.state,
+                    "origin",
+                    generation,
+                    projection,
+                ));
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_retract_reply_newest_decision_and_outcome() {
+            let mut rig = retract_reply_rig(false).await;
+            let painted = screen(&mut rig);
+            assert!(
+                painted.contains("[x] Retract auto-sent reply 10:42"),
+                "{painted}"
+            );
+            assert!(
+                !painted.contains("[x] Retract auto-sent reply 09:00"),
+                "{painted}"
+            );
+            rig.ch('x').await;
+            assert_eq!(top_surface(&rig), Some(Surface::Decision));
+            assert!(rig.state.decisions.items().any(|item| matches!(
+                &item.subject, DecisionSubject::TeamRetract(payload)
+                    if matches!(&payload.target, decision_queue::RetractTarget::AutoResponse { message_id }
+                        if message_id == "peer-response-new")
+            )));
+            assert!(
+                rig.frames().is_empty(),
+                "raising the decision sends nothing"
+            );
+            rig.ready();
+            rig.ch('y').await;
+            assert!(matches!(rig.frames().as_slice(),
+                [ClientFrame::RetractAutoResponse { message_id, target_seq: None }]
+                    if message_id == "peer-response-new"));
+            let outcomes: Vec<_> = rig.state.thread_outcomes.lines("ri-1").collect();
+            assert_eq!(outcomes.len(), 1);
+            assert!(outcomes[0].contains("Retracted. Marked in your log — never deleted."));
+            assert!(rig.feedback("peer-retract").is_none());
+            let painted = screen(&mut rig);
+            assert!(
+                painted
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains("Retracted.Markedinyourlog—neverdeleted."),
+                "{painted}"
+            );
+            rig.ch('j').await;
+            assert_eq!(rig.state.thread_outcomes.lines("ri-1").count(), 1);
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_retract_node_matched_reply_records_item_outcome_without_control()
+         {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, true).await;
+            rig.state.terminal_width = 130;
+            rig.state.terminal_height = 30;
+            let node = rig
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .node_id
+                .clone()
+                .unwrap();
+            let id = format!("peer-response-{node}");
+            rig.retractable(&id, "node-matched reply");
+            assert!(
+                !rig.domain_tab
+                    .conversation
+                    .peer_row_controls
+                    .contains_key(&id)
+            );
+            assert!(screen(&mut rig).contains("[x] Retract auto-sent reply"));
+            rig.ch('x').await;
+            assert!(rig.state.decisions.items().any(|item| matches!(
+                &item.subject, DecisionSubject::TeamRetract(payload)
+                    if matches!(&payload.target, decision_queue::RetractTarget::AutoResponse { message_id }
+                        if message_id == &id)
+            )));
+            assert!(rig.frames().is_empty());
+            rig.ready();
+            rig.ch('y').await;
+            assert!(matches!(rig.frames().as_slice(),
+                [ClientFrame::RetractAutoResponse { message_id, .. }] if message_id == &id));
+            assert!(
+                rig.state
+                    .thread_outcomes
+                    .lines("ri-1")
+                    .any(|line| line.contains("Retracted. Marked in your log — never deleted."))
+            );
+            let painted = screen(&mut rig);
+            assert!(
+                painted
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains("Retracted.Markedinyourlog—neverdeleted."),
+                "{painted}"
+            );
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_retract_reply_stale_at_confirm_sends_nothing() {
+            let mut rig = retract_reply_rig(false).await;
+            assert!(screen(&mut rig).contains("[x] Retract auto-sent reply 10:42"));
+            rig.ch('x').await;
+            assert!(decision_queue::team_retract_pending(&rig.state));
+            assert!(rig.frames().is_empty());
+            rig.domain_tab
+                .conversation
+                .messages
+                .retain(|row| row.id != "peer-response-new");
+            rig.ready();
+            rig.ch('y').await;
+            assert!(rig.frames().is_empty());
+            assert_eq!(
+                rig.notice(NoticeSource::Attached),
+                Some("that message can no longer be retracted — nothing sent")
+            );
+            assert_eq!(rig.state.thread_outcomes.lines("ri-1").count(), 0);
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_retract_reply_badge_human_unsettled_and_read_only_are_inert() {
+            let mut control = retract_reply_rig(false).await;
+            assert!(screen(&mut control).contains("[x] Retract auto-sent reply 10:42"));
+            control.ch('x').await;
+            assert!(decision_queue::team_retract_pending(&control.state));
+            assert!(control.frames().is_empty());
+            for case in ["badge", "human", "unsettled", "read-only"] {
+                let mut rig = retract_reply_rig(case == "read-only").await;
+                if case != "read-only" {
+                    rig.domain_tab
+                        .conversation
+                        .messages
+                        .retain(|row| row.id != "peer-response-old");
+                    match case {
+                        "badge" | "human" => {
+                            let row = rig
+                                .domain_tab
+                                .conversation
+                                .messages
+                                .iter_mut()
+                                .find(|row| row.id == "peer-response-new")
+                                .unwrap();
+                            row.send_authorization = if case == "badge" {
+                                SendAuthorization::Unknown
+                            } else {
+                                SendAuthorization::HumanDecided
+                            };
+                        }
+                        "unsettled" => {
+                            rig.domain_tab
+                                .conversation
+                                .peer_row_controls
+                                .get_mut("peer-response-new")
+                                .unwrap()
+                                .stage = PeerRowStage::Ready
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let painted = screen(&mut rig);
+                assert!(!painted.contains("[x] Retract"), "{case}: {painted}");
+                rig.ch('x').await;
+                assert_no_retract_decision(&rig);
+                assert!(rig.frames().is_empty(), "{case}");
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_sent_retract_preview_requires_own_unretracted_completed_turn() {
+            let mut rig = Rig::new(false);
+            rig.state.terminal_width = 130;
+            open_sent_retract(&mut rig, Some("  you  ri-sent\n      body"));
+            let painted = screen(&mut rig);
+            assert!(painted.contains("[x] Retract"), "{painted}");
+            rig.ch('x').await;
+            assert!(matches!(rig.frames().as_slice(),
+                [ClientFrame::TeamRetractPreview { peer, item_id, .. }]
+                    if peer == "peer-b" && item_id == "ri-sent"));
+            assert_no_retract_decision(&rig);
+            assert!(
+                rig.state
+                    .thread_outcomes
+                    .lines("sent:peer-b:ri-sent")
+                    .next()
+                    .is_none()
+            );
+            for projection in [
+                None,
+                Some("  another sender  ri-sent\n      body"),
+                Some("  you  ri-sent [retracted 10:42]\n      body"),
+            ] {
+                let mut rig = Rig::new(false);
+                rig.state.terminal_width = 130;
+                open_sent_retract(&mut rig, projection);
+                let painted = screen(&mut rig);
+                assert!(
+                    !painted.contains("[x] Retract"),
+                    "{projection:?}: {painted}"
+                );
+                rig.ch('x').await;
+                assert_no_retract_decision(&rig);
+                assert!(rig.frames().is_empty(), "{projection:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_retract_raw_guard_and_floor_rail_truth() {
+            let mut rig = retract_reply_rig(false).await;
+            assert!(screen(&mut rig).contains("[x] Retract auto-sent reply 10:42"));
+            for event in [
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('x'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release,
+                ),
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('x'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat,
+                ),
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT),
+            ] {
+                assert_eq!(rig.raw_key(event).await, KeyFlow::Continue);
+                assert_no_retract_decision(&rig);
+                assert!(rig.frames().is_empty());
+            }
+            rig.ch('x').await;
+            assert!(decision_queue::team_retract_pending(&rig.state));
+            assert!(rig.frames().is_empty());
+            let mut floor = retract_reply_rig(false).await;
+            floor.state.terminal_width = 60;
+            floor.state.terminal_height = 16;
+            set_composer(&mut floor, &full_composer());
+            let painted = screen(&mut floor);
+            assert!(!painted.contains("[x] Retract"), "{painted}");
+            floor.ch('x').await;
+            assert_no_retract_decision(&floor);
+            assert!(floor.frames().is_empty());
         }
 
         /// A thread over the response bound: a root, 128 chained 8 KiB replies and the

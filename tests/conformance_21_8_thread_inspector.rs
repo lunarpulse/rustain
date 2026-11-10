@@ -41,3 +41,15 @@ mod k12_search;
 
 #[path = "conformance_21_8_thread_inspector/k13_viewport.rs"]
 mod k13_viewport;
+
+#[path = "conformance_21_8_thread_inspector/k15_sent.rs"]
+mod k15_sent;
+
+#[path = "conformance_21_8_thread_inspector/k16_retract.rs"]
+mod k16_retract;
+
+#[path = "conformance_21_8_thread_inspector/k17_log.rs"]
+mod k17_log;
+
+#[path = "conformance_21_8_thread_inspector/k18_summary.rs"]
+mod k18_summary;

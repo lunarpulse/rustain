@@ -219,7 +219,7 @@ The optional leading `--type <type>` accepts `consultation`, `story_assignment`,
 
 Inherited outer whitespace trimming is unchanged. Interior spaces, tabs, newlines and code snippets remain verbatim; the parser consumes the type/recipient prefix by token position, not by searching for repeated words in the body.
 
-The action creates one stable, keyless `Info` block with one row per alias in the order typed. It has no header or aggregate result. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection (including a `-32040` policy refusal); `⚠ unreachable` names a send that did not land, with a named preflight cause on its indented line when available. Tokenless rows name `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, ``asked a question this verb cannot answer (task `…` cancelled) — /team send does not continue A2A input-required questions``, or `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
+The action creates one stable, keyless `Info` block containing one logical summary line: `Send · <type> · <alias> <label> · …`, with recipients in the order typed. The type segment is omitted when unknown; the line wraps rather than truncates. Each recipient settles independently at its **first** `message/send` answer: `● delivered` means that answer carried a non-empty recipient item ID; `✗ declined` is a send-time rejection (including a `-32040` policy refusal); `⚠ unreachable` names a send that did not land. Unreachable causes and asked-a-question explanations appear as Warning notices, and the retrospective note appears once as an Info notice, rather than as extra recipient lines. Other labels include `sending…`, `awaiting their approval` (`auth-required` without an item), `accepted — this peer keeps no item id`, `no usable answer — '/team board' shows whether it arrived`, and `not sent — this host could not record the attempt`. The recipient's `server.admission` defaults to `deny`, so an unconfigured recipient declines a team message.
 
 There is exactly one `message/send` attempt per recipient and no automatic retry or queue. To send again, re-type `/team send` with the recipients you choose; the block has no retry control. A recipient with an item ID is delivered even when its first answer is `auth-required`: this rail does not poll or cancel that task. An item-less `input-required` triggers a single-turn `tasks/cancel`; if that cleanup fails or its answer is not `canceled`, the row says `no usable answer` rather than claiming cancellation. A peer that answers with an A2A Message instead of a task, and no item ID, is `accepted — this peer keeps no item id`.
 
@@ -259,7 +259,7 @@ in selector order. An attached client never resolves holders locally: the daemon
 that owns the journal does so.
 For a selected send, the origin-only `TeamSendStarted.recipients` field supplies
 the resolved aliases before indexed settlements arrive, so the attached sender
-initializes the same per-recipient rows as a plain send. It is empty and omitted
+initializes the same one-line summary as a plain send. It is empty and omitted
 for sends without `--holders-of`, preserving their start-frame bytes.
 
 Both rails use these refusals (parser refusals also append `. Use: …`):
@@ -484,7 +484,7 @@ recipient authorship carrier, or AD-1826's separate A2A version boundary.
 
 ### The send action, its record and the action board (Story 19.21)
 
-A typed or untyped `/team send` is also one **send action**. After the whole action validates and **before** any recipient preflight, dispatch or POST, this host journals one sender-local action record: a host-minted id (`sa_…`, at most 16 characters), the addressed aliases in the order typed with the identity each resolved to, the semantic type, the optional label, and the body's hash and byte count — never the body and nothing derived from it. Each recipient's `dispatched` row carries that action's id and its position, and after every row a recipient's delivery path emits, its **typed settlement** (delivered with the item id, declined, unreachable with the complete cause, awaiting approval, accepted without an item, asked a question, no usable answer, not sent) is journaled before its row settles on screen. None of it is ever sent to a peer: no recipient can see or address the action id or the label, and there is no group identity, aggregate outcome or retry. If the record cannot be appended, nothing is sent and every row reads `not sent — this host could not record the attempt`. A settlement whose append fails after the recipient was reached is not shown and is never rewritten as `not sent`; the board reconciles it through the recipient's own item. `/team followup`, retract dispatches and model delegations record no action.
+A typed or untyped `/team send` is also one **send action**. After the whole action validates and **before** any recipient preflight, dispatch or POST, this host journals one sender-local action record: a host-minted id (`sa_…`, at most 16 characters), the addressed aliases in the order typed with the identity each resolved to, the semantic type, the optional label, and the body's hash and byte count — never the body and nothing derived from it. Each recipient's `dispatched` journal row carries that action's id and its position, and after every row a recipient's delivery path emits, its **typed settlement** (delivered with the item id, declined, unreachable with the complete cause, awaiting approval, accepted without an item, asked a question, no usable answer, not sent) is journaled before its label settles in the summary line. None of it is ever sent to a peer: no recipient can see or address the action id or the label, and there is no group identity, aggregate outcome or retry. If the record cannot be appended, nothing is sent and every recipient is labelled `not sent — this host could not record the attempt`. A settlement whose append fails after the recipient was reached is not shown and is never rewritten as `not sent`; the board reconciles it through the recipient's own item. `/team followup`, retract dispatches and model delegations record no action.
 
 ```text
 /team send --type story_assignment --subject sprint-7 jun-dev,tom-dev,yuki-dev,nina-ux <stories…>
@@ -534,7 +534,7 @@ independent send, not a group transaction.
 
 A retract (`/team retract`) whose dispatch row cannot be journaled is not sent either: it renders `not sent — this host could not record the attempt` (a local fact: nothing is attributed to the peer).
 
-If this host cannot read its own send journal, `/team board --last`, `--action <id>` and `--actions` read exactly `· this host could not read its send journal.` — never *no send action recorded*, which an unreadable journal cannot establish. For the same reason a `/team send` whose new action id cannot be checked against that journal is not sent: every row reads `not sent — this host could not record the attempt`, nothing is journaled or delivered, and the next send reads the journal again.
+If this host cannot read its own send journal, `/team board --last`, `--action <id>` and `--actions` read exactly `· this host could not read its send journal.` — never *no send action recorded*, which an unreadable journal cannot establish. For the same reason a `/team send` whose new action id cannot be checked against that journal is not sent: every recipient is labelled `not sent — this host could not record the attempt`, nothing is journaled or delivered, and the next send reads the journal again.
 
 A board field wider than the block (a long alias or id) wraps at grapheme
 boundaries using terminal-cell width, never byte/character clipping. The byte
@@ -570,9 +570,9 @@ addressed row-operation JSON, rather than presenting replacements as new replies
 
 ### Attached operator commands (Stories 19.21 and 19.21c)
 
-The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board`, `/team status` and `/team thread <peer> <item-id>` are explicit daemon-side reads available to trusted-local read-only attachments. Peer-tier attachments are refused for all team commands. Board and thread text arrive in bounded request-correlated chunks and are painted only after an in-order sequence and explicit completion boundary. Send rows use the same feature-independent typed renderer and remain in their own stable `team-send-N` Info block.
+The attached client composes no A2A egress. It sends `/team send` to the daemon's already-composed runtime, preserving the parsed multiline body, type and sender-local subject; sends and `/team untrust` require a trusted-local read/write attachment. `/team board`, `/team status` and `/team thread <peer> <item-id>` are explicit daemon-side reads available to trusted-local read-only attachments. Peer-tier attachments are refused for all team commands. Board and thread text arrive in bounded request-correlated chunks and are applied only after an in-order sequence and explicit completion boundary. Send outcomes use the same one-line summary in their stable `team-send-N` Info block.
 
-An unresolved `sending…` row remains visible when a recorded action's settlement cannot be published, including a `NotSent` outcome whose dispatch append and typed-settlement append both failed. The distinct action-record-failure branch has no action or settlement and may show visible `NotSent`. This matches standalone send-board behavior: the client does not invent a terminal outcome or add a timeout.
+An unresolved `sending…` label remains visible when a recorded action's settlement cannot be published, including a `NotSent` outcome whose dispatch append and typed-settlement append both failed. The distinct action-record-failure branch has no action or settlement and may show visible `NotSent`. This matches standalone send-board behavior: the client does not invent a terminal outcome or add a timeout.
 
 `/team followup <peer> <turn-id> <text…>` requires a trusted-local writer. It sends to exactly one peer with the reply link, human-written authorship and human-decided authorization; it creates no new send action, and its pending row settles without a `TeamSendStarted` frame. It shares the writer FIFO and the eight-send in-flight limit.
 
@@ -740,6 +740,22 @@ Use the verb on the rail that holds its object:
   their session's A2A egress.
 - `/team board <peer-id>` is the asker's discovery step: its correlated item
   row supplies the root item id to paste into `/team thread`.
+
+`/team thread <peer-id> <item-id>` opens the shared thread window titled
+`Thread · sent · <peer>`, initially showing `reading…`. A reply-arrival
+`[Enter] Read thread` opens the same window. The bounded read includes the
+credential disclosure, turn labels and marks; control and bidi characters are
+made safe for display. A completion for a closed or retargeted window, another
+origin or an older read is discarded, not inserted into the conversation.
+Without an A2A runtime, a warning is shown and no thread window opens.
+
+On a writer-access sent thread, `[x] Retract` is offered for this host's own
+opened item when it is loaded and not already retracted. On an eligible
+received-item thread, `[x] Retract auto-sent reply <HH:MM UTC>` targets its
+newest retractable automatic reply. Both use the existing 21-6 confirmation
+decision, not an immediate mutation; read-only and local-only item views do not
+offer the action. The result appears in the matching thread's outcomes, or as a
+notice when that thread is not on top.
 
 `/team reply` records a reply turn on the answering host. When the item's
 pending peer-response card has a live process-owned controller, it resolves
@@ -1066,8 +1082,8 @@ revocation (`D3`, `DF-19-18C-CAPABILITY-NO-REVOCATION`) and no key rotation
 
 When the transparency log holds rows newer than your last visit, the right edge of the status bar shows a muted `log: N` (`log: 99+` above 99). Your client reads its own workspace journal about once a second; nothing is pushed to it, and no peer, item, task or event name ever appears in the segment. It counts every transparency row of every kind and direction — a teammate's retract of an item you received is one such row — so the count is a reason to look, not a description of what happened.
 
-- **How to clear it.** Open the log unfiltered: `Ctrl+X, L` or `/team log` in the standalone TUI; `/team log` in a daemon-attached client (there `Ctrl+X` is the leader menu and has no log panel; the command palette's retract entry retracts this host's automatic sends only, and a read-only attach may still read the log). The reminder clears only once the view is actually drawn on screen. A filtered command (`--filter=…`), a panel with an active search, a failed read, a result scrolled off screen, a panel export, an unrelated key, a restart, or the offline `rustain team log` command never clears it. `--json` and `--export` clear it like the plain view, because the rows were shown — whether or not the export file was written.
-- **What clearing means.** It records that this client *presented* that snapshot. It is a local visit reminder: ⛔ not `/team ack`, not `/team remove`, not `/team retract`, not an acknowledgement or a receipt to anyone, and not proof that you read a row. The in-chat `/team log` shows at most 20 rows and says so; presenting it clears the reminder for the whole snapshot it read, while the older rows remain in `rustain team log` and the panel. Clearing does not mean those older rows were read.
+- **How to clear it.** `/team log` opens the scrollable `A2A log` window in either host; attached `Ctrl+X l` opens the same window, while standalone `Ctrl+X l` retains its transparency panel. The window has no 20-row cut, supports `/` filtering and is available to read-only attachments. The reminder clears only after an unfiltered log has actually painted on top with at least one body row in a completed draw. A filtered command (`--filter=…`), a failed read, a window closed, replaced or covered before that draw, an unrelated key, a restart, or the offline `rustain team log` command never clears it. An unfiltered `--json` or `--export` visit follows the same present rule.
+- **What clearing means.** It records that this client *presented* that snapshot. It is a local visit reminder: ⛔ not `/team ack`, not `/team remove`, not `/team retract`, not an acknowledgement or a receipt to anyone, and not proof that you read every row.
 - **What it counts.** Rows newer than the durable boundary your last presented visit recorded; rows that arrive after a view was read stay counted until the next visit. On first use every existing row counts. The boundary lives in `.rustain/transparency-seen.json`, is shared by the standalone and attached clients of this workspace, survives restarts, and is never written by polling.
 - **`log: ?`** means the reminder cannot currently be trusted — the journal or the preference could not be read, a visit could not be saved, or the journal's head fell below the saved boundary (a reset, which the client confirms and then counts from zero). It is never shown as an apparently current zero; open the log for details.
 

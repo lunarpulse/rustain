@@ -479,8 +479,55 @@ async fn settle(sender: &mut Sender, state: &mut TuiState, expected: usize) {
             &conversation_id,
             &block_id,
             index,
+            outcome.clone(),
+        );
+        let notices: Vec<_> = state
+            .notifications
+            .records()
+            .map(|notice| (notice.id, notice.count))
+            .collect();
+        team_send_settled(
+            "conv",
+            state,
+            &mut tabs,
+            &conversation_id,
+            &block_id,
+            index,
             outcome,
         );
+        assert_eq!(
+            state
+                .notifications
+                .records()
+                .map(|notice| (notice.id, notice.count))
+                .collect::<Vec<_>>(),
+            notices,
+            "settling the same row twice adds no notice or coalesced occurrence"
+        );
+    }
+}
+
+fn assert_unreachable_notices(state: &TuiState) {
+    use rustain::adapters::tui::notifications::NoticeSeverity;
+    for (cause, message) in [
+        (
+            "no credential for f: set the env var named in its auth field",
+            "f unreachable: no credential for f: set the env var named in its auth field",
+        ),
+        (
+            "peer `g` is configured but its AgentCard is not cached",
+            "g unreachable: peer `g` is configured but its AgentCard is not cached — discovery runs once at startup and may still be in flight, or the peer was unreachable when this session started. If it stays refused, restart the daemon with the peer up; on-demand discovery is `DF-18-9-CARD-REFRESH`.",
+        ),
+    ] {
+        let notices: Vec<_> = state
+            .notifications
+            .records()
+            .filter(|n| n.message.contains(cause))
+            .collect();
+        assert_eq!(notices.len(), 1, "{cause}");
+        assert_eq!(notices[0].message, message);
+        assert_eq!(notices[0].severity, NoticeSeverity::Warning);
+        assert_eq!(notices[0].count, 1, "{cause}");
     }
 }
 
@@ -661,18 +708,9 @@ async fn first_answers_render_per_recipient_and_waiting_tasks_remain_owned_by_re
     assert_eq!(block.level, FeedbackLevel::Info);
     assert_eq!(
         block.message,
-        concat!(
-            "  ● a  delivered\n",
-            "  ✗ b  declined\n",
-            "    c  awaiting their approval\n",
-            "  ● d  delivered\n",
-            "  ⚠ f  unreachable\n",
-            "    no credential for f: set the env var named in its auth field\n",
-            "  ⚠ g  unreachable\n",
-            "    peer `g` is configured but its AgentCard is not cached — discovery runs once at startup and may still be in flight, or the peer was unreachable when this session started. If it stays refused, restart the daemon with the peer up; on-demand discovery is `DF-18-9-CARD-REFRESH`.\n",
-            "    h  no usable answer — '/team board' shows whether it arrived"
-        )
+        "Send · ● a delivered · ✗ b declined · c awaiting their approval · ● d delivered · ⚠ f unreachable · ⚠ g unreachable · h no usable answer — '/team board' shows whether it arrived"
     );
+    assert_unreachable_notices(&state);
     assert!(!block.message.contains("cancelled"));
     assert!(!block.message.contains("7/"));
 
@@ -818,7 +856,7 @@ async fn concurrent_real_hosts_settle_rows_in_operator_order_after_pre_render() 
         .get(TEAM_SEND_BLOCK_ID)
         .expect("block pre-rendered before IO");
     assert_eq!(pending.level, FeedbackLevel::Info);
-    assert_eq!(pending.message, "    a  sending…\n    b  sending…");
+    assert_eq!(pending.message, "Send · a sending… · b sending…");
     assert_eq!(
         state.feedback_blocks.len(),
         1,
@@ -845,7 +883,7 @@ async fn concurrent_real_hosts_settle_rows_in_operator_order_after_pre_render() 
             .get(TEAM_SEND_BLOCK_ID)
             .unwrap()
             .message,
-        "    a  sending…\n  ● b  delivered"
+        "Send · a sending… · ● b delivered"
     );
     a_release.notify_one();
     settle(&mut sender, &mut state, 1).await;
@@ -855,7 +893,7 @@ async fn concurrent_real_hosts_settle_rows_in_operator_order_after_pre_render() 
             .get(TEAM_SEND_BLOCK_ID)
             .unwrap()
             .message,
-        "  ● a  delivered\n  ● b  delivered"
+        "Send · ● a delivered · ● b delivered"
     );
     assert_eq!(
         state.feedback_blocks.len(),
@@ -927,7 +965,7 @@ async fn a_cancelled_session_publishes_no_late_send_settlement() {
     );
     assert_eq!(
         state.feedback_blocks[TEAM_SEND_BLOCK_ID].message,
-        "    a  sending…"
+        "Send · a sending…"
     );
     recipient.stop().await;
 }
@@ -950,7 +988,7 @@ async fn a_closed_real_host_is_attempted_once_and_a_new_action_is_distinct() {
             .get(TEAM_SEND_BLOCK_ID)
             .unwrap()
             .message,
-        "  ⚠ e  unreachable"
+        "Send · ⚠ e unreachable"
     );
     let first = room_events(&sender.journal).await;
     assert_eq!(send_rows(&first).len(), 1);
@@ -995,12 +1033,10 @@ async fn per_recipient_journals_follow_the_iff_rule_and_dispatch_failure_fails_c
         .get(TEAM_SEND_BLOCK_ID)
         .unwrap()
         .message;
-    assert!(rendered.contains("  ● a  delivered"));
-    assert!(rendered.contains(
-        "  ⚠ f  unreachable\n    no credential for f: set the env var named in its auth field"
-    ));
-    assert!(rendered.contains("  ⚠ g  unreachable"));
-    assert!(rendered.contains("peer `g` is configured but its AgentCard is not cached"));
+    assert!(rendered.contains("● a delivered"));
+    assert!(rendered.contains("⚠ f unreachable"));
+    assert!(rendered.contains("⚠ g unreachable"));
+    assert_unreachable_notices(&state);
     let rows = room_events(&sender.journal).await;
     let dispatches = send_rows(&rows);
     assert_eq!(
@@ -1036,7 +1072,7 @@ async fn per_recipient_journals_follow_the_iff_rule_and_dispatch_failure_fails_c
             .get(TEAM_SEND_BLOCK_ID)
             .unwrap()
             .message,
-        "    a  not sent — this host could not record the attempt"
+        "Send · a not sent — this host could not record the attempt"
     );
     assert_eq!(
         received_tasks(&room_events(&a.journal).await).len(),

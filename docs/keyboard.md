@@ -701,6 +701,7 @@ Also inherits: Markdown body.
 | `2` | Leave the second retrospective field out of what is shared, or put it back | attached | portable |  |
 | `3` | Leave the third retrospective field out of what is shared, or put it back | attached | portable |  |
 | `u` | Use the opened item as peer context for this conversation, or stop using it | attached | portable |  |
+| `x` | Retract the item you sent, or your newest auto-sent reply to this item (asks to confirm first) | local, attached | portable |  |
 
 ## Thread reply field
 

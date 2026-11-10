@@ -177,12 +177,13 @@ pub enum AppEvent {
     /// Tuples contain resolved peer identity, roster alias, item ID and reply count.
     #[cfg(feature = "a2a")]
     TeamBoardObserved(Vec<(String, String, String, u64)>),
-    /// Story 19.18 `AC6` — a `/team thread` read finished: replace the issuing
-    /// tab's stable `team-thread` block in place (even when that tab is
-    /// inactive). A view event, like `TeamBoardReady` — ⛔ never a
+    /// Story 19.18 `AC6` — a `/team thread` read finished: fill the thread window that issued
+    /// it (21-8 A12), keyed by the issuing conversation and the read generation (a stale,
+    /// closed or retargeted frame drops it). A view event, like `TeamBoardReady` — ⛔ never a
     /// `SystemNotice`, never a model turn. Produced only by the rail-3 spawn.
     TeamThreadReady {
         conversation_id: ConversationId,
+        generation: u64,
         message: String,
     },
     /// Story 19.17: one independently settled row in a rail-three send block.

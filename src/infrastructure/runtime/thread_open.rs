@@ -217,3 +217,107 @@ pub async fn navigate(
     }
     result
 }
+
+/// Open (or retarget) the one thread frame on the sent thread of `item` on `peer`, in its
+/// loading state, and mint the read generation the caller must issue the read with. The mode
+/// and the filter of the same target survive a reopen; a newer generation voids every read
+/// still in flight.
+pub fn open_sent(
+    state: &mut TuiState,
+    access: ThreadAccess,
+    peer: &str,
+    item: &str,
+    origin: &str,
+) -> u64 {
+    use crate::adapters::tui::state::SentThread;
+    state.thread_read_generation += 1;
+    let generation = state.thread_read_generation;
+    let same = state.thread_inspector.take_if(|old| {
+        matches!(&old.target, ThreadTarget::Sent { peer: p, item: i } if p == peer && i == item)
+    });
+    let mut inspector = ThreadInspectorState::new(
+        ThreadTarget::Sent {
+            peer: peer.to_owned(),
+            item: item.to_owned(),
+        },
+        access,
+        crate::domain::models::SemanticMessageType::Unknown,
+    );
+    if let Some(old) = same {
+        inspector.mode = old.mode;
+        inspector.search = old.search;
+    }
+    inspector.sent = Some(SentThread {
+        generation,
+        origin: origin.to_owned(),
+        loading: true,
+        mine: false,
+        retracted: false,
+    });
+    inspector.content =
+        crate::adapters::tui::handlers::team_command::TEAM_THREAD_READING.to_owned();
+    inspector.segments = vec![crate::adapters::tui::thread_body::ThreadSegment::Text(
+        inspector.content.clone(),
+    )];
+    reducer::open_thread(state, inspector, thread_inspector::sent_title(peer));
+    generation
+}
+
+/// Apply a completed sent-thread read (`message` is the sender-side projection or a refusal
+/// sentence) to the frame that issued it. A completion applies only if the frame is open on a
+/// sent thread, was issued from `origin` and carries exactly this `generation`; anything
+/// else (closed, retargeted, another origin, an older read) is dropped, never reopens a frame
+/// and never paints a Stage row. Returns whether it applied.
+pub fn fill_sent(state: &mut TuiState, origin: &str, generation: u64, message: &str) -> bool {
+    let Some(inspector) = state.thread_inspector.as_mut() else {
+        return false;
+    };
+    let ThreadTarget::Sent { item, .. } = &inspector.target else {
+        return false;
+    };
+    let Some(sent) = inspector
+        .sent
+        .as_mut()
+        .filter(|sent| sent.generation == generation && sent.origin == origin)
+    else {
+        return false;
+    };
+    let page = crate::adapters::tui::thread_body::sent_page(message, item);
+    sent.loading = false;
+    sent.mine = page.mine;
+    sent.retracted = page.retracted;
+    inspector.content = page.content;
+    inspector.segments = page.segments;
+    inspector.turns = page.turns;
+    inspector.invalidate();
+    state.needs_redraw = true;
+    true
+}
+
+/// Open (or retarget) the one thread frame on the A2A log: one filterable turn per row, the
+/// closing claim kept under every filter.
+pub fn open_log(state: &mut TuiState, filtered: bool, blocks: &[String]) {
+    let same = state
+        .thread_inspector
+        .take_if(|old| matches!(old.target, ThreadTarget::Log { .. }));
+    let mut inspector = ThreadInspectorState::new(
+        ThreadTarget::Log { filtered },
+        ThreadAccess::ReadOnly,
+        crate::domain::models::SemanticMessageType::Unknown,
+    );
+    if let Some(old) = same {
+        inspector.mode = old.mode;
+        inspector.search = old.search;
+    }
+    // The display escape contract applies once at this boundary (journal and export bytes stay
+    // as they are): control and bidi characters of peer-derived scalars are visible escapes.
+    let escaped: Vec<String> = blocks
+        .iter()
+        .map(|block| super::recipient_view::escape_disclosable(block))
+        .collect();
+    let (content, segments, turns) = crate::adapters::tui::thread_body::block_page(&escaped, true);
+    inspector.content = content;
+    inspector.segments = segments;
+    inspector.turns = turns;
+    reducer::open_thread(state, inspector, thread_inspector::log_title(filtered));
+}

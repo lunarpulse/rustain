@@ -239,7 +239,7 @@ async fn k09_architecture_update_fanout_keeps_allowed_and_refused_recipients_ind
     let (mixed_state, mixed_block) =
         send_architecture_update(&mut sender, "allowed,denied", mixed_body).await;
     let mixed_outcomes = &mixed_state.feedback_blocks[&mixed_block].message;
-    let mixed_rows: Vec<_> = mixed_outcomes.lines().collect();
+    let mixed_rows: Vec<_> = mixed_outcomes.split(" · ").skip(2).collect();
     assert!(
         mixed_rows
             .iter()
@@ -282,7 +282,7 @@ async fn k09_architecture_update_fanout_keeps_allowed_and_refused_recipients_ind
     let (both_state, both_block) =
         send_architecture_update(&mut both_sender, "allowed,second", both_body).await;
     let both_outcomes = &both_state.feedback_blocks[&both_block].message;
-    let both_rows: Vec<_> = both_outcomes.lines().collect();
+    let both_rows: Vec<_> = both_outcomes.split(" · ").skip(2).collect();
     assert_eq!(both_rows.len(), 2, "{both_outcomes}");
     assert_eq!(
         both_rows

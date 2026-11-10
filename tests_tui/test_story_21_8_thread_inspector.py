@@ -558,6 +558,106 @@ def scene_env(stub, tmp_path) -> dict[str, str]:
     return stub.env("scene-ci", home)
 
 
+# ── Leg C: sender refusal and the transparency log ────────────────────────────
+
+def _c_frame(screen: str, filtered: bool = False) -> list[str]:
+    """Extract a complete log frame, rejecting partial title, sides or bottom."""
+    title = "A2A log · filtered" if filtered else "A2A log"
+    pattern = re.compile(r"┌[─ ]*" + re.escape(title) + r"[─ ]*┐")
+    rows = screen.split("\n")
+    for index, row in enumerate(rows):
+        found = pattern.search(row)
+        if found:
+            left, right = found.start(), found.end() - 1
+            break
+    else:
+        raise AssertionError("missing or torn log title")
+    inner = []
+    for row in rows[index + 1:]:
+        if len(row) > right and row[left] == "└" and row[right] == "┘":
+            return inner
+        assert len(row) > right and row[left] == "│" and row[right] == "│", "torn log side"
+        inner.append(row[left + 1:right].rstrip())
+    raise AssertionError("missing log bottom")
+
+
+def _c_log_ready(screen: str, *, filtered: bool = False, reminder: bool = False) -> bool:
+    try:
+        inner = _c_frame(screen, filtered)
+        status = harness.status_row(screen)
+        assert status and bool(re.search(r"\blog: \d+\+?", status)) == reminder
+        assert any(re.fullmatch(r"\s*(?:▶ )?.*\S.*", row) for row in inner)
+        assert "showing the 20 most recent" not in screen
+        return True
+    except AssertionError:
+        return False
+
+
+def _c_timestamp(index: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(1_700_000_000 + index, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def _c_row_visible(inner: list[str], index: int) -> bool:
+    # Match an entire painted line, not a substring elsewhere on the screen.
+    pattern = r"\s*(?:▶ )?" + re.escape(_c_timestamp(index)) + r" .*\S\s*"
+    return any(re.fullmatch(pattern, row) for row in inner)
+
+
+def _c_warning(screen: str) -> bool:
+    return any(
+        re.fullmatch(r".*\bWarning\b.*needs the.*a2a.*feature.*", row)
+        for row in harness.toast_rows(screen)
+    )
+
+
+def _c_synthetic(cols: int, rows: int, *, filtered: bool = False, reminder: bool = False) -> str:
+    title = " A2A log · filtered " if filtered else " A2A log "
+    width = cols - 2
+    inner = [f"  {_c_timestamp(0)} ↑ outbound ✗ refused",
+             "  — append-only, crash-safe"]
+    inner += [""] * (rows - 7 - len(inner))
+    return "\n".join([
+        "┌─" + title + "─" * (width - 1 - len(title)) + "┐",
+        *["│" + row.ljust(width) + "│" for row in inner],
+        "└" + "─" * width + "┘",
+        "".ljust(cols),
+        ("Ready │ model-x" + (" log: 25" if reminder else "")).ljust(cols),
+        "┌" + "─" * width + "┐",
+        "│" + " " * width + "│",
+        "└" + "─" * width + "┘",
+    ])
+
+
+@pytest.mark.parametrize("cols,rows", SYNTH_SIZES, ids=[f"{c}x{r}" for c, r in SYNTH_SIZES])
+def test_leg_c_desk_log_frames_and_reminder(cols, rows):
+    unfiltered = _c_synthetic(cols, rows)
+    assert _c_log_ready(unfiltered)
+    assert _c_row_visible(_c_frame(unfiltered), 0)
+    assert not _c_log_ready(unfiltered, reminder=True)
+    assert not _c_log_ready(_cut_row(unfiltered, 1))
+    assert not _c_log_ready(_cut_row(unfiltered, rows - 6))
+    filtered = _c_synthetic(cols, rows, filtered=True, reminder=True)
+    assert _c_log_ready(filtered, filtered=True, reminder=True)
+    assert not _c_log_ready(filtered, filtered=True)
+    assert not _c_log_ready(_cut_row(filtered, 0), filtered=True, reminder=True)
+    assert not _c_log_ready(filtered.replace("A2A log · filtered", "A2A log · filtere "),
+                            filtered=True, reminder=True)
+    assert not _c_row_visible(_c_frame(unfiltered), 1)
+
+
+@pytest.mark.parametrize("cols,rows", SYNTH_SIZES, ids=[f"{c}x{r}" for c, r in SYNTH_SIZES])
+def test_leg_c_desk_warning_and_stage(cols, rows):
+    base = synth_screen(cols, rows, frame=False)
+    warning = synth_screen(cols, rows, frame=False,
+                           toast="Warning needs the `a2a` feature")
+    assert _c_warning(warning) and stage_rows(warning) == stage_rows(base)
+    assert not _c_warning(base)
+    assert not _c_warning(warning.replace("feature", "featur "))
+    assert not _c_warning(warning.replace("Warning", "Info   "))
+
+
 # ── Live legs ────────────────────────────────────────────────────────────────
 
 
@@ -951,3 +1051,105 @@ def test_leg_b(tmp_path, stub, scene_env, monkeypatch):
             _settle(tui, thread_closed, "leave thread")
             _save_final(tui, "filter-client")
     assert _turn_rows(stub) == [], "viewing never reaches the model"
+
+
+def _c_seed_log(workspace: Path, env: dict[str, str]) -> None:
+    """Create a real writer journal, then append 25 fixture-shaped rows under its lock."""
+    journal = _create_journal_with_the_writer(workspace, env)
+    lock = os.open(journal.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lines = [line for line in journal.read_text().splitlines() if line.strip()]
+        seq = json.loads(lines[-1])["seq"] + 1 if lines else 1
+        with open(journal, "a", encoding="utf-8") as out:
+            for index in range(25):
+                entry = {
+                    "schema_version": 1, "seq": seq + index,
+                    "recorded_at_ms": 1_700_000_000_000 + index * 1000,
+                    "record": {"kind": "room", "payload": {
+                        "event": "remote_envelope_rejected", "peer": PEER,
+                        "reason": {"reason": "policy", "detail": f"smoke {index:02d}"},
+                        "direction": "inbound", "task": f"smoke-{index:02d}",
+                    }},
+                }
+                out.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+    finally:
+        os.close(lock)
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_c(tmp_path, stub, scene_env, monkeypatch):
+    from contextlib import ExitStack
+
+    _small_terminal(monkeypatch)
+    _begin_leg("test_leg_c")
+    with ExitStack() as stack:
+        def launch(name, workspace):
+            tui = stack.enter_context(RustainTUI(fresh=True, build=False, workspace=workspace,
+                                                env_overrides=scene_env))
+            evidence = _evidence_dir()
+            if evidence is not None:
+                terminal = stack.enter_context((evidence / f"test_leg_c-{name}-terminal.txt").open("w"))
+                tui.child.logfile_read = terminal
+                stack.callback(setattr, tui.child, "logfile_read", None)
+            return tui
+
+        workspace = tmp_path / "refusal"
+        workspace.mkdir()
+        tui = launch("refusal", workspace)
+        base = _settle(tui, lambda s: composer_top(screen_rows(s)) is not None and "Ready" in s,
+                       "idle Stage before unavailable thread")
+        def calm(rows):
+            # Toasts sit on Stage rows (21-8 smoke lesson): compare the Stage without them.
+            return ["" if re.match(r"\s+(Warning|Info|Error) ", row) else row for row in rows]
+
+        base_stage = calm(stage_rows(base))
+        _type_and_run(tui, "/team thread nobody ri_x")
+        warning = _settle(tui, _c_warning, "A2A feature Warning")
+        assert calm(stage_rows(warning)) == base_stage
+        assert not any(re.search(r"┌[─ ]*Thread · sent", row) for row in screen_rows(warning))
+        _save_final(tui, "refusal-client")
+
+        workspace = tmp_path / "log"
+        workspace.mkdir()
+        _c_seed_log(workspace, scene_env)
+        log = launch("log", workspace)
+        _settle(log, lambda s: bool(re.search(r"\blog: 25\b", harness.status_row(s))),
+                "25 unseen transparency rows")
+        _type_and_run(log, "/team log")
+        top = _settle(log, lambda s: _c_log_ready(s) and _c_row_visible(_c_frame(s), 0),
+                      "unfiltered log presented with oldest row")
+        seen = {i for i in range(25) if _c_row_visible(_c_frame(top), i)}
+        screen = top
+        for _ in range(250):
+            if len(seen) == 25:
+                break
+            old = screen
+            log.send("j")
+            screen = _settle(log, lambda s: s != old and _c_log_ready(s), "scroll log rows")
+            seen.update(i for i in range(25) if _c_row_visible(_c_frame(screen), i))
+        assert seen == set(range(25)), f"unreachable log rows: {set(range(25)) - seen}"
+        log.send("G")
+        end = _settle(log, lambda s: _c_log_ready(s) and _c_row_visible(_c_frame(s), 24)
+                      and any(re.fullmatch(r"\s*(?:▶ )?.*append-only.*", r) for r in _c_frame(s)),
+                      "last log row and append-only claim")
+        assert "showing the 20 most recent" not in end
+        log.send(ESC)
+        _settle(log, lambda s: "A2A log" not in s and composer_top(screen_rows(s)) is not None,
+                "log closed")
+        _save_final(log, "log-client")
+
+        workspace = tmp_path / "filtered"
+        workspace.mkdir()
+        _c_seed_log(workspace, scene_env)
+        filtered = launch("filtered", workspace)
+        _settle(filtered, lambda s: bool(re.search(r"\blog: 25\b", harness.status_row(s))),
+                "fresh unseen transparency rows")
+        _type_and_run(filtered, "/team log --filter=kind=topic-received")
+        _settle(filtered, lambda s: _c_log_ready(s, filtered=True, reminder=True),
+                "filtered log keeps reminder")
+        _save_final(filtered, "filtered-client")
+    assert _turn_rows(stub) == [], "thread and log reads never reach the model"

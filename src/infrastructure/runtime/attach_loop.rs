@@ -326,7 +326,7 @@ fn system_message(content: impl Into<String>) -> ChatMessage {
 /// Unretracted automatic responses supported by the daemon, newest first.
 /// Diagnostic/tool-evidence rows have no response identity, and pending response
 /// controls remain ineligible even when an edited draft is agent-composed.
-fn retractable_rows(conversation: &Conversation) -> impl Iterator<Item = &ChatMessage> {
+pub(crate) fn retractable_rows(conversation: &Conversation) -> impl Iterator<Item = &ChatMessage> {
     conversation.messages.iter().rev().filter(move |message| {
         message.send_authorization == crate::domain::models::SendAuthorization::Automatic
             && message.retracted_at_ms.is_none()
@@ -833,6 +833,10 @@ enum AttachedTeamRequest {
     Thread {
         next_sequence: u32,
         view: String,
+        /// The read this request fills (`thread_open::open_sent`): its generation, and the
+        /// request id as the origin the window was opened for.
+        generation: u64,
+        origin: String,
     },
     RetractPreview,
     Retract {
@@ -852,6 +856,8 @@ pub(in crate::infrastructure::runtime) struct AttachedTeamRequests {
     latest_board: Option<String>,
     latest_thread: Option<String>,
     open_retract: Option<String>,
+    /// The attached client is an observer: its sent-thread windows are read-only.
+    read_only: bool,
 }
 
 impl AttachedTeamRequests {
@@ -1046,16 +1052,14 @@ fn attached_composer_key_with_team_requests(
     ComposerOutcome::Handled
 }
 
-/// Story 19.16g — after the attached draw: only a frame that actually
-/// completed presents the `team-log` block it painted into the chat viewport.
-/// A failed draw, or a layout too small to paint the chat, presents nothing.
-fn after_attached_draw(
-    state: &mut TuiState,
-    drawn: bool,
-    visible_feedback_rows: &[(String, std::ops::Range<u16>)],
-) {
+/// Story 19.16g — after the attached draw: only a frame that actually completed presents
+/// the `/team log` window it painted. A failed draw, or a layout too small to paint, presents
+/// nothing.
+fn after_attached_draw(state: &mut TuiState, drawn: bool) {
     if drawn {
-        state.log_visits_presented(visible_feedback_rows.iter().map(|(id, _)| id.as_str()));
+        state.log_visits_presented();
+    } else {
+        state.restore_unflushed_log_visits();
     }
 }
 
@@ -1065,7 +1069,7 @@ fn begin_attached_team_send(
     message_type: crate::domain::models::SemanticMessageType,
 ) -> AttachedTeamRequest {
     use crate::adapters::tui::handlers::team_command::{
-        TeamSendRow, render_team_send_rows, show_team_send,
+        TeamSendRow, render_team_send_summary, show_team_send,
     };
     state.team_send_next_id += 1;
     let block_id = format!("team-send-{}", state.team_send_next_id);
@@ -1077,7 +1081,7 @@ fn begin_attached_team_send(
             message_type,
         })
         .collect();
-    show_team_send(state, &block_id, render_team_send_rows(&rows));
+    show_team_send(state, &block_id, render_team_send_summary(&rows));
     state.team_send_blocks.insert(block_id.clone(), rows);
     AttachedTeamRequest::Send {
         block_id,
@@ -1298,20 +1302,28 @@ fn enqueue_attached_team_frame(
                 crate::domain::models::SemanticMessageType::Unknown,
             ),
         ),
-        ClientFrame::TeamThread { request, .. } => {
+        ClientFrame::TeamThread {
+            request,
+            peer,
+            item_id,
+        } => {
             requests
                 .pending
                 .retain(|_, pending| !matches!(pending, AttachedTeamRequest::Thread { .. }));
             requests.latest_thread = Some(request.clone());
-            crate::adapters::tui::handlers::team_command::show_team_thread(
-                state,
-                crate::adapters::tui::handlers::team_command::TEAM_THREAD_READING.to_owned(),
-            );
+            let access = if requests.read_only {
+                crate::adapters::tui::state::ThreadAccess::ReadOnly
+            } else {
+                crate::adapters::tui::state::ThreadAccess::Writer
+            };
+            let generation = super::thread_open::open_sent(state, access, peer, item_id, request);
             (
                 request.clone(),
                 AttachedTeamRequest::Thread {
                     next_sequence: 0,
                     view: String::new(),
+                    generation,
+                    origin: request.clone(),
                 },
             )
         }
@@ -1374,8 +1386,10 @@ fn paint_team_request_failure(state: &mut TuiState, pending: AttachedTeamRequest
             show_team_send(state, &block_id, text);
         }
         AttachedTeamRequest::Board { .. } => show_team_board(state, text),
-        AttachedTeamRequest::Thread { .. } => {
-            crate::adapters::tui::handlers::team_command::show_team_thread(state, text)
+        AttachedTeamRequest::Thread {
+            generation, origin, ..
+        } => {
+            super::thread_open::fill_sent(state, &origin, generation, &text);
         }
         AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. } => {
             crate::adapters::tui::handlers::team_command::show_team_retract(state, text)
@@ -1392,7 +1406,7 @@ fn apply_attached_team_frame(
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
 ) -> bool {
     use crate::adapters::tui::handlers::team_command::{
-        render_team_send_rows, show_team_board, show_team_send, show_team_status,
+        render_team_send_summary, show_team_board, show_team_send, show_team_status,
     };
     match frame {
         DaemonFrame::TeamSendStarted {
@@ -1431,7 +1445,7 @@ fn apply_attached_team_frame(
             let message = state
                 .team_send_blocks
                 .get(block_id)
-                .map(|rows| render_team_send_rows(rows));
+                .map(|rows| render_team_send_summary(rows));
             if let Some(message) = message {
                 show_team_send(state, block_id, message);
             }
@@ -1456,7 +1470,14 @@ fn apply_attached_team_frame(
                 index,
                 outcome.into(),
             );
-            if !settled {
+            let landed = settled.as_ref().is_some_and(|settled| settled.redraw);
+            if let Some(settled) = settled {
+                crate::infrastructure::runtime::transparency_bridge::post_send_notices(
+                    state,
+                    settled.notices,
+                );
+            }
+            if !landed {
                 // Story 19.23: a selected send has no rows until its start
                 // frame names them. `NotSent` before any start means the daemon
                 // could not record the action and sent nothing; say so and
@@ -1522,6 +1543,7 @@ fn apply_attached_team_frame(
                 | AttachedTeamRequest::Thread {
                     next_sequence,
                     view,
+                    ..
                 }
                 | AttachedTeamRequest::Retract {
                     next_sequence,
@@ -1564,10 +1586,12 @@ fn apply_attached_team_frame(
                 AttachedTeamRequest::Thread {
                     next_sequence,
                     view,
+                    generation,
+                    origin,
                 } if chunks == next_sequence
                     && requests.latest_thread.as_deref() == Some(request.as_str()) =>
                 {
-                    crate::adapters::tui::handlers::team_command::show_team_thread(state, view)
+                    super::thread_open::fill_sent(state, &origin, generation, &view);
                 }
                 AttachedTeamRequest::Retract {
                     next_sequence,
@@ -1793,9 +1817,11 @@ fn apply_attached_team_refusal(
                 crate::adapters::tui::handlers::team_command::show_team_board(state, message);
             }
         }
-        AttachedTeamRequest::Thread { .. } => {
+        AttachedTeamRequest::Thread {
+            generation, origin, ..
+        } => {
             if requests.latest_thread.as_deref() == Some(request.as_str()) {
-                crate::adapters::tui::handlers::team_command::show_team_thread(state, message);
+                super::thread_open::fill_sent(state, &origin, generation, &message);
             }
         }
         AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. } => {
@@ -1961,7 +1987,7 @@ fn paint_attached(
     if let Some(facts) = tab_render_state.launchpad.as_mut() {
         facts.terminal_width = state.terminal_width;
     }
-    let mut result = chat_pane::render_attached(
+    let result = chat_pane::render_attached(
         f,
         transcript_area,
         conversation,
@@ -2048,9 +2074,6 @@ fn paint_attached(
     if decision_painted {
         crate::adapters::tui::decision_queue::note_painted(state);
     }
-    result
-        .visible_feedback_rows
-        .retain(|(_, rows)| opaque.presented(rows));
     state.total_content_height = result.total_content_height;
     state.scroll_snapshot = view.scroll_offset;
     state.auto_snapshot = matches!(view.mode, crate::domain::models::AnchorMode::Following);
@@ -2126,7 +2149,10 @@ pub async fn run_attached(
     let mut lifecycle =
         crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
     let mut approval_assemblies = HashMap::new();
-    let mut attached_team_requests = AttachedTeamRequests::default();
+    let mut attached_team_requests = AttachedTeamRequests {
+        read_only,
+        ..Default::default()
+    };
     let mut attached_interrupt =
         crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(read_only);
     let mut attached_chrome = attach_keys::AttachedChrome::new();
@@ -2216,8 +2242,8 @@ pub async fn run_attached(
                 &attach_info,
             );
         });
-        if let Some(result) = rendered {
-            after_attached_draw(&mut state, drawn.is_ok(), &result.visible_feedback_rows);
+        if rendered.is_some() {
+            after_attached_draw(&mut state, drawn.is_ok());
         }
 
         tokio::select! {
@@ -2278,6 +2304,8 @@ pub async fn run_attached(
                                         .is_some_and(|control| control.item_address.as_ref() == Some(address)),
                                     crate::adapters::tui::state::ThreadTarget::Node(node) => control
                                         .is_some_and(|control| &control.node_id == node),
+                                    crate::adapters::tui::state::ThreadTarget::Sent { .. }
+                                    | crate::adapters::tui::state::ThreadTarget::Log { .. } => false,
                                 }
                             });
                             if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
@@ -2457,6 +2485,557 @@ mod tests {
             .join("\n")
     }
 
+    #[tokio::test]
+    async fn story21_8_attached_sent_thread_completion_refusal_and_lifetime() {
+        use crate::adapters::daemon::protocol::{
+            ProtocolError, RecipientAction, RecipientActionOutcome,
+        };
+        use crate::adapters::tui::keymap::Key;
+        use crate::adapters::tui::state::{ThreadAccess, ThreadTarget};
+        for read_only in [false, true] {
+            let mut rig = attach_keys::tests::Rig::new(read_only);
+            rig.team_requests.read_only = read_only;
+            let open = |rig: &mut attach_keys::tests::Rig, request: &str| {
+                assert!(enqueue_attached_team_frame(
+                    &mut rig.state,
+                    &mut rig.team_requests,
+                    ClientFrame::TeamThread {
+                        request: request.into(),
+                        peer: "B".into(),
+                        item_id: "ri_a".into()
+                    },
+                    &rig.tx,
+                ));
+                assert!(
+                    matches!(rig.frames().as_slice(), [ClientFrame::TeamThread { request: id, .. }] if id == request)
+                );
+            };
+            let finish = |rig: &mut attach_keys::tests::Rig, request: &str, text: &str| {
+                for frame in [
+                    DaemonFrame::TeamViewChunk {
+                        request: request.into(),
+                        sequence: 0,
+                        view: text.into(),
+                    },
+                    DaemonFrame::TeamViewDone {
+                        request: request.into(),
+                        chunks: 1,
+                    },
+                ] {
+                    apply_attached_team_frame(
+                        &mut rig.state,
+                        &mut rig.team_requests,
+                        frame,
+                        false,
+                        &rig.tx,
+                    );
+                }
+            };
+            open(&mut rig, "first");
+            let thread = rig.state.thread_inspector.as_ref().unwrap();
+            assert!(
+                matches!(&thread.target, ThreadTarget::Sent { peer, item } if peer == "B" && item == "ri_a")
+            );
+            assert_eq!(
+                thread.access,
+                if read_only {
+                    ThreadAccess::ReadOnly
+                } else {
+                    ThreadAccess::Writer
+                }
+            );
+            assert!(thread.sent.as_ref().unwrap().loading);
+            let loading = attached_screen(&rig.paint());
+            assert!(
+                loading.contains("Thread · sent · B") && loading.contains("reading…"),
+                "{loading}"
+            );
+            finish(
+                &mut rig,
+                "first",
+                "Credential: verified.\n  3 earlier turns not shown — the full thread is on B\n  you  ri_a\n      hello \u{1b}red\u{202e} tail",
+            );
+            let painted = attached_screen(&rig.paint());
+            for text in [
+                "Credential: verified.",
+                "3 earlier turns not shown",
+                "you",
+                "tail",
+                "\\u{202e}",
+            ] {
+                assert!(painted.contains(text), "{text}: {painted}");
+            }
+            assert!(
+                !painted.contains('\u{1b}') && !painted.contains('\u{202e}'),
+                "{painted}"
+            );
+            assert!(
+                !rig.state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .sent
+                    .as_ref()
+                    .unwrap()
+                    .loading
+            );
+            open(&mut rig, "old");
+            open(&mut rig, "new");
+            finish(&mut rig, "old", "stale completion");
+            assert!(attached_screen(&rig.paint()).contains("reading…"));
+            finish(&mut rig, "new", "new completion");
+            assert!(attached_screen(&rig.paint()).contains("new completion"));
+            open(&mut rig, "refusal");
+            apply_attached_team_refusal(
+                &mut rig.state,
+                &mut rig.team_requests,
+                RecipientAction::TeamThread,
+                "refusal".into(),
+                RecipientActionOutcome::Refused {
+                    error: ProtocolError::Internal("not found".into()),
+                },
+            );
+            let refused = attached_screen(&rig.paint());
+            assert!(
+                refused.contains("[daemon error]") && refused.contains("not found"),
+                "{refused}"
+            );
+            open(&mut rig, "closed");
+            rig.key(Key::Esc).await;
+            assert!(rig.state.modal_stack.is_empty());
+            let blocks = rig.state.feedback_blocks.len();
+            finish(&mut rig, "closed", "must not return");
+            assert!(rig.state.modal_stack.is_empty());
+            assert_eq!(rig.state.feedback_blocks.len(), blocks);
+            assert!(!attached_screen(&rig.paint()).contains("must not return"));
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_8_attached_hostile_sent_and_log_display() {
+        use crate::adapters::tui::{keymap::Key, thread_body};
+        use crate::domain::models::{Direction, JournalRecord, PeerId, RejectReason, RoomEvent};
+        use crate::domain::services::transparency::render_export;
+        use crate::infrastructure::runtime::thread_open;
+        use crate::infrastructure::subagent::{NodeJournal, node_journal::WorkspaceJournalReader};
+        use crate::infrastructure::transparency::TransparencyService;
+
+        let mut rig = attach_keys::tests::Rig::new(false);
+        rig.state.terminal_width = 160;
+        rig.state.terminal_height = 40;
+        let base = "thread · ada · ri_open\n  you       ri_open\n      body";
+        for (suffix, mine, retracted, rail) in [
+            ("", true, false, true),
+            (
+                "\n  ada       other\n        you       ri_open  [retracted 99:99]",
+                true,
+                false,
+                true,
+            ),
+            ("\n  ada       ri_open\n      reply", false, false, false),
+            (
+                "\n  ada       ri_open  [retracted 99:99]\n      reply",
+                false,
+                false,
+                false,
+            ),
+            ("\n  you       ri_open\n      reply", false, false, false),
+            (
+                "\n  ada  ri_open       other\n      reply",
+                false,
+                false,
+                false,
+            ),
+        ] {
+            assert!(enqueue_attached_team_frame(
+                &mut rig.state,
+                &mut rig.team_requests,
+                ClientFrame::TeamThread {
+                    request: "sent".into(),
+                    peer: "ada".into(),
+                    item_id: "ri_open".into()
+                },
+                &rig.tx
+            ));
+            assert!(matches!(
+                rig.frames().as_slice(),
+                [ClientFrame::TeamThread { .. }]
+            ));
+            for frame in [
+                DaemonFrame::TeamViewChunk {
+                    request: "sent".into(),
+                    sequence: 0,
+                    view: format!("{base}{suffix}"),
+                },
+                DaemonFrame::TeamViewDone {
+                    request: "sent".into(),
+                    chunks: 1,
+                },
+            ] {
+                apply_attached_team_frame(
+                    &mut rig.state,
+                    &mut rig.team_requests,
+                    frame,
+                    false,
+                    &rig.tx,
+                );
+            }
+            let facts = rig
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .sent
+                .as_ref()
+                .unwrap();
+            assert_eq!((facts.mine, facts.retracted), (mine, retracted), "{suffix}");
+            let screen = attached_screen(&rig.paint());
+            assert_eq!(screen.contains("[x] Retract"), rail, "{suffix}: {screen}");
+        }
+        let generation = thread_open::open_sent(
+            &mut rig.state,
+            crate::adapters::tui::state::ThreadAccess::Writer,
+            "ada",
+            "ri_open",
+            "retracted",
+        );
+        assert!(thread_open::fill_sent(
+            &mut rig.state,
+            "retracted",
+            generation,
+            "thread · ada · ri_open\n  you       ri_open  [retracted 12:34]\n      body"
+        ));
+        assert!(
+            rig.state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .sent
+                .as_ref()
+                .unwrap()
+                .retracted
+        );
+        assert!(!attached_screen(&rig.paint()).contains("[x] Retract"));
+        rig.key(Key::Esc).await;
+
+        let journal = NodeJournal::open_workspace(rig.workspace()).await.unwrap();
+        journal
+            .append_batch(vec![JournalRecord::Room(
+                RoomEvent::RemoteEnvelopeRejected {
+                    rail: None,
+                    peer: PeerId::from_public_key(&[7; 32]).unwrap(),
+                    reason: RejectReason::Policy {
+                        detail: "سلام\u{202e}A\u{2066}B\u{1b}".into(),
+                    },
+                    direction: Direction::Inbound,
+                    task: None,
+                },
+            )])
+            .await
+            .unwrap();
+        let journal_bytes = std::fs::read(journal.path()).unwrap();
+        let service = TransparencyService::new(
+            std::sync::Arc::new(WorkspaceJournalReader::open_workspace(rig.workspace())),
+            rig.workspace().to_path_buf(),
+        );
+        for command in ["/team log", "/team log --json"] {
+            let before = render_export(&service.report().await.unwrap().rows);
+            assert!(before.contains('\u{202e}') && before.contains('\u{2066}'));
+            rig.paste(command).await;
+            rig.key(Key::Enter).await;
+            assert!(rig.frames().is_empty());
+            let inspector = rig.state.thread_inspector.as_ref().unwrap();
+            let lines = thread_body::build(inspector, &rig.state.theme, 150).lines;
+            let spans: String = lines
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+                .collect();
+            for text in ["\\u{202e}", "\\u{2066}", "سلام"] {
+                assert!(spans.contains(text), "{command}: {spans:?}");
+            }
+            assert!(!spans.chars().any(|c| c == '\u{1b}'
+                || ('\u{202a}'..='\u{202e}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c)));
+            let terminal = rig.paint();
+            let screen = attached_screen(&terminal);
+            for text in ["\\u{202e}", "\\u{2066}", "سلام"] {
+                assert!(screen.contains(text), "{command}: {screen}");
+            }
+            assert!(
+                !terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .flat_map(|cell| cell.symbol().chars())
+                    .any(|c| c == '\u{1b}'
+                        || ('\u{202a}'..='\u{202e}').contains(&c)
+                        || ('\u{2066}'..='\u{2069}').contains(&c))
+            );
+            assert_eq!(before, render_export(&service.report().await.unwrap().rows));
+            assert_eq!(journal_bytes, std::fs::read(journal.path()).unwrap());
+            rig.key(Key::Esc).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_8_attached_log_scrolling_filter_and_leader() {
+        use crate::adapters::tui::{keymap::Key, state::ThreadTarget};
+        let mut rig = attach_keys::tests::Rig::new(false);
+        rig.key(Key::Ctrl('x')).await;
+        rig.key(Key::Char('l')).await;
+        assert!(matches!(
+            rig.state.thread_inspector.as_ref().unwrap().target,
+            ThreadTarget::Log { filtered: false }
+        ));
+        assert!(attached_screen(&rig.paint()).contains("A2A log"));
+        rig.key(Key::Esc).await;
+        let workspace = tempfile::tempdir().unwrap();
+        crate::infrastructure::transparency_awareness::test_support::append_rows(
+            workspace.path(),
+            25,
+        )
+        .await;
+        let service = crate::infrastructure::transparency::TransparencyService::new(
+            std::sync::Arc::new(crate::infrastructure::subagent::node_journal::WorkspaceJournalReader::open_workspace(workspace.path())),
+            workspace.path().to_path_buf(),
+        );
+        let args = crate::adapters::tui::handlers::team_command::TeamLogArgs::default();
+        assert!(
+            crate::infrastructure::runtime::transparency_bridge::attached_team_log(
+                &service,
+                &mut rig.state,
+                &args
+            )
+            .await
+            .is_empty()
+        );
+        assert!(rig.state.thread_inspector.as_ref().unwrap().turns.len() >= 25);
+        assert!(
+            !rig.state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .content
+                .contains("showing the 20 most recent")
+        );
+        assert!(rig.state.pending_log_visit.is_some());
+        assert!(attached_screen(&rig.paint()).contains("A2A log"));
+        assert!(rig.state.pending_log_visit.is_none());
+        let json = crate::adapters::tui::handlers::team_command::TeamLogArgs {
+            json: true,
+            ..Default::default()
+        };
+        assert!(
+            crate::infrastructure::runtime::transparency_bridge::attached_team_log(
+                &service,
+                &mut rig.state,
+                &json
+            )
+            .await
+            .is_empty()
+        );
+        assert!(rig.state.pending_log_visit.is_some());
+        assert!(attached_screen(&rig.paint()).contains("A2A log"));
+        assert!(rig.state.pending_log_visit.is_none());
+        let filtered_args = crate::adapters::tui::handlers::team_command::TeamLogArgs {
+            filter: Some("direction=inbound".into()),
+            ..Default::default()
+        };
+        assert!(
+            crate::infrastructure::runtime::transparency_bridge::attached_team_log(
+                &service,
+                &mut rig.state,
+                &filtered_args
+            )
+            .await
+            .is_empty()
+        );
+        assert!(rig.state.pending_log_visit.is_none());
+        assert!(attached_screen(&rig.paint()).contains("A2A log · filtered"));
+        assert!(rig.state.pending_log_visit.is_none());
+        rig.key(Key::Esc).await;
+        rig.state.log_awareness.presented.clear();
+
+        let rows: Vec<String> = (0..25).map(|n| format!("log-row-{n:02}")).collect();
+        super::super::thread_open::open_log(&mut rig.state, false, &rows);
+        let visit = crate::domain::models::LogVisitCandidate {
+            seen_through: 25,
+            reset_revision: 0,
+        };
+        rig.state.pending_log_visit = Some(visit);
+        let mut seen = String::new();
+        for _ in 0..30 {
+            seen.push_str(&attached_screen(&rig.paint()));
+            rig.key(Key::Char('j')).await;
+        }
+        for n in 0..25 {
+            assert!(
+                seen.contains(&format!("log-row-{n:02}")),
+                "missing row {n}: {seen}"
+            );
+        }
+        assert_eq!(rig.state.log_awareness.presented, [visit]);
+        assert!(rig.state.pending_log_visit.is_none());
+        super::super::thread_open::open_log(&mut rig.state, true, &rows);
+        rig.state.pending_log_visit = Some(visit);
+        let filtered = attached_screen(&rig.paint());
+        assert!(filtered.contains("A2A log · filtered"), "{filtered}");
+        assert_eq!(rig.state.pending_log_visit, Some(visit));
+        assert_eq!(rig.state.log_awareness.presented, [visit]);
+        rig.key(Key::Esc).await;
+        assert!(rig.state.modal_stack.is_empty());
+        rig.paint();
+        assert_eq!(rig.state.log_awareness.presented, [visit]);
+        assert!(rig.frames().is_empty());
+    }
+
+    #[test]
+    fn story21_8_attached_send_summary_settles_in_place_and_notices_once() {
+        use crate::adapters::daemon::protocol::{
+            TeamSendCause, TeamSendCauseKind, TeamSendOutcome,
+        };
+        use crate::adapters::tui::handlers::team_command::TEAM_SEND_RETRO_NOTE;
+        use crate::domain::models::SemanticMessageType;
+        let mut rig = attach_keys::tests::Rig::new(false);
+        rig.state.terminal_width = 60;
+        let send = ClientFrame::TeamSend {
+            request: "send".into(),
+            recipients: vec!["alice".into(), "bob".into(), "carol".into()],
+            text: "hi".into(),
+            message_type: Some(SemanticMessageType::RetroRequest),
+            subject: None,
+            stories: None,
+            holders_of: None,
+        };
+        assert!(enqueue_attached_team_frame(
+            &mut rig.state,
+            &mut rig.team_requests,
+            send,
+            &rig.tx
+        ));
+        assert!(
+            matches!(rig.frames().as_slice(), [ClientFrame::TeamSend { request, .. }] if request == "send")
+        );
+        assert_eq!(rig.state.feedback_blocks.len(), 1);
+        assert_eq!(
+            rig.state.feedback_blocks["team-send-1"].message,
+            "Send · retro_request · alice sending… · bob sending… · carol sending…"
+        );
+        let painted = rig.paint();
+        let screen = attached_screen(&painted);
+        for alias in ["alice", "bob", "carol"] {
+            assert!(screen.contains(alias), "{screen}");
+        }
+        let layout = crate::adapters::tui::layout::compute_layout(
+            ratatui::layout::Rect::new(0, 0, 60, 24),
+            &rig.state.theme,
+            &rig.state.input_buffer,
+            1,
+            false,
+            DensityMode::Focus,
+        )
+        .unwrap();
+        let lines = crate::adapters::tui::widgets::feedback_block::render_feedback_lines(
+            &rig.state.feedback_blocks["team-send-1"],
+            layout.chat_pane.width,
+            &rig.state.theme,
+        );
+        assert!(lines.len() > 1);
+        assert_eq!(rig.state.total_content_height, lines.len());
+        let painted_rows = (layout.chat_pane.y..layout.chat_pane.bottom())
+            .filter(|&y| painted.backend().buffer()[(layout.chat_pane.x, y)].symbol() == "│")
+            .count();
+        assert_eq!(painted_rows, lines.len());
+        apply_attached_team_frame(
+            &mut rig.state,
+            &mut rig.team_requests,
+            DaemonFrame::TeamSendStarted {
+                request: "send".into(),
+                action: crate::domain::models::SendActionId::mint(),
+                recipients: vec!["alice".into(), "bob".into(), "carol".into(), "dave".into()],
+            },
+            false,
+            &rig.tx,
+        );
+        assert!(
+            rig.state.feedback_blocks["team-send-1"]
+                .message
+                .contains("dave sending…")
+        );
+        let settle = |rig: &mut attach_keys::tests::Rig, index, outcome| {
+            apply_attached_team_frame(
+                &mut rig.state,
+                &mut rig.team_requests,
+                DaemonFrame::TeamSendSettled {
+                    request: "send".into(),
+                    index,
+                    outcome,
+                },
+                false,
+                &rig.tx,
+            );
+            assert_eq!(rig.state.feedback_blocks.len(), 1);
+            assert!(
+                !rig.state.feedback_blocks["team-send-1"]
+                    .message
+                    .contains('\n')
+            );
+        };
+        settle(&mut rig, 0, TeamSendOutcome::Delivered);
+        assert!(
+            rig.state.feedback_blocks["team-send-1"]
+                .message
+                .contains("● alice sent")
+        );
+        let unreachable = TeamSendOutcome::Unreachable {
+            cause: Some(TeamSendCause {
+                kind: TeamSendCauseKind::Ratified,
+                text: "off\u{1b}line".into(),
+            }),
+        };
+        settle(&mut rig, 1, unreachable.clone());
+        settle(&mut rig, 1, unreachable);
+        settle(&mut rig, 2, TeamSendOutcome::Delivered);
+        settle(&mut rig, 3, TeamSendOutcome::Delivered);
+        let records: Vec<_> = rig.state.notifications.records().collect();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|n| n.message == "bob unreachable: offline")
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|n| n.message == TEAM_SEND_RETRO_NOTE)
+                .count(),
+            1
+        );
+        assert!(
+            records
+                .iter()
+                .any(|n| n.message == "bob unreachable: offline"
+                    && n.severity == NoticeSeverity::Warning)
+        );
+        assert!(
+            records
+                .iter()
+                .any(|n| n.message == TEAM_SEND_RETRO_NOTE && n.severity == NoticeSeverity::Info)
+        );
+        assert!(
+            rig.state.feedback_blocks["team-send-1"]
+                .message
+                .contains("⚠ bob unreachable")
+        );
+        assert!(
+            rig.state.feedback_blocks["team-send-1"]
+                .message
+                .contains("● carol sent")
+        );
+    }
+
     fn attached_frame_record(
         rig: &mut attach_keys::tests::Rig,
         stage: &str,
@@ -2552,12 +3131,10 @@ mod tests {
                 .messages
                 .push(system_message(format!("occlusion prefix {row}")));
         }
-        crate::adapters::tui::views::show_view(
-            &mut rig.state.feedback_blocks,
-            crate::adapters::tui::views::ViewKind::TeamLog,
-            crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID,
-            crate::domain::models::FeedbackLevel::Info,
-            "M12-ATTACHED-VISIBLE",
+        super::super::thread_open::open_log(
+            &mut rig.state,
+            false,
+            &["M12-ATTACHED-VISIBLE".into()],
         );
         rig.state.pending_log_visit = Some(crate::domain::models::LogVisitCandidate {
             seen_through: 41,
@@ -2622,7 +3199,10 @@ mod tests {
                 assert_eq!(rig.state.pending_log_visit, Some(visit));
                 assert!(rig.state.log_awareness.presented.is_empty());
                 rig.key(Key::Esc).await;
-                assert!(rig.state.modal_stack.is_empty());
+                assert_eq!(
+                    rig.state.modal_stack.top().unwrap().surface,
+                    Surface::ThreadInspector
+                );
                 let returned = attached_screen(&rig.paint());
                 assert!(returned.contains("M12-ATTACHED-VISIBLE"), "{returned}");
                 assert_eq!(rig.state.log_awareness.presented, [visit]);
@@ -2642,14 +3222,31 @@ mod tests {
 
     #[test]
     fn story21_4_r3_attached_indicator_does_not_present_the_replaced_row() {
-        use crate::adapters::tui::{
-            handlers::team_command::TEAM_LOG_BLOCK_ID,
-            views::{self, ViewKind},
-        };
+        for read_only in [false, true] {
+            let mut rig = attached_occlusion_rig(80, 24, read_only, 0);
+            let old = rig.state.pending_log_visit.unwrap();
+            let newer = crate::domain::models::LogVisitCandidate {
+                seen_through: old.seen_through + 1,
+                reset_revision: old.reset_revision,
+            };
+            super::super::thread_open::open_log(&mut rig.state, false, &["R3-new-log-row".into()]);
+            rig.state.pending_log_visit = Some(newer);
+            let screen = attached_screen(&rig.paint());
+            assert!(screen.contains("R3-new-log-row"), "{screen}");
+            assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
+            assert_eq!(rig.state.log_awareness.presented, [newer]);
+            assert!(rig.state.pending_log_visit.is_none());
+            assert!(rig.frames().is_empty());
+        }
+    }
+
+    #[test]
+    fn story21_8_attached_streaming_indicator_still_covers_stage_feedback() {
+        use crate::adapters::tui::views::{self, ViewKind};
         use crate::domain::models::{AnchorMode, FeedbackLevel};
         for read_only in [false, true] {
             for (streaming, surviving) in [(true, false), (true, true), (false, false)] {
-                let mut rig = attached_occlusion_rig(80, 24, read_only, 0);
+                let mut rig = attach_keys::tests::Rig::new(read_only);
                 let pane = crate::adapters::tui::layout::compute_layout(
                     ratatui::layout::Rect::new(0, 0, 80, 24),
                     &rig.state.theme,
@@ -2663,8 +3260,8 @@ mod tests {
                 let keep = if surviving { 2 } else { 1 };
                 views::show_view(
                     &mut rig.state.feedback_blocks,
-                    ViewKind::TeamLog,
-                    TEAM_LOG_BLOCK_ID,
+                    ViewKind::TeamStatus,
+                    "r3-row",
                     FeedbackLevel::Info,
                     "R3-first-feedback-row\nR3-second-feedback-row",
                 );
@@ -2675,7 +3272,7 @@ mod tests {
                 let origin = visible
                     .lines()
                     .position(|row| row.contains("R3-first-feedback-row"))
-                    .expect("uncovered streaming control genuinely presents a feedback row");
+                    .unwrap();
                 let target = pane.bottom() - keep;
                 assert!(origin < target as usize, "{visible}");
                 views::show_view(
@@ -2685,89 +3282,65 @@ mod tests {
                     FeedbackLevel::Info,
                     vec!["padding"; target as usize - origin].join("\n"),
                 );
-                rig.state.feedback_blocks.remove(TEAM_LOG_BLOCK_ID);
+                rig.state.feedback_blocks.remove("r3-row");
                 views::show_view(
                     &mut rig.state.feedback_blocks,
-                    ViewKind::TeamLog,
-                    TEAM_LOG_BLOCK_ID,
+                    ViewKind::TeamStatus,
+                    "r3-row",
                     FeedbackLevel::Info,
                     "R3-first-feedback-row\nR3-second-feedback-row",
                 );
-                let visit = rig.state.log_awareness.presented[0];
-                rig.state.log_awareness.presented.clear();
-                rig.state.pending_log_visit = Some(visit);
-                let final_paint = attached_screen(&rig.paint());
+                let screen = attached_screen(&rig.paint());
                 if streaming {
                     assert!(
-                        final_paint
+                        screen
                             .lines()
                             .nth((pane.bottom() - 1) as usize)
                             .unwrap()
                             .contains("New content below"),
-                        "{final_paint}"
+                        "{screen}"
                     );
                 }
                 if streaming && !surviving {
-                    assert!(
-                        !final_paint.contains("R3-first-feedback-row"),
-                        "{final_paint}"
-                    );
-                    assert_eq!(
-                        rig.state.pending_log_visit,
-                        Some(visit),
-                        "no genuine feedback row survived"
-                    );
-                    assert!(rig.state.log_awareness.presented.is_empty());
+                    assert!(!screen.contains("R3-first-feedback-row"), "{screen}");
                     rig.domain_tab.streaming.is_streaming = false;
                     assert!(attached_screen(&rig.paint()).contains("R3-first-feedback-row"));
                 } else if surviving {
                     assert!(
-                        final_paint
+                        screen
                             .lines()
                             .nth(target as usize)
                             .unwrap()
                             .contains("R3-first-feedback-row"),
-                        "{final_paint}"
+                        "{screen}"
                     );
                 }
-                assert!(rig.state.pending_log_visit.is_none());
-                assert_eq!(rig.state.log_awareness.presented, [visit]);
-                assert!(
-                    rig.frames().is_empty(),
-                    "real successful paints do not submit actions"
-                );
+                assert!(rig.frames().is_empty());
             }
         }
     }
 
     #[test]
     fn story21_4_attached_absent_empty_message_and_minimum_draw_controls() {
-        use crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID;
         for read_only in [false, true] {
             let mut rig = attached_occlusion_rig(80, 24, read_only, 0);
             let visit = rig.state.pending_log_visit.unwrap();
-            let block = rig.state.feedback_blocks.remove(TEAM_LOG_BLOCK_ID).unwrap();
-            rig.paint();
-            assert_eq!(rig.state.pending_log_visit, Some(visit));
-            assert!(rig.state.log_awareness.presented.is_empty());
-            rig.state.feedback_blocks.insert(
-                TEAM_LOG_BLOCK_ID.into(),
-                crate::domain::models::FeedbackBlock {
-                    message: String::new(),
-                    ..block
-                },
+            super::super::thread_open::open_log(&mut rig.state, false, &[String::new()]);
+            let empty = attached_screen(&rig.paint());
+            assert!(empty.contains("A2A log"), "{empty}");
+            assert_eq!(rig.state.thread_inspector.as_ref().unwrap().content, "");
+            assert_eq!(
+                rig.state.pending_log_visit,
+                Some(visit),
+                "empty log content paints no body row"
             );
-            rig.paint();
-            // Empty text still paints one bordered row (feedback_block::wrap_text).
-            assert!(rig.state.pending_log_visit.is_none());
-            assert_eq!(rig.state.log_awareness.presented, [visit]);
-            rig.state.log_awareness.presented.clear();
+            assert!(rig.state.log_awareness.presented.is_empty());
             rig.state.pending_log_visit = Some(visit);
-            rig.state
-                .feedback_blocks
-                .get_mut(TEAM_LOG_BLOCK_ID)
-                .unwrap()
-                .message = "M12-ATTACHED-VISIBLE".into();
+            super::super::thread_open::open_log(
+                &mut rig.state,
+                false,
+                &["M12-ATTACHED-VISIBLE".into()],
+            );
             rig.state.terminal_width = 59;
             let too_small = attached_screen(&rig.paint());
             assert!(too_small.contains("Terminal too small"));
@@ -2781,77 +3354,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn story21_8_attached_log_closed_before_paint_does_not_commit() {
+        use crate::adapters::tui::keymap::Key;
+        let mut rig = attached_occlusion_rig(80, 24, false, 0);
+        let visit = rig.state.pending_log_visit.unwrap();
+        rig.key(Key::Esc).await;
+        assert!(rig.state.modal_stack.is_empty());
+        assert!(!attached_screen(&rig.paint()).contains("M12-ATTACHED-VISIBLE"));
+        assert!(rig.state.log_awareness.presented.is_empty());
+        super::super::thread_open::open_log(
+            &mut rig.state,
+            false,
+            &["M12-ATTACHED-VISIBLE".into()],
+        );
+        rig.state.pending_log_visit = Some(visit);
+        assert!(attached_screen(&rig.paint()).contains("M12-ATTACHED-VISIBLE"));
+        assert_eq!(rig.state.log_awareness.presented, [visit]);
+    }
+
+    #[tokio::test]
     async fn story21_6_attached_decision_and_leader_project_the_only_row() {
         use crate::adapters::tui::keymap::Key;
         for read_only in [false, true] {
             for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-                for card in [false, true] {
-                    let mut rig = attached_occlusion_rig(width, height, read_only, 90);
-                    let visit = rig.state.pending_log_visit.unwrap();
-                    let before = attached_screen(&rig.paint());
-                    let layout = crate::adapters::tui::layout::compute_layout(
-                        ratatui::layout::Rect::new(0, 0, width, height),
-                        &rig.state.theme,
-                        &rig.state.input_buffer,
-                        1,
-                        false,
-                        DensityMode::Focus,
-                    )
-                    .unwrap();
-                    let rows: Vec<_> = before
-                        .lines()
-                        .enumerate()
-                        .filter_map(|(row, text)| {
-                            text.contains("M12-ATTACHED-VISIBLE").then_some(row as u16)
-                        })
-                        .collect();
-                    assert_eq!(
-                        rows,
-                        [layout.chat_pane.bottom() - 1],
-                        "one observed tail row must independently acknowledge: {before}"
-                    );
-                    assert_eq!(rig.state.log_awareness.presented, [visit]);
-                    rig.state.log_awareness.presented.clear();
-                    rig.state.pending_log_visit = Some(visit);
-                    if card {
-                        apply_attached_consolidation_frame(
-                            &mut rig.state,
-                            DaemonFrame::ConsolidationProposed {
-                                token: crate::adapters::daemon::protocol::ProposalToken(1),
-                                proposals: vec![],
-                            },
-                            read_only,
-                        );
-                        assert_eq!(rig.state.decisions.undecided(), usize::from(!read_only));
-                    } else {
-                        rig.key(Key::Ctrl('x')).await;
-                        assert!(rig.state.pending_leader.is_some());
-                    }
-                    let covered = rig.paint();
-                    let screen = attached_screen(&covered);
-                    if !card {
-                        assert_eq!(
-                            covered.backend().buffer()
-                                [(layout.chat_pane.right() - 1, layout.chat_pane.bottom() - 1)]
-                                .symbol(),
-                            "┘",
-                            "the opaque leader rail covers the observed row: {screen}"
-                        );
-                        assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
-                        assert_eq!(rig.state.pending_log_visit, Some(visit));
-                        assert!(rig.state.log_awareness.presented.is_empty());
-                    } else if screen.contains("M12-ATTACHED-VISIBLE") {
-                        assert!(rig.state.pending_log_visit.is_none());
-                        assert_eq!(rig.state.log_awareness.presented, [visit]);
-                    } else {
-                        assert_eq!(rig.state.pending_log_visit, Some(visit));
-                        assert!(rig.state.log_awareness.presented.is_empty());
-                    }
-                    assert!(
-                        rig.frames().is_empty(),
-                        "local paint/leader/admission sends no wire actions"
-                    );
+                let mut rig = attached_occlusion_rig(width, height, read_only, 0);
+                let visit = rig.state.pending_log_visit.unwrap();
+                apply_attached_consolidation_frame(
+                    &mut rig.state,
+                    DaemonFrame::ConsolidationProposed {
+                        token: crate::adapters::daemon::protocol::ProposalToken(1),
+                        proposals: vec![],
+                    },
+                    read_only,
+                );
+                assert_eq!(rig.state.decisions.undecided(), usize::from(!read_only));
+                if !read_only {
+                    rig.ready();
+                    let covered = attached_screen(&rig.paint());
+                    assert!(!covered.contains("M12-ATTACHED-VISIBLE"), "{covered}");
+                    assert_eq!(rig.state.pending_log_visit, Some(visit));
+                    assert!(rig.state.log_awareness.presented.is_empty());
+                    rig.key(Key::Esc).await;
                 }
+                let visible = attached_screen(&rig.paint());
+                assert!(visible.contains("M12-ATTACHED-VISIBLE"), "{visible}");
+                assert_eq!(rig.state.log_awareness.presented, [visit]);
+                assert!(rig.frames().is_empty());
+                rig.state.log_awareness.presented.clear();
+                rig.state.pending_log_visit = Some(visit);
+                rig.key(Key::Ctrl('x')).await;
+                assert!(rig.state.pending_leader.is_some());
+                rig.paint();
+                assert_eq!(rig.state.pending_log_visit, Some(visit));
+                assert!(rig.state.log_awareness.presented.is_empty());
+                rig.key(Key::Esc).await;
+                assert!(rig.state.pending_leader.is_none());
+                assert!(attached_screen(&rig.paint()).contains("M12-ATTACHED-VISIBLE"));
+                assert_eq!(rig.state.log_awareness.presented, [visit]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_8_attached_leader_still_occludes_stage_tail() {
+        use crate::adapters::tui::{
+            keymap::Key,
+            views::{self, ViewKind},
+        };
+        use crate::domain::models::FeedbackLevel;
+        for read_only in [false, true] {
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                let mut rig = attach_keys::tests::Rig::new(read_only);
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                for row in 0..90 {
+                    rig.domain_tab
+                        .conversation
+                        .messages
+                        .push(system_message(format!("occlusion prefix {row}")));
+                }
+                views::show_view(
+                    &mut rig.state.feedback_blocks,
+                    ViewKind::TeamStatus,
+                    "stage-occlusion",
+                    FeedbackLevel::Info,
+                    "M12-ATTACHED-VISIBLE",
+                );
+                let layout = crate::adapters::tui::layout::compute_layout(
+                    ratatui::layout::Rect::new(0, 0, width, height),
+                    &rig.state.theme,
+                    &rig.state.input_buffer,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap();
+                let before = attached_screen(&rig.paint());
+                assert!(
+                    before
+                        .lines()
+                        .nth((layout.chat_pane.bottom() - 1) as usize)
+                        .unwrap()
+                        .contains("M12-ATTACHED-VISIBLE"),
+                    "{before}"
+                );
+                rig.key(Key::Ctrl('x')).await;
+                assert!(rig.state.pending_leader.is_some());
+                let covered = rig.paint();
+                let screen = attached_screen(&covered);
+                assert_eq!(
+                    covered.backend().buffer()
+                        [(layout.chat_pane.right() - 1, layout.chat_pane.bottom() - 1)]
+                        .symbol(),
+                    "┘"
+                );
+                assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
+                assert!(rig.frames().is_empty());
             }
         }
     }
@@ -8513,7 +9131,6 @@ mod tests {
     /// and the observer never touches a turn.
     #[tokio::test]
     async fn attached_log_is_local_and_streaming_survives() {
-        use crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID;
         use crate::adapters::tui::state::LogAwareness;
         use crate::infrastructure::transparency_awareness::LogAwarenessObserver;
         use crate::infrastructure::transparency_awareness::test_support::append_rows;
@@ -8521,28 +9138,29 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        fn draw_attached(state: &TuiState) -> Vec<(String, std::ops::Range<u16>)> {
+        fn draw_attached(state: &mut TuiState) -> String {
             let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
             let mut tab = TabRenderState::default();
             let domain_tab =
                 crate::domain::models::tab::TabState::from_conversation(0, Conversation::default());
-            let mut visible = Vec::new();
             term.draw(|f| {
-                visible = chat_pane::render_attached(
+                paint_attached(
                     f,
-                    f.area(),
+                    state,
                     &domain_tab.conversation,
                     &domain_tab.streaming,
                     &domain_tab.view_state,
-                    &state.theme,
                     &mut tab,
-                    &state.feedback_blocks,
                     &HashMap::new(),
-                )
-                .visible_feedback_rows;
+                    crate::domain::models::PermissionMode::Normal,
+                    &crate::adapters::tui::state::AttachInfo {
+                        read_only: false,
+                        channel_count: 1,
+                    },
+                );
             })
             .unwrap();
-            visible
+            attached_screen(&term)
         }
 
         let workspace = tempfile::tempdir().unwrap();
@@ -8593,20 +9211,24 @@ mod tests {
             "zero frames: never a model UserMessage"
         );
         assert!(
-            state.feedback_blocks[TEAM_LOG_BLOCK_ID]
-                .message
+            state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .content
                 .contains("append-only")
         );
 
         // Painted, but the draw failed: nothing presented.
-        let visible = draw_attached(&state);
-        assert!(visible.iter().any(|(id, _)| id == TEAM_LOG_BLOCK_ID));
-        after_attached_draw(&mut state, false, &visible);
+        let screen = draw_attached(&mut state);
+        assert!(screen.contains("A2A log"), "{screen}");
+        after_attached_draw(&mut state, false);
         assert_eq!(
             poll(&mut observer, &mut state).await,
             LogAwareness::Unseen(3)
         );
-        after_attached_draw(&mut state, true, &visible);
+        assert!(draw_attached(&mut state).contains("A2A log"));
+        after_attached_draw(&mut state, true);
         assert_eq!(poll(&mut observer, &mut state).await, LogAwareness::Hidden);
 
         // An incoming retract row and a poll never touch a streaming turn.
@@ -9047,8 +9669,13 @@ mod attached_parity_tests {
                     rx.try_recv().unwrap(),
                     ClientFrame::TeamThread { .. }
                 ));
+                let thread = state.thread_inspector.as_ref().unwrap();
+                assert!(
+                    matches!(&thread.target, crate::adapters::tui::state::ThreadTarget::Sent { peer, item } if peer == "B" && item == "ri_a")
+                );
+                assert!(thread.sent.as_ref().unwrap().loading);
                 assert_eq!(
-                    state.feedback_blocks["team-thread"].message,
+                    thread.content,
                     crate::adapters::tui::handlers::team_command::TEAM_THREAD_READING
                 );
             } else {
@@ -9107,7 +9734,7 @@ mod attached_parity_tests {
         );
         assert_eq!(
             state.feedback_blocks["team-send-1"].message,
-            "  ● B  delivered"
+            "Send · ● B delivered"
         );
         assert!(requests.pending.is_empty());
     }
@@ -9268,7 +9895,7 @@ mod attached_parity_tests {
                 &tx,
             );
         }
-        assert_eq!(state.feedback_blocks["team-thread"].message, "latest");
+        assert_eq!(state.thread_inspector.as_ref().unwrap().content, "latest");
         requests.pending.insert(
             "retract".into(),
             AttachedTeamRequest::Retract {

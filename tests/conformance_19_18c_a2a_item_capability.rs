@@ -79,14 +79,13 @@ use rustain::adapters::noop::{
 };
 use rustain::adapters::rap::{AgentSigner, IdentityKeyStore};
 use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
-use rustain::adapters::tui::handlers::team_command::TEAM_THREAD_BLOCK_ID;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::capability_registry::CapabilityRegistry;
 use rustain::domain::models::{
-    A2aPeerSource, A2aPeerSpec, AppConfig, CompletionOptions, Conversation, FeedbackLevel,
-    JournalRecord, Message, ResponseMode, RoomEvent, StopReason, StreamChunk,
+    A2aPeerSource, A2aPeerSpec, AppConfig, CompletionOptions, Conversation, JournalRecord, Message,
+    ResponseMode, RoomEvent, StopReason, StreamChunk,
 };
 use rustain::domain::ports::{
     DeliveryPolicy, RoomJournal, RoomJournalError, RoomJournalReader, SecurityPort, StoragePort,
@@ -859,23 +858,28 @@ async fn read_thread_block(
     sender
         .type_command(state, &format!("/team thread {peer} {item}"))
         .await;
-    assert_eq!(
-        state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "  reading…",
-        "the stable block shows its pending line before the read lands"
+    let frame = state.thread_inspector.as_ref().expect("sent thread frame");
+    assert!(
+        matches!(&frame.target, rustain::adapters::tui::state::ThreadTarget::Sent { peer: p, item: i } if p == peer && i == item)
     );
+    assert_eq!(frame.content, "  reading…");
     let event = next_event(sender).await;
     let AppEvent::TeamThreadReady {
         conversation_id,
+        generation,
         message,
     } = event
     else {
         panic!("a thread read publishes TeamThreadReady, got {event:?}");
     };
-    let mut tabs = rustain::domain::models::tab::TabManager::new(CancellationToken::new());
-    team_thread_ready("conv", state, &mut tabs, &conversation_id, message);
-    let block = &state.feedback_blocks[TEAM_THREAD_BLOCK_ID];
-    assert_eq!(block.level, FeedbackLevel::Info);
-    block.message.clone()
+    team_thread_ready(state, &conversation_id, generation, &message);
+    assert!(!state.feedback_blocks.contains_key("team-thread"));
+    state
+        .thread_inspector
+        .as_ref()
+        .expect("sent thread frame")
+        .content
+        .clone()
 }
 
 /// `/team board <peer>` through the operator's rail, rendered.
@@ -1574,7 +1578,7 @@ async fn k05_only_the_sender_can_read_answer_poll_cancel_or_retract_its_item() {
 
     // 1. A sends; its operator discovers the id from the board (19.18 `P8`).
     let sent = send_item(&mut a, &mut state, "b", &b.host, "question").await;
-    assert_eq!(send_row(&state, 1), "  ● b  delivered");
+    assert_eq!(send_row(&state, 1), "Send · ● b delivered");
     assert_eq!(
         sent.capability_hash.as_deref(),
         Some(stored_hash(&wire(&key_a, &sent.task)).as_str()),
@@ -1866,9 +1870,9 @@ async fn k06_a_co_holding_sender_cannot_act_on_another_senders_item() {
         assert_eq!(
             send_row(&state_c, 1),
             if credential_scoped {
-                "    b  no usable answer — '/team board' shows whether it arrived"
+                "Send · b no usable answer — '/team board' shows whether it arrived"
             } else {
-                "  ✗ b  declined"
+                "Send · ✗ b declined"
             }
         );
         raise_retract_card(
@@ -1903,12 +1907,12 @@ async fn k06_a_co_holding_sender_cannot_act_on_another_senders_item() {
             a.type_command(&mut state_a, &format!("/team followup b {} x", sent.id))
                 .await;
             settle_send(&mut a, &mut state_a).await;
-            assert!(
-                send_row(&state_a, 2)
-                    .starts_with("  ⚠ b  unreachable\n    peer `b` has no usable A2A endpoint: "),
-                "{}",
-                send_row(&state_a, 2)
-            );
+            assert_eq!(send_row(&state_a, 2), "Send · ⚠ b unreachable");
+            assert!(state_a.notifications.visible().any(|notice| {
+                notice
+                    .message
+                    .starts_with("b unreachable: peer `b` has no usable A2A endpoint: ")
+            }));
             let after = room_events(&a.journal).await;
             assert_eq!(dispatches(&after), dispatches(&rows), "zero dispatch rows");
             assert_eq!(
@@ -3256,15 +3260,14 @@ async fn k18_an_unusable_key_refuses_credentialed_peers_and_is_never_rewritten()
 
     a.type_command(&mut state, "/team send b hello").await;
     settle_send(&mut a, &mut state).await;
-    assert_eq!(
-        send_row(&state, 1),
-        format!(
-            "  ⚠ b  unreachable\n    this host's item key can't be read ({}: item capability \
-             key file permissions must be 0600, got 644). Fix its permissions (chmod 600) or \
-             restore it; don't delete it.",
+    assert_eq!(send_row(&state, 1), "Send · ⚠ b unreachable");
+    assert!(state.notifications.visible().any(|notice| notice.message
+        == format!(
+            "b unreachable: this host's item key can't be read ({}: item capability \
+         key file permissions must be 0600, got 644). Fix its permissions (chmod 600) or \
+         restore it; don't delete it.",
             key_path.display()
-        )
-    );
+        )));
     let rows = room_events(&a.journal).await;
     let new_rows = &rows[a_rows..];
     // Story 19.21: the one preflight-refusal row now sits between the send

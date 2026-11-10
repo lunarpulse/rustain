@@ -150,6 +150,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         _command(tui, f"/team thread B {item}")
         screen = _wait_screen(tui, lambda screen: f"thread · B · {item}" in screen, "thread view")
         (evidence / "03-thread.screen.txt").write_text(screen)
+        tui.send("\x1b")
+        _wait_screen(tui, lambda screen: "Thread · sent" not in screen, "thread window closed")
         _command(tui, f"/team followup B {item} more")
         screen = _wait_screen(tui, lambda screen: screen.count("delivered") >= 3 and "sending…" not in screen,
                               "second delivered receipt")

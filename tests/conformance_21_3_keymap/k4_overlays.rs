@@ -656,6 +656,7 @@ const THREAD: &[W] = &[
     w(&[Key::Char('c')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Char('/')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Enter], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('x')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Ctrl('x')], "Consumed | frame=true focus=Chat top=20 pal=false leader=true"),
     w(&[Key::Ctrl('p')], "Consumed | frame=true focus=Chat top=20 pal=true leader=false"),
     w(&[Key::Ctrl('q')], "Quit | frame=true focus=Chat top=20 pal=false leader=false"),
@@ -760,6 +761,7 @@ fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts
         Key::Ctrl('c'),
         Key::Char('c'),
         Key::Char('/'),
+        Key::Char('x'),
         Key::Enter,
         Key::Ctrl('x'),
         Key::Ctrl('p'),
@@ -823,6 +825,33 @@ fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts
     let own = |host| rows_of(Context::ThreadInspector, host).count();
     assert_eq!(own(Host::Local), both.len());
     assert_eq!(own(Host::Attached), both.len() + writer.len() + 1);
+}
+
+#[test]
+fn thread_retract_binding_is_by_value_and_has_no_other_key_on_either_host() {
+    use rustain::adapters::tui::keymap::{CommandId, resolve, table_thread::ThreadCmd};
+    for host in [Host::Local, Host::Attached] {
+        let Resolved::Hit(row) = resolve(Context::ThreadInspector, host, &[Key::Char('x')]) else {
+            panic!("{host:?}: missing retract row");
+        };
+        assert_eq!(row.command, CommandId::Thread(ThreadCmd::Retract));
+        assert_eq!(row.label, "Retract");
+        let mut swept = 0;
+        for key in Key::universe() {
+            if key == Key::Char('x') {
+                continue;
+            }
+            if let Resolved::Hit(row) = resolve(Context::ThreadInspector, host, &[key]) {
+                assert_ne!(
+                    row.command,
+                    CommandId::Thread(ThreadCmd::Retract),
+                    "{host:?} {key:?}"
+                );
+            }
+            swept += 1;
+        }
+        assert!(swept > 40);
+    }
 }
 
 fn thread_viewport() -> TuiState {

@@ -25,11 +25,13 @@ use crate::adapters::tui::thread_inspector::{
 use crate::domain::models::Conversation;
 
 /// What the page rail offers besides the writer actions, by facts alone.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Offers {
     toggle: bool,
     open: bool,
     viewport: bool,
+    /// `x`: the words of the retract entry (`Retract`, `Retract auto-sent reply HH:MM`).
+    retract: Option<String>,
 }
 
 /// Everything the rail depends on besides the width: the offered actions, the access, the
@@ -38,7 +40,7 @@ fn rail_facts(
     inspector: &ThreadInspectorState,
     actions: &[Option<ThreadAction>; 6],
     redacted: bool,
-    offers: Offers,
+    offers: &Offers,
 ) -> u64 {
     let base = actions.iter().flatten().fold(
         (u32::from(inspector.access == ThreadAccess::ReadOnly) << 31)
@@ -53,6 +55,7 @@ fn rail_facts(
         | (u64::from(offers.toggle) << 1)
         | (u64::from(offers.open) << 2)
         | (u64::from(offers.viewport) << 3)
+        | (retract_facts(offers) << 9)
         | (u64::from(matches!(inspector.target, ThreadTarget::Node(_))) << 4)
         | (u64::from(inspector.reply.is_some()) << 5)
         | (u64::from(inspector.search.editing) << 6)
@@ -65,7 +68,7 @@ fn footer_text(
     inspector: &ThreadInspectorState,
     actions: &[Option<ThreadAction>; 6],
     redacted: bool,
-    offers: Offers,
+    offers: &Offers,
 ) -> (String, String) {
     // A text field or the block viewport replaces the page rail by its own keys.
     if inspector.reply.is_some() {
@@ -103,13 +106,19 @@ fn footer_text(
         );
     }
     let mut footer = String::new();
+    let item_target = matches!(
+        inspector.target,
+        ThreadTarget::Item(_) | ThreadTarget::Node(_)
+    );
     match inspector.access {
-        ThreadAccess::LocalOnly => footer.push_str(
+        // The passive sentences speak of item actions: the sent thread and the log have none.
+        ThreadAccess::LocalOnly if item_target => footer.push_str(
             "local view only — replying, acknowledgement and item context require a daemon-attached writer\n",
         ),
-        ThreadAccess::ReadOnly => {
+        ThreadAccess::ReadOnly if item_target => {
             footer.push_str("read-only — view only; item actions require the attached writer\n");
         }
+        ThreadAccess::LocalOnly | ThreadAccess::ReadOnly => {}
         ThreadAccess::Writer => {
             for action in actions.iter().flatten() {
                 if !footer.is_empty() {
@@ -129,6 +138,15 @@ fn footer_text(
                         action.label(inspector.context_selected, redacted),
                     ));
                 }
+            }
+            if let Some(label) = &offers.retract {
+                if !footer.is_empty() {
+                    footer.push_str("  ");
+                }
+                footer.push_str(&format!(
+                    "{} {label}",
+                    rail(KeyContext::ThreadInspector, ThreadCmd::Retract)
+                ));
             }
             if !footer.is_empty() {
                 footer.push('\n');
@@ -170,23 +188,28 @@ fn footer_text(
             rail(KeyContext::ThreadInspector, ThreadCmd::OpenDecision)
         ));
     }
-    push(format!(
-        "{} Copy",
-        rail(KeyContext::ThreadInspector, ThreadCmd::Copy)
-    ));
+    let log = matches!(inspector.target, ThreadTarget::Log { .. });
+    if !log {
+        push(format!(
+            "{} Copy",
+            rail(KeyContext::ThreadInspector, ThreadCmd::Copy)
+        ));
+    }
     push(format!(
         "{} Search",
         rail(KeyContext::ThreadInspector, OverlayCmd::InspectorSearch)
     ));
-    push(format!(
-        "{} {}",
-        rail(KeyContext::MarkdownBody, BodyCmd::ToggleMode),
-        if inspector.mode == BodyMode::Rendered {
-            "Source"
-        } else {
-            "Rendered"
-        }
-    ));
+    if !log {
+        push(format!(
+            "{} {}",
+            rail(KeyContext::MarkdownBody, BodyCmd::ToggleMode),
+            if inspector.mode == BodyMode::Rendered {
+                "Source"
+            } else {
+                "Rendered"
+            }
+        ));
+    }
     if offers.viewport {
         push(format!(
             "{} Block viewport",
@@ -203,6 +226,17 @@ fn footer_text(
         rail(KeyContext::ThreadInspector, ThreadCmd::Back)
     ));
     (info, footer)
+}
+
+/// The retract entry's share of the rail key: present, plus a hash of its words (a newer
+/// auto-sent reply changes the time in them).
+fn retract_facts(offers: &Offers) -> u64 {
+    offers.retract.as_ref().map_or(0, |label| {
+        1 | (label.bytes().fold(0u64, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+        }) & 0x3f_ffff)
+            << 1
+    })
 }
 
 /// The one row of the open text field: the prompt of the command it will run (reply) or the
@@ -288,6 +322,7 @@ pub fn render(
         toggle: thread_inspector::offered(state, conversation, ThreadCmd::Toggle),
         open: thread_inspector::offered(state, conversation, ThreadCmd::OpenDecision),
         viewport: false,
+        retract: thread_inspector::retract_plan(state, conversation).map(|plan| plan.label()),
     };
     let mut cache = inspector.layout.borrow_mut();
     let body_key = (
@@ -329,8 +364,10 @@ pub fn render(
         ) {
             body.extend(wrap(&notice, width, 2, theme.colors.fg_primary));
         }
-        cache.header = identity_text(inspector)
-            .split('\n')
+        cache.header = Some(identity_text(inspector))
+            .filter(|text| !text.is_empty())
+            .iter()
+            .flat_map(|text| text.split('\n'))
             .flat_map(|line| wrap(line, width, 2, theme.colors.fg_secondary))
             .collect();
         cache.body = body;
@@ -358,10 +395,10 @@ pub fn render(
     };
     let footer_key = (
         inner.width,
-        rail_facts(inspector, &actions, redacted, offers),
+        rail_facts(inspector, &actions, redacted, &offers),
     );
     if cache.footer_key != Some(footer_key) {
-        let (info, reader) = footer_text(inspector, &actions, redacted, offers);
+        let (info, reader) = footer_text(inspector, &actions, redacted, &offers);
         let rows = |text: &str| -> Vec<Line<'static>> {
             text.split('\n')
                 .flat_map(|line| wrap(line.trim_end(), width, 2, theme.colors.fg_secondary))
@@ -401,6 +438,9 @@ pub fn render(
         rows_of(&cache.header).min(room.saturating_sub(body_min + field_height + footer_height));
     let body_height = room - header_height - field_height - footer_height;
     let rows = cache.body.len();
+    if matches!(inspector.target, ThreadTarget::Log { .. }) && body_height >= 1 && rows > 0 {
+        inspector.log_painted.set(true);
+    }
     inspector.fit.set((rows, usize::from(body_height)));
     let top = Rect::new(inner.x, inner.y, inner.width, header_height);
     let body = Rect::new(inner.x, inner.y + header_height, inner.width, body_height);

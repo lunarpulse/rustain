@@ -76,12 +76,39 @@ pub struct LogAwarenessView {
     pub presented: Vec<crate::domain::models::LogVisitCandidate>,
 }
 
-/// What the thread window shows: a received item (the journal thread) or the response row
-/// of a peer node (the legacy "response" view); the sent-thread and log views are slice 8-C.
+/// What the thread window shows: a received item (the journal thread), the response row of a
+/// peer node (the legacy "response" view), the thread of an item this host sent (the sent
+/// thread, read from the peer) or the A2A log.
 #[derive(Debug, Clone)]
 pub enum ThreadTarget {
     Item(crate::domain::models::ItemAddress),
     Node(String),
+    /// `/team thread <peer> <item>`: the operator's own typing, kept raw for the commands the
+    /// frame runs; every painted use sanitizes it.
+    Sent {
+        peer: String,
+        item: String,
+    },
+    /// `/team log`: `filtered` is a `--filter=` view (never a full visit).
+    Log {
+        filtered: bool,
+    },
+}
+
+/// The facts of a sent-thread frame: which read it waits for (target + generation + issuing
+/// conversation) and what the completed read says about the opened item.
+#[derive(Debug, Clone)]
+pub struct SentThread {
+    /// Incremented per `/team thread` and per reopen: only the newest read applies.
+    pub generation: u64,
+    /// The conversation that issued the read (origin keying).
+    pub origin: String,
+    /// The read has not completed yet (the body is `reading…`).
+    pub loading: bool,
+    /// The opened item is this host's own item per the read.
+    pub mine: bool,
+    /// The read marks the opened item retracted.
+    pub retracted: bool,
 }
 
 /// What the opening host may do with the thread: act on it (attached writer), only read it
@@ -194,6 +221,11 @@ pub struct ThreadInspectorState {
     pub layout: std::cell::RefCell<ThreadLayoutCache>,
     /// How many body layouts the cache has computed (a repaint at the same key adds none).
     pub layouts_built: std::cell::Cell<usize>,
+    /// The read this sent-thread frame waits for or shows (`None` on every other target).
+    pub sent: Option<SentThread>,
+    /// A completed draw painted the log body with at least one body row on top of the stack
+    /// (commit-on-present, 19.16g semantics); consumed by `TuiState::log_visits_presented`.
+    pub log_painted: std::cell::Cell<bool>,
 }
 
 impl ThreadInspectorState {
@@ -232,6 +264,8 @@ impl ThreadInspectorState {
             rail_live: std::cell::Cell::new((true, true)),
             layout: std::cell::RefCell::new(ThreadLayoutCache::default()),
             layouts_built: std::cell::Cell::new(0),
+            sent: None,
+            log_painted: std::cell::Cell::new(false),
         }
     }
 
@@ -239,7 +273,7 @@ impl ThreadInspectorState {
     pub fn item_address(&self) -> Option<&crate::domain::models::ItemAddress> {
         match &self.target {
             ThreadTarget::Item(address) => Some(address),
-            ThreadTarget::Node(_) => None,
+            ThreadTarget::Node(_) | ThreadTarget::Sent { .. } | ThreadTarget::Log { .. } => None,
         }
     }
 
@@ -248,6 +282,8 @@ impl ThreadInspectorState {
         match &self.target {
             ThreadTarget::Item(address) => address.item().as_str().to_owned(),
             ThreadTarget::Node(node) => format!("node:{node}"),
+            ThreadTarget::Sent { peer, item } => format!("sent:{peer}:{item}"),
+            ThreadTarget::Log { .. } => "log".to_owned(),
         }
     }
 
@@ -2411,6 +2447,8 @@ pub struct TuiState {
     pub team_send_blocks:
         BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
     pub team_send_next_id: u64,
+    /// Source of the sent-thread read generations (`/team thread` and reopen).
+    pub thread_read_generation: u64,
     /// The session decision queue (Story 21.6): every question the session asks,
     /// keyed `(kind, source, conversation)`; its items own the payloads the old
     /// per-kind slots held (a large image, a delete target).
@@ -2535,6 +2573,10 @@ pub struct TuiState {
     /// Story 19.16g — the active tab's unpresented `team-log` visit (saved
     /// and restored with the tab's feedback blocks).
     pub pending_log_visit: Option<crate::domain::models::LogVisitCandidate>,
+    /// The active local tab is a read-only (subagent output) view: the thread frame offers no
+    /// retract there (synced by the local event loop on every input and paint; always false
+    /// in the attached host, which gates on its own read-only flag).
+    pub local_read_only: bool,
     /// Durable room viewer panel state (Ctrl+X, R / `/room`) (Story 18.3a AC1).
     pub room_panel: RoomPanelState,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
@@ -2708,27 +2750,37 @@ pub struct TuiState {
 }
 
 impl TuiState {
-    /// Story 19.16g — before a draw: a panel visit painted by a frame that
-    /// never completed was not presented, so it returns to pending (unless a
-    /// newer read already replaced it).
+    /// Story 19.16g — before a draw: a visit painted by a frame that never completed was not
+    /// presented, so a panel visit returns to pending (unless a newer read already replaced
+    /// it) and the log frame's paint mark is cleared.
     pub fn restore_unflushed_log_visits(&mut self) {
         if let Some(visit) = self.transparency_panel.painted_visit.take() {
             self.transparency_panel.pending_visit.get_or_insert(visit);
         }
+        if let Some(inspector) = &self.thread_inspector {
+            inspector.log_painted.set(false);
+        }
     }
 
-    /// Story 19.16g — after a **successful** draw: hand the visits this frame
-    /// actually presented to the persistence shell. The panel's visit counts
-    /// only if the widget painted it with body space; the `team-log` visit
-    /// only if a projected row survives actual opaque paint. Each visit is
-    /// consumed once, so rerendering cannot acknowledge later rows.
-    pub fn log_visits_presented<'a>(&mut self, presented_ids: impl IntoIterator<Item = &'a str>) {
+    /// Story 19.16g, re-keyed by 21-8 (A15) — after a **successful** draw: hand the visits
+    /// this frame actually presented to the persistence shell. The panel's visit counts only
+    /// if the widget painted it with body space; the `/team log` visit only if the log frame
+    /// is on top of the stack and the widget painted its body with at least one row. Each
+    /// visit is consumed once, so rerendering cannot acknowledge later rows.
+    pub fn log_visits_presented(&mut self) {
         if let Some(visit) = self.transparency_panel.painted_visit.take() {
             self.log_awareness.presented.push(visit);
         }
-        if presented_ids
-            .into_iter()
-            .any(|id| id == crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID)
+        let on_top = self.modal_stack.top().is_some_and(|frame| {
+            frame.surface == crate::adapters::tui::presentation::Surface::ThreadInspector
+        });
+        let painted = self.thread_inspector.as_ref().is_some_and(|inspector| {
+            matches!(inspector.target, ThreadTarget::Log { filtered: false })
+                && inspector.log_painted.take()
+        });
+        if on_top
+            && self.pending_leader.is_none()
+            && painted
             && let Some(visit) = self.pending_log_visit.take()
         {
             self.log_awareness.presented.push(visit);
@@ -2928,6 +2980,7 @@ impl TuiState {
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
             team_send_next_id: 0,
+            thread_read_generation: 0,
             decisions: Default::default(),
             last_printable_at: None,
             pending_z: false,
@@ -2973,6 +3026,7 @@ impl TuiState {
             transparency_panel: TransparencyPanelState::default(),
             log_awareness: LogAwarenessView::default(),
             pending_log_visit: None,
+            local_read_only: false,
             room_panel: RoomPanelState::default(),
             artifacts_panel: ArtifactsPanelState::default(),
             daily_budget: None,

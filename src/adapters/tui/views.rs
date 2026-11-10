@@ -1,12 +1,13 @@
 //! Class-V transcript views (Story 21.1 S2, A10; RU-18).
 //!
-//! A *view* is a non-notice row the user asked to see (team log/status/board,
-//! `/room`, `/artifact`, `/peer` output, transparency decision rows, recipient
-//! outcomes). They keep their `feedback_blocks` storage, content and
-//! commit-on-present until 21-7/21-8 migrate them, but there is exactly ONE
-//! production writer of that map: [`show_view`]. Views carry no actions and no
-//! "active" slot — the order "the view shown last renders last" is an insertion
-//! sequence stored in the block itself, so it survives tab stash/restore.
+//! A *view* is a non-notice row the user asked to see (team status/board/send,
+//! `/room`, `/artifact`, `/peer` output, transparency decision rows, the
+//! `/team context` inventory). The team log, the sent thread and the recipient outcomes
+//! left for the thread window (21-8). Views keep their `feedback_blocks` storage until
+//! 21-7 migrates the rest, but there is exactly ONE production writer of that map:
+//! [`show_view`]. Views carry no actions and no "active" slot — the order "the view shown
+//! last renders last" is an insertion sequence stored in the block itself, so it survives tab
+//! stash/restore.
 
 use std::collections::BTreeMap;
 
@@ -15,17 +16,14 @@ use crate::domain::models::{FeedbackBlock, FeedbackLevel};
 /// The closed list of view producers (RU-18 class V).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewKind {
-    TeamLog,
     TeamStatus,
     TeamBoard,
-    TeamThread,
     TeamSend,
     TeamRetract,
     TeamProposalStatus,
     Transparency,
     TransparencyJournal,
     RecipientContext,
-    PeerRetract,
     Room,
     Artifact,
     Peer,
@@ -36,17 +34,14 @@ impl ViewKind {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::TeamLog => "team-log",
             Self::TeamStatus => "team-status",
             Self::TeamBoard => "team-board",
-            Self::TeamThread => "team-thread",
             Self::TeamSend => "team-send",
             Self::TeamRetract => "team-retract",
             Self::TeamProposalStatus => "team-proposal-status",
             Self::Transparency => "transparency",
             Self::TransparencyJournal => "transparency-journal",
             Self::RecipientContext => "recipient-context",
-            Self::PeerRetract => "peer-retract",
             Self::Room => "room",
             Self::Artifact => "artifact",
             Self::Peer => "peer",

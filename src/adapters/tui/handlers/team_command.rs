@@ -62,32 +62,6 @@ pub struct TeamLogInput {
     /// **before** these rows were read; `None` when it was untrusted or could
     /// not be loaded (the projection's revision is used instead).
     pub reset_revision: Option<u64>,
-    /// Story 19.16g — the client presenting the block.
-    pub rail: LogRail,
-}
-
-/// Story 19.16g — which client presents the in-chat log. Only the access
-/// guidance differs: the attached client has no `Ctrl+X, L` (its leader menu
-/// has no log panel; retracting an auto-sent message is the palette's retract
-/// entry), so it names the full CLI reader alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogRail {
-    Standalone,
-    Attached,
-}
-
-impl LogRail {
-    fn full_readers(self) -> String {
-        match self {
-            Self::Standalone => format!(
-                "`rustain team log` or {} for all",
-                crate::adapters::tui::keymap::render::leader_follow_up_long(
-                    crate::adapters::tui::keymap::table::LeaderCmd::A2aLog
-                )
-            ),
-            Self::Attached => "`rustain team log` for all".to_owned(),
-        }
-    }
 }
 
 /// Parse the `log` tail. Mirrors `forget_command::parse_forget_query`'s
@@ -635,24 +609,13 @@ pub(crate) const fn team_send_unavailable() -> &'static str {
     "`/team send` needs the `a2a` feature; this build was compiled without it."
 }
 
-/// Stable id for the in-chat rows. `/team log` is a **view**, not an event
-/// stream: re-running it replaces the row rather than stacking a new copy of
-/// the same log under the old one.
-pub const TEAM_LOG_BLOCK_ID: &str = "team-log";
-
-/// Most rows rendered in-chat. The panel and the export are unbounded; the
-/// transcript is not, and a thousand-line block would bury the conversation.
-/// The cut is stated in the output — silent truncation is a lie with good
-/// intentions (ADR R23).
-pub const MAX_INCHAT_ROWS: usize = 20;
-
-/// Render the rows in-chat. Returns the `AppEvent`s the caller should emit.
+/// Open the rows in the thread window (S-THREAD's log view). Returns the `AppEvent`s the
+/// caller should emit.
 ///
-/// The rows go into a `FeedbackBlock` directly, **not** through
-/// `AppEvent::SystemNotice { level: Info }`: an `Info` notice becomes a
-/// transient status-bar flash and never reaches the transcript, so the rows
-/// would blink and vanish. Only Warning/Error notices are routed through the
-/// bus, because those levels DO produce a chat block.
+/// The rows go into the frame directly, **not** through `AppEvent::SystemNotice { level: Info }`:
+/// an `Info` notice becomes a transient status-bar flash and never reaches the transcript, so
+/// the rows would blink and vanish. Only Warning/Error notices are routed through the bus,
+/// because those levels DO produce a chat block.
 pub(crate) fn team_command(
     state: &mut TuiState,
     conversation_id: &str,
@@ -697,17 +660,15 @@ pub(crate) fn team_command(
         None => {}
     }
 
-    crate::adapters::tui::views::show_view(
-        &mut state.feedback_blocks,
-        crate::adapters::tui::views::ViewKind::TeamLog,
-        TEAM_LOG_BLOCK_ID,
-        crate::domain::models::FeedbackLevel::Info,
-        render_rows(&rows, args.json, input.rail),
+    crate::infrastructure::runtime::thread_open::open_log(
+        state,
+        args.filter.is_some(),
+        &log_blocks(&rows, args.json),
     );
-    // Story 19.16g: the visit travels with the block it replaced — a newer
-    // command discards the older, unpresented one, and a filtered view is
-    // never a full visit. `TuiState::log_visits_presented` consumes it only
-    // once the block intersects a successfully drawn chat viewport.
+    // Story 19.16g: the visit travels with the log it armed — a newer command discards the
+    // older, unpresented one, and a filtered view is never a full visit.
+    // `TuiState::log_visits_presented` consumes it only once a completed draw painted the log
+    // body on top of the stack.
     state.pending_log_visit =
         args.filter
             .is_none()
@@ -720,35 +681,47 @@ pub(crate) fn team_command(
     out
 }
 
+/// One filterable block per log row (its line and provenance clauses) and the closing claim
+/// last; `--json` is one block per export line. The frame scrolls: nothing is cut.
+pub fn log_blocks(rows: &[TransparencyRow], json: bool) -> Vec<String> {
+    if json {
+        let mut blocks: Vec<String> = crate::domain::services::transparency::render_export(rows)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        if blocks.is_empty() {
+            blocks.push(String::new());
+        }
+        return blocks;
+    }
+    if rows.is_empty() {
+        return vec!["· no A2A interactions recorded (or none match this filter).".to_owned()];
+    }
+    let mut blocks: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let mut block = format!("{} {}", row.timestamp_label(), row.one_line());
+            if let Some(provenance) = &row.provenance {
+                block.push_str(&format!(
+                    "\n  {}\n  {}",
+                    provenance.response_clause(),
+                    provenance.notification_clause()
+                ));
+            }
+            block
+        })
+        .collect();
+    blocks.push(format!("— {STRUCTURAL_REPLAY_CLAIM}; {ATTRIBUTION_CAVEAT}"));
+    blocks
+}
+
 /// The shared rendering. `--json` emits one machine-readable object per line —
 /// byte-identical to the export body, because it *is* the export body.
-pub fn render_rows(rows: &[TransparencyRow], json: bool, rail: LogRail) -> String {
+pub fn render_rows(rows: &[TransparencyRow], json: bool) -> String {
     if json {
         return crate::domain::services::transparency::render_export(rows);
     }
-    if rows.is_empty() {
-        return "· no A2A interactions recorded (or none match this filter).".to_owned();
-    }
-    let mut out = String::new();
-    let skipped = rows.len().saturating_sub(MAX_INCHAT_ROWS);
-    if skipped > 0 {
-        out.push_str(&format!(
-            "· showing the {MAX_INCHAT_ROWS} most recent of {} rows — {}\n",
-            rows.len(),
-            rail.full_readers()
-        ));
-    }
-    for row in rows.iter().skip(skipped) {
-        out.push_str(&format!("{} {}\n", row.timestamp_label(), row.one_line()));
-        if let Some(provenance) = &row.provenance {
-            out.push_str(&format!("  {}\n", provenance.response_clause()));
-            out.push_str(&format!("  {}\n", provenance.notification_clause()));
-        }
-    }
-    out.push_str(&format!(
-        "— {STRUCTURAL_REPLAY_CLAIM}; {ATTRIBUTION_CAVEAT}"
-    ));
-    out
+    log_blocks(rows, false).join("\n")
 }
 
 /// Resolve an operator-facing peer alias or a full stable `PeerId`.
@@ -839,7 +812,7 @@ pub(crate) fn show_team_status(state: &mut TuiState, message: String) {
 
 /// Stable id for the board block. `/team board` is a **view** with its own
 /// refresh verb and a stated refresh floor (19.16b): re-running it replaces
-/// the block — `team-log` and `team-status` semantics — ⛔ never a fresh
+/// the block, like `team-status` — ⛔ never a fresh
 /// dismissible `wfb-N` warning stacked under the previous board.
 pub const TEAM_BOARD_BLOCK_ID: &str = "team-board";
 
@@ -870,19 +843,92 @@ pub struct TeamSendRow {
 /// Story 19.25 D7: the one line under a `retro_request` action's send rows.
 pub const TEAM_SEND_RETRO_NOTE: &str = "Read the report with '/team board --last'. It holds only what members choose to share, never who or how many.";
 
-/// The single feature-independent renderer for standalone and attached sends.
-pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
+/// One recipient's projection: the token (`●`/`✗`/`⚠`, blank while pending or neutral), the
+/// label and the cause line the detail rows add. Both renderers (the CLI's rows and the
+/// conversation's one-line summary) read the same words.
+fn row_parts(
+    row: &TeamSendRow,
+) -> (
+    &'static str,
+    std::borrow::Cow<'_, str>,
+    Option<&crate::domain::models::SendCause>,
+) {
     use std::borrow::Cow;
-    use std::fmt::Write;
 
     use crate::domain::models::team_send::{
         TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL, TEAM_SEND_DECLINED_LABEL, TEAM_SEND_DELIVERED_LABEL,
         TEAM_SEND_NOT_SENT_LABEL, TEAM_SEND_UNREACHABLE_LABEL,
     };
-    use crate::domain::models::{RecipientOutcome, SemanticMessageType, SendCause};
+    use crate::domain::models::{RecipientOutcome, SemanticMessageType};
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+
+    let row_retro = row.message_type == SemanticMessageType::RetroRequest;
+    match row.outcome.as_ref() {
+        None => (" ", Cow::Borrowed("sending…"), None),
+        // D7: whether a member shares is theirs alone; a policy decline
+        // or a pending approval never reads as a per-member answer.
+        Some(
+            RecipientOutcome::Delivered
+            | RecipientOutcome::Declined
+            | RecipientOutcome::AwaitingApproval,
+        ) if row_retro => ("●", Cow::Borrowed("sent"), None),
+        Some(RecipientOutcome::Delivered) => ("●", Cow::Borrowed(TEAM_SEND_DELIVERED_LABEL), None),
+        Some(RecipientOutcome::Declined) => ("✗", Cow::Borrowed(TEAM_SEND_DECLINED_LABEL), None),
+        Some(RecipientOutcome::Unreachable { cause }) => (
+            "⚠",
+            Cow::Borrowed(TEAM_SEND_UNREACHABLE_LABEL),
+            cause.as_ref(),
+        ),
+        Some(RecipientOutcome::AwaitingApproval) => {
+            (" ", Cow::Borrowed("awaiting their approval"), None)
+        }
+        Some(RecipientOutcome::AcceptedWithoutItem) => (
+            " ",
+            Cow::Borrowed(TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL),
+            None,
+        ),
+        Some(RecipientOutcome::NoUsableAnswer) => (
+            " ",
+            Cow::Borrowed("no usable answer — '/team board' shows whether it arrived"),
+            None,
+        ),
+        Some(RecipientOutcome::NotSent) => (" ", Cow::Borrowed(TEAM_SEND_NOT_SENT_LABEL), None),
+        Some(RecipientOutcome::AskedQuestion { task_id }) => (
+            " ",
+            Cow::Owned(
+                crate::infrastructure::runtime::recipient_view::escape_disclosable(
+                    &sanitize_disclosable(
+                        &format!(
+                            "asked a question this verb cannot answer (task `{task_id}` cancelled) — /team send does not continue A2A input-required questions"
+                        ),
+                        MAX_PEER_ID_BYTES,
+                    ),
+                ),
+            ),
+            None,
+        ),
+    }
+}
+
+/// The bounded, sanitized cause line of an unreachable row.
+fn cause_text(cause: &crate::domain::models::SendCause) -> String {
+    use crate::domain::models::SendCause;
     use crate::domain::services::transparency::{
         MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
     };
+    let limit = match cause {
+        SendCause::Ratified(_) => MAX_SUMMARY_BYTES,
+        SendCause::PeerInfluenced(_) => MAX_PEER_ID_BYTES,
+    };
+    sanitize_disclosable(cause.as_str(), limit)
+}
+
+/// The feature-independent per-recipient renderer of a standalone send (the CLI): one row per
+/// recipient with its cause line.
+pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
+    use std::fmt::Write;
+
+    use crate::domain::models::SemanticMessageType;
 
     // Aliases are peer-chosen and may be wide or combining: the label column
     // is measured and padded in display cells, not scalars.
@@ -894,56 +940,8 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
     let mut retro = false;
     let mut text = String::new();
     for row in rows {
-        let row_retro = row.message_type == SemanticMessageType::RetroRequest;
-        retro |= row_retro;
-        let (token, label, cause): (&str, Cow<'_, str>, Option<&SendCause>) = match row
-            .outcome
-            .as_ref()
-        {
-            None => (" ", Cow::Borrowed("sending…"), None),
-            // D7: whether a member shares is theirs alone; a policy decline
-            // or a pending approval never reads as a per-member answer.
-            Some(
-                RecipientOutcome::Delivered
-                | RecipientOutcome::Declined
-                | RecipientOutcome::AwaitingApproval,
-            ) if row_retro => ("●", Cow::Borrowed("sent"), None),
-            Some(RecipientOutcome::Delivered) => {
-                ("●", Cow::Borrowed(TEAM_SEND_DELIVERED_LABEL), None)
-            }
-            Some(RecipientOutcome::Declined) => {
-                ("✗", Cow::Borrowed(TEAM_SEND_DECLINED_LABEL), None)
-            }
-            Some(RecipientOutcome::Unreachable { cause }) => (
-                "⚠",
-                Cow::Borrowed(TEAM_SEND_UNREACHABLE_LABEL),
-                cause.as_ref(),
-            ),
-            Some(RecipientOutcome::AwaitingApproval) => {
-                (" ", Cow::Borrowed("awaiting their approval"), None)
-            }
-            Some(RecipientOutcome::AcceptedWithoutItem) => (
-                " ",
-                Cow::Borrowed(TEAM_SEND_ACCEPTED_WITHOUT_ITEM_LABEL),
-                None,
-            ),
-            Some(RecipientOutcome::NoUsableAnswer) => (
-                " ",
-                Cow::Borrowed("no usable answer — '/team board' shows whether it arrived"),
-                None,
-            ),
-            Some(RecipientOutcome::NotSent) => (" ", Cow::Borrowed(TEAM_SEND_NOT_SENT_LABEL), None),
-            Some(RecipientOutcome::AskedQuestion { task_id }) => (
-                " ",
-                Cow::Owned(crate::domain::services::transparency::sanitize_disclosable(
-                    &format!(
-                        "asked a question this verb cannot answer (task `{task_id}` cancelled) — /team send does not continue A2A input-required questions"
-                    ),
-                    MAX_PEER_ID_BYTES,
-                )),
-                None,
-            ),
-        };
+        retro |= row.message_type == SemanticMessageType::RetroRequest;
+        let (token, label, cause) = row_parts(row);
         let _ = writeln!(
             text,
             "  {token} {}  {label}",
@@ -951,11 +949,7 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
         );
         if let Some(cause) = cause {
             text.push_str("    ");
-            let limit = match cause {
-                SendCause::Ratified(_) => MAX_SUMMARY_BYTES,
-                SendCause::PeerInfluenced(_) => MAX_PEER_ID_BYTES,
-            };
-            text.push_str(&sanitize_disclosable(cause.as_str(), limit));
+            text.push_str(&cause_text(cause));
             text.push('\n');
         }
     }
@@ -965,6 +959,63 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
         text.pop();
     }
     text
+}
+
+/// The conversation's one-line summary of a send (OR-21-8-1): `Send · <type token> ·
+/// <alias> <label> · <alias> <label> …` in recipient order, `●`/`✗`/`⚠` before the alias when
+/// the row has one. One logical line, never truncated (the Stage soft-wraps it); the cause
+/// lines and the retrospective note are ambient notices (`send_notices`).
+pub fn render_team_send_summary(rows: &[TeamSendRow]) -> String {
+    use crate::domain::models::{SemanticMessageType, semantic_message_type_metadata};
+
+    let Some(first) = rows.first() else {
+        return String::new();
+    };
+    let mut line = String::from("Send");
+    if first.message_type != SemanticMessageType::Unknown {
+        line.push_str(" · ");
+        line.push_str(semantic_message_type_metadata(first.message_type).token);
+    }
+    for row in rows {
+        let (token, label, _) = row_parts(row);
+        line.push_str(" · ");
+        if token != " " {
+            line.push_str(token);
+            line.push(' ');
+        }
+        line.push_str(&row.alias);
+        line.push(' ');
+        line.push_str(&label);
+    }
+    line
+}
+
+/// What a row's first settlement adds to the ambient notices: an unreachable cause or an
+/// asked-a-question explanation as a Warning (`<alias> unreachable: <cause>`), and — when it
+/// is the action's first settled row — the retrospective note as an Info. Posted once, when
+/// the row settles. The flag is `true` for a Warning.
+pub fn send_notices(row: &TeamSendRow, first_settled: bool) -> Vec<(bool, String)> {
+    use crate::domain::models::{RecipientOutcome, SemanticMessageType};
+
+    let mut notices = Vec::new();
+    if let Some(RecipientOutcome::Unreachable { cause: Some(cause) }) = &row.outcome {
+        notices.push((
+            true,
+            crate::infrastructure::runtime::recipient_view::escape_disclosable(&format!(
+                "{} unreachable: {}",
+                row.alias,
+                cause_text(cause)
+            )),
+        ));
+    }
+    if let Some(RecipientOutcome::AskedQuestion { .. }) = &row.outcome {
+        let (_, label, _) = row_parts(row);
+        notices.push((true, format!("{} {label}", row.alias)));
+    }
+    if first_settled && row.message_type == SemanticMessageType::RetroRequest {
+        notices.push((false, TEAM_SEND_RETRO_NOTE.to_owned()));
+    }
+    notices
 }
 
 /// Story 19.16f's unconditional credential sentence, shared by the retract
@@ -977,11 +1028,6 @@ pub fn one_credential_sentence(alias: &str) -> String {
          this item."
     )
 }
-
-/// Stable id for the thread block (Story 19.18 `AC6(a)`): one per tab,
-/// replaced on every read. ⛔ Never a stacked `wfb-N`, never a Warning, never
-/// a `SystemNotice` (`A12`).
-pub const TEAM_THREAD_BLOCK_ID: &str = "team-thread";
 
 /// The thread block's in-flight line, in the board's pre-outcome shape.
 pub const TEAM_THREAD_READING: &str = "  reading…";
@@ -1139,18 +1185,6 @@ pub fn render_team_thread(
         text.push_str(crate::adapters::a2a::board::COLLAPSED_PRINCIPAL_DISCLOSURE);
     }
     text
-}
-
-/// Replace the stable `team-thread` block, at Info level, keyless.
-pub fn show_team_thread(state: &mut TuiState, message: String) {
-    crate::adapters::tui::views::show_view(
-        &mut state.feedback_blocks,
-        crate::adapters::tui::views::ViewKind::TeamThread,
-        TEAM_THREAD_BLOCK_ID,
-        crate::domain::models::FeedbackLevel::Info,
-        message,
-    );
-    state.needs_redraw = true;
 }
 
 pub fn show_team_send(state: &mut TuiState, block_id: &str, message: String) {
@@ -1770,7 +1804,7 @@ mod tests {
     fn json_output_is_the_export_body_byte_for_byte() {
         let rows = vec![row(1), row(2)];
         assert_eq!(
-            render_rows(&rows, true, LogRail::Standalone),
+            render_rows(&rows, true),
             crate::domain::services::transparency::render_export(&rows),
             "the two faces must not have two renderers"
         );
@@ -1778,7 +1812,7 @@ mod tests {
 
     #[test]
     fn text_output_states_the_scoped_integrity_claim() {
-        let text = render_rows(&[row(1)], false, LogRail::Standalone);
+        let text = render_rows(&[row(1)], false);
         // Bind to the CONSTANTS, not to a copy of their prose. Story 18.2's
         // review replaced the old "not cryptographically tamper-evident"
         // wording with the scoped structural-replay claim but left this test
@@ -1798,8 +1832,8 @@ mod tests {
 
     #[test]
     fn an_empty_log_says_so_rather_than_rendering_a_blank() {
-        assert!(render_rows(&[], false, LogRail::Standalone).contains("no A2A interactions"));
-        assert_eq!(render_rows(&[], true, LogRail::Standalone), "");
+        assert!(render_rows(&[], false).contains("no A2A interactions"));
+        assert_eq!(render_rows(&[], true), "");
     }
 
     #[test]
@@ -1815,7 +1849,6 @@ mod tests {
                 export: None,
                 snapshot_max_seq: 0,
                 reset_revision: None,
-                rail: LogRail::Standalone,
             },
         );
         assert_eq!(events.len(), 1);
@@ -1839,22 +1872,30 @@ mod tests {
                 export: None,
                 snapshot_max_seq: 1,
                 reset_revision: None,
-                rail: LogRail::Standalone,
             },
         );
-        // The divergence warning rides the bus (Warning DOES reach the
-        // transcript); the rows go straight into a FeedbackBlock, because an
-        // Info notice would be a transient status flash instead.
         assert_eq!(events.len(), 1, "one divergence warning");
-        assert!(format!("{events:?}").contains("sequence gap"));
-        let block = &state.feedback_blocks[TEAM_LOG_BLOCK_ID];
-        assert!(block.message.contains("peer-a"), "{}", block.message);
-        assert_eq!(
-            crate::adapters::tui::views::in_render_order(&state.feedback_blocks)
-                .last()
-                .map(|b| b.id.as_str()),
-            Some(TEAM_LOG_BLOCK_ID)
+        assert!(
+            matches!(&events[0], AppEvent::SystemNotice { level: NoticeLevel::Warning, message, .. } if message.contains("sequence gap"))
         );
+        let inspector = state.thread_inspector.as_ref().expect("log window");
+        assert!(matches!(
+            inspector.target,
+            crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
+        ));
+        assert!(
+            inspector.content.contains("peer-a"),
+            "{}",
+            inspector.content
+        );
+        let frame = state.modal_stack.top().expect("log frame");
+        assert_eq!(
+            frame.surface,
+            crate::adapters::tui::presentation::Surface::ThreadInspector
+        );
+        assert_eq!(frame.title(), "A2A log");
+        assert!(state.pending_log_visit.is_some());
+        assert!(!state.feedback_blocks.contains_key("team-log"));
     }
 
     #[test]
@@ -1871,39 +1912,301 @@ mod tests {
                     export: None,
                     snapshot_max_seq: 1,
                     reset_revision: None,
-                    rail: LogRail::Standalone,
                 },
             );
         }
         assert_eq!(
-            state.feedback_blocks.len(),
+            state.modal_stack.len(),
             1,
-            "a log view, not an event stream"
+            "one log frame, not an event stream"
+        );
+        let inspector = state.thread_inspector.as_ref().expect("log window");
+        assert!(matches!(
+            inspector.target,
+            crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
+        ));
+        assert!(inspector.content.contains("peer-a"));
+        assert_eq!(state.modal_stack.top().unwrap().title(), "A2A log");
+        assert!(state.pending_log_visit.is_some());
+        assert!(!state.feedback_blocks.contains_key("team-log"));
+    }
+
+    #[test]
+    fn an_over_long_log_renders_every_row_without_a_cut() {
+        let rows: Vec<TransparencyRow> = (1..=25).map(row).collect();
+        let text = render_rows(&rows, false);
+        assert_eq!(text.lines().count(), 26, "{text}");
+        assert_eq!(text.matches("peer-a").count(), 25, "{text}");
+        assert!(text.contains(STRUCTURAL_REPLAY_CLAIM), "{text}");
+        assert!(text.contains(ATTRIBUTION_CAVEAT), "{text}");
+        assert!(!text.contains("showing the 20 most recent"), "{text}");
+    }
+
+    #[test]
+    fn story21_8_log_blocks_keep_rows_provenance_and_json_lines_together() {
+        let mut rows: Vec<_> = (1..=25).map(row).collect();
+        let provenance = crate::domain::models::InteractionPolicySnapshot::default();
+        rows[4].provenance = Some(provenance.clone());
+        let blocks = log_blocks(&rows, false);
+        assert_eq!(blocks.len(), 26);
+        for (index, item) in rows.iter().enumerate() {
+            assert!(blocks[index].starts_with(&format!(
+                "{} {}",
+                item.timestamp_label(),
+                item.one_line()
+            )));
+        }
+        assert!(blocks[4].contains(&provenance.response_clause()));
+        assert!(blocks[4].contains(&provenance.notification_clause()));
+        assert!(!blocks[3].contains(&provenance.response_clause()));
+        assert!(!blocks[5].contains(&provenance.notification_clause()));
+        assert_eq!(
+            blocks[25],
+            format!("— {STRUCTURAL_REPLAY_CLAIM}; {ATTRIBUTION_CAVEAT}")
+        );
+        let export = crate::domain::services::transparency::render_export(&rows);
+        let json = log_blocks(&rows, true);
+        assert_eq!(json, export.lines().map(str::to_owned).collect::<Vec<_>>());
+        assert_eq!(
+            json.join("\n"),
+            export.lines().collect::<Vec<_>>().join("\n")
+        );
+        assert_eq!(
+            log_blocks(&[], false),
+            vec!["· no A2A interactions recorded (or none match this filter)."]
         );
     }
 
     #[test]
-    fn an_over_long_log_states_its_own_truncation_and_a_rail_true_full_reader() {
-        let rows: Vec<TransparencyRow> = (1..=MAX_INCHAT_ROWS as u64 + 5).map(row).collect();
-        let text = render_rows(&rows, false, LogRail::Standalone);
-        assert!(
-            text.contains(&format!("most recent of {} rows", rows.len())),
-            "silent truncation is a lie with good intentions: {text}"
+    fn story21_8_log_window_arms_only_full_visits_and_keeps_export_notices() {
+        use crate::adapters::tui::presentation::Surface;
+        use crate::adapters::tui::state::ThreadTarget;
+        for (filtered, json) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut state = TuiState::new(80, 24);
+            let rows = vec![row(1)];
+            let args = TeamLogArgs {
+                filter: filtered.then(|| "peer=peer-a".to_owned()),
+                json,
+                export: true,
+            };
+            let events = team_command(
+                &mut state,
+                "conv",
+                &args,
+                TeamLogInput {
+                    rows: Ok(rows.clone()),
+                    divergence: None,
+                    export: Some(Ok(TransparencyExport {
+                        path: "report.jsonl".into(),
+                        rows: 1,
+                        findings: vec![],
+                    })),
+                    snapshot_max_seq: 1,
+                    reset_revision: Some(7),
+                },
+            );
+            assert!(
+                matches!(&events[..], [AppEvent::SystemNotice { level: NoticeLevel::Warning, message, .. }] if message.contains("report.jsonl") && message.contains("1 rows"))
+            );
+            let inspector = state.thread_inspector.as_ref().expect("log window");
+            assert!(
+                matches!(&inspector.target, ThreadTarget::Log { filtered: actual } if *actual == filtered)
+            );
+            assert_eq!(
+                inspector.content.trim_end(),
+                render_rows(&rows, json).trim_end()
+            );
+            let frame = state.modal_stack.top().expect("frame");
+            assert_eq!(frame.surface, Surface::ThreadInspector);
+            assert_eq!(
+                frame.title(),
+                if filtered {
+                    "A2A log · filtered"
+                } else {
+                    "A2A log"
+                }
+            );
+            assert_eq!(state.pending_log_visit.is_some(), !filtered);
+            if let Some(visit) = &state.pending_log_visit {
+                assert_eq!(visit.seen_through, 1);
+                assert_eq!(visit.reset_revision, 7);
+            }
+            assert!(!state.feedback_blocks.contains_key("team-log"));
+        }
+        let mut state = TuiState::new(80, 24);
+        let events = team_command(
+            &mut state,
+            "conv",
+            &TeamLogArgs::default(),
+            TeamLogInput {
+                rows: Ok(vec![row(1)]),
+                divergence: None,
+                export: Some(Err("disk full".into())),
+                snapshot_max_seq: 1,
+                reset_revision: None,
+            },
         );
-        assert!(text.contains("Ctrl+X, L"), "the full surface must be named");
-        // Story 19.16g: the attached client has no `Ctrl+X, L` — it retracts an
-        // auto-sent message through the palette — so it names only the full reader,
-        // and keeps the same explicit truncation disclosure.
-        let attached = render_rows(&rows, false, LogRail::Attached);
         assert!(
-            attached.contains(&format!("most recent of {} rows", rows.len())),
-            "{attached}"
+            matches!(&events[..], [AppEvent::SystemNotice { level: NoticeLevel::Error, message, .. }] if message.contains("disk full"))
         );
         assert!(
-            attached.contains("`rustain team log` for all"),
-            "{attached}"
+            state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .content
+                .contains("peer-a")
         );
-        assert!(!attached.contains("Ctrl+X"), "{attached}");
+    }
+
+    #[test]
+    fn story21_8_send_summary_matches_unchanged_cli_labels_for_every_outcome() {
+        use crate::domain::models::{RecipientOutcome as O, SemanticMessageType as T};
+        let cases = [
+            (None, "    b  sending…", "b sending…"),
+            (Some(O::Delivered), "  ● b  delivered", "● b delivered"),
+            (Some(O::Declined), "  ✗ b  declined", "✗ b declined"),
+            (
+                Some(O::Unreachable { cause: None }),
+                "  ⚠ b  unreachable",
+                "⚠ b unreachable",
+            ),
+            (
+                Some(O::AwaitingApproval),
+                "    b  awaiting their approval",
+                "b awaiting their approval",
+            ),
+            (
+                Some(O::AcceptedWithoutItem),
+                "    b  accepted — this peer keeps no item id",
+                "b accepted — this peer keeps no item id",
+            ),
+            (
+                Some(O::NoUsableAnswer),
+                "    b  no usable answer — '/team board' shows whether it arrived",
+                "b no usable answer — '/team board' shows whether it arrived",
+            ),
+            (
+                Some(O::NotSent),
+                "    b  not sent — this host could not record the attempt",
+                "b not sent — this host could not record the attempt",
+            ),
+            (
+                Some(O::AskedQuestion {
+                    task_id: "t1".into(),
+                }),
+                "    b  asked a question this verb cannot answer (task `t1` cancelled) — /team send does not continue A2A input-required questions",
+                "b asked a question this verb cannot answer (task `t1` cancelled) — /team send does not continue A2A input-required questions",
+            ),
+        ];
+        for (outcome, cli, summary) in cases {
+            let row = TeamSendRow {
+                alias: "b".into(),
+                outcome,
+                message_type: T::Unknown,
+            };
+            assert_eq!(render_team_send_rows(std::slice::from_ref(&row)), cli);
+            assert_eq!(
+                render_team_send_summary(std::slice::from_ref(&row)),
+                format!("Send · {summary}")
+            );
+            let cli_label = cli.split_once("b  ").unwrap().1;
+            assert!(summary.ends_with(cli_label));
+        }
+        for outcome in [O::Delivered, O::Declined, O::AwaitingApproval] {
+            let row = TeamSendRow {
+                alias: "b".into(),
+                outcome: Some(outcome),
+                message_type: T::RetroRequest,
+            };
+            assert_eq!(
+                render_team_send_rows(std::slice::from_ref(&row)),
+                format!("  ● b  sent\n{TEAM_SEND_RETRO_NOTE}")
+            );
+            assert_eq!(
+                render_team_send_summary(&[row]),
+                "Send · retro_request · ● b sent"
+            );
+        }
+        let rows = [
+            TeamSendRow {
+                alias: "z".into(),
+                outcome: None,
+                message_type: T::Consultation,
+            },
+            TeamSendRow {
+                alias: "a".into(),
+                outcome: Some(O::Delivered),
+                message_type: T::Consultation,
+            },
+        ];
+        assert_eq!(
+            render_team_send_summary(&rows),
+            "Send · consultation · z sending… · ● a delivered"
+        );
+        assert_eq!(render_team_send_summary(&[]), "");
+    }
+
+    #[test]
+    fn story21_8_send_notices_are_bounded_safe_and_first_settlement_only_for_retro() {
+        use crate::domain::models::{RecipientOutcome as O, SemanticMessageType as T, SendCause};
+        let make = |outcome, message_type| TeamSendRow {
+            alias: "peer".into(),
+            outcome: Some(outcome),
+            message_type,
+        };
+        for cause in [
+            SendCause::Ratified("offline".into()),
+            SendCause::PeerInfluenced("offline".into()),
+        ] {
+            let row = make(O::Unreachable { cause: Some(cause) }, T::Unknown);
+            assert_eq!(
+                send_notices(&row, false),
+                vec![(true, "peer unreachable: offline".into())]
+            );
+        }
+        let hostile = format!("safe\x1b[31m\u{202e}{}", "x".repeat(4096));
+        let row = make(
+            O::Unreachable {
+                cause: Some(SendCause::PeerInfluenced(hostile)),
+            },
+            T::Unknown,
+        );
+        let notices = send_notices(&row, false);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].0);
+        assert!(notices[0].1.starts_with("peer unreachable: safe"));
+        assert!(!notices[0].1.contains('\x1b'));
+        assert!(!notices[0].1.contains('\u{202e}'));
+        assert!(notices[0].1.contains("…[truncated]"));
+        assert!(notices[0].1.len() < 1000);
+        let asked = make(
+            O::AskedQuestion {
+                task_id: "t1".into(),
+            },
+            T::Unknown,
+        );
+        assert_eq!(send_notices(&asked, false), vec![(true, "peer asked a question this verb cannot answer (task `t1` cancelled) — /team send does not continue A2A input-required questions".into())]);
+        let hostile_question = make(
+            O::AskedQuestion {
+                task_id: "t\x1b\u{202e}1".into(),
+            },
+            T::Unknown,
+        );
+        let question_notices = send_notices(&hostile_question, false);
+        assert_eq!(question_notices.len(), 1);
+        assert!(question_notices[0].0);
+        assert!(question_notices[0].1.contains("asked a question"));
+        assert!(!question_notices[0].1.contains('\x1b'));
+        assert!(!question_notices[0].1.contains('\u{202e}'));
+        let delivered = make(O::Delivered, T::Unknown);
+        assert!(send_notices(&delivered, true).is_empty());
+        let retro = make(O::Delivered, T::RetroRequest);
+        assert_eq!(
+            send_notices(&retro, true),
+            vec![(false, TEAM_SEND_RETRO_NOTE.into())]
+        );
+        assert!(send_notices(&retro, false).is_empty());
     }
 
     #[test]

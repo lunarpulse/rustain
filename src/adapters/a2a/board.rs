@@ -208,8 +208,8 @@ impl BoardItemState {
 
 /// Most per-item rows rendered under one peer in-chat (Story 19.16f `AC1`).
 ///
-/// A separate constant from `team_command::MAX_INCHAT_ROWS` (20): a log is
-/// read, a picker is **searched** for one id. "Most recent" = highest
+/// A picker is **searched** for one id, unlike the uncapped log view.
+/// "Most recent" = highest
 /// `ordinal`. The cut is stated, and its overflow line names the one surface
 /// that lifts it — `/team board <peer-id>`, which renders one peer uncapped.
 /// Lives beside the render that applies it: this module is the a2a adapter's

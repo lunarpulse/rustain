@@ -42,7 +42,7 @@ async fn k20a_approved_proposal_is_agent_composed_human_decided() {
     assert!(
         f.state.feedback_blocks[&block_id]
             .message
-            .lines()
+            .split(" · ")
             .any(|line| line.split_whitespace().take(2).eq(["●", "lena-po"])),
         "ordinary send row must settle Delivered"
     );

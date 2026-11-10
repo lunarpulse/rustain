@@ -312,6 +312,11 @@ const RULES: &[(&str, &str)] = &[
         "thread-21-8-b",
         r#"\bViewKind\s*::\s*RecipientOutcome\b|"recipient-actions"|"recipient-view"|input already contains text|\b(?:PinnedPeerCompose|pinned_peer_compose|take_current_peer_compose|PeerComposeAction)\b|\bRecipientActionState\s*::\s*Completed\b"#,
     ),
+    // Slice 8-C retires transcript thread/log/retract surfaces and their old renderer.
+    (
+        "thread-21-8-c",
+        r#"\b(?:show_team_thread|TEAM_THREAD_BLOCK_ID|view_block|TEAM_LOG_BLOCK_ID|MAX_INCHAT_ROWS|run_team_log)\b|\bViewKind\s*::\s*(?:TeamThread|PeerRetract|TeamLog)\b|"peer-retract"|\brender_team_send_rows\s*\("#,
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -487,6 +492,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             let haystack = if *rule == "osc8-encoder"
                 || *rule == "thread-21-8-a"
                 || *rule == "thread-21-8-b"
+                || *rule == "thread-21-8-c"
                 || rule.starts_with("tool-line-")
             {
                 &literal
@@ -495,6 +501,12 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             };
             for m in pattern.find_iter(haystack) {
                 // The query moved to the queue; its implementation remains legal.
+                if *rule == "thread-21-8-c"
+                    && m.as_str().starts_with("render_team_send_rows")
+                    && (path.ends_with("/team_command.rs") || path.ends_with("/team_send_cli.rs"))
+                {
+                    continue;
+                }
                 if *rule == "decision-21-6-d"
                     && path == "src/adapters/tui/decision_queue/retract.rs"
                     && m.as_str().starts_with("fn confirmation_pending")
@@ -570,6 +582,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "decision-21-6-e",
                     "thread-21-8-a",
                     "thread-21-8-b",
+                    "thread-21-8-c",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -854,6 +867,17 @@ fn k6_same_scanner_rejects_each_forbidden_mechanism() {
         ("thread-21-8-b", "take_current_peer_compose(s);"),
         ("thread-21-8-b", "let a = PeerComposeAction::Send;"),
         ("thread-21-8-b", "let a = RecipientActionState::Completed;"),
+        ("thread-21-8-c", "show_team_thread(s);"),
+        ("thread-21-8-c", "let _ = TEAM_THREAD_BLOCK_ID;"),
+        ("thread-21-8-c", "let _ = ViewKind::TeamThread;"),
+        ("thread-21-8-c", "let _ = ViewKind::PeerRetract;"),
+        ("thread-21-8-c", "let _ = \"peer-retract\";"),
+        ("thread-21-8-c", "s.view_block = None;"),
+        ("thread-21-8-c", "let _ = ViewKind::TeamLog;"),
+        ("thread-21-8-c", "let _ = TEAM_LOG_BLOCK_ID;"),
+        ("thread-21-8-c", "let _ = MAX_INCHAT_ROWS;"),
+        ("thread-21-8-c", "run_team_log(s);"),
+        ("thread-21-8-c", "render_team_send_rows(rows);"),
     ];
     for (rule, text) in cases
         .into_iter()
@@ -2473,4 +2497,60 @@ fn k6_story21_8_retired_recipient_surface_symbols_are_unpinnable_and_thread_apis
             .iter()
             .all(|s| !s.contains("thread-21-8-a|"))
     );
+}
+
+#[test]
+fn k6_story21_8_c_retired_symbols_are_unpinnable_and_cli_renderer_remains_legal() {
+    for text in [
+        "show_team_thread(s);",
+        "let _ = TEAM_THREAD_BLOCK_ID;",
+        "let _ = ViewKind::TeamThread;",
+        "let _ = ViewKind::PeerRetract;",
+        "let _ = \"peer-retract\";",
+        "s.view_block = None;",
+        "let _ = ViewKind::TeamLog;",
+        "let _ = TEAM_LOG_BLOCK_ID;",
+        "let _ = MAX_INCHAT_ROWS;",
+        "run_team_log(s);",
+        "render_team_send_rows(rows);",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("thread-21-8-c|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("thread-21-8-c|")),
+            "{text}: {errors:?}"
+        );
+    }
+    for path in [
+        "src/adapters/tui/handlers/team_command.rs",
+        "src/adapters/cli/team_send_cli.rs",
+    ] {
+        let errors = scan(
+            &[(
+                path.into(),
+                "fn real() { render_team_send_rows(rows); }".into(),
+            )],
+            &[],
+        );
+        assert!(
+            !errors.iter().any(|s| s.contains("thread-21-8-c|")),
+            "{errors:?}"
+        );
+    }
+    assert!(PINS.is_empty());
 }

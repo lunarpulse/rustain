@@ -1073,6 +1073,7 @@ pub async fn run(
             Some(event_result) = terminal_events.next() => {
                 match event_result {
                     Ok(event) => {
+                        state.local_read_only = tab_manager.active_tab().read_only;
                         if let crossterm::event::Event::Paste(text) = &event
                             && apply_query_paste(&mut tab_manager, &mut state, &conversation, text, &storage, &session_index, &domain_tx).is_some()
                         {
@@ -1213,6 +1214,7 @@ pub async fn run(
                                         tracing::warn!(%error, "received-thread page unavailable");
                                     }
                                 }
+                                InputAction::ThreadRetract { peer, item } => crate::infrastructure::runtime::transparency_bridge::retract_sent(&mut state, &conversation.id, &peer, &item, tab_manager.active_tab().read_only, &app_state).await,
                                 InputAction::SubmitMessage(text) => {
                                     // Resolve any file mentions from autocomplete selections
                                     let mut mention_images: Vec<ImageAttachment> = Vec::new();
@@ -4976,7 +4978,7 @@ pub async fn run(
                     // ⛔ never route through the turn-fatal Warning path.
                     AppEvent::TeamRetractPreviewReady { conversation_id: c, preview } => crate::infrastructure::runtime::transparency_bridge::team_retract_preview_ready(conversation.id.clone(), &mut state, &mut tab_manager, c, preview),
                     AppEvent::TeamRetractAnswered { conversation_id: c, message, board } => crate::infrastructure::runtime::transparency_bridge::team_retract_answered(conversation.id.clone(), &mut state, &mut tab_manager, c, message, board),
-                    AppEvent::TeamThreadReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
+                    AppEvent::TeamThreadReady { conversation_id: c, generation, message } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&mut state, &c, generation, &message),
                     AppEvent::TeamBoardReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_board_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
                     #[cfg(feature = "a2a")]
                     AppEvent::TeamBoardObserved(rows) => crate::adapters::tui::decision_queue::reply::observe_board(&mut state, rows),
@@ -7477,8 +7479,8 @@ pub fn render(
     let mut user_msg_bounds: Vec<usize> = Vec::new();
     let mut focused_item_id: Option<String> = None;
     let mut vp_height: u16 = state.viewport_height;
-    let mut visible_feedback_rows = Vec::new();
     state.restore_unflushed_log_visits();
+    state.local_read_only = tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only);
 
     let permission_mode = security.current_mode();
     let leader_tail = crate::adapters::tui::app::status_tail(state);
@@ -7958,7 +7960,6 @@ pub fn render(
                     msg_bounds = result.message_boundaries;
                     user_msg_bounds = result.user_message_boundaries;
                     focused_item_id = result.focused_item_id;
-                    visible_feedback_rows = result.visible_feedback_rows;
                 }
 
                 opaque.host(paint_wave_base(
@@ -8070,7 +8071,6 @@ pub fn render(
                     &mut opaque,
                     paint_status,
                 );
-                visible_feedback_rows.retain(|(_, rows)| opaque.presented(rows));
             }
             None => {
                 presentation::paint_too_small(frame, area);
@@ -8089,7 +8089,7 @@ pub fn render(
     state.focused_item_id = focused_item_id;
     state.current_hint = rendered_hint;
     state.viewport_height = vp_height;
-    state.log_visits_presented(visible_feedback_rows.iter().map(|(id, _)| id.as_str()));
+    state.log_visits_presented();
 
     resolve_resize_anchor(tab_manager, state);
     Ok(())

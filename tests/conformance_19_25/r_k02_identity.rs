@@ -444,10 +444,9 @@ async fn r_k02_no_participation_reports_are_byte_identical_and_name_nobody() {
     }
 }
 
-/// M07/M08 on the standalone rail: D's host declines `retro_request` by
-/// policy and its row reads `sent`, exactly like delivered B's, followed by
-/// the D7 note; the retro board names and counts nobody. Control: the same
-/// sends as `consultation` keep `✗ declined` and the `N addressed` board.
+/// M07/M08: D's policy decline and B's delivery both read `sent` in the
+/// summary, with the D7 note in a notice; the retro board names and counts
+/// nobody. A consultation retains `✗ declined` and the `N addressed` board.
 #[tokio::test]
 async fn r_k02_policy_decline_reads_sent_and_consultation_control_keeps_declined() {
     let b =
@@ -497,7 +496,15 @@ async fn r_k02_policy_decline_reads_sent_and_consultation_control_keeps_declined
     let retro_rows = state.feedback_blocks[&retro_block].message.clone();
     assert_eq!(
         retro_rows,
-        format!("  ● {B}  sent\n  ● {D}  sent\n{TEAM_SEND_RETRO_NOTE}")
+        format!("Send · retro_request · ● {B} sent · ● {D} sent")
+    );
+    assert_eq!(
+        state
+            .notifications
+            .records()
+            .filter(|notice| notice.message == TEAM_SEND_RETRO_NOTE)
+            .count(),
+        1
     );
     let retro_board = team_board_message(sender.runtime(), &TeamBoardSelector::Last).await;
     assert!(
@@ -543,7 +550,7 @@ async fn r_k02_policy_decline_reads_sent_and_consultation_control_keeps_declined
     let control_rows = state.feedback_blocks[&control_block].message.clone();
     assert_eq!(
         control_rows,
-        format!("  ● {B}  delivered\n  ✗ {D}  declined")
+        format!("Send · consultation · ● {B} delivered · ✗ {D} declined")
     );
     assert!(!control_rows.contains(TEAM_SEND_RETRO_NOTE));
     // Independent board read, like the tolerance fixtures: preserve the real

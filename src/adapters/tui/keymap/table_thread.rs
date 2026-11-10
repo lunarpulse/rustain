@@ -43,6 +43,8 @@ pub enum ThreadCmd {
     /// `1`, `2`, `3`: the index into `RetroField::ALL`.
     LeaveOut(u8),
     Context,
+    /// `x`: retract the opened sent item, or the newest auto-sent reply of the opened item.
+    Retract,
 }
 
 const fn t(keys: &'static [Key], command: ThreadCmd, label: &'static str) -> Binding {
@@ -103,6 +105,7 @@ pub const ROWS: &[Binding] = &[
     w(&[Key::Char('2')], ThreadCmd::LeaveOut(1), "Leave out").does("Leave the second retrospective field out of what is shared, or put it back"),
     w(&[Key::Char('3')], ThreadCmd::LeaveOut(2), "Leave out").does("Leave the third retrospective field out of what is shared, or put it back"),
     w(&[Key::Char('u')], ThreadCmd::Context, "Use as context").does("Use the opened item as peer context for this conversation, or stop using it"),
+    t(&[Key::Char('x')], ThreadCmd::Retract, "Retract").does("Retract the item you sent, or your newest auto-sent reply to this item (asks to confirm first)"),
     r(&[Key::Enter], ThreadCmd::SendReply, "Send").does("Send the reply through /team reply and close the thread window"),
     r(&[Key::Esc], ThreadCmd::ReplyBack, "Clear").does("Clear the reply and leave its field"),
     r(&[Key::Ctrl('c')], ThreadCmd::ReplyBack, "").does("Clear the reply and leave its field"),

@@ -9,7 +9,7 @@
 //! Deliberately **not** in `handlers/`: it performs journal reads and file
 //! writes, and the handler contract is data-in/data-out.
 
-use crate::adapters::tui::handlers::team_command::{LogRail, TeamLogArgs, TeamLogInput};
+use crate::adapters::tui::handlers::team_command::{TeamLogArgs, TeamLogInput};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::AppConfig;
 use crate::domain::services::transparency::{
@@ -214,7 +214,7 @@ pub(crate) async fn export_command(
 /// Gather everything `/team log` needs: the filtered rows, the divergence
 /// report, and the export result when `--export` was asked for.
 pub(crate) async fn team_log_input(app_state: &AppState, args: &TeamLogArgs) -> TeamLogInput {
-    team_log_input_from(app_state.transparency.as_deref(), args, LogRail::Standalone).await
+    team_log_input_from(app_state.transparency.as_deref(), args).await
 }
 
 /// The rail-independent core of [`team_log_input`]: one report read, shared
@@ -222,7 +222,6 @@ pub(crate) async fn team_log_input(app_state: &AppState, args: &TeamLogArgs) -> 
 pub(crate) async fn team_log_input_from(
     service: Option<&crate::infrastructure::transparency::TransparencyService>,
     args: &TeamLogArgs,
-    rail: LogRail,
 ) -> TeamLogInput {
     let failed = |error: String, divergence: Option<String>| TeamLogInput {
         rows: Err(error),
@@ -230,7 +229,6 @@ pub(crate) async fn team_log_input_from(
         export: None,
         snapshot_max_seq: 0,
         reset_revision: None,
-        rail,
     };
     let Some(service) = service else {
         return failed(NO_JOURNAL.to_owned(), None);
@@ -270,13 +268,12 @@ pub(crate) async fn team_log_input_from(
         export,
         snapshot_max_seq: report.rows.iter().map(|row| row.seq).max().unwrap_or(0),
         reset_revision,
-        rail,
     }
 }
 
 /// Story 19.16g — `/team log` on the daemon-attached client: a **local**
 /// read of the same workspace journal (attach is a Unix-socket client of this
-/// filesystem, not a journal replica), rendered into the same stable block.
+/// filesystem, not a journal replica), rendered in the thread inspector.
 /// ⛔ Never a model turn and never daemon write authority. The handler's
 /// notices come back as plain strings for the client's own non-turn-fatal
 /// transcript line — never the daemon's turn-control stream.
@@ -287,7 +284,7 @@ pub(crate) async fn attached_team_log(
 ) -> Vec<String> {
     use crate::adapters::tui::handlers::team_command as handler;
 
-    let input = team_log_input_from(Some(service), args, LogRail::Attached).await;
+    let input = team_log_input_from(Some(service), args).await;
     handler::team_command(state, "", args, input)
         .into_iter()
         .filter_map(|event| match event {
@@ -656,8 +653,8 @@ pub async fn team_command(
         }
         // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
         // holding this session's own A2A egress. Spawned, never awaited
-        // inline; the answer arrives as `TeamThreadReady` and replaces the
-        // stable `team-thread` block in place.
+        // inline; the answer arrives as `TeamThreadReady` and fills the
+        // originating thread window.
         TeamCommandArgs::Thread { peer, item_id } => {
             read_team_thread(state, conversation_id, peer, item_id, app_state);
         }
@@ -739,7 +736,38 @@ pub async fn team_command(
     }
 }
 
-/// Execute the same thread reader used by `/team thread`, without reparsing identifiers.
+/// The local host's `x` on a sent thread: the same `/team retract <peer> <item>` preview (the
+/// confirm-time read and 21-6's L3 decision stay the only raisers; nothing is marked here). A
+/// read-only tab never retracts (the rail is not painted there either: `retract_plan`).
+pub async fn retract_sent(
+    state: &mut TuiState,
+    conversation_id: &str,
+    peer: &str,
+    item: &str,
+    read_only: bool,
+    app_state: &AppState,
+) {
+    if read_only {
+        crate::adapters::tui::notifications::warning(
+            state,
+            crate::adapters::tui::notifications::NoticeSource::Tabs,
+            "Tab is read-only (subagent output view)",
+        );
+        return;
+    }
+    team_command(
+        state,
+        conversation_id,
+        Some(&format!("retract {peer} {item}")),
+        app_state,
+    )
+    .await;
+}
+
+/// Open the sent-thread window for `/team thread` (the same reader `/team thread` and 21-6's
+/// `[Enter] Read thread` share, without reparsing identifiers) and spawn the read; the answer
+/// fills the window that issued it (`team_thread_ready`). Without the a2a feature or a send
+/// runtime there is no peer to read: a Warning notice and no window.
 pub fn read_team_thread(
     state: &mut TuiState,
     conversation_id: &str,
@@ -747,18 +775,29 @@ pub fn read_team_thread(
     item_id: String,
     app_state: &AppState,
 ) {
-    use crate::adapters::tui::handlers::team_command::{TEAM_THREAD_READING, show_team_thread};
+    use crate::adapters::tui::notifications::{self, NoticeSource};
     #[cfg(feature = "a2a")]
     {
         let Some(runtime) = app_state.a2a_send.clone() else {
-            show_team_thread(state, "· no A2A send runtime is configured for this session, so there is no peer to read a thread from.".to_owned());
+            notifications::warning(
+                state,
+                NoticeSource::Team,
+                "· no A2A send runtime is configured for this session, so there is no peer to read a thread from.",
+            );
             return;
         };
-        show_team_thread(state, TEAM_THREAD_READING.to_owned());
+        let generation = super::thread_open::open_sent(
+            state,
+            crate::adapters::tui::state::ThreadAccess::Writer,
+            &peer,
+            &item_id,
+            conversation_id,
+        );
         drop(spawn_team_thread(
             runtime,
             app_state.event_bus.clone(),
             conversation_id.to_owned(),
+            generation,
             peer,
             item_id,
             app_state.session_cancel.child_token(),
@@ -766,17 +805,11 @@ pub fn read_team_thread(
     }
     #[cfg(not(feature = "a2a"))]
     {
-        let _ = (
-            peer,
-            item_id,
-            conversation_id,
-            app_state,
-            TEAM_THREAD_READING,
-        );
-        show_team_thread(
+        let _ = (peer, item_id, conversation_id, app_state);
+        notifications::warning(
             state,
-            "· `/team thread` needs the `a2a` feature; this build was compiled without it."
-                .to_owned(),
+            NoticeSource::Team,
+            "· `/team thread` needs the `a2a` feature; this build was compiled without it.",
         );
     }
 }
@@ -855,7 +888,7 @@ async fn start_team_send(
         use crate::adapters::a2a::send::{
             SendRequest, coordinate_send, validate_send_request, validate_story_holders,
         };
-        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_summary};
         let Some(runtime) = app_state.a2a_send.clone() else {
             show_team_send(
                 state,
@@ -919,7 +952,7 @@ async fn start_team_send(
                 message_type: row_type,
             })
             .collect();
-        show_team_send(state, &block_id, render_team_send_rows(&rows));
+        show_team_send(state, &block_id, render_team_send_summary(&rows));
         state.team_send_blocks.insert(block_id.clone(), rows);
         let event_bus = app_state.event_bus.clone();
         let conversation_id = conversation_id.to_owned();
@@ -1000,13 +1033,15 @@ pub async fn team_thread_message(
 }
 
 /// Story 19.18 `AC6(a)` — the rail-3 thread spawn: session-scoped, and a
-/// cancelled session publishes nothing further (`K11`). Returns the handle so
-/// the in-crate keystone can await it instead of waiting on a timer.
+/// cancelled session publishes nothing further (`K11`). The answer carries the issuing
+/// conversation and the read generation. Returns the handle so the in-crate keystone can
+/// await it instead of waiting on a timer.
 #[cfg(feature = "a2a")]
 fn spawn_team_thread(
     runtime: std::sync::Arc<crate::adapters::a2a::driver::A2aDelegationRuntime>,
     event_bus: std::sync::Arc<crate::infrastructure::runtime::event_bus::EventBus>,
     conversation_id: String,
+    generation: u64,
     peer: String,
     item_id: String,
     cancel: tokio_util::sync::CancellationToken,
@@ -1022,36 +1057,23 @@ fn spawn_team_thread(
         }
         let _ = event_bus.emit_domain(crate::domain::events::AppEvent::TeamThreadReady {
             conversation_id,
+            generation,
             message,
         });
     })
 }
 
-/// Story 19.18 `AC6(a)` — the `TeamThreadReady` arm: replace the issuing
-/// tab's `team-thread` block IN PLACE, even when that tab is inactive — the
-/// `team_send_settled` cross-tab path. ⛔ Not the board's background path,
-/// which records a Warning notice attributed to the issuing conversation.
+/// Story 19.18 `AC6(a)` — the `TeamThreadReady` arm: fill the sent-thread window that issued
+/// the read (21-8 A12). Only a window open on that read applies it: a closed, retargeted,
+/// other-origin or newer-generation frame drops the completion, which never reopens a window
+/// and never paints a Stage row in any tab.
 pub fn team_thread_ready(
-    active_conversation_id: &str,
     state: &mut TuiState,
-    tab_manager: &mut crate::domain::models::tab::TabManager,
     conversation_id: &str,
-    message: String,
+    generation: u64,
+    message: &str,
 ) {
-    use crate::adapters::tui::handlers::team_command::{TEAM_THREAD_BLOCK_ID, show_team_thread};
-
-    if conversation_id == active_conversation_id {
-        show_team_thread(state, message);
-    } else if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
-        crate::adapters::tui::views::show_view(
-            &mut tab.feedback_blocks,
-            crate::adapters::tui::views::ViewKind::TeamThread,
-            TEAM_THREAD_BLOCK_ID,
-            crate::domain::models::FeedbackLevel::Info,
-            message,
-        );
-        state.needs_redraw = true;
-    }
+    super::thread_open::fill_sent(state, conversation_id, generation, message);
 }
 
 /// Apply the asynchronous board answer to its issuing conversation.
@@ -1508,7 +1530,9 @@ pub async fn resolve_team_retract(
     let _ = (pending, app_state, state);
 }
 
-/// Story 19.17: settle only the addressed action's row on its issuing tab.
+/// Story 19.17: settle only the addressed action's row on its issuing tab. The row's line is
+/// rewritten in place; its cause and the retrospective note are ambient notices, posted once
+/// when the row first settles.
 pub fn team_send_settled(
     active_conversation_id: &str,
     state: &mut TuiState,
@@ -1518,7 +1542,7 @@ pub fn team_send_settled(
     index: usize,
     outcome: crate::domain::models::RecipientOutcome,
 ) {
-    let redraw = if conversation_id == active_conversation_id {
+    let settled = if conversation_id == active_conversation_id {
         settle_team_send_row(
             &mut state.team_send_blocks,
             &mut state.feedback_blocks,
@@ -1535,16 +1559,39 @@ pub fn team_send_settled(
             outcome,
         )
     } else {
-        false
+        None
     };
-    if redraw {
-        state.needs_redraw = true;
+    if let Some(settled) = settled {
+        if settled.redraw {
+            state.needs_redraw = true;
+        }
+        post_send_notices(state, settled.notices);
     }
 }
 
-/// Replace one row and re-render its block. Once every row has settled the
-/// block text is final, so its typed rows are dropped rather than carried
-/// (and cloned on every tab switch) for the rest of the session.
+/// What settling one row did: whether its block was rewritten, and the ambient notices the
+/// row's first settlement adds.
+pub(crate) struct SettledRow {
+    pub redraw: bool,
+    pub notices: Vec<(bool, String)>,
+}
+
+/// Post the notices of a settled send row: a Warning (`true`) or an Info, keyless, reviewable
+/// in S-LOG.
+pub(crate) fn post_send_notices(state: &mut TuiState, notices: Vec<(bool, String)>) {
+    use crate::adapters::tui::notifications::{self, NoticeSource};
+    for (warning, text) in notices {
+        if warning {
+            notifications::warning(state, NoticeSource::Team, text);
+        } else {
+            notifications::info(state, NoticeSource::Team, text);
+        }
+    }
+}
+
+/// Replace one row and rewrite the one-line summary of its block in place. Once every row has
+/// settled the block text is final, so its typed rows are dropped rather than carried (and
+/// cloned on every tab switch) for the rest of the session. `None`: no such row.
 pub(crate) fn settle_team_send_row(
     blocks: &mut std::collections::BTreeMap<
         String,
@@ -1554,18 +1601,21 @@ pub(crate) fn settle_team_send_row(
     block_id: &str,
     index: usize,
     outcome: crate::domain::models::RecipientOutcome,
-) -> bool {
-    use crate::adapters::tui::handlers::team_command::render_team_send_rows;
+) -> Option<SettledRow> {
+    use crate::adapters::tui::handlers::team_command::{render_team_send_summary, send_notices};
 
-    let Some(rows) = blocks.get_mut(block_id) else {
-        return false;
-    };
-    let Some(row) = rows.get_mut(index) else {
-        return false;
-    };
+    let rows = blocks.get_mut(block_id)?;
+    let first_settled = rows.iter().all(|row| row.outcome.is_none());
+    let row = rows.get_mut(index)?;
+    let newly = row.outcome.is_none();
     row.outcome = Some(outcome);
+    let notices = if newly {
+        send_notices(row, first_settled)
+    } else {
+        Vec::new()
+    };
     let redraw = if let Some(block) = feedback_blocks.get_mut(block_id) {
-        block.message = render_team_send_rows(rows);
+        block.message = render_team_send_summary(rows);
         true
     } else {
         false
@@ -1573,7 +1623,7 @@ pub(crate) fn settle_team_send_row(
     if rows.iter().all(|row| row.outcome.is_some()) {
         blocks.remove(block_id);
     }
-    redraw
+    Some(SettledRow { redraw, notices })
 }
 
 /// Route a retract preview to its originating conversation.
@@ -2354,51 +2404,192 @@ mod tests {
         );
     }
 
-    /// Story 19.18 `K11` — a thread answer for a background tab replaces THAT
-    /// tab's single `team-thread` block and leaves the visible tab's alone.
-    ///
-    /// `M20` → RED: publish to the active conversation instead.
+    /// A background completion cannot write a transcript block in either tab.
     #[test]
-    fn a_background_thread_answer_replaces_only_its_issuing_tabs_block() {
-        use crate::adapters::tui::handlers::team_command::TEAM_THREAD_BLOCK_ID;
-
+    fn story21_8_background_thread_answer_is_dropped() {
+        use crate::adapters::tui::state::ThreadAccess;
         let mut tabs = crate::domain::models::tab::TabManager::default();
         let issuing = tabs.active_tab().conversation.id.clone();
+        let mut conversation = tabs.active_tab().conversation.clone();
+        let mut state = TuiState::new(120, 40);
+        let generation_a = super::super::thread_open::open_sent(
+            &mut state,
+            ThreadAccess::Writer,
+            "peer",
+            "ri_a",
+            &issuing,
+        );
         tabs.create_tab();
         let active = tabs.active_tab().conversation.id.clone();
-        let mut state = TuiState::new(120, 40);
-        crate::adapters::tui::handlers::team_command::show_team_thread(
+        assert_ne!(issuing, active);
+        super::super::event_loop::replace_stage_conversation(
+            &mut conversation,
             &mut state,
-            "visible tab's own thread".to_owned(),
+            tabs.active_tab().conversation.clone(),
         );
-        team_thread_ready(&active, &mut state, &mut tabs, &issuing, "first".to_owned());
-        team_thread_ready(
+        assert!(
+            state.thread_inspector.is_some(),
+            "the thread window is global: a tab switch does not close it"
+        );
+        // A's own read completes while another tab is active: it fills A's window (origin and
+        // generation match) and still writes no transcript row anywhere.
+        let rows_before = state.feedback_blocks.clone();
+        team_thread_ready(&mut state, &issuing, generation_a, "late A");
+        assert_eq!(state.feedback_blocks, rows_before);
+        assert_eq!(state.thread_inspector.as_ref().unwrap().content, "late A");
+        let generation_b = super::super::thread_open::open_sent(
+            &mut state,
+            ThreadAccess::Writer,
+            "peer",
+            "ri_b",
             &active,
-            &mut state,
-            &mut tabs,
-            &issuing,
-            "second".to_owned(),
         );
+        assert_ne!(generation_a, generation_b);
+        let before = state.feedback_blocks.clone();
+        let parked = tabs
+            .find_by_conversation(&issuing)
+            .unwrap()
+            .feedback_blocks
+            .clone();
+        team_thread_ready(&mut state, &issuing, generation_a, "stale A");
+        team_thread_ready(&mut state, &issuing, generation_b, "foreign origin");
+        team_thread_ready(&mut state, &active, generation_a, "stale generation");
         assert_eq!(
-            state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message,
-            "visible tab's own thread"
+            state.thread_inspector.as_ref().unwrap().content,
+            "  reading…"
         );
-        let tab = tabs.find_by_conversation(&issuing).expect("issuing tab");
-        assert_eq!(tab.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "second");
-        assert_eq!(
-            tab.feedback_blocks[TEAM_THREAD_BLOCK_ID].level,
-            crate::domain::models::FeedbackLevel::Info
-        );
-        assert_eq!(
-            tab.feedback_blocks
+        assert_eq!(state.feedback_blocks, before);
+        let tab = tabs.find_by_conversation(&issuing).unwrap();
+        assert_eq!(tab.feedback_blocks, parked);
+        assert!(
+            !state
+                .feedback_blocks
                 .keys()
-                .filter(|id| id.starts_with("team-thread"))
-                .count(),
-            1,
-            "one block per tab, replaced — never stacked"
+                .any(|id| id.starts_with("team-thread"))
         );
-        team_thread_ready(&active, &mut state, &mut tabs, &active, "mine".to_owned());
-        assert_eq!(state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "mine");
+        assert!(
+            !tab.feedback_blocks
+                .keys()
+                .any(|id| id.starts_with("team-thread"))
+        );
+        team_thread_ready(&mut state, &active, generation_b, "right tab");
+        assert_eq!(
+            state.thread_inspector.as_ref().unwrap().content,
+            "right tab"
+        );
+    }
+
+    #[test]
+    fn story21_8_thread_completion_respects_generation_origin_and_close() {
+        use super::super::thread_open::open_sent;
+        use crate::adapters::tui::{presentation::reducer, state::ThreadAccess};
+        let mut state = TuiState::new(120, 40);
+        let old = open_sent(&mut state, ThreadAccess::Writer, "peer", "ri_x", "origin");
+        let new = open_sent(&mut state, ThreadAccess::Writer, "peer", "ri_x", "origin");
+        team_thread_ready(&mut state, "origin", old, "stale");
+        team_thread_ready(&mut state, "other", new, "other origin");
+        assert_eq!(
+            state.thread_inspector.as_ref().unwrap().content,
+            "  reading…"
+        );
+        team_thread_ready(&mut state, "origin", new, "accepted");
+        assert_eq!(state.thread_inspector.as_ref().unwrap().content, "accepted");
+        reducer::back(&mut state);
+        team_thread_ready(&mut state, "origin", new, "closed");
+        assert!(state.thread_inspector.is_none());
+        assert!(state.modal_stack.top().is_none());
+        assert!(!state.feedback_blocks.contains_key("team-thread"));
+    }
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn story21_8_thread_refusal_fills_open_frame() {
+        use crate::adapters::a2a::send::ThreadRead;
+        use crate::adapters::tui::{
+            handlers::team_command::render_team_thread, state::ThreadAccess,
+        };
+        let mut state = TuiState::new(120, 40);
+        let generation = super::super::thread_open::open_sent(
+            &mut state,
+            ThreadAccess::Writer,
+            "peer",
+            "ri_x",
+            "origin",
+        );
+        let message = render_team_thread("peer", "ri_x", &ThreadRead::NotFound, false);
+        team_thread_ready(&mut state, "origin", generation, &message);
+        assert_eq!(
+            state.thread_inspector.as_ref().unwrap().content,
+            "thread not found on peer's host"
+        );
+        assert!(!state.feedback_blocks.contains_key("team-thread"));
+    }
+
+    #[test]
+    fn story21_8_sent_page_escapes_and_keeps_root_and_opened_turn() {
+        use crate::adapters::tui::{state::ThreadAccess, thread_body};
+        let mut state = TuiState::new(120, 40);
+        let generation = super::super::thread_open::open_sent(
+            &mut state,
+            ThreadAccess::Writer,
+            "peer",
+            "ri_open",
+            "origin",
+        );
+        let message = "thread · a\u{1b}\u{202e} · ri_root\n  another sender  ri_root\n      root\n  a\u{1b}\u{202e}  ri_mid\u{1b}\u{202e}\n      body\u{1b}\u{202e}\n  you  ri_open  [retracted 12:34]\n      opened";
+        team_thread_ready(&mut state, "origin", generation, message);
+        let page = state.thread_inspector.as_mut().unwrap();
+        let expected = message
+            .replace('\u{1b}', "\\u{1b}")
+            .replace('\u{202e}', "\\u{202e}");
+        assert_eq!(page.content, expected);
+        let joined = page
+            .segments
+            .iter()
+            .map(|s| s.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(joined.matches("\\u{1b}").count(), 4);
+        assert_eq!(joined.matches("\\u{202e}").count(), 4);
+        assert!(!joined.contains('\u{1b}') && !joined.contains('\u{202e}'));
+        let facts = page.sent.as_ref().unwrap();
+        assert!(facts.mine && facts.retracted);
+        page.search.query = "no such turn".into();
+        assert_eq!(thread_body::shown_turns(page), vec![true, false, true]);
+        let other = thread_body::sent_page(
+            "thread · peer · ri_root\n  you  ri_other  [retracted 12:34]\n      body\n  another sender  ri_open\n      body",
+            "ri_open",
+        );
+        assert!(!other.mine && !other.retracted);
+        let mine = thread_body::sent_page(
+            "thread · peer · ri_root\n  you  ri_open\n      body",
+            "ri_open",
+        );
+        assert!(mine.mine && !mine.retracted);
+        let retracted_other = thread_body::sent_page(
+            "thread · peer · ri_root\n  another sender  ri_open  [retracted 12:34]\n      body",
+            "ri_open",
+        );
+        assert!(!retracted_other.mine && retracted_other.retracted);
+    }
+
+    #[tokio::test]
+    async fn story21_8_unavailable_thread_read_posts_one_warning_without_frame() {
+        use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource};
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        read_team_thread(&mut state, "conv", "peer".into(), "ri_x".into(), &app);
+        assert!(state.thread_inspector.is_none());
+        assert!(state.modal_stack.top().is_none());
+        let notices: Vec<_> = state.notifications.visible().collect();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, NoticeSeverity::Warning);
+        assert_eq!(notices[0].source, NoticeSource::Team);
+        #[cfg(feature = "a2a")]
+        assert!(notices[0].message.contains("no A2A send runtime"));
+        #[cfg(not(feature = "a2a"))]
+        assert!(notices[0].message.contains("needs the `a2a` feature"));
     }
 
     /// Story 21.1 AC4 — the board's background path is an attributed Warning
@@ -2459,6 +2650,7 @@ mod tests {
             runtime.clone(),
             event_bus.clone(),
             "conv".to_owned(),
+            17,
             "nobody".to_owned(),
             "ri_q".to_owned(),
             cancel,
@@ -2473,6 +2665,7 @@ mod tests {
             runtime,
             event_bus,
             "conv".to_owned(),
+            18,
             "nobody".to_owned(),
             "ri_q".to_owned(),
             tokio_util::sync::CancellationToken::new(),
@@ -2481,13 +2674,13 @@ mod tests {
         .expect("spawned read");
         assert!(matches!(
             domain_rx.try_recv(),
-            Ok(crate::domain::events::AppEvent::TeamThreadReady { .. })
+            Ok(crate::domain::events::AppEvent::TeamThreadReady { generation: 18, .. })
         ));
     }
 
     #[test]
     fn a_background_team_send_settlement_updates_only_its_issuing_tab() {
-        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_summary};
         use crate::domain::models::RecipientOutcome;
         use crate::domain::models::{FeedbackBlock, FeedbackLevel};
 
@@ -2507,7 +2700,7 @@ mod tests {
         let sending_block = FeedbackBlock {
             id: BLOCK_ID.to_owned(),
             level: FeedbackLevel::Info,
-            message: render_team_send_rows(std::slice::from_ref(&sending_row)),
+            message: render_team_send_summary(std::slice::from_ref(&sending_row)),
             seq: 0,
         };
         let issuing_tab = tabs
@@ -2541,7 +2734,7 @@ mod tests {
             "a settlement for a background tab must not overwrite the visible tab's row"
         );
         assert_eq!(
-            state.feedback_blocks[BLOCK_ID].message, "    jun-dev  sending…",
+            state.feedback_blocks[BLOCK_ID].message, "Send · jun-dev sending…",
             "the visible Info block remains its own in-progress action"
         );
         let issuing_tab = tabs
@@ -2556,7 +2749,7 @@ mod tests {
             FeedbackLevel::Info
         );
         assert_eq!(
-            issuing_tab.feedback_blocks[BLOCK_ID].message, "  ● jun-dev  delivered",
+            issuing_tab.feedback_blocks[BLOCK_ID].message, "Send · ● jun-dev delivered",
             "the background tab's visible Info block is updated in place"
         );
         assert!(
@@ -2572,7 +2765,7 @@ mod tests {
     #[test]
     fn story19_25_settlement_redraw_keeps_the_retro_type_of_stored_rows() {
         use crate::adapters::tui::handlers::team_command::{
-            TEAM_SEND_RETRO_NOTE, TeamSendRow, render_team_send_rows,
+            TEAM_SEND_RETRO_NOTE, TeamSendRow, render_team_send_summary,
         };
         use crate::domain::models::{
             FeedbackBlock, FeedbackLevel, RecipientOutcome, SemanticMessageType,
@@ -2594,42 +2787,50 @@ mod tests {
                 FeedbackBlock {
                     id: BLOCK_ID.to_owned(),
                     level: FeedbackLevel::Info,
-                    message: render_team_send_rows(&rows),
+                    message: render_team_send_summary(&rows),
                     seq: 0,
                 },
             );
             let mut blocks = std::collections::BTreeMap::new();
             blocks.insert(BLOCK_ID.to_owned(), rows);
-            assert!(settle_team_send_row(
+            let settled = settle_team_send_row(
                 &mut blocks,
                 &mut feedback,
                 BLOCK_ID,
                 1,
                 RecipientOutcome::Declined,
-            ));
+            )
+            .unwrap();
+            assert!(settled.redraw);
+            let first_notices = settled.notices;
             let first = feedback[BLOCK_ID].message.clone();
-            assert!(settle_team_send_row(
+            let settled = settle_team_send_row(
                 &mut blocks,
                 &mut feedback,
                 BLOCK_ID,
                 0,
                 RecipientOutcome::AwaitingApproval,
-            ));
+            )
+            .unwrap();
+            assert!(settled.redraw);
+            assert!(settled.notices.is_empty());
             assert!(!blocks.contains_key(BLOCK_ID));
-            (first, feedback[BLOCK_ID].message.clone())
+            (first, feedback[BLOCK_ID].message.clone(), first_notices)
         };
         assert_eq!(
             settle(SemanticMessageType::RetroRequest),
             (
-                format!("    a   sending…\n  ● bb  sent\n{TEAM_SEND_RETRO_NOTE}"),
-                format!("  ● a   sent\n  ● bb  sent\n{TEAM_SEND_RETRO_NOTE}"),
+                "Send · retro_request · a sending… · ● bb sent".to_owned(),
+                "Send · retro_request · ● a sent · ● bb sent".to_owned(),
+                vec![(false, TEAM_SEND_RETRO_NOTE.to_owned())],
             )
         );
         assert_eq!(
             settle(SemanticMessageType::Consultation),
             (
-                "    a   sending…\n  ✗ bb  declined".to_owned(),
-                "    a   awaiting their approval\n  ✗ bb  declined".to_owned(),
+                "Send · consultation · a sending… · ✗ bb declined".to_owned(),
+                "Send · consultation · a awaiting their approval · ✗ bb declined".to_owned(),
+                vec![],
             )
         );
     }
@@ -2809,13 +3010,120 @@ mod tests {
             "nothing was journaled"
         );
     }
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn story21_8_local_sent_retract_effect_opens_item_decision_before_any_mark() {
+        use crate::adapters::a2a::{egress::A2aEgress, test_fixtures::PeerFixture};
+        use crate::adapters::tui::decision_queue::{DecisionSubject, RetractTarget};
+        use crate::adapters::tui::presentation::{self, Surface};
+        use crate::adapters::tui::state::ThreadAccess;
+        use crate::domain::events::AppEvent;
+        use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl};
+        use crate::domain::ports::{RoomJournal, RoomJournalReader};
+        use crate::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
+        use std::sync::Arc;
+
+        let peer = PeerFixture::plaintext().await;
+        peer.answer_method(
+            crate::adapters::a2a::ITEMS_LIST_METHOD,
+            serde_json::json!({"items":[{"itemId":"ri_sent","state":"received"}]}),
+        )
+        .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let node = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+        let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(node.clone(), None));
+        let (tx, _catalog_events) = tokio::sync::mpsc::unbounded_channel();
+        let keys = tempfile::tempdir().unwrap();
+        let egress = A2aEgress::compose(
+            vec![A2aPeerSpec::new(
+                "ada",
+                RedactedUrl::from(peer.origin.as_str()),
+                A2aPeerSource::Workspace,
+            )],
+            NodeTree::new(),
+            room,
+            node.clone(),
+            tx,
+            crate::adapters::a2a::item_capability::load_item_capability_key(Ok(keys
+                .path()
+                .to_path_buf())),
+        )
+        .unwrap();
+        for (_, client) in egress.provider().peer_bindings().iter() {
+            tokio::time::timeout(std::time::Duration::from_secs(20), client.await_settled())
+                .await
+                .expect("peer discovery settled");
+        }
+        let (mut app, mut events) = bridge_app_state(workspace.path());
+        app.a2a_send = Some(egress.runtime().clone());
+        let mut tabs = crate::domain::models::tab::TabManager::default();
+        let origin = tabs.active_tab().conversation.id.clone();
+        let mut state = TuiState::new(120, 40);
+        let generation = crate::infrastructure::runtime::thread_open::open_sent(
+            &mut state,
+            ThreadAccess::Writer,
+            "ada",
+            "ri_sent",
+            &origin,
+        );
+        assert!(crate::infrastructure::runtime::thread_open::fill_sent(
+            &mut state,
+            &origin,
+            generation,
+            "  you  ri_sent\n      body"
+        ));
+        let before = node.load_entries().await.unwrap().len();
+        super::retract_sent(&mut state, &origin, "ada", "ri_sent", false, &app).await;
+        let (conversation_id, preview) =
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
+                    match events.recv().await {
+                        Some(AppEvent::TeamRetractPreviewReady {
+                            conversation_id,
+                            preview,
+                        }) => break (conversation_id, preview),
+                        Some(_) => {}
+                        None => panic!("preview event channel closed"),
+                    }
+                }
+            })
+            .await
+            .expect("preview arrived");
+        assert_eq!(conversation_id, origin);
+        super::team_retract_preview_ready(
+            origin.clone(),
+            &mut state,
+            &mut tabs,
+            conversation_id,
+            preview,
+        );
+        let decisions: Vec<_> = state.decisions.items().collect();
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0].subject,
+            DecisionSubject::TeamRetract(payload) if matches!(&payload.target,
+                RetractTarget::Item { peer, item } if peer == "ada" && item == "ri_sent")));
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
+        assert!(presentation::is_open(&state, Surface::ThreadInspector));
+        assert_eq!(
+            peer.calls(crate::adapters::a2a::ITEMS_LIST_METHOD)
+                .await
+                .len(),
+            1
+        );
+        assert!(
+            peer.calls(crate::adapters::a2a::ITEMS_RETRACT_METHOD)
+                .await
+                .is_empty()
+        );
+        assert_eq!(node.load_entries().await.unwrap().len(), before);
+    }
 }
 
 /// Story 19.14 `AC2`/`AC4`/`AC5` — the credential, the typed refusals, and the
 /// secret's absence, through the `/team send` front door.
 ///
 /// Front door: `A2aEgress::compose` → `egress.runtime()` →
-/// `send::deliver_text` → `render_team_send_rows` — the calls `team_command`'s
+/// `send::deliver_text` → `render_team_send_summary` — the calls `team_command`'s
 /// send arm makes, minus its `TuiState`/`AppState` shell (the nearest
 /// test-visible production seam).
 ///
@@ -2839,7 +3147,9 @@ mod credential_tests {
         PeerFixture, RpcAnswer, TestLeaf, Validity, leaf_issued_by, self_signed_leaf, test_ca,
         write_pem,
     };
-    use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+    use crate::adapters::tui::handlers::team_command::{
+        TeamSendRow, render_team_send_summary, send_notices,
+    };
     use crate::domain::events::AppEvent;
     use crate::domain::models::{
         A2aPeerSource, A2aPeerSpec, CapabilityId, RecipientOutcome, RedactedUrl, RejectReason,
@@ -2963,14 +3273,18 @@ mod credential_tests {
         let RecipientOutcome::Unreachable { cause: Some(cause) } = outcome.clone() else {
             panic!("a refusal must retain its typed, operator-safe cause: {outcome:?}");
         };
+        let row = TeamSendRow {
+            alias: alias.to_owned(),
+            outcome: Some(outcome),
+            message_type: crate::domain::models::SemanticMessageType::Unknown,
+        };
         assert_eq!(
-            render_team_send_rows(&[TeamSendRow {
-                alias: alias.to_owned(),
-                outcome: Some(outcome),
-                message_type: crate::domain::models::SemanticMessageType::Unknown,
-            }]),
-            format!("  ⚠ {alias}  unreachable\n    {}", cause.as_str()),
-            "the cause is a separate row line, never a transient notice"
+            render_team_send_summary(std::slice::from_ref(&row)),
+            format!("Send · ⚠ {alias} unreachable")
+        );
+        assert_eq!(
+            send_notices(&row, true),
+            vec![(true, format!("{alias} unreachable: {}", cause.as_str()))]
         );
         cause.as_str().to_owned()
     }
@@ -3575,12 +3889,12 @@ mod credential_tests {
         let outcome = harness.send("plain", "hello").await;
         assert_eq!(outcome, RecipientOutcome::AcceptedWithoutItem);
         assert_eq!(
-            render_team_send_rows(&[TeamSendRow {
+            render_team_send_summary(&[TeamSendRow {
                 alias: "plain".to_owned(),
                 outcome: Some(outcome),
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
-            "    plain  accepted — this peer keeps no item id"
+            "Send · plain accepted — this peer keeps no item id"
         );
         assert!(
             fixture.api_keys_seen().await.is_empty(),
@@ -3606,12 +3920,12 @@ mod credential_tests {
         unexport(VAR);
         assert_eq!(outcome, RecipientOutcome::AcceptedWithoutItem);
         assert_eq!(
-            render_team_send_rows(&[TeamSendRow {
+            render_team_send_summary(&[TeamSendRow {
                 alias: "welcome".to_owned(),
                 outcome: Some(outcome),
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
-            "    welcome  accepted — this peer keeps no item id"
+            "Send · welcome accepted — this peer keeps no item id"
         );
         assert_eq!(fixture.api_keys_seen().await, vec!["accepted-secret"]);
         assert_eq!(harness.dispatched_rows().await, 1);
@@ -3646,7 +3960,7 @@ mod credential_tests {
         unexport(VAR);
 
         assert_eq!(success, RecipientOutcome::AcceptedWithoutItem);
-        let succeeded = render_team_send_rows(&[TeamSendRow {
+        let succeeded = render_team_send_summary(&[TeamSendRow {
             alias: ALIAS.to_owned(),
             outcome: Some(success),
             message_type: crate::domain::models::SemanticMessageType::Unknown,
@@ -3817,12 +4131,12 @@ mod credential_tests {
         let outcome = harness.send("gone", "hello").await;
         assert_eq!(outcome, RecipientOutcome::Unreachable { cause: None });
         assert_eq!(
-            render_team_send_rows(&[TeamSendRow {
+            render_team_send_summary(&[TeamSendRow {
                 alias: "gone".to_owned(),
                 outcome: Some(outcome),
                 message_type: crate::domain::models::SemanticMessageType::Unknown,
             }]),
-            "  ⚠ gone  unreachable"
+            "Send · ⚠ gone unreachable"
         );
         assert_eq!(harness.dispatched_rows().await, 1);
         assert_eq!(harness.rejected_rows().await.len(), 1);
@@ -3907,7 +4221,6 @@ mod credential_tests {
 /// observer is the production `log_awareness_observer`.
 #[cfg(test)]
 mod log_awareness_tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -3917,9 +4230,8 @@ mod log_awareness_tests {
     use ratatui::layout::Rect;
 
     use super::*;
-    use crate::adapters::tui::state::{LogAwareness, LogAwarenessView, TabRenderState};
-    use crate::adapters::tui::widgets::chat_pane;
-    use crate::domain::models::{Conversation, LogVisitCandidate, StreamingState};
+    use crate::adapters::tui::state::{LogAwareness, LogAwarenessView};
+    use crate::domain::models::{Conversation, LogVisitCandidate};
     use crate::infrastructure::transparency_awareness::test_support::append_rows;
     use crate::infrastructure::transparency_awareness::{
         LogAwarenessObserver, SeenBoundary, SeenLoad, SeenStore,
@@ -4014,45 +4326,41 @@ mod log_awareness_tests {
             team_command(&mut self.state, "conv", Some(arg), &self.app_state).await;
         }
 
-        /// A successful chat frame: `height` 0 is a zero-height chat pane;
-        /// `scroll_offset > 0` reads away from the bottom, where feedback
-        /// blocks render.
-        fn draw_chat(&mut self, height: u16, scroll_offset: usize) {
+        /// Paint the real log widget only when its frame is on top, then hand off
+        /// the completed draw exactly as the event loop does.
+        fn draw_chat(&mut self, height: u16, _scroll_offset: usize) {
+            self.paint_log(height);
+            self.state.log_visits_presented();
+        }
+
+        fn paint_log(&mut self, height: u16) {
+            use crate::adapters::tui::presentation::Surface;
             self.state.restore_unflushed_log_visits();
             let mut terminal = Terminal::new(TestBackend::new(100, height.max(1))).unwrap();
-            let mut tab = TabRenderState::default();
-            let mut visible = Vec::new();
-            let (state, conversation) = (&self.state, &self.conversation);
+            let state = &self.state;
+            let conversation = &self.conversation;
             terminal
                 .draw(|frame| {
-                    let area = Rect {
-                        height,
-                        ..frame.area()
-                    };
-                    visible = chat_pane::render_attached(
-                        frame,
-                        area,
-                        conversation,
-                        &StreamingState::default(),
-                        &crate::domain::models::ViewState {
-                            scroll_offset,
-                            mode: if scroll_offset == 0 {
-                                crate::domain::models::AnchorMode::Following
-                            } else {
-                                crate::domain::models::AnchorMode::Reading
-                            },
-                            ..Default::default()
-                        },
-                        &state.theme,
-                        &mut tab,
-                        &state.feedback_blocks,
-                        &HashMap::new(),
-                    )
-                    .visible_feedback_rows;
+                    if state
+                        .modal_stack
+                        .top()
+                        .is_some_and(|top| top.surface == Surface::ThreadInspector)
+                    {
+                        let area = Rect {
+                            height,
+                            ..frame.area()
+                        };
+                        crate::adapters::tui::widgets::thread_inspector::render(
+                            frame,
+                            area,
+                            state,
+                            Some(conversation),
+                            "A2A log",
+                            false,
+                        );
+                    }
                 })
                 .unwrap();
-            self.state
-                .log_visits_presented(visible.iter().map(|(id, _)| id.as_str()));
         }
 
         /// A frame whose chat pane was painted but whose draw failed: the
@@ -4063,7 +4371,7 @@ mod log_awareness_tests {
 
         fn draw_panel(&mut self, height: u16) {
             self.paint_panel(height);
-            self.state.log_visits_presented(std::iter::empty());
+            self.state.log_visits_presented();
         }
 
         /// The panel painted by a frame whose draw then failed.
@@ -4184,19 +4492,21 @@ mod log_awareness_tests {
         // not clear; redraws without a log visit do not clear.
         client.state.density_mode = crate::domain::models::visual::DensityMode::Monitor;
         client.slash("status").await;
-        client
-            .state
-            .feedback_blocks
-            .remove(crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID);
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Unseen(3));
 
-        // `/team log` inserts the block — that alone is not a visit.
+        // Opening the log frame alone is not a visit.
         client.slash("log").await;
         assert_eq!(client.poll().await, LogAwareness::Unseen(3), "not at open");
-        // Offscreen, zero-height, or a failed draw: still not presented.
-        client.draw_chat(10, 200);
+        // A covered frame, zero-height frame, or failed draw is not presented.
+        crate::adapters::tui::presentation::reducer::open(
+            &mut client.state,
+            crate::adapters::tui::presentation::Surface::Help,
+        );
+        client.draw_chat(20, 0);
+        crate::adapters::tui::presentation::reducer::back(&mut client.state);
         client.draw_chat(0, 0);
+        client.paint_log(20);
         client.failed_draw();
         assert_eq!(client.poll().await, LogAwareness::Unseen(3));
         assert_eq!(stored(workspace.path()), SeenLoad::Missing);
@@ -4221,6 +4531,31 @@ mod log_awareness_tests {
         client.failed_draw();
         assert_eq!(client.poll().await, LogAwareness::Unseen(2));
         client.draw_panel(20);
+        assert_eq!(client.poll().await, LogAwareness::Hidden);
+    }
+
+    #[tokio::test]
+    async fn story21_8_replaced_and_closed_log_visits_require_a_new_paint() {
+        let workspace = tempfile::tempdir().unwrap();
+        append_rows(workspace.path(), 2).await;
+        let mut client = Client::launch(workspace.path());
+        assert_eq!(client.poll().await, LogAwareness::Unseen(2));
+        client.slash("log").await;
+        append_rows(workspace.path(), 1).await;
+        client.slash("log").await;
+        assert_eq!(client.poll().await, LogAwareness::Unseen(3));
+        assert_eq!(stored(workspace.path()), SeenLoad::Missing);
+        client.draw_chat(20, 0);
+        assert_eq!(client.poll().await, LogAwareness::Hidden);
+        assert_eq!(stored(workspace.path()), valid(3, 0));
+        append_rows(workspace.path(), 1).await;
+        assert_eq!(client.poll().await, LogAwareness::Unseen(1));
+        client.slash("log").await;
+        crate::adapters::tui::presentation::reducer::back(&mut client.state);
+        client.draw_chat(20, 0);
+        assert_eq!(client.poll().await, LogAwareness::Unseen(1));
+        client.slash("log").await;
+        client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
     }
 
@@ -4288,15 +4623,13 @@ mod log_awareness_tests {
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Unseen(2));
 
-        // An inactive tab keeps its pending visit with its own block
-        // (`event_loop::save_active_tab` / `load_active_tab` move exactly
-        // these two fields) and commits only once that tab presents it.
+        // An inactive tab parks its frame and visit until it is presented again.
         client.slash("log").await;
-        let parked_blocks = std::mem::take(&mut client.state.feedback_blocks);
+        let parked_frame = client.state.thread_inspector.take();
         let parked_visit = client.state.pending_log_visit.take();
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Unseen(2));
-        client.state.feedback_blocks = parked_blocks;
+        client.state.thread_inspector = parked_frame;
         client.state.pending_log_visit = parked_visit;
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
@@ -4336,17 +4669,12 @@ mod log_awareness_tests {
         );
         client.state.transparency_panel.pending_visit = None;
 
-        // A capped in-chat visit keeps its explicit truncation and clears
-        // the whole presented snapshot's reminder.
+        // The log frame contains all 25 rows, with no in-chat truncation.
         client.slash("log").await;
-        let block = &client.state.feedback_blocks
-            [crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID];
-        assert!(
-            block.message.contains("most recent of 25 rows"),
-            "{}",
-            block.message
-        );
-        assert!(block.message.contains("Ctrl+X, L"), "{}", block.message);
+        let inspector = client.state.thread_inspector.as_ref().unwrap();
+        assert!(inspector.turns.len() >= 25);
+        assert!(!inspector.content.contains("most recent of 25 rows"));
+        assert!(!client.state.feedback_blocks.contains_key("team-log"));
         client.draw_chat(40, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
 
@@ -4462,10 +4790,9 @@ mod log_awareness_tests {
             reset_revision: 0,
         };
 
-        // (1) A `team-log` visit parked with its tab (the two fields
-        // `event_loop::save_active_tab` moves).
+        // (1) A log frame and its visit parked with its tab.
         a.slash("log").await;
-        let parked_blocks = std::mem::take(&mut a.state.feedback_blocks);
+        let parked_frame = a.state.thread_inspector.take();
         let parked_visit = a.state.pending_log_visit.take();
         assert_eq!(parked_visit, Some(old));
         // (2) A panel visit parked because the panel had no body space.
@@ -4498,8 +4825,8 @@ mod log_awareness_tests {
         // (3) is retried first: `Stale`, drained, nothing persisted.
         assert_eq!(a.poll().await, LogAwareness::Unseen(2));
         assert_eq!(stored(ws), valid(0, 1));
-        // (1) The tab comes back and presents its block.
-        a.state.feedback_blocks = parked_blocks;
+        // (1) The tab comes back and presents its frame.
+        a.state.thread_inspector = parked_frame;
         a.state.pending_log_visit = parked_visit;
         a.draw_chat(20, 0);
         assert_eq!(a.poll().await, LogAwareness::Unseen(2));

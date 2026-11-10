@@ -219,11 +219,7 @@ fn both_faces_render_the_same_rows_from_the_same_fold() {
     }
 
     // …and the slash command renders the identical rows.
-    let slash = rustain::adapters::tui::handlers::team_command::render_rows(
-        &fold,
-        true,
-        rustain::adapters::tui::handlers::team_command::LogRail::Standalone,
-    );
+    let slash = rustain::adapters::tui::handlers::team_command::render_rows(&fold, true);
     assert_eq!(
         slash,
         rustain::domain::services::transparency::render_export(&fold),
