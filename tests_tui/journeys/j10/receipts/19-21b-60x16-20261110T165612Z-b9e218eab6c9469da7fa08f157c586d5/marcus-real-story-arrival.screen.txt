@@ -1,0 +1,16 @@
+┌ Decision: Recipient draft ───────────────────────────────┐
+│Needs you › Recipient draft lena-po | 1 pending           │
+│story_assignment · lena-po                                │
+│Principal:                                                │
+│122090e39f8b54c125d359f9d74b18a50b015bdf23fb850af69cbfedf4│
+│2cb65582ed                                                │
+│Peer is waiting for your response.                        │
+│[w] My own  [n] Decline  [v] View item                    │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+ ( [F] │ attached │ Normal │ Ready Needs you (1) ^X q log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

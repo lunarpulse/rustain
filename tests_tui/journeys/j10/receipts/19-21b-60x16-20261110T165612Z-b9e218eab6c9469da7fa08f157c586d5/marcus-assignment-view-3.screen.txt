@@ -1,0 +1,16 @@
+┌Thread · story_assignment─────────────────────────────────┐
+│  item actions · ri_vIxcIPwzqu6guFyLgz_XIAgiR-xEg8zI      │
+│  story_assignment                                        │
+│      item is visible before its durable append. Please   │
+│      identify conflicts with ADR-047; do not send        │
+│      automatically.                                      │
+│                                                          │
+│  ri_vIxcIPwzqu6guFyLgz_XIAgiR-xEg8zI · received          │
+│  [r] Respond  [a] Acknowledge  [u] Use as context        │
+│  [Tab] Response  [c] Copy  [/] Search  [v] Source  [PgUp/│
+│  PgDn] Scroll  [Esc] Close                               │
+└──────────────────────────────────────────────────────────┘
+ ( [F] │ attached │ Normal │ Ready Needs you (1) ^X q log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

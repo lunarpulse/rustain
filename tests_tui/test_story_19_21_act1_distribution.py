@@ -280,6 +280,24 @@ def _painted_item(tui, alias, snapshots):
     match = re.search(r"item actions · (ri_[A-Za-z0-9_-]+)", screen)
     assert match, screen
     return match.group(1)
+def _window_text(screen):
+    # At wide viewports the thread window is narrower than the screen: the rows beside
+    # it still show the transcript, which must not interleave with the window's text.
+    # Keep only the window's own columns (top border to `└` row); a screen with no
+    # thread window (full-width at 80 columns shows no strip) is returned unchanged.
+    lines = screen.splitlines()
+    top = next((i for i, line in enumerate(lines) if "┌Thread" in line or "┌ Thread" in line), None)
+    if top is None:
+        return screen
+    left, right = lines[top].index("┌"), lines[top].rindex("┐") if "┐" in lines[top] else None
+    rows = []
+    for line in lines[top:]:
+        rows.append(line[left:right + 1] if right is not None else line[left:])
+        if line[left:left + 1] == "└":
+            break
+    return "\n".join(rows)
+
+
 def _surface_pages(tui, name, snapshots, limit=12):
     pages = [tui.get_screen_text()]
     snapshots.append((f"{name}-initial", pages[0]))
@@ -296,7 +314,7 @@ def _surface_pages(tui, name, snapshots, limit=12):
         tui.send("\x1b[6~")
     else:
         raise AssertionError(f"{name}: recipient surface pagination did not reach its end")
-    return "\n".join(pages)
+    return "\n".join(_window_text(page) for page in pages)
 
 
 
@@ -590,7 +608,14 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
         assert "sprint-7" in compact_final, compact_final
         assert re.search(r"attempted .+ · 4 addressed", compact_final), "M53: final board header must include its exact addressed count\n" + final_board
         board_rows = compact_final.split("Distribution board · story_assignment", 1)[1]
-        order = [board_rows.find(token) for token in ("✓ jun-dev", "● tom-dev", "✗ yuki-dev", "⚠ nina-ux")]
+        # 21-8 8-C summarises a send on one line ("… ✗ yuki-dev declined · ⚠ nina-ux …") that
+        # can be painted below the board; only the board's own padded rows
+        # ("✓ jun-dev   acknowledged") carry its order.
+        raw_board = final_board.split("Distribution board · story_assignment", 1)[1]
+        order = [
+            (match.start() if (match := re.search(rf"(?m)^[ │]*{re.escape(token)} {{2,}}\S", raw_board)) else -1)
+            for token in ("✓ jun-dev", "● tom-dev", "✗ yuki-dev", "⚠ nina-ux")
+        ]
         assert all(index >= 0 for index in order), "M55: 60-column board must preserve every outcome row\n" + final_board
         disclosure = ("⚠ At least one peer answered over a loopback bind, where every local caller is "
                       "the same principal — the rows above are that host's items for all local callers, "
@@ -607,6 +632,8 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
         _command(lena, f"/team thread jun-dev {jun_item}")
         _wait_for_marker(lena, f"thread · jun-dev · {jun_item}", lena.get_screen_text)
         thread_render = _chat_pages(lena, "lena-thread", snapshots)
+        lena.send("\x1b")
+        _wait(lambda: "Thread · sent" not in lena.get_screen_text(), lena.get_screen_text)
         thread_compact = _compact(thread_render)
         assert f"thread · jun-dev · {jun_item}" in thread_compact, thread_render
         assert _provider_requests(stub, "lena-po") == before_thread_requests, stub.rows()

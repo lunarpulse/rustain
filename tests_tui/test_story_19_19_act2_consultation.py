@@ -369,6 +369,7 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         def pages(tui, name, limit=12, recipient=True):
             seen = []
             if recipient:
+                tui.send("v")
                 for _ in range(limit):
                     tui.send("\x1b[5~")
                 time.sleep(0.1)
@@ -424,8 +425,11 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
             _command(tui, "/clear")
             _wait(lambda: "thread · " + peer not in tui.get_screen_text(), tui.get_screen_text)
             _command(tui, f"/team thread {peer} {item}")
-            assert tui.wait_for_screen("loopback bind", timeout=30), tui.get_screen_text()
-            text = pages(tui, name, recipient=False)
+            assert tui.wait_for_screen("thread · " + peer + " ·", timeout=30), tui.get_screen_text()
+            text = pages(tui, name, recipient=True)
+            assert "loopback bind" in text, text
+            tui.send("\x1b")
+            _wait(lambda: "Thread · sent" not in tui.get_screen_text(), tui.get_screen_text)
             assert "thread · " + peer in text and item in text, text
             return text
 
@@ -543,12 +547,12 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         assert notification_ids["jun"] != notification_ids["dev2"], notification_ids
         def settled_send_rows():
             screen = local_agent.get_screen_text()
-            return screen if all(re.search(rf"{alias}\s+awaiting their approval", screen) for alias in ("jun", "dev2")) else None
+            return screen if all(re.search(rf"{alias}\s+awaiting their approval", " ".join(screen.replace("│", " ").split())) for alias in ("jun", "dev2")) else None
         _wait(settled_send_rows, local_agent.get_screen_text)
         send_outcomes = save(local_agent, "marcus-independent-notification-outcomes")
         for alias in ("jun", "dev2"):
             # Each notification is its own send: the first answer is that recipient's pending approval, one row each.
-            assert len(re.findall(rf"(?m)^[^\n]*{alias}\s+awaiting their approval", send_outcomes)) == 1, send_outcomes
+            assert len(re.findall(rf"{alias} awaiting their approval", " ".join(send_outcomes.replace("│", " ").split()))) == 1, send_outcomes
         for alias, item in notification_ids.items():
             observed = thread(local_agent, alias, item, "marcus-" + alias + "-reply-pull")
             assert "Discussed " + alias in observed, observed
@@ -588,20 +592,20 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         close_view(jun)
         model_probe("default-before-adoption", 1, False)
         open_view(jun, item, "jun-before-explicit-use")
-        jun.send("c")
-        assert jun.wait_for_screen("[c] Stop using", timeout=15), jun.get_screen_text()
+        jun.send("u")
+        assert jun.wait_for_screen("[u] Stop using", timeout=15), jun.get_screen_text()
         assert jun.wait_for_screen("peer-tainted", timeout=15), jun.get_screen_text()
         save(jun, "jun-selected-body-only")
         close_view(jun)
         model_probe("explicit-adoption-check", 2, True)
         open_view(jun, item, "jun-before-off")
-        jun.send("c")
-        assert jun.wait_for_screen("[c] Use as context", timeout=15), jun.get_screen_text()
+        jun.send("u")
+        assert jun.wait_for_screen("[u] Use as context", timeout=15), jun.get_screen_text()
         save(jun, "jun-off")
         close_view(jun)
         model_probe("after-off-check", 3, False)
         open_view(jun, item, "jun-reselect-for-guarded-tool")
-        jun.send("c")
+        jun.send("u")
         assert jun.wait_for_screen("peer-tainted", timeout=15), jun.get_screen_text()
         close_view(jun)
         _command(jun, "guarded-canary-check")

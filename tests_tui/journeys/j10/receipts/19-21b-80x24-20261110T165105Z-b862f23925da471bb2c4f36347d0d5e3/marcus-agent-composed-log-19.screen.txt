@@ -1,0 +1,24 @@
+┌A2A log───────────────────────────────────────────────────────────────────────┐
+│2026-11-10 16:51:07Z ← inbound ⏸ awaiting-approval · peer                     │
+│122046dc5ac151f4bb85037ce34f3d7e4bf95fab3c03c97426d4132ee798daae9685 · task   │
+│rustain-1794329467340904730-e39ec05bbc7bf740 · task parked awaiting operator  │
+│approval                                                                      │
+│2026-11-10 16:51:08Z ← inbound ↓ item-received · peer                         │
+│122046dc5ac151f4bb85037ce34f3d7e4bf95fab3c03c97426d4132ee798daae9685 · task   │
+│ri__JNzWJYH6nbSSsOx7TMTgkhQQpTtvDrN · recipient item received from lena-po    │
+│2026-11-10 16:51:08Z ← inbound ✓ accepted via A2A · peer                      │
+│122046dc5ac151f4bb85037ce34f3d7e4bf95fab3c03c97426d4132ee798daae9685 · task   │
+│rustain-1794329467340904730-e39ec05bbc7bf740 · task accepted and executing    │
+│2026-11-10 16:51:08Z ← inbound ! surfaced · peer                              │
+│122046dc5ac151f4bb85037ce34f3d7e4bf95fab3c03c97426d4132ee798daae9685 · task   │
+│a2a-in/p-cGVlcjoxMjIwNDZkYzVhYzE1MWY0YmI4NTAzN2NlMzRmM2Q3ZTRiZjk1ZmFiM2MwM2M5N│
+│zQyNmQ0MTMyZWU3OThkYWFlOTY4NQ/t-cnVzdGFpbi0xNzk0MzI5NDY3MzQwOTA0NzMwLWUzOWVjMD│
+│ViYmM3YmY3NDA · peer interaction recorded · notification immediate            │
+│  response: notify-and-wait · via individual — a2a-interaction.toml           │
+│  notification: immediate · via individual — a2a-interaction.toml             │
+│  [/] Search  [PgUp/PgDn] Scroll  [Esc] Close                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready          Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

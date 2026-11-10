@@ -1,0 +1,16 @@
+┌A2A log───────────────────────────────────────────────────┐
+│a2a-in/p-cGVlcjoxMjIwOTBlMzlmOGI1NGMxMjVkMzU5ZjlkNzRiMThhN│
+│TBiMDE1YmRmMjNmYjg1MGFmNjljYmZlZGY0MmNiNjU1ODJlZA/t-cnVzdG│
+│Fpbi0xNzk0MzI5NzczNTUxNDI3MjQ1LTJiMDAzNjFmODc3NzVlZGQ ·   │
+│peer interaction recorded · notification immediate        │
+│  response: notify-and-wait · via individual —            │
+│a2a-interaction.toml                                      │
+│  notification: immediate · via individual —              │
+│a2a-interaction.toml                                      │
+│2026-11-10 16:56:19Z ? unknown ✓ item-acknowledged · peer │
+│  [/] Search  [PgUp/PgDn] Scroll  [Esc] Close             │
+└──────────────────────────────────────────────────────────┘
+ [F] │ attached │ Normal │ ↑109 ↓19 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+                                                            
+│ ⚠ ← inbound ✓ accepted via A2A · peer│                    
+│   122090e39f8b54c125d359f9d74b18a50b015bdf23fb850af69cbf│ 
+│   edf42cb65582ed · task│                                  
+│ ℹ Send · architecture_update · lena-po awaiting their│    
+│   approval · jun-dev awaiting their approval│             
+│ ℹ Team interaction policy│                                
+│   Response mode: notify-and-wait│                         
+│   Notification urgency: immediate│                        
+│   Peers:│                                                 
+│   - jun-dev│                                              
+│   (1220b9c7fd46312a0ae19e910b83db74c1e2a9c9cbc92ab73f721│ 
+ [F] │ attached │ Normal │ ↑173 ↓18 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

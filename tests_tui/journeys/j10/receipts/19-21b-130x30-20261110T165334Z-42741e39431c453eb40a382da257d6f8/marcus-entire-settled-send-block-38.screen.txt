@@ -1,0 +1,30 @@
+┆  Jun owns implementation; Marcus checks the architecture.                                                                       
+┆  Acceptance: an arriving item is visible before its durable append.                                                             
+┆  Please identify conflicts with ADR-047; do not send automatically.                                                             
+┆  response: notify-and-wait · via individual — a2a-interaction.toml                                                              
+┆  notification: immediate · via individual — a2a-interaction.toml                                                                
+                                                                                                                                  
+                                                                                                                                  
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] Assistant:                                                                                                             
+The architecture finding is a draft for your review. I have not sent it.                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ⚠ ← inbound ✓ accepted via A2A · peer 1220336ef2cc4122efbe36f202796fbfff436d8079586802086227e30ea1ad104e61 · task│              
+│   rustain-1794329616213998321-08d8b10565daf477 · task accepted and executing│                                                   
+│ ℹ Send · architecture_update · lena-po awaiting their approval · jun-dev awaiting their approval│                               
+│ ℹ Team interaction policy│                                                                                                      
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready                                 ^X d detach Needs you (1) ^X q log: 7 ^X menu
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

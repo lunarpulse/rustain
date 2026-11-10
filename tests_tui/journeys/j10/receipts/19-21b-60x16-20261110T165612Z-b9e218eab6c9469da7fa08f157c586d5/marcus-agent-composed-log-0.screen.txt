@@ -1,0 +1,16 @@
+┌A2A log───────────────────────────────────────────────────┐
+│2026-11-10 16:56:19Z ? unknown ✓ item-acknowledged · peer │
+│122090e39f8b54c125d359f9d74b18a50b015bdf23fb850af69cbfedf4│
+│2cb65582ed · task ri_vIxcIPwzqu6guFyLgz_XIAgiR-xEg8zI ·   │
+│recipient item from lena-po acknowledged                  │
+│2026-11-10 16:56:27Z → outbound ↑ dispatched · peer       │
+│122090e39f8b54c125d359f9d74b18a50b015bdf23fb850af69cbfedf4│
+│2cb65582ed · task                                         │
+│rustain-1794329787902599982-aad28640c8bc48f6 · task       │
+│dispatched to peer (542 bytes) [agent-composed]           │
+│  [/] Search  [PgUp/PgDn] Scroll  [Esc] Close             │
+└──────────────────────────────────────────────────────────┘
+ [F] │ attached │ Normal │ ↑109 ↓19 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

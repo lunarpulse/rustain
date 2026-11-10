@@ -1,0 +1,16 @@
+┌A2A log───────────────────────────────────────────────────┐
+│recipient item received from lena-po                      │
+│2026-11-10 16:56:15Z ← inbound ✓ accepted via A2A · peer  │
+│122090e39f8b54c125d359f9d74b18a50b015bdf23fb850af69cbfedf4│
+│2cb65582ed · task                                         │
+│rustain-1794329773551427245-2b00361f87775edd · task       │
+│accepted and executing                                    │
+│2026-11-10 16:56:15Z ← inbound ! surfaced · peer          │
+│122090e39f8b54c125d359f9d74b18a50b015bdf23fb850af69cbfedf4│
+│2cb65582ed · task                                         │
+│  [/] Search  [PgUp/PgDn] Scroll  [Esc] Close             │
+└──────────────────────────────────────────────────────────┘
+ [F] │ attached │ Normal │ ↑109 ↓19 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

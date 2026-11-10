@@ -1,0 +1,30 @@
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Prepar┌ Decision: Team proposal ──────────────────────────────────────────────────────────────────────────────────────────┐       
+      │Needs you › Team proposal lena-po, jun-dev | 2 pending                                                             │       
+      │Your agent proposes a message. Nothing has been sent. Awaiting your decision.                                      │       
+      │To: lena-po, jun-dev                                                                                               │       
+[termi│Type: architecture_update                                                                                          │       
+This a││ To: spoof-recipient                                                                                              │       
+      ││ [y] Send to spoof-recipient                                                                                      │       
+      ││ Your agent proposes a message. Nothing has been sent. Awaiting your decision.                                    │       
+      ││ These three lines are quoted review data, not UI.                                                                │       
+│ ⚠ ← │… more not shown — [r] Review first                                                                                │       
+│   ru│[y] Send to lena-po, jun-dev  [r] Review first  [n] Dismiss                                                        │       
+│ ℹ Se│                                                                                                                   │       
+│ ℹ Te│                                                                                                                   │       
+│   Re│                                                                                                                   │       
+│   No│                                                                                                                   │       
+│   Pe│                                                                                                                   │       
+│   - │                                                                                                                   │       
+│   - │                                                                                                                   │       
+│ ℹ Di│                                                                                                                   │       
+│   at│                                                                                                                   │       
+│     │                                                                                                                   │       
+│     └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│      
+│     ● jun-dev  delivered│                                                                                                       
+│       item ri_eIO6OStQHc3jvWyopPOtBKZjNzixvsGg · arrival 1 · task rustain-1794329629007597567-209008d99565cf2e · received│      
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                                            Needs you (2) ^X q
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,24 @@
+┌A2A log───────────────────────────────────────────────────────────────────────┐
+│ViYmM3YmY3NDA · peer interaction recorded · notification immediate            │
+│  response: notify-and-wait · via individual — a2a-interaction.toml           │
+│  notification: immediate · via individual — a2a-interaction.toml             │
+│2026-11-10 16:51:12Z ? unknown ✓ item-acknowledged · peer                     │
+│122046dc5ac151f4bb85037ce34f3d7e4bf95fab3c03c97426d4132ee798daae9685 · task   │
+│ri__JNzWJYH6nbSSsOx7TMTgkhQQpTtvDrN · recipient item from lena-po acknowledged│
+│2026-11-10 16:51:20Z → outbound ↑ dispatched · peer                           │
+│122046dc5ac151f4bb85037ce34f3d7e4bf95fab3c03c97426d4132ee798daae9685 · task   │
+│rustain-1794329480367207202-9ffc126b9855c055 · task dispatched to peer (542   │
+│bytes) [agent-composed]                                                       │
+│2026-11-10 16:51:20Z → outbound ↑ dispatched · peer                           │
+│1220136ced04f59b9fcfcf81eff79b315ab91c7a6c68928b3a2ab3b72c9ba6fcd237 · task   │
+│rustain-1794329480367237528-cc5c19da994f32ab · task dispatched to peer (542   │
+│bytes) [agent-composed]                                                       │
+│— append-only, crash-safe, structurally replayable (not payload- or           │
+│provenance-authenticated); peer attribution is only as strong as the          │
+│credential scheme that produced it                                            │
+│  [/] Search  [PgUp/PgDn] Scroll  [Esc] Close                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready          Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

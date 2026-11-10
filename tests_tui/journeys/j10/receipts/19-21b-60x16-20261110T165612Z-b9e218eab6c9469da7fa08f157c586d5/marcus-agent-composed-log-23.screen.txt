@@ -1,0 +1,16 @@
+┌A2A log───────────────────────────────────────────────────┐
+│rustain-1794329787902599982-aad28640c8bc48f6 · task       │
+│dispatched to peer (542 bytes) [agent-composed]           │
+│2026-11-10 16:56:27Z → outbound ↑ dispatched · peer       │
+│1220b9c7fd46312a0ae19e910b83db74c1e2a9c9cbc92ab73f72181186│
+│92ecc350f6 · task                                         │
+│rustain-1794329787902632493-7d3c24df8cdc5246 · task       │
+│dispatched to peer (542 bytes) [agent-composed]           │
+│— append-only, crash-safe, structurally replayable (not   │
+│payload- or provenance-authenticated); peer attribution is│
+│  [/] Search  [PgUp/PgDn] Scroll  [Esc] Close             │
+└──────────────────────────────────────────────────────────┘
+ [F] │ attached │ Normal │ ↑109 ↓19 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

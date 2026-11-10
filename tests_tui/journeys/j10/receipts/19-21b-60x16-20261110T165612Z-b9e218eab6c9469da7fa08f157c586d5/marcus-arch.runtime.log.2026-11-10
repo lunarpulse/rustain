@@ -1,0 +1,148 @@
+2026-11-10T16:56:12.305732Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-11-10T16:56:12.305854Z  INFO rustain::infrastructure::config: Merging user-global config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:12.305881Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:12.306093Z  INFO rustain::infrastructure::config: Merging user-global config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:12.306112Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:12.306303Z  INFO rustain::adapters::daemon::policy_startup: interaction policy resolved (NFR66) conflicts=0
+2026-11-10T16:56:12.306308Z  INFO rustain::adapters::daemon::policy_startup: policy policy=notification urgency: `immediate` (yours: `immediate`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-11-10T16:56:12.306309Z  INFO rustain::adapters::daemon::policy_startup: policy policy=response automation: `notify-and-wait` (yours: `notify-and-wait`, team: not configured) — source: individual (a2a-interaction.toml)
+2026-11-10T16:56:12.306310Z  INFO rustain::adapters::daemon::policy_startup: policy policy=sharing breadth: none (yours) — no team norm is configured.
+2026-11-10T16:56:12.306310Z  INFO rustain::adapters::daemon::policy_startup: policy policy=effective consent per sender: no journaled consent grants recorded — TOML policy precedence is the only live source
+2026-11-10T16:56:12.311526Z  INFO rustain::adapters::daemon: durable node recovery complete restored=0 suspended=0 failed=0
+2026-11-10T16:56:12.321601Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:36885/
+2026-11-10T16:56:12.321603Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:36275/
+2026-11-10T16:56:12.321619Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:36885
+2026-11-10T16:56:12.321620Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:36275
+2026-11-10T16:56:12.321676Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:36275
+2026-11-10T16:56:12.321685Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-11-10T16:56:12.321687Z DEBUG rustls::client::hs: Not resuming any session
+2026-11-10T16:56:12.321688Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:36885
+2026-11-10T16:56:12.321694Z DEBUG rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([127, 0, 0, 1])))
+2026-11-10T16:56:12.321696Z DEBUG rustls::client::hs: Not resuming any session
+2026-11-10T16:56:12.322122Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:12.322128Z DEBUG rustls::client::tls13: Not resuming
+2026-11-10T16:56:12.322171Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-11-10T16:56:12.322177Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-11-10T16:56:12.322276Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:12.322279Z DEBUG rustls::client::tls13: Not resuming
+2026-11-10T16:56:12.322339Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-11-10T16:56:12.322350Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-11-10T16:56:12.324483Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:12.324615Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:12.327139Z  INFO rustain::adapters::a2a::server: A2A listener bound bound_addr=0.0.0.0:37267
+2026-11-10T16:56:12.327249Z  WARN rustain::adapters::a2a::server: A2A pending task file is missing; no approval-pending tasks restored path=/tmp/r21h-3d0fujj6/marcus-arch/.rustain/a2a-pending.json
+2026-11-10T16:56:12.327349Z  INFO rustain::adapters::daemon::lifecycle: daemon lifecycle ready (Story 12.4: attach server + scheduler live, headless turn runtime lazy) idle_secs=14400 daily_reset=04:00
+2026-11-10T16:56:12.327377Z DEBUG rustain::adapters::daemon::server: A2aCatalogChanged before the daemon runtime is built; catalogue unchanged peer_id=jun-dev skill_count=0
+2026-11-10T16:56:12.327383Z DEBUG rustain::adapters::daemon::server: A2aCatalogChanged before the daemon runtime is built; catalogue unchanged peer_id=lena-po skill_count=0
+2026-11-10T16:56:12.343295Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:12.344082Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:12.362801Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:12.363617Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:13.097384Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-11-10T16:56:13.097537Z  INFO rustain::infrastructure::config: Merging user-global config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:13.097566Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:13.097818Z  INFO rustain::infrastructure::config: Merging user-global config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:13.097838Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:56:13.558116Z DEBUG rustls::server::hs: decided upon suite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:13.589256Z  INFO rustain::infrastructure::startup: Anthropic provider initialized (model: claude-sonnet-4-6)
+2026-11-10T16:56:13.589306Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589309Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589362Z  INFO provider: router registered: anthropic
+2026-11-10T16:56:13.589379Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589380Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589407Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589408Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589431Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589432Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589454Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589455Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589479Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589480Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589501Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589502Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589519Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589520Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589548Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589550Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589588Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589589Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589628Z DEBUG globset: glob `Glob("*")` converted to regex: `"(?-u)^.*$"`
+2026-11-10T16:56:13.589629Z DEBUG globset: built glob set; 0 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 1 regexes
+2026-11-10T16:56:13.589662Z  INFO provider: router active: anthropic -> anthropic
+2026-11-10T16:56:13.589782Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:41711/
+2026-11-10T16:56:13.589796Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41711
+2026-11-10T16:56:13.589864Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41711
+2026-11-10T16:56:13.590389Z  WARN rustain::infrastructure::model_discovery: Model discovery for 'anthropic' returned 0 models. provider=anthropic
+2026-11-10T16:56:13.595597Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:20.022386Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:41711/
+2026-11-10T16:56:20.022399Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41711
+2026-11-10T16:56:20.022454Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41711
+2026-11-10T16:56:20.023129Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:41711 status=200 OK
+2026-11-10T16:56:20.023877Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:56:20.023985Z DEBUG rustain::adapters::filesystem: Created checkpoint 1 for conversation WMfWNTa0-i53G6bP7vlTe at message_index 2
+2026-11-10T16:56:20.024135Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:41711/
+2026-11-10T16:56:20.024140Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41711
+2026-11-10T16:56:20.024180Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41711
+2026-11-10T16:56:20.024448Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:56:20.024552Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:41711 status=200 OK
+2026-11-10T16:56:20.024999Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:56:27.908692Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:36275/
+2026-11-10T16:56:27.908709Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:36275
+2026-11-10T16:56:27.908792Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:36275
+2026-11-10T16:56:27.908819Z DEBUG rustls::client::hs: Resuming session
+2026-11-10T16:56:27.909265Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:27.909272Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-11-10T16:56:27.909320Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-11-10T16:56:27.909325Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-11-10T16:56:27.913957Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:36885/
+2026-11-10T16:56:27.913967Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:36885
+2026-11-10T16:56:27.914014Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:36885
+2026-11-10T16:56:27.914021Z DEBUG rustls::client::hs: Resuming session
+2026-11-10T16:56:27.914265Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:27.914269Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-11-10T16:56:27.914311Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-11-10T16:56:27.914316Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-11-10T16:56:27.966019Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:27.971440Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:58.303740Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:36275/
+2026-11-10T16:56:58.303758Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:36275
+2026-11-10T16:56:58.303826Z DEBUG reqwest::connect: starting new connection: https://127.0.0.1:36885/
+2026-11-10T16:56:58.303831Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:36885
+2026-11-10T16:56:58.303859Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:36275
+2026-11-10T16:56:58.303865Z DEBUG rustls::client::hs: Resuming session
+2026-11-10T16:56:58.303920Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:36885
+2026-11-10T16:56:58.303924Z DEBUG rustls::client::hs: Resuming session
+2026-11-10T16:56:58.304175Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:58.304180Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-11-10T16:56:58.304224Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-11-10T16:56:58.304228Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-11-10T16:56:58.304266Z DEBUG rustls::client::hs: Using ciphersuite TLS13_AES_256_GCM_SHA384
+2026-11-10T16:56:58.304268Z DEBUG rustls::client::tls13: Resuming using PSK
+2026-11-10T16:56:58.304300Z DEBUG rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {10}, .. }
+2026-11-10T16:56:58.304302Z DEBUG rustls::client::hs: ALPN protocol is None
+2026-11-10T16:56:58.306941Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:56:58.306968Z DEBUG rustls::common_state: Sending warning alert CloseNotify
+2026-11-10T16:57:57.945934Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:57:57.946081Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:41711/
+2026-11-10T16:57:57.946089Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41711
+2026-11-10T16:57:57.946178Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41711
+2026-11-10T16:57:57.946813Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:41711 status=200 OK
+2026-11-10T16:57:57.947358Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:57:57.947384Z DEBUG rustain::adapters::filesystem: Created checkpoint 2 for conversation WMfWNTa0-i53G6bP7vlTe at message_index 5
+2026-11-10T16:57:57.947572Z DEBUG reqwest::connect: starting new connection: http://127.0.0.1:41711/
+2026-11-10T16:57:57.947579Z DEBUG hyper_util::client::legacy::connect::http: connecting to 127.0.0.1:41711
+2026-11-10T16:57:57.947631Z DEBUG hyper_util::client::legacy::connect::http: connected to 127.0.0.1:41711
+2026-11-10T16:57:57.947815Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:57:57.948064Z DEBUG rustain::adapters::anthropic: Response received from http://127.0.0.1:41711 status=200 OK
+2026-11-10T16:57:57.948439Z  INFO rustain::adapters::filesystem: Migrated session from flat to directory layout (first image save) conversation_id=WMfWNTa0-i53G6bP7vlTe
+2026-11-10T16:58:27.257199Z  INFO rustain::infrastructure::startup: Starting rustain...
+2026-11-10T16:58:27.257314Z  INFO rustain::infrastructure::config: Merging user-global config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:58:27.257345Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:58:27.257582Z  INFO rustain::infrastructure::config: Merging user-global config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:58:27.257602Z  INFO rustain::infrastructure::config: Merging workspace config layer from /tmp/r21h-3d0fujj6/marcus-arch/.rustain/config.toml
+2026-11-10T16:58:29.094971Z  INFO rustain::adapters::daemon::lifecycle: daemon received SIGTERM
+2026-11-10T16:58:29.094989Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown begin
+2026-11-10T16:58:29.095005Z  INFO rustain::adapters::daemon::lifecycle: daemon SessionBoundary boundary=shutdown
+2026-11-10T16:58:29.095012Z DEBUG rustain::adapters::daemon::lifecycle: on_session_end invoked with the per-process conversation transcript boundary=shutdown transcript_len=8
+2026-11-10T16:58:29.101193Z  INFO rustain::adapters::daemon::lifecycle: daemon graceful shutdown complete
+2026-11-10T16:58:29.101276Z DEBUG rustain::adapters::a2a::tls: A2A TLS listener: receiver dropped; stopping accept pump
