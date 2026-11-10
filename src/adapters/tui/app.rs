@@ -2541,6 +2541,8 @@ fn submit_message(state: &mut TuiState) -> InputAction {
     state.input_scroll_offset = 0;
     state.autocomplete.dismiss();
     state.needs_redraw = true;
+    // 21-17: the previous `/room role` and `/peer` views leave before this submission runs.
+    crate::adapters::tui::views::retire_on_submit(&mut state.feedback_blocks);
 
     let trimmed = text.trim_start();
     if let Some(after_at) = trimmed.strip_prefix("@Agents/") {

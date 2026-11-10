@@ -90,6 +90,22 @@ pub fn in_render_order(
     ordered.into_iter()
 }
 
+/// The views that answer one composer submission and leave at the next one (21-17):
+/// the `/room role` result and the `/peer` output and alarm. Every other view keeps its
+/// row until it is replaced.
+const RETIRED_ON_SUBMIT: [&str; 3] = [
+    super::handlers::room_command::ROOM_BLOCK_ID,
+    super::handlers::peer_command::PEER_BLOCK_ID,
+    super::handlers::peer_command::PEER_ALARM_BLOCK_ID,
+];
+
+/// Remove the [`RETIRED_ON_SUBMIT`] views before a composer submission runs.
+pub fn retire_on_submit(blocks: &mut BTreeMap<String, FeedbackBlock>) {
+    for id in RETIRED_ON_SUBMIT {
+        blocks.remove(id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

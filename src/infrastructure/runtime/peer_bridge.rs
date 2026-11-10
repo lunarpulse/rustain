@@ -1568,4 +1568,133 @@ mod tests {
             outcome.text
         );
     }
+
+    use crate::adapters::tui::app::InputAction;
+
+    /// Submit `text` through the production composer path, then run the command
+    /// arm exactly as `event_loop.rs` dispatches it.
+    async fn submit(state: &mut TuiState, app_state: &AppState, text: &str) -> InputAction {
+        use crate::domain::events::{DomainInputEvent, DomainKey};
+        state.input_buffer = text.to_owned();
+        state.cursor_position = text.chars().count();
+        let action = crate::adapters::tui::app::handle_input(
+            state,
+            &DomainInputEvent::SpecialKey(DomainKey::Enter),
+        );
+        if let InputAction::ExecuteCommand { name, args } = &action {
+            match name.as_str() {
+                "room" => {
+                    crate::infrastructure::runtime::room_bridge::room_command(
+                        state,
+                        "c1",
+                        args.as_deref(),
+                        app_state,
+                    )
+                    .await;
+                }
+                "peer" => peer_command(state, "c1", args.as_deref(), app_state).await,
+                other => panic!("unexpected command {other}"),
+            }
+        }
+        action
+    }
+
+    fn painted_rows(state: &TuiState) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        terminal
+            .draw(|frame| {
+                crate::adapters::tui::widgets::chat_pane::render(
+                    frame,
+                    frame.area(),
+                    &crate::domain::models::Conversation::default(),
+                    &crate::domain::models::StreamingState::default(),
+                    0,
+                    true,
+                    &theme,
+                    &mut crate::adapters::tui::state::TabRenderState::default(),
+                    &state.feedback_blocks,
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buffer.cell((x, y)).expect("cell").symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn painted(state: &TuiState, needle: &str) -> bool {
+        painted_rows(state).iter().any(|row| row.contains(needle))
+    }
+
+    #[tokio::test]
+    async fn story21_17_peer_views_replace_and_the_alarm_keeps_its_own_slot() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (app_state, _rx) =
+            super::super::transparency_bridge::bridge_app_state(workspace.path());
+        let config_path = workspace_p2p_config_path(workspace.path());
+        std::fs::create_dir_all(config_path.parent().expect("config dir")).expect("config dir");
+        std::fs::write(&config_path, "{").expect("malformed config");
+        let mut state = TuiState::new(80, 24);
+
+        peer_command(&mut state, "c1", Some("list"), &app_state).await;
+        peer_command(&mut state, "c1", Some("list"), &app_state).await;
+        let second_list = state.feedback_blocks.get("peer").map(|b| b.message.clone());
+        peer_command(&mut state, "c1", Some("revoke nobody"), &app_state).await;
+
+        let keys: Vec<&str> = state.feedback_blocks.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["peer", "peer-alarm"],
+            "stable ids, alarm in its own slot"
+        );
+        assert_eq!(
+            state.feedback_blocks.get("peer").map(|b| b.message.clone()),
+            second_list
+        );
+        let order: Vec<&str> = crate::adapters::tui::views::in_render_order(&state.feedback_blocks)
+            .map(|b| b.id.as_str())
+            .collect();
+        assert_eq!(order.last(), Some(&"peer-alarm"));
+    }
+
+    #[tokio::test]
+    async fn story21_17_room_and_peer_views_leave_at_the_next_submission() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (app_state, _rx) =
+            super::super::transparency_bridge::bridge_app_state(workspace.path());
+        let mut state = TuiState::new(80, 24);
+        state.focus = crate::domain::models::FocusState::Input;
+        crate::adapters::tui::views::show_view(
+            &mut state.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::TeamStatus,
+            "team-status",
+            crate::domain::models::FeedbackLevel::Info,
+            "team status survives",
+        );
+
+        submit(&mut state, &app_state, "/room role list").await;
+        assert!(state.feedback_blocks.contains_key("room-role"));
+        assert!(painted(&state, "room roles"), "{:#?}", painted_rows(&state));
+
+        submit(&mut state, &app_state, "/peer list").await;
+        assert!(state.feedback_blocks.contains_key("peer"));
+        assert!(painted(&state, "Transport peers"));
+        assert!(!state.feedback_blocks.contains_key("room-role"));
+        assert!(!painted(&state, "room roles"));
+
+        let action = submit(&mut state, &app_state, "hello").await;
+        assert!(matches!(&action, InputAction::SubmitMessage(text) if text == "hello"));
+        let keys: Vec<&str> = state.feedback_blocks.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["team-status"]);
+        assert!(painted(&state, "team status survives"));
+        assert!(!painted(&state, "Transport peers"));
+        assert!(!painted(&state, "room roles"));
+    }
 }

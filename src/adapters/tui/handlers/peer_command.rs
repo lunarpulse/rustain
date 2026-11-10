@@ -154,13 +154,20 @@ pub fn parse_peer_command(cmd_arg: Option<&str>) -> Result<PeerCommandArgs, Stri
     }
 }
 
-/// Push one block of `peer` output into the transcript.
+/// Stable id of the `/peer` output view: a newer result replaces the older one.
+pub const PEER_BLOCK_ID: &str = "peer";
+
+/// Stable id of the key-mismatch alarm view, separate from [`PEER_BLOCK_ID`] so a
+/// pin result and a reach alarm from one decision are both shown.
+pub const PEER_ALARM_BLOCK_ID: &str = "peer-alarm";
+
+/// Push one block of `peer` output into the transcript. It leaves at the next
+/// composer submission (21-17).
 pub fn show_peer_message(state: &mut TuiState, message: String) {
-    let id = format!("peer-{}", state.feedback_blocks.len() + 1);
     crate::adapters::tui::views::show_view(
         &mut state.feedback_blocks,
         crate::adapters::tui::views::ViewKind::Peer,
-        id,
+        PEER_BLOCK_ID,
         crate::domain::models::FeedbackLevel::Info,
         message,
     );
@@ -172,13 +179,13 @@ pub fn show_peer_message(state: &mut TuiState, message: String) {
 /// `FeedbackLevel::Error` is exempt from the three-line cap that bounds
 /// `Warning`, which is exactly why the alarm uses it: both fingerprints and the
 /// two-verb remedy must survive at the 60×16 layout floor. ⛔ It carries **no**
-/// actions, so no keystroke resolves it into an accept.
+/// actions, so no keystroke resolves it into an accept. It leaves at the next
+/// composer submission (21-17).
 pub fn show_peer_alarm(state: &mut TuiState, message: String) {
-    let id = format!("peer-alarm-{}", state.feedback_blocks.len() + 1);
     crate::adapters::tui::views::show_view(
         &mut state.feedback_blocks,
         crate::adapters::tui::views::ViewKind::Peer,
-        id,
+        PEER_ALARM_BLOCK_ID,
         crate::domain::models::FeedbackLevel::Error,
         message,
     );

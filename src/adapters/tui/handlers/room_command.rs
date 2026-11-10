@@ -22,7 +22,8 @@ pub const USAGE: &str = "/room | /room role list | /room role grant <alias-or-pe
 
 /// Stable id for the in-chat `/room role` result block. A role listing is a
 /// **view**, not an event stream: re-running it replaces the block rather than
-/// stacking another copy under the old one.
+/// stacking another copy under the old one. It leaves at the next composer
+/// submission (21-17).
 pub const ROOM_BLOCK_ID: &str = "room-role";
 
 #[derive(Debug, PartialEq, Eq)]

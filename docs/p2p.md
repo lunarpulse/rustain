@@ -6,6 +6,9 @@ verbs for exchanging liveness and context with them. The same verbs exist as
 `/peer …` in the TUI; both faces parse into the same decision cores and print
 the same strings.
 
+In the TUI a `/peer …` result appears below the conversation until the next
+message or command is submitted; a newer result replaces it.
+
 P2P is off by default for `cargo install`. **Published release assets up to and
 including `v0.1.3` do not contain it; `v0.2.0` and later do** (Story 19.5); source
 builds need `--features p2p`:
