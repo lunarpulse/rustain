@@ -5105,13 +5105,12 @@ pub async fn run(
                             let edit_snapshot = matches!(decision, crate::domain::models::plan::PlanDecision::Edit)
                                 .then(|| conversation.plans.get(&plan_id).cloned())
                                 .flatten();
-                            handlers::plan_card::handle_plan_decision(&mut conversation, &plan_id, &decision);
+                            handlers::plan_card::handle_plan_decision(&mut conversation, &mut state, &plan_id, &decision);
                             match decision {
                                 crate::domain::models::plan::PlanDecision::Approve => {
-                                    let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
-                                        conversation_id: cid,
-                                        plan_id,
-                                    });
+                                    for event in handlers::plan_card::card_decision_events(&decision, security.current_mode(), &cid, &plan_id) {
+                                        let _ = app_state.event_bus.emit_domain(event);
+                                    }
                                 }
                                 crate::domain::models::plan::PlanDecision::Reject => {
                                     let _ = domain_tx.send(AppEvent::SystemNotice {

@@ -96,6 +96,7 @@ pub fn handle_plan_proposed(
 /// Apply the selected card's state transition; dispatch retains event/editor I/O.
 pub fn handle_plan_decision(
     conversation: &mut Conversation,
+    state: &mut TuiState,
     plan_id: &str,
     decision: &crate::domain::models::plan::PlanDecision,
 ) {
@@ -114,6 +115,39 @@ pub fn handle_plan_decision(
             PlanDecision::AutoApproveYolo => {}
         }
     }
+    // The card settles the plan the conversation's plan approval (`exit_plan_mode`) asks
+    // about: left queued it would stay in `Needs you` after the user already decided.
+    if matches!(decision, PlanDecision::Approve | PlanDecision::Reject) {
+        decision_queue::withdraw_for(
+            state,
+            decision_queue::DecisionKind::PlanApproval,
+            &conversation.id,
+        );
+    }
+}
+
+/// The ordered events a decided card starts. Approving from Plan mode first leaves it (the
+/// shared `SetPermissionMode` transition: permissions, sandbox, plan-file exception), or the
+/// structured run would start under Plan's read-only rules; every other mode is kept.
+pub fn card_decision_events(
+    decision: &crate::domain::models::plan::PlanDecision,
+    permission_mode: PermissionMode,
+    conversation_id: &str,
+    plan_id: &str,
+) -> Vec<AppEvent> {
+    use crate::domain::models::plan::PlanDecision;
+    if *decision != PlanDecision::Approve {
+        return Vec::new();
+    }
+    let mut events = Vec::with_capacity(2);
+    if permission_mode == PermissionMode::Plan {
+        events.push(AppEvent::SetPermissionMode(PermissionMode::Normal));
+    }
+    events.push(AppEvent::PlanExecutionStarted {
+        conversation_id: conversation_id.to_owned(),
+        plan_id: plan_id.to_owned(),
+    });
+    events
 }
 
 /// Re-present an edited (or cancelled/invalid-edit) card on its original host.
@@ -562,7 +596,7 @@ mod tests {
             // card is raised (and stays raised) until that frame resolves it.
             let host = conversation.plans["selected"].host_message_id.clone();
             assert!(plan_card_pending(&state, "selected"));
-            handle_plan_decision(&mut conversation, "selected", &decision);
+            handle_plan_decision(&mut conversation, &mut state, "selected", &decision);
             assert_eq!(conversation.plans["selected"].status, expected);
             assert_eq!(conversation.plans["control"].status, PlanStatus::Pending);
             assert_eq!(conversation.plans["selected"].host_message_id, host);
@@ -577,7 +611,12 @@ mod tests {
                     plan_card_snapshot(&state, "selected").unwrap().title,
                     "edited title"
                 );
-                handle_plan_decision(&mut conversation, "selected", &PlanDecision::Edit);
+                handle_plan_decision(
+                    &mut conversation,
+                    &mut state,
+                    "selected",
+                    &PlanDecision::Edit,
+                );
                 handle_plan_edit_completed(&mut conversation, &mut state, "selected", None);
                 assert_eq!(conversation.plans["selected"].title, "edited title");
                 conversation.rebuild_messages_mirror();
@@ -586,6 +625,107 @@ mod tests {
             } else {
                 assert!(conversation.plans["selected"].resolved_at.is_some());
             }
+        }
+    }
+
+    /// Deciding the plan card (approve or reject) settles the plan its conversation's
+    /// plan approval (`exit_plan_mode`) asks about: that approval must not linger in
+    /// `Needs you`. Another conversation's approval, and an edit, leave it alone.
+    #[test]
+    fn deciding_the_plan_card_retires_the_conversations_plan_approval() {
+        use crate::adapters::tui::decision_queue::{
+            PlanApprovalPayload, raise_plan_approval, waiting,
+        };
+        use crate::domain::models::plan::PlanDecision;
+        let approval = |conversation: &str, path: &str| PlanApprovalPayload {
+            conversation_id: conversation.into(),
+            plan_path: path.into(),
+            contents: "# plan".into(),
+            summary: "Plan ready for review.".into(),
+        };
+        for (decision, retires) in [
+            (PlanDecision::Approve, true),
+            (PlanDecision::Reject, true),
+            (PlanDecision::Edit, false),
+        ] {
+            let mut conversation = Conversation {
+                id: "c".into(),
+                ..Default::default()
+            };
+            let mut state = TuiState::new(80, 24);
+            handle_plan_proposed(
+                &mut conversation,
+                &mut state,
+                "c",
+                plan("p"),
+                PermissionMode::Normal,
+                None,
+            );
+            raise_plan_approval(&mut state, approval("c", "/w/plan.md"));
+            raise_plan_approval(&mut state, approval("other", "/w/plan.md"));
+            assert_eq!(waiting(&state), 3);
+            // The card item is answered (it leaves the queue) before the event is applied.
+            decision_queue::withdraw_plan_card(&mut state, "p");
+            handle_plan_decision(&mut conversation, &mut state, "p", &decision);
+            let mine = state
+                .decisions
+                .items()
+                .filter(|item| {
+                    item.kind == DecisionKind::PlanApproval
+                        && item.conversation_id.as_deref() == Some("c")
+                })
+                .count();
+            assert_eq!(mine, usize::from(!retires), "{decision:?}");
+            assert_eq!(
+                state.decisions.count(DecisionKind::PlanApproval),
+                1 + usize::from(!retires),
+                "another conversation's approval stays: {decision:?}"
+            );
+        }
+    }
+
+    /// Approving a card from Plan mode leaves Plan mode before the single execution start;
+    /// other modes are kept; reject and edit never exit.
+    #[test]
+    fn card_approval_leaves_plan_mode_before_execution_starts() {
+        use crate::domain::models::plan::PlanDecision;
+        let shape = |events: &[AppEvent]| -> Vec<String> {
+            events
+                .iter()
+                .map(|event| match event {
+                    AppEvent::SetPermissionMode(mode) => format!("mode:{mode:?}"),
+                    AppEvent::PlanExecutionStarted { plan_id, .. } => format!("start:{plan_id}"),
+                    other => format!("other:{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            shape(&card_decision_events(
+                &PlanDecision::Approve,
+                PermissionMode::Plan,
+                "c",
+                "p"
+            )),
+            ["mode:Normal", "start:p"]
+        );
+        for kept in [
+            PermissionMode::Normal,
+            PermissionMode::AutoEdit,
+            PermissionMode::Yolo,
+        ] {
+            assert_eq!(
+                shape(&card_decision_events(
+                    &PlanDecision::Approve,
+                    kept,
+                    "c",
+                    "p"
+                )),
+                ["start:p"],
+                "{kept:?}"
+            );
+        }
+        for decision in [PlanDecision::Reject, PlanDecision::Edit] {
+            assert!(card_decision_events(&decision, PermissionMode::Plan, "c", "p").is_empty());
         }
     }
 }
