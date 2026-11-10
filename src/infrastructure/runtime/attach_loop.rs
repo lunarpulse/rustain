@@ -391,27 +391,28 @@ async fn recipient_projection(
     Ok(crate::adapters::policy::JournalRecipientItemProjection::from_entries(&entries))
 }
 
-/// `[v] View item` on a peer draft: the thread of the item the pinned node answers, in the
-/// one thread frame. A node without an item address has no item to view (the node view is a
-/// later slice of Story 21.8).
+/// `[v] View item` on a peer draft and `Tab` in the thread: the item the pinned node answers
+/// (journal thread), or the node's response view (`want_node`, or a node without an item
+/// address). Both are the one thread frame; neither offers a draft decision of its own.
 async fn open_thread_for_node(
     workspace: &Path,
     conversation: &Conversation,
     node: &str,
     state: &mut TuiState,
     read_only: bool,
+    want_node: bool,
 ) -> Result<()> {
     use crate::adapters::tui::state::ThreadAccess;
 
+    let access = if read_only {
+        ThreadAccess::ReadOnly
+    } else {
+        ThreadAccess::Writer
+    };
     let (_, control) = pinned_response(conversation, node)
         .ok_or_else(|| anyhow!("response already settled — no action applied"))?;
-    let Some(address) = &control.item_address else {
-        notifications::info(
-            state,
-            NoticeSource::Attached,
-            "no item to view — answer it in the decision",
-        );
-        return Ok(());
+    let Some(address) = control.item_address.as_ref().filter(|_| !want_node) else {
+        return super::thread_open::open_node(conversation, node, state, access);
     };
     #[cfg(feature = "a2a")]
     {
@@ -428,11 +429,6 @@ async fn open_thread_for_node(
             ));
         }
     }
-    let access = if read_only {
-        ThreadAccess::ReadOnly
-    } else {
-        ThreadAccess::Writer
-    };
     super::thread_open::open_received(
         workspace,
         Some(conversation),
@@ -940,9 +936,6 @@ fn attached_composer_key_with_team_requests(
                 &mut state.input_buffer,
                 state.cursor_position,
             );
-            if state.input_buffer.is_empty() {
-                state.pinned_peer_compose = None;
-            }
         }
         KeyCode::Enter if state.input_buffer.trim().is_empty() => {
             if read_only {
@@ -956,7 +949,6 @@ fn attached_composer_key_with_team_requests(
             state.input_buffer.clear();
             state.cursor_position = 0;
             state.input_scroll_offset = 0;
-            state.pinned_peer_compose = None;
             notifications::info(state, NoticeSource::Login, ATTACHED_SIGN_IN);
         }
         // `/logout` and `/accounts` likewise; a CLI account change reaches the
@@ -965,7 +957,6 @@ fn attached_composer_key_with_team_requests(
             state.input_buffer.clear();
             state.cursor_position = 0;
             state.input_scroll_offset = 0;
-            state.pinned_peer_compose = None;
             notifications::info(state, NoticeSource::Accounts, ATTACHED_ACCOUNT_CHANGE);
         }
         KeyCode::Enter => {
@@ -975,18 +966,15 @@ fn attached_composer_key_with_team_requests(
                     state.input_buffer.clear();
                     state.cursor_position = 0;
                     state.input_scroll_offset = 0;
-                    state.pinned_peer_compose = None;
                     return ComposerOutcome::LocalLog(args);
                 }
                 AttachedTeamLine::LocalView(item_id) => {
                     state.input_buffer.clear();
                     state.cursor_position = 0;
                     state.input_scroll_offset = 0;
-                    state.pinned_peer_compose = None;
                     return ComposerOutcome::LocalView(item_id);
                 }
                 AttachedTeamLine::Frame(ClientFrame::InspectRecipientContext) => {
-                    state.pinned_peer_compose = None;
                     if queue_recipient_action(
                         state,
                         ClientFrame::InspectRecipientContext,
@@ -999,7 +987,6 @@ fn attached_composer_key_with_team_requests(
                 AttachedTeamLine::Frame(frame @ ClientFrame::TeamBoard { .. })
                 | AttachedTeamLine::Frame(frame @ ClientFrame::TeamThread { .. })
                 | AttachedTeamLine::Frame(frame @ ClientFrame::TeamStatus { .. }) => {
-                    state.pinned_peer_compose = None;
                     if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
                         state.input_buffer.clear();
                         state.cursor_position = 0;
@@ -1019,7 +1006,6 @@ fn attached_composer_key_with_team_requests(
                         };
                         flash(state, message.into());
                     } else {
-                        state.pinned_peer_compose = None;
                         if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
                             state.input_buffer.clear();
                             state.cursor_position = 0;
@@ -1033,7 +1019,6 @@ fn attached_composer_key_with_team_requests(
                     let _ = frame;
                 }
                 AttachedTeamLine::Frame(frame) => {
-                    state.pinned_peer_compose = None;
                     if !queue_recipient_action(state, frame, frame_tx, true) {
                         return ComposerOutcome::Handled;
                     }
@@ -1043,16 +1028,12 @@ fn attached_composer_key_with_team_requests(
                     state.input_buffer.clear();
                     state.cursor_position = 0;
                     state.input_scroll_offset = 0;
-                    state.pinned_peer_compose = None;
                     flash(state, error);
                 }
                 AttachedTeamLine::PassThrough => {
                     if read_only {
                         flash(state, "read-only — can't send here".into());
                     } else {
-                        if is_attached_command(&state.input_buffer) {
-                            state.pinned_peer_compose = None;
-                        }
                         state.cursor_position = 0;
                         state.input_scroll_offset = 0;
                         return ComposerOutcome::Submit(std::mem::take(&mut state.input_buffer));
@@ -1063,45 +1044,6 @@ fn attached_composer_key_with_team_requests(
         _ => {}
     }
     ComposerOutcome::Handled
-}
-
-fn is_attached_command(text: &str) -> bool {
-    let text = text.trim();
-    text == "/clear"
-        || text
-            .strip_prefix("/team")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-}
-
-fn pinned_compose_is_current(
-    conversation: &Conversation,
-    compose: &crate::adapters::tui::state::PinnedPeerCompose,
-) -> bool {
-    use crate::adapters::tui::state::PeerComposeAction;
-    use crate::domain::models::PeerRowStage;
-    pinned_response(conversation, &compose.node_id).is_some_and(|(_, control)| {
-        control.node_resolvable
-            && match compose.action {
-                PeerComposeAction::Respond => matches!(
-                    control.stage,
-                    PeerRowStage::AwaitingOperator | PeerRowStage::Ready
-                ),
-                PeerComposeAction::Edit => control.stage == PeerRowStage::Ready,
-            }
-    })
-}
-
-fn take_current_peer_compose(
-    state: &mut TuiState,
-    conversation: &Conversation,
-) -> Result<Option<crate::adapters::tui::state::PinnedPeerCompose>, ()> {
-    let Some(compose) = state.pinned_peer_compose.as_ref() else {
-        return Ok(None);
-    };
-    if !pinned_compose_is_current(conversation, compose) {
-        return Err(());
-    }
-    Ok(state.pinned_peer_compose.take())
 }
 
 /// Story 19.16g — after the attached draw: only a frame that actually
@@ -2053,10 +1995,7 @@ fn paint_attached(
         if read_only {
             Some("read-only — can't send here")
         } else {
-            state
-                .pinned_peer_compose
-                .as_ref()
-                .map(|compose| compose.label.as_str())
+            None
         },
     );
     // Inline cards can leave fewer than five rows; paging must not skip visible content.
@@ -2327,16 +2266,19 @@ pub async fn run_attached(
                 match frame {
                         Ok(Some(DaemonFrame::PeerRowOperation(operation))) => {
                             let refresh_item = state.thread_inspector.as_ref().is_some_and(|inspector| {
-                                let crate::adapters::tui::state::ThreadTarget::Item(address) = &inspector.target;
                                 let (row_id, new_control) = match operation.as_ref() {
                                     crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
                                         (message.id.as_str(), control.as_ref()),
                                     crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
                                         (row_id.as_str(), None),
                                 };
-                                new_control
-                                    .or_else(|| conversation.peer_row_controls.get(row_id))
-                                    .is_some_and(|control| control.item_address.as_ref() == Some(address))
+                                let control = new_control.or_else(|| conversation.peer_row_controls.get(row_id));
+                                match &inspector.target {
+                                    crate::adapters::tui::state::ThreadTarget::Item(address) => control
+                                        .is_some_and(|control| control.item_address.as_ref() == Some(address)),
+                                    crate::adapters::tui::state::ThreadTarget::Node(node) => control
+                                        .is_some_and(|control| &control.node_id == node),
+                                }
                             });
                             if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
                                 crate::adapters::tui::decision_queue::sync_recipient_drafts(&mut state, conversation, read_only);
@@ -4684,8 +4626,13 @@ mod tests {
                 &rig.tx,
                 false,
             ));
-            assert!(matches!(rig.state.recipient_actions.get(&action_key),
-                Some(RecipientActionState::Completed { notice }) if !notice.is_empty()));
+            assert!(!rig.state.recipient_actions.contains_key(&action_key));
+            assert!(
+                rig.state
+                    .thread_outcomes
+                    .lines("ri_status_keys")
+                    .any(|notice| !notice.is_empty())
+            );
             let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
             assert!(actions[2] == Some(ThreadAction::ShareStatus));
             assert!(actions[4] == Some(ThreadAction::DeclineStatus));
@@ -5041,8 +4988,13 @@ mod tests {
             &rig.tx,
             false,
         ));
-        assert!(matches!(rig.state.recipient_actions.get(&action_key),
-            Some(RecipientActionState::Completed { notice }) if !notice.is_empty()));
+        assert!(!rig.state.recipient_actions.contains_key(&action_key));
+        assert!(
+            rig.state
+                .thread_outcomes
+                .lines(item)
+                .any(|notice| !notice.is_empty())
+        );
         let actions = thread_inspector::actions(&rig.state, Some(&rig.domain_tab.conversation));
         assert_eq!(actions[2], Some(ThreadAction::RetroShare));
         assert_eq!(overlay(&rig.state), Some(set(&[RetroField::ReplyTimes])));
@@ -5395,15 +5347,17 @@ mod tests {
         assert!(painted.contains("[d] Discuss concerns"));
         assert!(painted.contains("[a] Acknowledge"));
 
-        // `[d] Discuss concerns` prefills the typed verdict line.
+        // `[d] Discuss concerns` opens the typed verdict in the thread's own field.
+        let composer = rig.state.input_buffer.clone();
         press_surface_key(&mut rig, 'd').await;
+        let inspector = rig.state.thread_inspector.as_ref().unwrap();
+        let reply = inspector.reply.as_ref().expect("reply field");
         assert_eq!(
-            rig.state.input_buffer,
-            format!("/team reply --discuss {opened_id} "),
-            "Discuss concerns prefills the typed verdict form"
+            reply.prompt(&opened_id),
+            format!("/team reply --discuss {opened_id} ")
         );
-        assert!(rig.state.thread_inspector.is_none());
-        assert_eq!(rig.state.focus, crate::domain::models::FocusState::Input);
+        assert_eq!(reply.field.as_str(), "");
+        assert_eq!(rig.state.input_buffer, composer);
     }
 
     #[test]
@@ -5830,18 +5784,28 @@ mod tests {
         );
         assert!(presentation::is_open(&rig.state, Surface::ThreadInspector));
 
-        // A Press of the same key acts: the composer is non-empty, so it refuses and the
-        // frame stays open with the text intact.
+        // A plain Press opens the frame-owned field despite the nonempty composer.
         rig.state.input_buffer = "unfinished operator text".to_owned();
         rig.state.cursor_position = rig.state.input_buffer.chars().count();
         rig.raw_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
             .await;
         assert!(rig.frames().is_empty());
         assert_eq!(rig.state.input_buffer, "unfinished operator text");
-        assert!(
-            presentation::is_open(&rig.state, Surface::ThreadInspector),
-            "nonempty compose refusal retains the frame"
+        assert_eq!(
+            rig.state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .reply
+                .as_ref()
+                .unwrap()
+                .field
+                .as_str(),
+            ""
         );
+        rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(rig.state.thread_inspector.as_ref().unwrap().reply.is_none());
         rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
         assert!(rig.state.thread_inspector.is_none());
@@ -5939,6 +5903,23 @@ mod tests {
             );
             assert_eq!(rig.state.input_buffer, "unfinished operator text");
             assert!(rig.state.thread_inspector.is_some());
+            assert_eq!(
+                rig.state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .reply
+                    .as_ref()
+                    .unwrap()
+                    .prompt(address.item().as_str()),
+                format!("/team reply {} ", address.item().as_str())
+            );
+            rig.raw_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .await;
+            assert!(rig.state.thread_inspector.as_ref().unwrap().reply.is_none());
             rig.raw_key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Esc,
                 crossterm::event::KeyModifiers::NONE,
@@ -5963,14 +5944,31 @@ mod tests {
             assert!(matches!(actions[0], Some(ThreadAction::Respond)));
             press_surface_key(&mut rig, 'r').await;
             assert!(rig.frames().is_empty());
+            let reply = rig
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .reply
+                .as_ref()
+                .unwrap();
             assert_eq!(
-                rig.state.input_buffer,
+                reply.prompt(address.item().as_str()),
                 format!("/team reply {} ", address.item().as_str())
             );
-            assert!(rig.state.thread_inspector.is_none());
+            assert_eq!(reply.field.as_str(), "");
+            assert!(rig.state.input_buffer.is_empty());
             assert_eq!(rig.state.focus, FocusState::Input);
-            assert!(rig.state.pinned_peer_compose.is_none());
-            rig.state.input_buffer.clear();
+            rig.raw_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .await;
+            rig.raw_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .await;
         }
     }
 
@@ -6196,12 +6194,24 @@ mod tests {
                 rig.state.input_buffer = String::new();
                 rig.state.cursor_position = rig.state.input_buffer.chars().count();
                 press_surface_key(&mut rig, 'd').await;
-                assert_eq!(rig.state.input_buffer, "/team reply ri_bug_discuss ");
+                assert_eq!(rig.state.input_buffer, "");
+                let reply = rig
+                    .state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .reply
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(
+                    reply.prompt("ri_bug_discuss"),
+                    "/team reply ri_bug_discuss "
+                );
                 assert!(
                     rig.frames().is_empty(),
                     "Discuss composes, it does not send"
                 );
-                assert!(rig.state.thread_inspector.is_none());
+                assert!(rig.state.thread_inspector.is_some());
             }
         }
     }
@@ -6236,14 +6246,6 @@ mod tests {
             attached_composer_key(KeyCode::Enter, false, &mut state, &tx),
             ComposerOutcome::Submit(text) if text == "ordinary model question"
         ));
-        assert!(
-            matches!(
-                take_current_peer_compose(&mut state, &conversation),
-                Ok(None)
-            ),
-            "ordinary model question must not become an implicit FIFO WriteOwn"
-        );
-        assert!(state.pinned_peer_compose.is_none());
         assert!(rx.try_recv().is_err());
         assert_eq!(state.decisions.len(), 1);
     }
@@ -6354,7 +6356,7 @@ mod tests {
         rig.raw_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
         assert!(rig.state.thread_inspector.is_none());
-        assert!(rig.state.feedback_blocks.contains_key("recipient-actions"));
+        assert!(!rig.state.feedback_blocks.contains_key("recipient-actions"));
         assert_eq!(rig.state.recipient_actions.len(), 1);
         assert_eq!(rig.state.input_buffer, "unsent local composition");
 
@@ -6504,64 +6506,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_legacy_compose_keeps_its_node_and_commands_take_precedence() {
+    async fn operator_commands_reach_their_daemon_hooks() {
         use crossterm::event::KeyCode;
-        let mut conversation = Conversation {
-            messages: vec![peer_row("row-a", "incoming")],
-            peer_row_controls: [(
-                "row-a".to_owned(),
-                peer_control(
-                    "node-a",
-                    crate::domain::models::PeerRowStage::AwaitingOperator,
-                ),
-            )]
-            .into_iter()
-            .collect(),
-            ..Default::default()
-        };
         let (tx, mut rx) = mpsc::unbounded_channel();
-        // The pinned compose is built directly: the node surface that used to arm it by
-        // `[r] Respond` is gone (PC-13, 21-6's decision frame owns that path).
-        let compose = crate::adapters::tui::state::PinnedPeerCompose::new(
-            "node-a".to_owned(),
-            crate::adapters::tui::state::PeerComposeAction::Respond,
-        );
-        conversation
-            .messages
-            .insert(0, peer_row("row-b", "new head"));
-        conversation.peer_row_controls.insert(
-            "row-b".to_owned(),
-            peer_control("node-b", crate::domain::models::PeerRowStage::Ready),
-        );
-        assert!(pinned_compose_is_current(&conversation, &compose));
-        conversation
-            .peer_row_controls
-            .get_mut("row-a")
-            .unwrap()
-            .stage = crate::domain::models::PeerRowStage::Settled;
-        assert!(!pinned_compose_is_current(&conversation, &compose));
-        conversation
-            .peer_row_controls
-            .get_mut("row-a")
-            .unwrap()
-            .stage = crate::domain::models::PeerRowStage::AwaitingOperator;
         for command in ["/team defer ri_explicit", "/clear"] {
             let mut state = TuiState::new(80, 24);
-            state.pinned_peer_compose = Some(crate::adapters::tui::state::PinnedPeerCompose::new(
-                "node-a".to_owned(),
-                crate::adapters::tui::state::PeerComposeAction::Respond,
-            ));
             state.input_buffer = command.to_owned();
             state.cursor_position = state.input_buffer.chars().count();
             let outcome = attached_composer_key(KeyCode::Enter, false, &mut state, &tx);
             if let ComposerOutcome::Submit(text) = outcome {
-                assert!(
-                    matches!(
-                        take_current_peer_compose(&mut state, &conversation),
-                        Ok(None)
-                    ),
-                    "an operator command cannot be submitted as a pinned peer response"
-                );
                 assert_eq!(text, command, "the daemon receives the complete command");
                 assert!(
                     rx.try_recv().is_err(),
@@ -6582,10 +6535,6 @@ mod tests {
                     (_, frame) => panic!("command reached the wrong daemon action: {frame:?}"),
                 }
             }
-            assert!(
-                state.pinned_peer_compose.is_none(),
-                "an operator command disarms pinned peer composition"
-            );
         }
     }
 
@@ -8462,7 +8411,6 @@ mod tests {
     }
 
     fn assert_attached_auth_commands(names: &[&str], source: NoticeSource, message: &str) {
-        use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
         use crossterm::event::KeyCode;
 
         for read_only in [false, true] {
@@ -8491,10 +8439,6 @@ mod tests {
                         let context = format!("input: {line:?}, read_only: {read_only}");
                         let mut state = TuiState::new(80, 24);
                         state.needs_redraw = false;
-                        state.pinned_peer_compose = Some(PinnedPeerCompose::new(
-                            "node-a".into(),
-                            PeerComposeAction::Respond,
-                        ));
                         let (tx, mut rx) = mpsc::unbounded_channel();
                         state.input_buffer = line.clone();
                         state.cursor_position = state.input_buffer.chars().count();
@@ -8507,7 +8451,6 @@ mod tests {
                         if accepted {
                             assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
                             assert!(state.input_buffer.is_empty(), "{context}");
-                            assert!(state.pinned_peer_compose.is_none(), "{context}");
                             assert!(state.feedback_blocks.is_empty(), "{context}");
                             assert_eq!(state.notifications.len(), 1, "{context}");
                             let record = state.notifications.records().next().unwrap();
@@ -8518,7 +8461,6 @@ mod tests {
                             assert!(state.needs_redraw, "{context}");
                         } else {
                             assert!(state.feedback_blocks.is_empty(), "{context}");
-                            assert!(state.pinned_peer_compose.is_some(), "{context}");
                             if read_only {
                                 assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
                                 assert_eq!(state.input_buffer, *line, "{context}");
@@ -9462,12 +9404,11 @@ mod display_width_tests {
         state.cursor_position = state.input_buffer.chars().count();
         press(&mut state, KeyCode::Backspace, true);
         assert_eq!(state.input_buffer, "x");
-        // Emptying the draft still drops the pinned peer compose.
+        // Emptying the draft removes the whole final grapheme.
         state.input_buffer = A.to_owned();
         state.cursor_position = state.input_buffer.chars().count();
         press(&mut state, KeyCode::Backspace, false);
         assert!(state.input_buffer.is_empty());
-        assert!(state.pinned_peer_compose.is_none());
     }
 
     #[test]
@@ -9543,7 +9484,7 @@ mod display_width_tests {
             ),
             crate::adapters::tui::state::RecipientActionState::Pending {
                 composed_input: Some(format!("pending {G}")),
-                pinned_compose: None,
+                reply: None,
             },
         );
         state.input_buffer = String::new();

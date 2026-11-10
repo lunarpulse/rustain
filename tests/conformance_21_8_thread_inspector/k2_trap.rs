@@ -169,7 +169,7 @@ async fn k2_body_keys_move_painted_rows_by_value_and_the_sideways_keys_are_dead(
     );
     let body = body_rows(&rig);
     let footer = footer_rows(&rig);
-    for c in ['h', '0', '$', 'v'] {
+    for c in ['h', '0', '$'] {
         assert!(consumed(rig.key(Key::Char(c))), "{c}");
         rig.paint();
         assert_eq!(snapshot(&rig), moved, "{c} is a no-op");
@@ -177,9 +177,27 @@ async fn k2_body_keys_move_painted_rows_by_value_and_the_sideways_keys_are_dead(
         assert_eq!(footer_rows(&rig), footer, "{c} is not a painted action");
     }
     let rail = compact(&footer.join("\n"));
-    for label in ["[h]", "[0]", "[$]", "[v]"] {
+    for label in ["[h]", "[0]", "[$]"] {
         assert!(!rail.contains(label), "{label} is never painted");
     }
+    // 8-B: `v` is the Rendered/Source toggle (painted in the rail), no longer a no-op: it
+    // repaints the body in the other mode and back again, leaving the draft and viewer alone.
+    assert!(rail.contains("[v]"), "[v] is a painted row in 8-B: {rail}");
+    assert!(consumed(rig.key(Key::Char('v'))));
+    rig.paint();
+    assert_ne!(body_rows(&rig), body, "v switches the body to its source");
+    assert!(consumed(rig.key(Key::Char('v'))));
+    rig.paint();
+    assert_eq!(
+        body_rows(&rig),
+        body,
+        "a second v returns to the rendered body"
+    );
+    assert_eq!(
+        snapshot(&rig),
+        moved,
+        "v touches neither the draft nor the viewer"
+    );
     assert!(
         rail.contains("Scroll"),
         "positive control: the scroll rail is painted"

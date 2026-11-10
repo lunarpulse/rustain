@@ -1100,7 +1100,8 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
         | Context::SearchTyping
         | Context::SearchNavigating
         | Context::CrossSearch
-        | Context::InspectorSearch) => {
+        | Context::InspectorSearch
+        | Context::ThreadReply) => {
             edit_query(state, context, |field| field.insert_char(c)).expect("query context")
         }
         Context::ModelSelector => model_char(state, None, c).unwrap_or(InputAction::Consumed),
@@ -1652,6 +1653,7 @@ fn edit_query(
             edit(&mut state.search_state.query)
         }
         Context::CrossSearch => edit(&mut state.cross_search.query),
+        Context::ThreadReply => edit(&mut state.thread_inspector.as_mut()?.reply.as_mut()?.field),
         Context::InspectorSearch => {
             let changed = edit(&mut presentation::inspector_search_mut(state)?.query);
             if changed {
@@ -1661,6 +1663,9 @@ fn edit_query(
                         crate::adapters::tui::notification_log::reconcile_search(state);
                     }
                     Some(Surface::ToolInspector(_) | Surface::BlockViewer(_)) => {}
+                    Some(Surface::ThreadInspector) => {
+                        crate::adapters::tui::thread_inspector::search_changed(state);
+                    }
                     _ => unreachable!("only inspector frames lend the child field"),
                 }
             }
@@ -1695,7 +1700,10 @@ pub(crate) fn paste_query(state: &mut TuiState, text: &str, host: Host) -> Optio
         return Some(InputAction::Consumed);
     }
     if host == Host::Attached
-        && !matches!(context, Context::CommandPalette | Context::InspectorSearch)
+        && !matches!(
+            context,
+            Context::CommandPalette | Context::InspectorSearch | Context::ThreadReply
+        )
     {
         return None;
     }
@@ -1982,6 +1990,26 @@ fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
 fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
     if cmd == OverlayCmd::QuitRequest {
         return InputAction::Quit;
+    }
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::ThreadInspector)
+    {
+        match cmd {
+            OverlayCmd::InspectorAccept => {
+                crate::adapters::tui::thread_inspector::accept_search(state)
+            }
+            OverlayCmd::InspectorBack => {
+                if let Some(thread) = state.thread_inspector.as_mut() {
+                    thread.search.back();
+                }
+                crate::adapters::tui::thread_inspector::search_changed(state);
+            }
+            _ => {}
+        }
+        state.needs_redraw = true;
+        return InputAction::Consumed;
     }
     if let Some(Surface::ToolInspector(key)) = state.modal_stack.top().map(|frame| frame.surface) {
         let tool = state
@@ -3998,7 +4026,7 @@ mod tests {
             ));
             drop(state.decisions.take_resolved());
             let inspector = state.thread_inspector.as_ref().unwrap();
-            let ThreadTarget::Item(actual) = &inspector.target;
+            let actual = inspector.item_address().unwrap();
             assert_eq!(
                 actual, &address,
                 "decision changed the pinned reader target"

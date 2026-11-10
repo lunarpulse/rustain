@@ -598,6 +598,22 @@ identified. The opened body appears once, not again in its chronological row.
 Missing ids refuse with a warning notice and open nothing; removed bodies remain
 unavailable. Unknown legacy types use a fixed disclosure, not body-derived type.
 
+Bodies render as markdown by default, with links shown explicitly as
+`label (url)`; `v` switches to Source. Control characters and bidi overrides
+and isolates appear as visible escapes, not terminal controls. `c` copies the
+opened item's original body, not the display escapes, up to 8 MiB. If no body
+is available or the bound is exceeded, the window reports that instead.
+
+`/` filters turns case-insensitively while retaining the identity and opened
+item; Enter keeps the filter, and Esc clears it before backing out. When a
+block is wider than the window, Enter opens its viewport: `h`/`l` and `0`/`$`
+move across the block, and Esc or Ctrl+C returns to the thread.
+
+In an attached session, Tab switches between the item and its node view, titled
+`Thread · response`. When that response has an eligible queued draft decision,
+`o` opens the Needs-you decision above the thread; closing it returns to the
+node view. The node view itself has no Approve, Edit or Reject actions.
+
 The window does not take over the keyboard: `Ctrl+X` (menu, help, notifications,
 Needs-you list), `Ctrl+P` and `Ctrl+Q` work above it, `Esc` or `Ctrl+C` closes
 it and returns to exactly what it covered, and keys it does not bind never reach
@@ -748,24 +764,26 @@ a build without it refuses without recording an unservable turn.
 
 Outside the thread window, `y/e/n/b` are ordinary input and Enter does not
 implicitly answer the FIFO head. Approve, Edit, Reject and My own belong only to
-the Needs-you recipient decision frame, not to the thread window. In the thread
-window, item `r` and `d` keep the interim composer prefill (`/team reply <id> `
-and `/team reply --discuss <id> `): they are refused while the composer holds
-text, otherwise they prefill the composer and close the window. Ctrl+D and
-Ctrl+U scroll the thread body half a page. Esc closes the window (back one
-frame); Ctrl+C also closes it and never detaches (detach is `Ctrl+X d` or
-`/detach`). Only unmodified lowercase Press events invoke thread actions;
-reported Repeat, Release and modified action letters cannot mutate the item.
+the Needs-you recipient decision frame, not to the thread window. In an attached
+item thread, `r` and `d` open a reply field owned by the window, with prompt
+`/team reply <id> ` or `/team reply --discuss <id> `. Enter sends nonempty text
+and closes the thread; Esc or Ctrl+C clears the field and returns to the thread.
+A refused or already-settled reply keeps its text in the thread for the next
+reply field. The composer is unchanged. Ctrl+D and Ctrl+U scroll the thread
+body half a page. At the root Esc or Ctrl+C closes the window, never detaching
+(detach is `Ctrl+X d` or `/detach`). Only unmodified lowercase Press events
+invoke thread actions; Repeat, Release and modified action letters cannot mutate
+the item.
 
 On an architecture-update thread window, `[a] Acknowledge` records receipt and
-`[d] Discuss` seeds an explicit `/team reply <item-id>` composition. Ack confirms
+`[d] Discuss` opens the reply field. Ack confirms
 only after its durable append; a repeated/raced Ack reports already recorded
 without another append. Its hint disappears after acknowledgement. It does not
 resolve a pending answer or select model context.
 
-On a readable story-list Item surface, `[d] Discuss concerns` seeds
-`/team reply --discuss <item-id> `. When the item names you as a story's
-holder, `[y] Accept` records the same verdict as the typed accept form. A live
+On a readable story-list Item surface, `[d] Discuss concerns` opens the reply
+field with the `/team reply --discuss <item-id> ` prompt. When the item names you
+as a story's holder, `[y] Accept` records the same verdict as the typed accept form. A live
 Drafting card offers neither verdict; a Ready draft is decided in the Needs-you
 recipient decision frame (Approve/Edit/Reject/My own), never by the Accept key.
 Settled items remain answerable from their View, including NotifyAndAuto items,
@@ -777,13 +795,14 @@ The asker's `/team thread` shows ` [verdict: accept]` or
 ` [verdict: discuss concerns]`; the local View shows `verdict: accept` or
 `verdict: discuss concerns`. `/team log` keeps its generic reply row.
 
-Action results carry their originating action and item/node target. Each
-pending marker survives closing/reopening the reader until its own outcome;
-unrelated completions cannot clear it. Item-turn outcomes show the recorded turn
-and pull-only disclosure. Applied node actions without a turn, settled no-ops
-and refusals remain distinct. A refused reply prefill retains the composer text;
-an idempotent Ack consumes its command rather than restoring it as unsent reply
-text.
+Action results carry their originating action and item/node target. Each pending
+marker survives closing/reopening the reader until its own outcome; unrelated
+completions cannot clear it. Outcomes appear in the matching thread and remain
+available on reopening within the session's bounded outcome history. If that
+thread is not on top, one ambient Info notice is also shown. Item-turn outcomes
+show the recorded turn and pull-only disclosure; applied node actions without a
+turn, settled no-ops and refusals remain distinct. Refused reply text remains in
+the thread, not in the composer.
 
 Reply-kind metadata is additive. Missing journal `kind` means Answer and
 Answer omits the field; Defer uses `{"type":"defer","minutes":30}`. Served

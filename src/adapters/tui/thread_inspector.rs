@@ -7,18 +7,114 @@
 
 use crate::adapters::daemon::protocol::{ClientFrame, RecipientAction};
 use crate::adapters::tui::{
-    handlers::recipient_actions::{action_is_pending, pending_composition},
+    handlers::recipient_actions::action_is_pending,
     keymap::{
         self, CommandId, Context, Host, Key, Resolved, table_block::BodyCmd,
-        table_thread::ThreadCmd,
+        table_overlay::OverlayCmd, table_thread::ThreadCmd,
     },
     presentation::{Surface, reducer, viewer},
-    state::{ThreadAccess, ThreadInspectorState, ThreadTarget, TuiState},
+    state::{ThreadAccess, ThreadInspectorState, ThreadReplyField, ThreadTarget, TuiState},
 };
 use crate::domain::models::{
     ChatMessage, Conversation, PeerRowControl, PeerRowStage, RetroField, RetroFieldSet,
     RetroPreview, SemanticMessageType, VerdictOffer,
 };
+
+const MAX_OUTCOME_TARGETS: usize = 32;
+const MAX_OUTCOME_LINES: usize = 16;
+
+struct OutcomeEntry {
+    key: String,
+    lines: std::collections::VecDeque<String>,
+    last: u64,
+    retained_reply: Option<String>,
+}
+
+/// The session-local outcome log (Story 21.8 A13): at most 32 targets with at most 16 lines
+/// each; when full, the target with the oldest last outcome is evicted whole. A refused reply's
+/// text rides in its target's entry (`retained_reply`) until the next reply field takes it.
+#[derive(Default)]
+pub struct ThreadOutcomes {
+    entries: Vec<OutcomeEntry>,
+    clock: u64,
+}
+
+impl ThreadOutcomes {
+    fn entry(&mut self, key: &str) -> &mut OutcomeEntry {
+        self.clock += 1;
+        let at = match self.entries.iter().position(|entry| entry.key == key) {
+            Some(at) => at,
+            None => {
+                if self.entries.len() >= MAX_OUTCOME_TARGETS
+                    && let Some(oldest) = self
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, entry)| entry.last)
+                        .map(|(at, _)| at)
+                {
+                    self.entries.remove(oldest);
+                }
+                self.entries.push(OutcomeEntry {
+                    key: key.to_owned(),
+                    lines: Default::default(),
+                    last: 0,
+                    retained_reply: None,
+                });
+                self.entries.len() - 1
+            }
+        };
+        let entry = &mut self.entries[at];
+        entry.last = self.clock;
+        entry
+    }
+
+    /// Record one outcome line of `key`.
+    pub fn push(&mut self, key: &str, line: String) {
+        let entry = self.entry(key);
+        if entry.lines.len() >= MAX_OUTCOME_LINES {
+            entry.lines.pop_front();
+        }
+        entry.lines.push_back(line);
+    }
+
+    /// The outcome lines of `key`, oldest first.
+    pub fn lines<'a>(&'a self, key: &str) -> impl Iterator<Item = &'a str> + 'a {
+        self.entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .into_iter()
+            .flat_map(|entry| entry.lines.iter().map(String::as_str))
+    }
+
+    /// Keep the text of a reply the daemon did not take, on its target.
+    pub fn retain_reply(&mut self, key: &str, text: String) {
+        self.entry(key).retained_reply = Some(text);
+    }
+
+    /// The retained reply text of `key`, once.
+    pub fn take_retained(&mut self, key: &str) -> Option<String> {
+        self.entries
+            .iter_mut()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.retained_reply.take())
+    }
+
+    pub fn retained(&self, key: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.retained_reply.as_deref())
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
 
 /// The pinned response (the peer-row control) of `node`, if the conversation still has one.
 pub(crate) fn pinned_response<'a>(
@@ -140,7 +236,7 @@ pub(crate) fn retro_overlay<'a>(
     left_out: &'a std::collections::HashMap<String, RetroFieldSet>,
 ) -> Option<RetroOverlay<'a>> {
     let preview = retro_preview(conversation, inspector)?;
-    let ThreadTarget::Item(address) = &inspector.target;
+    let address = inspector.item_address()?;
     Some(RetroOverlay {
         preview,
         left_out: left_out.get(address.item().as_str()),
@@ -201,20 +297,27 @@ pub(crate) fn retro_overlay_bits(overlay: Option<&RetroOverlay<'_>>) -> u32 {
         .fold(1 << 23, |bits, (index, _)| bits | (1 << (24 + index)))
 }
 
-/// The pinned identity rows (never scrolled): the item id, its type token (and the
-/// peer-tainted mark once it is selected as context) and the thread root.
+/// The pinned identity rows (never scrolled): the item id (or the response node), its type
+/// token (and the peer-tainted mark once it is selected as context) and the thread root.
 pub(crate) fn identity_text(inspector: &ThreadInspectorState) -> String {
-    let ThreadTarget::Item(address) = &inspector.target;
-    let mut heading = format!(
-        "item actions · {}\n{}",
-        address.item().as_str(),
-        type_token(inspector.message_type),
-    );
+    let mut heading = match &inspector.target {
+        ThreadTarget::Item(address) => format!(
+            "item actions · {}\n{}",
+            address.item().as_str(),
+            type_token(inspector.message_type),
+        ),
+        ThreadTarget::Node(node) => format!(
+            "response actions · {node}\n{}",
+            type_token(inspector.message_type),
+        ),
+    };
     if inspector.context_selected {
         heading.push_str(" · peer-tainted");
     }
     if let Some(root) = &inspector.root_id
-        && root != address.item().as_str()
+        && inspector
+            .item_address()
+            .is_some_and(|a| root != a.item().as_str())
     {
         heading.push_str("\nthread root · ");
         heading.push_str(root);
@@ -235,6 +338,20 @@ pub(crate) fn title(message_type: SemanticMessageType) -> String {
     format!("Thread · {}", type_token(message_type))
 }
 
+/// The frame's painted title on the response view of a peer node.
+pub(crate) fn node_title() -> String {
+    "Thread · response".to_owned()
+}
+
+/// Whether the thread's reply field holds text that quitting would lose.
+pub(crate) fn reply_field_has_text(state: &TuiState) -> bool {
+    state
+        .thread_inspector
+        .as_ref()
+        .and_then(|inspector| inspector.reply.as_ref())
+        .is_some_and(|reply| !reply.field.is_empty())
+}
+
 /// Which writer actions the opened item offers now, in rail order (slot order): none unless
 /// the frame is an attached writer's and the conversation is the writer's own. This is the
 /// one eligibility rule: the rail paints exactly these and the dispatch runs exactly these.
@@ -247,7 +364,8 @@ pub(crate) fn actions(
     else {
         return actions;
     };
-    if inspector.access != ThreadAccess::Writer {
+    // A node view offers no draft decision of its own (21-6's decision frame is the one route).
+    if inspector.access != ThreadAccess::Writer || inspector.item_address().is_none() {
         return actions;
     }
     let control = inspector
@@ -345,27 +463,22 @@ pub(crate) fn actions(
             | ThreadAction::DiscussConcerns
             | ThreadAction::Accept => RecipientAction::Reply,
         };
-        if (matches!(
-            action,
-            ThreadAction::Respond | ThreadAction::Discuss | ThreadAction::DiscussConcerns
-        ) && pending_composition(state).is_some())
-            || action_is_pending(
+        if action_is_pending(
+            state,
+            wire_action,
+            &inspector.target,
+            inspector.node_id.as_deref(),
+        ) || (action == ThreadAction::Context
+            && action_is_pending(
                 state,
-                wire_action,
+                if inspector.context_selected {
+                    RecipientAction::ContextSelect
+                } else {
+                    RecipientAction::ContextRemove
+                },
                 &inspector.target,
                 inspector.node_id.as_deref(),
-            )
-            || (action == ThreadAction::Context
-                && action_is_pending(
-                    state,
-                    if inspector.context_selected {
-                        RecipientAction::ContextSelect
-                    } else {
-                        RecipientAction::ContextRemove
-                    },
-                    &inspector.target,
-                    inspector.node_id.as_deref(),
-                ))
+            ))
         {
             *slot = None;
         }
@@ -393,9 +506,73 @@ pub(crate) fn action_for(
         .find(|action| action.handles(cmd))
 }
 
-/// Whether `cmd` can act on the thread now (S-THREAD's `applies`): paging needs an omitted
-/// page, writer rows need an offered action. An inapplicable row is never painted and its
-/// key is a consumed no-op.
+fn page_rail_live(state: &TuiState) -> bool {
+    state
+        .thread_inspector
+        .as_ref()
+        .is_some_and(|inspector| inspector.rail_live.get().1)
+}
+
+/// The queued 21-6 draft decision of the node the response view shows, if the decision queue
+/// would open it now (`decision_queue::can_open`: queued, decidable on this tab, no text field
+/// or quit guard on top). Never `holds`: a decision of another tab or a stale one is not offered.
+pub(crate) fn open_decision_key(
+    state: &TuiState,
+    conversation: Option<&Conversation>,
+) -> Option<crate::adapters::tui::decision_queue::DecisionKey> {
+    use crate::adapters::tui::decision_queue::{self, DecisionKey, DecisionKind};
+    let inspector = state.thread_inspector.as_ref()?;
+    let ThreadTarget::Node(node) = &inspector.target else {
+        return None;
+    };
+    if inspector.access != ThreadAccess::Writer {
+        return None;
+    }
+    let key = DecisionKey {
+        kind: DecisionKind::RecipientDraftApproval,
+        source: node.clone(),
+        conversation_id: Some(conversation?.id.clone()),
+    };
+    // A stale draft decision (its response left) is no decision to open.
+    (state
+        .decisions
+        .item(&key)
+        .is_some_and(|item| !item.is_stale())
+        && decision_queue::can_open(state, &key))
+    .then_some(key)
+}
+
+/// Whether the painted rail offers `cmd` by facts alone (the last paint's fit decides whether
+/// the key is also live: `applies`).
+pub(crate) fn offered(
+    state: &TuiState,
+    conversation: Option<&Conversation>,
+    cmd: ThreadCmd,
+) -> bool {
+    let Some(inspector) = state.thread_inspector.as_ref() else {
+        return false;
+    };
+    match cmd {
+        ThreadCmd::Back
+        | ThreadCmd::SendReply
+        | ThreadCmd::ReplyBack
+        | ThreadCmd::LeaveViewport => true,
+        ThreadCmd::Earlier => inspector.omitted_before > 0,
+        ThreadCmd::Newer => inspector.omitted_after > 0,
+        ThreadCmd::Copy => true,
+        ThreadCmd::Toggle => inspector.can_toggle && inspector.access != ThreadAccess::LocalOnly,
+        ThreadCmd::OpenDecision => open_decision_key(state, conversation).is_some(),
+        ThreadCmd::Viewport => inspector.wide_fit.get().0 > 0,
+        _ => actions(state, conversation)
+            .into_iter()
+            .flatten()
+            .any(|action| action.handles(cmd)),
+    }
+}
+
+/// Whether `cmd` can act on the thread now (S-THREAD's `applies`): every key of the page rail
+/// needs its fact and the rail painted whole (rail truth == dispatch), writer rows need an
+/// offered action. An inapplicable row is never painted and its key is a consumed no-op.
 pub(crate) fn applies(
     state: &TuiState,
     conversation: Option<&Conversation>,
@@ -405,9 +582,16 @@ pub(crate) fn applies(
         return false;
     };
     match cmd {
-        ThreadCmd::Back => true,
-        ThreadCmd::Earlier => inspector.omitted_before > 0 && inspector.rail_live.get().1,
-        ThreadCmd::Newer => inspector.omitted_after > 0 && inspector.rail_live.get().1,
+        ThreadCmd::Back
+        | ThreadCmd::SendReply
+        | ThreadCmd::ReplyBack
+        | ThreadCmd::LeaveViewport => true,
+        ThreadCmd::Earlier
+        | ThreadCmd::Newer
+        | ThreadCmd::Copy
+        | ThreadCmd::Toggle
+        | ThreadCmd::OpenDecision
+        | ThreadCmd::Viewport => inspector.rail_live.get().1 && offered(state, conversation, cmd),
         _ => action_for(state, conversation, cmd).is_some(),
     }
 }
@@ -420,6 +604,8 @@ pub(crate) enum ThreadOutcome {
     Page {
         earlier: bool,
     },
+    /// `Tab`: show the other view (item ⇄ response) of the same exchange.
+    Toggle,
     /// A correlated writer frame to queue. `joined` carries the node and item whose journal
     /// join the host checks first (the Busy fast path reuses the durable principal/task join).
     Send {
@@ -428,9 +614,21 @@ pub(crate) enum ThreadOutcome {
     },
 }
 
-/// The one key executor of the top thread frame: resolves `key` in the thread context for
-/// `host`, then applies it. Unbound and inapplicable keys are consumed (never the composer,
-/// the Stage or a card).
+/// The key context of the thread frame now: the reply field and the filter field are text
+/// contexts, the block viewport swaps the thread rows for the horizontal ones.
+pub(crate) fn frame_context(state: &TuiState) -> Context {
+    match state.thread_inspector.as_ref() {
+        Some(inspector) if inspector.reply.is_some() => Context::ThreadReply,
+        Some(inspector) if inspector.search.editing => Context::InspectorSearch,
+        Some(inspector) if inspector.viewport => Context::BodyViewport,
+        _ => Context::ThreadInspector,
+    }
+}
+
+/// The one key executor of the top thread frame: resolves `key` in the frame's own context
+/// (`ThreadInspector` at the root, `BodyViewport` inside the block viewport) for `host`, then
+/// applies it. Unbound and inapplicable keys are consumed (never the composer, the Stage or a
+/// card).
 pub(crate) fn on_key(
     state: &mut TuiState,
     key: Key,
@@ -444,25 +642,107 @@ pub(crate) fn on_key(
     {
         return ThreadOutcome::Consumed;
     }
-    let Resolved::Hit(row) = keymap::resolve(Context::ThreadInspector, host, &[key]) else {
+    let context = frame_context(state);
+    let Resolved::Hit(row) = keymap::resolve(context, host, &[key]) else {
         return ThreadOutcome::Consumed;
     };
     state.needs_redraw = true;
     match row.command {
         CommandId::Thread(ThreadCmd::Back) => {
-            reducer::back(state);
-            crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
+            // The first `Esc` clears a kept filter, the next backs the frame.
+            if state
+                .thread_inspector
+                .as_ref()
+                .is_some_and(|inspector| !inspector.search.query.is_empty())
+            {
+                if let Some(inspector) = state.thread_inspector.as_mut() {
+                    inspector.search.back();
+                }
+                search_changed(state);
+            } else {
+                reducer::back(state);
+                crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(
+                    state, false,
+                );
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::LeaveViewport) => {
+            if let Some(inspector) = state.thread_inspector.as_mut() {
+                inspector.viewport = false;
+                inspector.viewer.h_off = 0;
+            }
             ThreadOutcome::Consumed
         }
         CommandId::Viewer(command) if !command.horizontal() => {
             if let Some(inspector) = state.thread_inspector.as_mut() {
                 let (rows, viewport) = inspector.fit.get();
+                // A pending jump-to-end (`follow`, set by `G`) is resolved against the live
+                // fit, so relative moves start from the real bottom (8B-02).
+                if inspector.viewer.follow {
+                    inspector.viewer.top = usize::MAX;
+                }
                 viewer::apply(&mut inspector.viewer, command, rows, viewport);
             }
             ThreadOutcome::Consumed
         }
-        // Nothing to scroll sideways or to toggle at the root of a thread (8-A).
-        CommandId::Viewer(_) | CommandId::Body(BodyCmd::ToggleMode) => ThreadOutcome::Consumed,
+        // Sideways movement exists only inside the block viewport: `h/l/0/$` move the wide
+        // blocks' shared offset there and nothing at the root.
+        CommandId::Viewer(command) => {
+            if context == Context::BodyViewport
+                && let Some(inspector) = state.thread_inspector.as_mut()
+            {
+                let (widest, cols) = inspector.wide_fit.get();
+                viewer::apply_horizontal(&mut inspector.viewer, command, widest, cols);
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Body(BodyCmd::ToggleMode) => {
+            if context == Context::ThreadInspector && page_rail_live(state) {
+                if let Some(inspector) = state.thread_inspector.as_mut() {
+                    inspector.mode = inspector.mode.toggled();
+                    inspector.invalidate();
+                }
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Overlay(OverlayCmd::InspectorSearch) => {
+            if page_rail_live(state)
+                && let Some(inspector) = state.thread_inspector.as_mut()
+            {
+                inspector.search.open();
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::Viewport) => {
+            if applies(state, conversation, ThreadCmd::Viewport)
+                && let Some(inspector) = state.thread_inspector.as_mut()
+            {
+                inspector.viewport = true;
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::Copy) => {
+            if applies(state, conversation, ThreadCmd::Copy) {
+                copy_original(state);
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::OpenDecision) => {
+            if applies(state, conversation, ThreadCmd::OpenDecision)
+                && let Some(key) = open_decision_key(state, conversation)
+            {
+                crate::adapters::tui::decision_queue::open(state, &key);
+            }
+            ThreadOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::Toggle) => {
+            if applies(state, conversation, ThreadCmd::Toggle) {
+                ThreadOutcome::Toggle
+            } else {
+                ThreadOutcome::Consumed
+            }
+        }
         CommandId::Thread(cmd @ (ThreadCmd::Earlier | ThreadCmd::Newer)) => {
             if applies(state, conversation, cmd) {
                 ThreadOutcome::Page {
@@ -487,6 +767,10 @@ pub(crate) fn on_wheel(
 ) {
     if let Some(inspector) = state.thread_inspector.as_mut() {
         let (rows, viewport) = inspector.fit.get();
+        // A pending jump-to-end (`follow`, set by Bottom) is resolved against the live fit.
+        if inspector.viewer.follow {
+            inspector.viewer.top = usize::MAX;
+        }
         viewer::apply_scroll(&mut inspector.viewer, delta, rows, viewport);
         state.needs_redraw = true;
     }
@@ -496,7 +780,9 @@ fn run_action(state: &mut TuiState, action: ThreadAction, key: Key) -> ThreadOut
     let Some(inspector) = state.thread_inspector.as_ref() else {
         return ThreadOutcome::Consumed;
     };
-    let ThreadTarget::Item(address) = &inspector.target;
+    let Some(address) = inspector.item_address() else {
+        return ThreadOutcome::Consumed;
+    };
     let item_id = address.item().as_str().to_owned();
     let send = |frame| ThreadOutcome::Send {
         frame,
@@ -504,7 +790,7 @@ fn run_action(state: &mut TuiState, action: ThreadAction, key: Key) -> ThreadOut
     };
     match action {
         ThreadAction::Respond | ThreadAction::Discuss | ThreadAction::DiscussConcerns => {
-            prefill_reply(state, &item_id, action == ThreadAction::DiscussConcerns);
+            open_reply(state, action == ThreadAction::DiscussConcerns);
             ThreadOutcome::Consumed
         }
         // Story 19.22 `AC4(c)` — `[y] Accept` queues the verdict frame directly: empty text
@@ -573,44 +859,170 @@ fn run_action(state: &mut TuiState, action: ThreadAction, key: Key) -> ThreadOut
     }
 }
 
-/// The interim composer route of `r`/`d` (until the reply field): a non-empty composer is
-/// refused, otherwise the `/team reply` command is typed for the writer and the window closes.
-fn prefill_reply(state: &mut TuiState, item_id: &str, discuss_concerns: bool) {
-    use crate::domain::models::FocusState;
-    if !state.input_buffer.is_empty() {
-        crate::adapters::tui::handlers::recipient_actions::show_notice(
-            state,
-            None,
-            "input already contains text — close this view and finish or clear it before composing a reply".to_owned(),
-        );
+/// `r`/`d`: open the frame-owned reply field on the opened item (the composer is never read
+/// or written). A reply the daemon refused earlier pre-fills it.
+fn open_reply(state: &mut TuiState, discuss: bool) {
+    let Some(inspector) = state.thread_inspector.as_ref() else {
         return;
-    }
-    state.input_buffer = if discuss_concerns {
-        format!("/team reply --discuss {item_id} ")
-    } else {
-        format!("/team reply {item_id} ")
     };
-    state.pinned_peer_compose = None;
-    reducer::close(state, Surface::ThreadInspector);
-    state.cursor_position = state.input_buffer.chars().count();
-    state.input_scroll_offset = 0;
-    reducer::set_base(state, FocusState::Input);
-    crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
+    let key = inspector.outcome_key();
+    let retained = state.thread_outcomes.take_retained(&key);
+    let Some(inspector) = state.thread_inspector.as_mut() else {
+        return;
+    };
+    let mut reply = ThreadReplyField {
+        discuss,
+        ..ThreadReplyField::default()
+    };
+    if let Some(text) = retained {
+        reply.field.set(&text);
+    }
+    inspector.reply = Some(reply);
+    inspector.invalidate();
+    state.needs_redraw = true;
 }
 
-/// The writer action letters: a Repeat, a Release or a modified variant of one never acts.
-const WRITER_LETTERS: &[char] = &['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u'];
+/// What the reply field's `Enter` asks of the attached host.
+#[derive(Debug)]
+pub(crate) enum ReplyOutcome {
+    Consumed,
+    /// Send this reply: the host runs it through the `/team reply` parse and dispatch.
+    Submit {
+        item_id: String,
+        text: String,
+        discuss: bool,
+    },
+}
+
+/// A key of the reply field that is not text editing: `Enter` submits, `Esc`/`Ctrl+C` clear
+/// the field and leave it (the next `Esc` backs the frame).
+pub(crate) fn on_reply_key(state: &mut TuiState, key: Key) -> ReplyOutcome {
+    let Resolved::Hit(row) = keymap::resolve(Context::ThreadReply, Host::Attached, &[key]) else {
+        return ReplyOutcome::Consumed;
+    };
+    state.needs_redraw = true;
+    match row.command {
+        CommandId::Thread(ThreadCmd::ReplyBack) => {
+            if let Some(inspector) = state.thread_inspector.as_mut() {
+                inspector.reply = None;
+                inspector.invalidate();
+            }
+            ReplyOutcome::Consumed
+        }
+        CommandId::Thread(ThreadCmd::SendReply) => {
+            let Some(inspector) = state.thread_inspector.as_ref() else {
+                return ReplyOutcome::Consumed;
+            };
+            let (Some(reply), Some(address)) = (inspector.reply.as_ref(), inspector.item_address())
+            else {
+                return ReplyOutcome::Consumed;
+            };
+            let text = reply.field.as_str();
+            if text.trim().is_empty() {
+                return ReplyOutcome::Consumed;
+            }
+            // The bound is checked on the field before any command line is built.
+            if text.len() > crate::domain::models::MAX_REPLY_BYTES {
+                crate::adapters::tui::handlers::recipient_actions::show_notice(
+                    state,
+                    None,
+                    format!(
+                        "reply is longer than {} KiB — shorten it before sending",
+                        crate::domain::models::MAX_REPLY_BYTES / 1024
+                    ),
+                );
+                return ReplyOutcome::Consumed;
+            }
+            ReplyOutcome::Submit {
+                item_id: address.item().as_str().to_owned(),
+                text: text.to_owned(),
+                discuss: reply.discuss,
+            }
+        }
+        _ => ReplyOutcome::Consumed,
+    }
+}
+
+/// The reply was dispatched: the field and the frame leave, back to the base exactly as it was.
+pub(crate) fn reply_sent(state: &mut TuiState) {
+    reducer::close(state, Surface::ThreadInspector);
+    state.needs_redraw = true;
+}
+
+/// `c`: copy the opened item's original body (never the escaped display, never turn rows)
+/// through the injectable copier. The bound is checked on the source length before anything
+/// is copied; nothing available is a notice, never an empty copy.
+fn copy_original(state: &mut TuiState) {
+    use crate::adapters::tui::handlers::clipboard::{notify_copy, notify_failure};
+    use crate::adapters::tui::notifications::{self, NoticeSource};
+    let copier = state.clipboard_copier.clone();
+    let source = state
+        .thread_inspector
+        .as_mut()
+        .and_then(|inspector| inspector.original.take());
+    match &source {
+        None => notifications::info(state, NoticeSource::Clipboard, "Nothing to copy"),
+        Some(text) if text.len() > crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES => {
+            notify_failure(state, "item body exceeds the 8 MiB copy limit");
+        }
+        Some(text) => match copier {
+            Some(copier) => notify_copy(state, text, &*copier),
+            None => notify_copy(
+                state,
+                text,
+                &crate::adapters::tui::clipboard::copy_to_clipboard,
+            ),
+        },
+    }
+    if let Some(inspector) = state.thread_inspector.as_mut() {
+        inspector.original = source;
+    }
+}
+
+/// The filter was edited or cleared: the body rows depend on it.
+pub(crate) fn search_changed(state: &mut TuiState) {
+    if let Some(inspector) = state.thread_inspector.as_mut() {
+        inspector.invalidate();
+        inspector.viewer.top = 0;
+    }
+    state.needs_redraw = true;
+}
+
+/// `Enter` in the filter field keeps the filter; a query that matches nothing says so and
+/// leaves the view unchanged.
+pub(crate) fn accept_search(state: &mut TuiState) {
+    let Some(inspector) = state.thread_inspector.as_mut() else {
+        return;
+    };
+    inspector.search.accept();
+    if !crate::adapters::tui::thread_body::has_match(&inspector.segments, &inspector.search) {
+        let query = inspector.search.query.as_str().to_owned();
+        inspector.search.back();
+        crate::adapters::tui::notifications::info(
+            state,
+            crate::adapters::tui::notifications::NoticeSource::Search,
+            format!("Search: no match for \"{query}\""),
+        );
+    }
+    search_changed(state);
+}
+
+/// The writer action letters (and `o`): a Repeat, a Release or a modified variant of one
+/// never acts.
+const WRITER_LETTERS: &[char] = &['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u', 'o'];
 
 /// The raw press-only rule of the thread frame (PC-14): conversion discards kind and
 /// modifiers, so each host's raw pre-filter asks this before converting. Only the writer
-/// action letters are guarded; registered chords (`Ctrl+X`, `Ctrl+P`, `Ctrl+Q`, `Ctrl+C`,
-/// `Ctrl+D`, `Ctrl+U`) and shifted printables (`G`, `$`) resolve normally.
+/// action letters are guarded and only at the root of the frame (its text fields and the block
+/// viewport take Shift text and readline chords); registered chords (`Ctrl+X`, `Ctrl+P`,
+/// `Ctrl+Q`, `Ctrl+C`, `Ctrl+D`, `Ctrl+U`) and shifted printables (`G`, `$`) resolve normally.
 pub(crate) fn ignores_raw_key(state: &TuiState, key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     if state
         .modal_stack
         .top()
         .is_none_or(|frame| frame.surface != Surface::ThreadInspector)
+        || frame_context(state) != Context::ThreadInspector
     {
         return false;
     }
@@ -756,7 +1168,7 @@ mod tests {
             ),
             RecipientActionState::Pending {
                 composed_input: composed.map(str::to_owned),
-                pinned_compose: None,
+                reply: None,
             },
         );
     }
@@ -1154,28 +1566,24 @@ mod tests {
         let mut state = fresh();
         pend(&mut state, RecipientAction::Defer, "another-item", None);
         assert_eq!(offered(&state, &conv), baseline);
-        // …except a typed composition, which blocks a second reply everywhere.
+        // A typed composition for another item does not own this frame's reply field.
         pend(
             &mut state,
             RecipientAction::Reply,
             "another-item",
             Some("typed"),
         );
-        assert_eq!(
-            offered(&state, &conv),
-            [None, Some(A::Busy), None, None, None, Some(A::Context)]
-        );
+        assert_eq!(offered(&state, &conv), baseline);
         // A settled act is no longer in flight.
         let mut state = fresh();
-        state.recipient_actions.insert(
-            (
-                RecipientAction::Defer,
-                RecipientActionTarget::Item { item_id: item_id() },
-            ),
-            RecipientActionState::Completed {
-                notice: "done".into(),
-            },
+        pend(&mut state, RecipientAction::Defer, &item_id(), None);
+        crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+            &mut state,
+            RecipientAction::Defer,
+            RecipientActionTarget::Item { item_id: item_id() },
+            crate::adapters::daemon::protocol::RecipientActionOutcome::Applied { reply: None },
         );
+        assert!(state.thread_outcomes.lines(&item_id()).next().is_some());
         assert_eq!(offered(&state, &conv), baseline);
         // A selected item's removal is suppressed by its own wire act.
         let mut state = fresh();
@@ -1256,9 +1664,14 @@ mod tests {
         for forbidden in ["Approve", "Edit", "Reject"] {
             assert!(!labels.contains(forbidden), "{forbidden}");
         }
-        // The target type has the single `Item` shape (irrefutable pattern); a node target is 8-B.
+        // This fixture is an item even though node targets also exist.
         let state = thread_state(ThreadAccess::Writer, SemanticMessageType::Unknown, None);
-        let ThreadTarget::Item(address) = &state.thread_inspector.as_ref().unwrap().target;
+        let address = state
+            .thread_inspector
+            .as_ref()
+            .unwrap()
+            .item_address()
+            .unwrap();
         assert_eq!(address.item().as_str(), item_id());
     }
 
@@ -1328,7 +1741,7 @@ mod tests {
             Some("received"),
         );
         let none = KeyModifiers::NONE;
-        for c in "rdbaysn123u".chars() {
+        for c in "rdbaysn123uo".chars() {
             let code = KeyCode::Char(c);
             assert!(
                 !ignores_raw_key(&state, &key(code, none, KeyEventKind::Press)),

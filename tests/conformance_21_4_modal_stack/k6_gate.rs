@@ -307,6 +307,11 @@ const RULES: &[(&str, &str)] = &[
         "thread-21-8-a",
         r"\bContext\s*::\s*RecipientSurface\b|\bOverlayCmd\s*::\s*Recipient\w*|\b(?:recipient_higher_confirmation_active|attached_higher_confirmation|recipient_surface_key|dispatch_recipient_surface_key|render_recipient_surface|recipient_surface_ignores_raw_key|exec_recipient|recipient_blocked)\b|\bRecipientSurface(?:Target|Access|Action)?\b|\brecipient_surface\b|\[c\] Use as context|\[c\] Stop using as context",
     ),
+    // Slice 8-B removes the old outcome blocks and the pinned-node composer.
+    (
+        "thread-21-8-b",
+        r#"\bViewKind\s*::\s*RecipientOutcome\b|"recipient-actions"|"recipient-view"|input already contains text|\b(?:PinnedPeerCompose|pinned_peer_compose|take_current_peer_compose|PeerComposeAction)\b|\bRecipientActionState\s*::\s*Completed\b"#,
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -481,6 +486,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             }
             let haystack = if *rule == "osc8-encoder"
                 || *rule == "thread-21-8-a"
+                || *rule == "thread-21-8-b"
                 || rule.starts_with("tool-line-")
             {
                 &literal
@@ -563,6 +569,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "decision-21-6-d",
                     "decision-21-6-e",
                     "thread-21-8-a",
+                    "thread-21-8-b",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -835,6 +842,18 @@ fn k6_same_scanner_rejects_each_forbidden_mechanism() {
         ("thread-21-8-a", "let b = recipient_blocked(s);"),
         ("thread-21-8-a", "let t = \"[c] Use as context\";"),
         ("thread-21-8-a", "let t = \"[c] Stop using as context\";"),
+        ("thread-21-8-b", "let v = ViewKind::RecipientOutcome;"),
+        ("thread-21-8-b", "let id = \"recipient-actions\";"),
+        ("thread-21-8-b", "let id = \"recipient-view\";"),
+        (
+            "thread-21-8-b",
+            "let message = \"input already contains text\";",
+        ),
+        ("thread-21-8-b", "let p: PinnedPeerCompose = make();"),
+        ("thread-21-8-b", "let p = s.pinned_peer_compose.take();"),
+        ("thread-21-8-b", "take_current_peer_compose(s);"),
+        ("thread-21-8-b", "let a = PeerComposeAction::Send;"),
+        ("thread-21-8-b", "let a = RecipientActionState::Completed;"),
     ];
     for (rule, text) in cases
         .into_iter()

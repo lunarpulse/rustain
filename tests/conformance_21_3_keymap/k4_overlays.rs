@@ -653,6 +653,9 @@ const THREAD: &[W] = &[
     w(&[Key::Char('l')], "ThreadPage { earlier: false } | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Esc], "Consumed | frame=false focus=Chat top=0 pal=false leader=false"),
     w(&[Key::Ctrl('c')], "Consumed | frame=false focus=Chat top=0 pal=false leader=false"),
+    w(&[Key::Char('c')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('/')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Enter], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Ctrl('x')], "Consumed | frame=true focus=Chat top=20 pal=false leader=true"),
     w(&[Key::Ctrl('p')], "Consumed | frame=true focus=Chat top=20 pal=true leader=false"),
     w(&[Key::Ctrl('q')], "Quit | frame=true focus=Chat top=20 pal=false leader=false"),
@@ -720,6 +723,30 @@ fn thread_inspector_rows_by_value_and_every_other_key_is_swallowed() {
     });
 }
 
+#[test]
+fn thread_search_and_viewport_rows_open_their_child_contexts() {
+    let mut search = thread();
+    assert_eq!(press(&mut search, Key::Char('/')), InputAction::Consumed);
+    assert!(search.thread_inspector.as_ref().unwrap().search.editing);
+    assert_eq!(search.input_buffer, "");
+
+    let mut viewport = thread();
+    assert_eq!(press(&mut viewport, Key::Enter), InputAction::Consumed);
+    assert!(!viewport.thread_inspector.as_ref().unwrap().viewport);
+    viewport
+        .thread_inspector
+        .as_ref()
+        .unwrap()
+        .wide_fit
+        .set((120, 40));
+    assert_eq!(press(&mut viewport, Key::Enter), InputAction::Consumed);
+    assert!(viewport.thread_inspector.as_ref().unwrap().viewport);
+    let before = viewport.thread_inspector.as_ref().unwrap().mode;
+    assert_eq!(press(&mut viewport, Key::Char('v')), InputAction::Consumed);
+    assert_eq!(viewport.thread_inspector.as_ref().unwrap().mode, before);
+    assert_eq!(viewport.input_buffer, "");
+}
+
 /// Catches a writer letter that resolves in the local host (the local host has no daemon to
 /// act through), a paging/closing row missing from either host, and a widened viewer row
 /// that stays local-only (the attached host reaches it through the thread frame).
@@ -731,6 +758,9 @@ fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts
         Key::Char('l'),
         Key::Esc,
         Key::Ctrl('c'),
+        Key::Char('c'),
+        Key::Char('/'),
+        Key::Enter,
         Key::Ctrl('x'),
         Key::Ctrl('p'),
         Key::Ctrl('q'),
@@ -751,7 +781,7 @@ fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts
         Key::Char('$'),
         Key::Char('v'),
     ];
-    let writer = ['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u'];
+    let writer = ['r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u', 'o'];
     for host in [Host::Local, Host::Attached] {
         for key in both {
             let Resolved::Hit(row) = resolve(Context::ThreadInspector, host, &[key]) else {
@@ -783,9 +813,72 @@ fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts
             "local: writer letter {letter} must not resolve"
         );
     }
+    assert!(
+        matches!(resolve(Context::ThreadInspector, Host::Attached, &[Key::Tab]), Resolved::Hit(row) if row.context == Context::ThreadInspector)
+    );
+    assert!(matches!(
+        resolve(Context::ThreadInspector, Host::Local, &[Key::Tab]),
+        Resolved::Miss
+    ));
     let own = |host| rows_of(Context::ThreadInspector, host).count();
     assert_eq!(own(Host::Local), both.len());
-    assert_eq!(own(Host::Attached), both.len() + writer.len());
+    assert_eq!(own(Host::Attached), both.len() + writer.len() + 1);
+}
+
+fn thread_viewport() -> TuiState {
+    let mut state = thread();
+    let inspector = state.thread_inspector.as_mut().unwrap();
+    inspector.viewport = true;
+    inspector.viewer.h_off = 16;
+    inspector.wide_fit.set((120, 40));
+    state
+}
+
+#[rustfmt::skip]
+const VIEWPORT: &[W] = &[
+    w(&[Key::Esc], "Consumed | viewport=false off=0 top=20 pal=false leader=false"),
+    w(&[Key::Ctrl('c')], "Consumed | viewport=false off=0 top=20 pal=false leader=false"),
+    w(&[Key::Ctrl('x')], "Consumed | viewport=true off=16 top=20 pal=false leader=true"),
+    w(&[Key::Ctrl('p')], "Consumed | viewport=true off=16 top=20 pal=true leader=false"),
+    w(&[Key::Ctrl('q')], "Quit | viewport=true off=16 top=20 pal=false leader=false"),
+];
+
+#[rustfmt::skip]
+const VIEWPORT_INHERITED: &[W] = &[
+    w(&[Key::Char('h')], "Consumed | viewport=true off=8 top=20 pal=false leader=false"),
+    w(&[Key::Char('l')], "Consumed | viewport=true off=24 top=20 pal=false leader=false"),
+    w(&[Key::Char('0')], "Consumed | viewport=true off=0 top=20 pal=false leader=false"),
+    w(&[Key::Char('$')], "Consumed | viewport=true off=80 top=20 pal=false leader=false"),
+    w(&[Key::Char('v')], "Consumed | viewport=true off=16 top=20 pal=false leader=false"),
+    w(&[Key::Char('j')], "Consumed | viewport=true off=16 top=21 pal=false leader=false"),
+    w(&[Key::Down], "Consumed | viewport=true off=16 top=21 pal=false leader=false"),
+    w(&[Key::Char('k')], "Consumed | viewport=true off=16 top=19 pal=false leader=false"),
+    w(&[Key::Up], "Consumed | viewport=true off=16 top=19 pal=false leader=false"),
+    w(&[Key::Ctrl('d')], "Consumed | viewport=true off=16 top=25 pal=false leader=false"),
+    w(&[Key::Ctrl('u')], "Consumed | viewport=true off=16 top=15 pal=false leader=false"),
+    w(&[Key::PageDown], "Consumed | viewport=true off=16 top=30 pal=false leader=false"),
+    w(&[Key::PageUp], "Consumed | viewport=true off=16 top=10 pal=false leader=false"),
+    w(&[Key::Char('g')], "Consumed | viewport=true off=16 top=0 pal=false leader=false"),
+    w(&[Key::Char('G')], "Consumed | viewport=true off=16 top=89 pal=false leader=false"),
+];
+
+#[test]
+fn body_viewport_rows_by_value_and_every_other_key_is_swallowed() {
+    let salient = |s: &TuiState| {
+        let i = s.thread_inspector.as_ref().unwrap();
+        format!(
+            "viewport={} off={} top={} pal={} leader={}",
+            i.viewport,
+            i.viewer.h_off,
+            i.viewer.top,
+            is_open(s, Surface::CommandPalette),
+            s.pending_leader.is_some()
+        )
+    };
+    run(&Case {
+        inherited: VIEWPORT_INHERITED,
+        ..local(Context::BodyViewport, thread_viewport, salient, VIEWPORT)
+    });
 }
 
 fn typed(s: &mut TuiState) {

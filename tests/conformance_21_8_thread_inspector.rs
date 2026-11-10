@@ -29,3 +29,15 @@ mod k6_context_local;
 
 #[path = "conformance_21_8_thread_inspector/k7_nav_cutover.rs"]
 mod k7_nav_cutover;
+
+#[path = "conformance_21_8_thread_inspector/k8_markdown.rs"]
+mod k8_markdown;
+
+#[path = "conformance_21_8_thread_inspector/k11_copy.rs"]
+mod k11_copy;
+
+#[path = "conformance_21_8_thread_inspector/k12_search.rs"]
+mod k12_search;
+
+#[path = "conformance_21_8_thread_inspector/k13_viewport.rs"]
+mod k13_viewport;

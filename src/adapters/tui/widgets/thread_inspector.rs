@@ -2,29 +2,45 @@
 //! identity rows, the scrolling body and the generated rail are laid out once per
 //! (width, content generation, rail facts) and reused by every repaint; the row list the
 //! viewer clamps against is the row list painted here (height == paint, AD-2113).
+//!
+//! The body is the page's segments (`thread_body::build`): local facts literal, peer text
+//! rendered as markdown behind the six-cell gutter (or the literal source, `v`).
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear};
 
+use crate::adapters::tui::block_viewer;
 use crate::adapters::tui::keymap::Context as KeyContext;
 use crate::adapters::tui::keymap::render::{rail, rail_key, rail_pair};
+use crate::adapters::tui::keymap::table_block::BodyCmd;
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_thread::ThreadCmd;
 use crate::adapters::tui::presentation::markdown_body::{self, BodyMode};
 use crate::adapters::tui::presentation::viewer::{self, ViewerCmd};
-use crate::adapters::tui::state::{ThreadAccess, ThreadInspectorState, TuiState};
+use crate::adapters::tui::state::{ThreadAccess, ThreadInspectorState, ThreadTarget, TuiState};
+use crate::adapters::tui::thread_body::{self, GUTTER};
 use crate::adapters::tui::thread_inspector::{
     self, ThreadAction, identity_text, retro_overlay, retro_overlay_bits, retro_preview_lines,
 };
 use crate::domain::models::Conversation;
 
+/// What the page rail offers besides the writer actions, by facts alone.
+#[derive(Clone, Copy)]
+struct Offers {
+    toggle: bool,
+    open: bool,
+    viewport: bool,
+}
+
 /// Everything the rail depends on besides the width: the offered actions, the access, the
-/// paging facts and the context/redaction wording.
+/// paging facts, the page offers, the field state and the context/redaction wording.
 fn rail_facts(
     inspector: &ThreadInspectorState,
     actions: &[Option<ThreadAction>; 6],
     redacted: bool,
-) -> u32 {
-    actions.iter().flatten().fold(
+    offers: Offers,
+) -> u64 {
+    let base = actions.iter().flatten().fold(
         (u32::from(inspector.access == ThreadAccess::ReadOnly) << 31)
             | (u32::from(inspector.access == ThreadAccess::LocalOnly) << 30)
             | (u32::from(inspector.omitted_before > 0) << 29)
@@ -32,14 +48,60 @@ fn rail_facts(
             | (u32::from(inspector.context_selected) << 27)
             | (u32::from(redacted) << 22),
         |facts, action| facts | (1 << (*action as u8)),
-    )
+    );
+    let extra = u64::from(inspector.mode == BodyMode::Source)
+        | (u64::from(offers.toggle) << 1)
+        | (u64::from(offers.open) << 2)
+        | (u64::from(offers.viewport) << 3)
+        | (u64::from(matches!(inspector.target, ThreadTarget::Node(_))) << 4)
+        | (u64::from(inspector.reply.is_some()) << 5)
+        | (u64::from(inspector.search.editing) << 6)
+        | (u64::from(inspector.viewport) << 7)
+        | (u64::from(!inspector.search.query.is_empty()) << 8);
+    u64::from(base) | (extra << 32)
 }
 
 fn footer_text(
     inspector: &ThreadInspectorState,
     actions: &[Option<ThreadAction>; 6],
     redacted: bool,
+    offers: Offers,
 ) -> (String, String) {
+    // A text field or the block viewport replaces the page rail by its own keys.
+    if inspector.reply.is_some() {
+        return (
+            String::new(),
+            format!(
+                "{} Send  {} Clear",
+                rail(KeyContext::ThreadReply, ThreadCmd::SendReply),
+                rail(KeyContext::ThreadReply, ThreadCmd::ReplyBack),
+            ),
+        );
+    }
+    if inspector.search.editing {
+        return (
+            String::new(),
+            format!(
+                "{} Keep filter  {} Clear",
+                rail(KeyContext::InspectorSearch, OverlayCmd::InspectorAccept),
+                rail(KeyContext::InspectorSearch, OverlayCmd::InspectorBack),
+            ),
+        );
+    }
+    if inspector.viewport {
+        return (
+            String::new(),
+            format!(
+                "[{}] Columns  {} Leave",
+                rail_pair(
+                    KeyContext::MarkdownBody,
+                    ViewerCmd::ScrollLeft,
+                    ViewerCmd::ScrollRight
+                ),
+                rail(KeyContext::BodyViewport, ThreadCmd::LeaveViewport),
+            ),
+        );
+    }
     let mut footer = String::new();
     match inspector.access {
         ThreadAccess::LocalOnly => footer.push_str(
@@ -73,18 +135,62 @@ fn footer_text(
             }
         }
     }
-    // The writer rail (or the passive sentence) is the first section, the reader rail the second.
+    // The writer rail (or the passive sentence) is the first section, the page rail the second.
     let info = std::mem::take(&mut footer);
+    let mut push = |text: String| {
+        footer.push_str(&text);
+        footer.push_str("  ");
+    };
     if inspector.omitted_before > 0 {
-        footer.push_str(&format!(
-            "{} Earlier  ",
+        push(format!(
+            "{} Earlier",
             rail(KeyContext::ThreadInspector, ThreadCmd::Earlier)
         ));
     }
     if inspector.omitted_after > 0 {
-        footer.push_str(&format!(
-            "{} Newer  ",
+        push(format!(
+            "{} Newer",
             rail(KeyContext::ThreadInspector, ThreadCmd::Newer)
+        ));
+    }
+    if offers.toggle {
+        push(format!(
+            "{} {}",
+            rail(KeyContext::ThreadInspector, ThreadCmd::Toggle),
+            if matches!(inspector.target, ThreadTarget::Node(_)) {
+                "Item"
+            } else {
+                "Response"
+            }
+        ));
+    }
+    if offers.open {
+        push(format!(
+            "{} Open decision",
+            rail(KeyContext::ThreadInspector, ThreadCmd::OpenDecision)
+        ));
+    }
+    push(format!(
+        "{} Copy",
+        rail(KeyContext::ThreadInspector, ThreadCmd::Copy)
+    ));
+    push(format!(
+        "{} Search",
+        rail(KeyContext::ThreadInspector, OverlayCmd::InspectorSearch)
+    ));
+    push(format!(
+        "{} {}",
+        rail(KeyContext::MarkdownBody, BodyCmd::ToggleMode),
+        if inspector.mode == BodyMode::Rendered {
+            "Source"
+        } else {
+            "Rendered"
+        }
+    ));
+    if offers.viewport {
+        push(format!(
+            "{} Block viewport",
+            rail(KeyContext::ThreadInspector, ThreadCmd::Viewport)
         ));
     }
     footer.push_str(&format!(
@@ -99,6 +205,48 @@ fn footer_text(
     (info, footer)
 }
 
+/// The one row of the open text field: the prompt of the command it will run (reply) or the
+/// filter query, with the caret only where the compositor grants it.
+fn field_line(
+    inspector: &ThreadInspectorState,
+    width: usize,
+    theme: &crate::adapters::tui::theme::Theme,
+    show_caret: bool,
+) -> Option<Line<'static>> {
+    if let Some(reply) = &inspector.reply {
+        let ThreadTarget::Item(address) = &inspector.target else {
+            return None;
+        };
+        let prompt = reply.prompt(address.item().as_str());
+        let used = crate::adapters::tui::text_geometry::cells(&prompt);
+        let view = reply.field.view(width.saturating_sub(used).max(1));
+        let normal = Style::default().fg(theme.colors.fg_primary);
+        return Some(Line::from(vec![
+            Span::styled(prompt, Style::default().fg(theme.colors.accent)),
+            Span::styled(view.before.to_owned(), normal),
+            Span::styled(
+                view.caret.to_owned(),
+                if show_caret {
+                    normal.add_modifier(Modifier::REVERSED)
+                } else {
+                    normal
+                },
+            ),
+            Span::styled(view.after.to_owned(), normal),
+        ]));
+    }
+    if inspector.search.editing || !inspector.search.query.is_empty() {
+        let line = inspector.search.query_line(width, theme, show_caret);
+        return Some(Line::from(
+            line.spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    None
+}
+
 /// The paint of one thread frame. `conversation` is the attached writer's own conversation
 /// (the eligibility facts); the local host passes its Stage's.
 pub fn render(
@@ -107,6 +255,7 @@ pub fn render(
     state: &TuiState,
     conversation: Option<&Conversation>,
     title: &str,
+    show_caret: bool,
 ) {
     let theme = &state.theme;
     let Some(inspector) = state.thread_inspector.as_ref() else {
@@ -135,6 +284,11 @@ pub fn render(
     let redacted = retro
         .and_then(|overlay| overlay.left_out)
         .is_some_and(|set| !set.is_empty());
+    let offers = Offers {
+        toggle: thread_inspector::offered(state, conversation, ThreadCmd::Toggle),
+        open: thread_inspector::offered(state, conversation, ThreadCmd::OpenDecision),
+        viewport: false,
+    };
     let mut cache = inspector.layout.borrow_mut();
     let body_key = (
         inner.width,
@@ -154,17 +308,17 @@ pub fn render(
                 },
             )
         };
-        let mut body =
-            markdown_body::layout(&inspector.content, width, theme, BodyMode::Source, true).lines;
+        let laid = thread_body::build(inspector, theme, width);
+        let mut body = laid.lines;
         if let Some(overlay) = retro {
             for text in retro_preview_lines(overlay.preview, overlay.left_out) {
                 body.extend(wrap(&text, width, 2, theme.colors.fg_primary));
             }
         }
         body.extend(
-            inspector
-                .results
-                .iter()
+            state
+                .thread_outcomes
+                .lines(&inspector.outcome_key())
                 .flat_map(|result| result.split('\n'))
                 .flat_map(|line| paint(line, 0)),
         );
@@ -180,17 +334,37 @@ pub fn render(
             .flat_map(|line| wrap(line, width, 2, theme.colors.fg_secondary))
             .collect();
         cache.body = body;
+        cache.wide = laid.wide;
+        cache.widest = laid.widest;
         cache.body_key = Some(body_key);
         inspector
             .layouts_built
             .set(inspector.layouts_built.get() + 1);
     }
-    let footer_key = (inner.width, rail_facts(inspector, &actions, redacted));
+    // A wide block exists only where some block is wider than the columns it scrolls in.
+    let cols = width.saturating_sub(GUTTER).max(1);
+    inspector.wide_fit.set((
+        if cache.wide.is_empty() {
+            0
+        } else {
+            cache.widest
+        },
+        cols,
+    ));
+    // The viewport row is offered only where a wide block exists in this very layout.
+    let offers = Offers {
+        viewport: !cache.wide.is_empty(),
+        ..offers
+    };
+    let footer_key = (
+        inner.width,
+        rail_facts(inspector, &actions, redacted, offers),
+    );
     if cache.footer_key != Some(footer_key) {
-        let (info, reader) = footer_text(inspector, &actions, redacted);
+        let (info, reader) = footer_text(inspector, &actions, redacted, offers);
         let rows = |text: &str| -> Vec<Line<'static>> {
             text.split('\n')
-                .flat_map(|line| wrap(line, width, 2, theme.colors.fg_secondary))
+                .flat_map(|line| wrap(line.trim_end(), width, 2, theme.colors.fg_secondary))
                 .collect()
         };
         cache.footer_info = if info.is_empty() {
@@ -201,12 +375,15 @@ pub fn render(
         cache.footer_reader = rows(&reader);
         cache.footer_key = Some(footer_key);
     }
-    // One shared fitting plan for paint and dispatch (rail truth): keep one body row, then give
-    // the rail priority over the identity rows. When the writer rail does not fit whole it is not
-    // painted, so its keys are inert; when the reader rail is cut, its page keys are inert.
+    // One shared fitting plan for paint and dispatch (rail truth): keep one body row, then the
+    // open field's row, then give the rail priority over the identity rows. When the writer
+    // rail does not fit whole it is not painted, so its keys are inert; when the reader rail
+    // is cut, the page keys are inert.
     let room = inner.height;
     let body_min = u16::from(room > 0);
-    let rail_room = room.saturating_sub(body_min);
+    let field = field_line(inspector, width, theme, show_caret);
+    let field_height = u16::from(field.is_some() && room > body_min);
+    let rail_room = room.saturating_sub(body_min + field_height);
     let rows_of = |lines: &[Line<'static>]| u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let (info_rows, reader_rows) = (rows_of(&cache.footer_info), rows_of(&cache.footer_reader));
     let show_info = info_rows.saturating_add(reader_rows) <= rail_room;
@@ -220,12 +397,19 @@ pub fn render(
         .rail_live
         .set((show_info || info_rows == 0, reader_height == reader_rows));
     let footer_height = info_height + reader_height;
-    let header_height = rows_of(&cache.header).min(room.saturating_sub(body_min + footer_height));
-    let body_height = room - header_height - footer_height;
+    let header_height =
+        rows_of(&cache.header).min(room.saturating_sub(body_min + field_height + footer_height));
+    let body_height = room - header_height - field_height - footer_height;
     let rows = cache.body.len();
     inspector.fit.set((rows, usize::from(body_height)));
     let top = Rect::new(inner.x, inner.y, inner.width, header_height);
     let body = Rect::new(inner.x, inner.y + header_height, inner.width, body_height);
+    let field_area = Rect::new(
+        inner.x,
+        inner.y + header_height + body_height,
+        inner.width,
+        field_height,
+    );
     let info_area = Rect::new(
         inner.x,
         inner.y + room - footer_height,
@@ -239,8 +423,46 @@ pub fn render(
         reader_height,
     );
     paint_lines(frame, top, &cache.header);
-    let range = viewer::slice(&inspector.viewer, rows, usize::from(body_height));
-    paint_lines(frame, body, &cache.body[range]);
+    // `follow` is a pending jump-to-end (`G`): resolved here against the live fit, so a key
+    // that followed a field/filter transition before this paint cannot leave a stale position
+    // (8B-02). Any other scroll clears it.
+    let mut seen = inspector.viewer;
+    if seen.follow {
+        seen.top = usize::MAX;
+    }
+    let range = viewer::slice(&seen, rows, usize::from(body_height));
+    let h_off = inspector
+        .viewer
+        .h_off
+        .min(cache.widest.saturating_sub(cols));
+    for (offset, line) in cache.body[range.clone()].iter().enumerate() {
+        let y = body.y + offset as u16;
+        if markdown_body::is_wide_row(&cache.wide, range.start + offset) && line.spans.len() > 1 {
+            // The block row scrolls sideways behind its fixed gutter, with edge markers.
+            let block = Line::from(line.spans[1..].to_vec());
+            let (cut, left, right) = block_viewer::window(&block, block.width(), h_off, cols);
+            let x = body.x + GUTTER as u16;
+            frame.buffer_mut().set_line(
+                x + u16::from(left),
+                y,
+                &cut,
+                u16::try_from(cols).unwrap_or(u16::MAX),
+            );
+            let muted = Style::default().fg(theme.colors.fg_muted);
+            if left {
+                frame.buffer_mut().set_stringn(x, y, "←", 1, muted);
+            }
+            if right {
+                let last = x + u16::try_from(cols).unwrap_or(u16::MAX) - 1;
+                frame.buffer_mut().set_stringn(last, y, "→", 1, muted);
+            }
+        } else {
+            frame.render_widget(line, Rect::new(body.x, y, body.width, 1));
+        }
+    }
+    if let Some(field) = &field {
+        paint_lines(frame, field_area, std::slice::from_ref(field));
+    }
     paint_lines(frame, info_area, &cache.footer_info);
     let reader_start = cache
         .footer_reader
@@ -316,6 +538,9 @@ mod tests {
             SemanticMessageType::Consultation,
         );
         inspector.content = content.to_owned();
+        inspector.segments = vec![crate::adapters::tui::thread_body::ThreadSegment::Text(
+            content.to_owned(),
+        )];
         reducer::open_thread(&mut state, inspector, "Thread · consultation".to_owned());
         state
     }
@@ -325,7 +550,16 @@ mod tests {
     fn paint(state: &TuiState, outer: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(outer, HEIGHT)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), state, None, "Thread · consultation"))
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    state,
+                    None,
+                    "Thread · consultation",
+                    false,
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (1..HEIGHT - 1)

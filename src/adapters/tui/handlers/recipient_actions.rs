@@ -4,7 +4,7 @@ use crate::adapters::daemon::protocol::{
 use crate::adapters::tui::state::{RecipientActionState, ThreadTarget, TuiState};
 use crate::domain::models::FeedbackLevel;
 use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
-use std::{borrow::Cow, collections::BTreeMap};
+use std::borrow::Cow;
 
 pub(crate) fn action_key(frame: &ClientFrame) -> Option<(RecipientAction, RecipientActionTarget)> {
     let (action, item_id) = match frame {
@@ -50,8 +50,25 @@ pub(crate) fn pending_composition(state: &TuiState) -> Option<&str> {
         .values()
         .find_map(|action| match action {
             RecipientActionState::Pending { composed_input, .. } => composed_input.as_deref(),
-            RecipientActionState::Completed { .. } => None,
         })
+}
+
+/// Whether a reply sent from a thread's own field still awaits its result: its text is
+/// recoverable only while the session lives, so quitting must ask (8B-03).
+pub(crate) fn pending_field_reply(state: &TuiState) -> bool {
+    state
+        .recipient_actions
+        .values()
+        .any(|action| matches!(action, RecipientActionState::Pending { reply: Some(_), .. }))
+}
+
+/// The outcome-log key of an act's target (`None`: a `/team` request names no thread).
+fn outcome_key(target: &RecipientActionTarget) -> Option<String> {
+    match target {
+        RecipientActionTarget::Item { item_id } => Some(item_id.clone()),
+        RecipientActionTarget::Node { node_id } => Some(format!("node:{node_id}")),
+        RecipientActionTarget::Request { .. } => None,
+    }
 }
 
 pub(crate) fn begin_action(state: &mut TuiState, frame: &ClientFrame, composed: bool) -> bool {
@@ -65,18 +82,13 @@ pub(crate) fn begin_action(state: &mut TuiState, frame: &ClientFrame, composed: 
     {
         return false;
     }
-    let visible = action_target_is_visible(state, &key.1)
-        || state.recipient_actions.iter().any(|((_, target), phase)| {
-            matches!(phase, RecipientActionState::Completed { .. })
-                && action_target_is_visible(state, target)
-        });
-    state
-        .recipient_actions
-        .retain(|_, action| matches!(action, RecipientActionState::Pending { .. }));
-    let pinned_compose = if composed {
-        state.pinned_peer_compose.take()
-    } else {
-        None
+    let visible = action_target_is_visible(state, &key.1);
+    // A reply sent from the thread's own field keeps its text until the daemon settles it.
+    let reply = match frame {
+        ClientFrame::ReplyToRecipientItem { text, .. } if !composed && !text.is_empty() => {
+            Some(text.clone())
+        }
+        _ => None,
     };
     let composed_input = composed.then(|| {
         state.cursor_position = 0;
@@ -86,7 +98,7 @@ pub(crate) fn begin_action(state: &mut TuiState, frame: &ClientFrame, composed: 
         key,
         RecipientActionState::Pending {
             composed_input,
-            pinned_compose,
+            reply,
         },
     );
     refresh_action_notices(state, visible);
@@ -105,7 +117,7 @@ pub(crate) fn action_is_pending(
             && match pending_target {
                 RecipientActionTarget::Item { item_id } => matches!(target, ThreadTarget::Item(address) if address.item().as_str() == item_id),
                 RecipientActionTarget::Node { node_id } => node == Some(node_id.as_str()),
-                // A `/team` request key never names a recipient surface.
+                // A `/team` request key never names a thread.
                 RecipientActionTarget::Request { .. } => false,
             }
     })
@@ -131,22 +143,27 @@ pub(crate) fn apply_action_result(
     }
     let pending = state.recipient_actions.remove(&key);
     let target = &key.1;
-    let (submitted, pinned_compose) = pending
-        .and_then(|phase| match phase {
+    let (submitted, reply) = pending
+        .map(|phase| match phase {
             RecipientActionState::Pending {
                 composed_input,
-                pinned_compose,
-            } => Some((composed_input, pinned_compose)),
-            RecipientActionState::Completed { .. } => None,
+                reply,
+            } => (composed_input, reply),
         })
         .unwrap_or((None, None));
+    let thread_key = outcome_key(target);
     let id = sanitize_disclosable(target_id(target), MAX_PEER_ID_BYTES);
     let message = match outcome {
-        RecipientActionOutcome::Applied { reply: Some(reply) } => format!(
-            "reply recorded for {} as {} — the asker sees it when they read the thread",
-            sanitize_disclosable(&reply.item_id, MAX_PEER_ID_BYTES),
-            sanitize_disclosable(&reply.turn_id, MAX_PEER_ID_BYTES),
-        ),
+        RecipientActionOutcome::Applied { reply: Some(reply) } => {
+            if let Some(thread) = &thread_key {
+                state.thread_outcomes.take_retained(thread);
+            }
+            format!(
+                "reply recorded for {} as {} — the asker sees it when they read the thread",
+                sanitize_disclosable(&reply.item_id, MAX_PEER_ID_BYTES),
+                sanitize_disclosable(&reply.turn_id, MAX_PEER_ID_BYTES),
+            )
+        }
         RecipientActionOutcome::Applied { reply: None } => {
             if action == RecipientAction::Acknowledge {
                 acknowledge_surface_item(state, target);
@@ -185,12 +202,14 @@ pub(crate) fn apply_action_result(
             if action == RecipientAction::Acknowledge {
                 acknowledge_surface_item(state, target);
                 format!(
-                    "acknowledgement already recorded for {id} — receipt only; no new action applied"
+                    "no new action applied — acknowledgement already recorded for {id} (receipt only)"
                 )
             } else if let Some(text) = submitted {
                 state.cursor_position = text.chars().count();
                 state.input_buffer = text;
-                state.pinned_peer_compose = pinned_compose;
+                "response already settled — your text was not sent".to_owned()
+            } else if let (Some(text), Some(thread)) = (reply, &thread_key) {
+                state.thread_outcomes.retain_reply(thread, text);
                 "response already settled — your text was not sent".to_owned()
             } else {
                 "response already settled — no action applied".to_owned()
@@ -200,16 +219,13 @@ pub(crate) fn apply_action_result(
             if let Some(text) = submitted {
                 state.cursor_position = text.chars().count();
                 state.input_buffer = text;
-                state.pinned_peer_compose = pinned_compose;
+            } else if let (Some(text), Some(thread)) = (reply, &thread_key) {
+                state.thread_outcomes.retain_reply(thread, text);
             }
             format!("[daemon error] {error}")
         }
     };
-    let visible = action_target_is_visible(state, target);
-    state
-        .recipient_actions
-        .insert(key, RecipientActionState::Completed { notice: message });
-    refresh_action_notices(state, visible);
+    show_notice(state, Some(target), message);
 }
 
 pub(crate) fn apply_context_state(
@@ -219,8 +235,9 @@ pub(crate) fn apply_context_state(
     show_inventory: bool,
 ) {
     state.recipient_context_ids = ids.into_iter().collect();
-    if let Some(inspector) = state.thread_inspector.as_mut() {
-        let ThreadTarget::Item(address) = &inspector.target;
+    if let Some(inspector) = state.thread_inspector.as_mut()
+        && let Some(address) = inspector.item_address()
+    {
         let selected = state
             .recipient_context_ids
             .contains(address.item().as_str());
@@ -232,7 +249,7 @@ pub(crate) fn apply_context_state(
     if show_inventory {
         crate::adapters::tui::views::show_view(
             &mut state.feedback_blocks,
-            crate::adapters::tui::views::ViewKind::RecipientOutcome,
+            crate::adapters::tui::views::ViewKind::RecipientContext,
             "recipient-context",
             FeedbackLevel::Info,
             inventory,
@@ -242,98 +259,67 @@ pub(crate) fn apply_context_state(
 }
 
 pub(crate) fn abort_unsent_action(state: &mut TuiState, frame: ClientFrame, message: String) {
-    let key = match frame {
-        ClientFrame::ReplyToRecipientItem { item_id, .. } => (
-            RecipientAction::Reply,
-            RecipientActionTarget::Item { item_id },
-        ),
-        ClientFrame::DeferRecipientItem { item_id } => (
-            RecipientAction::Defer,
-            RecipientActionTarget::Item { item_id },
-        ),
-        ClientFrame::ShareRecipientStatus { item_id, .. } => (
-            RecipientAction::ShareStatus,
-            RecipientActionTarget::Item { item_id },
-        ),
-        ClientFrame::ShareRecipientRetro { item_id, .. } => (
-            RecipientAction::ShareRetro,
-            RecipientActionTarget::Item { item_id },
-        ),
-        ClientFrame::AcknowledgeRecipientItem { item_id } => (
-            RecipientAction::Acknowledge,
-            RecipientActionTarget::Item { item_id },
-        ),
-        ClientFrame::SetRecipientContext { item_id, selected } => (
-            if selected {
-                RecipientAction::ContextSelect
-            } else {
-                RecipientAction::ContextRemove
-            },
-            RecipientActionTarget::Item { item_id },
-        ),
-        ClientFrame::ResolvePeerDraft { node, .. } => (
-            RecipientAction::Response,
-            RecipientActionTarget::Node { node_id: node },
-        ),
-        _ => return,
+    let Some(key) = action_key(&frame) else {
+        return;
     };
-    if let Some(RecipientActionState::Pending {
-        composed_input: Some(text),
-        pinned_compose,
-    }) = state.recipient_actions.remove(&key)
-    {
-        state.cursor_position = text.chars().count();
-        state.input_buffer = text;
-        state.pinned_peer_compose = pinned_compose;
-    }
-    let visible = action_target_is_visible(state, &key.1);
-    state
-        .recipient_actions
-        .insert(key, RecipientActionState::Completed { notice: message });
-    refresh_action_notices(state, visible);
-}
-
-fn action_notice<'a>(
-    action: RecipientAction,
-    target: &RecipientActionTarget,
-    phase: &'a RecipientActionState,
-) -> Cow<'a, str> {
-    match phase {
-        RecipientActionState::Completed { notice } => Cow::Borrowed(notice),
-        RecipientActionState::Pending { .. } => {
-            let noun = match action {
-                RecipientAction::Acknowledge => "acknowledgement",
-                RecipientAction::Defer => "defer reply",
-                RecipientAction::ShareStatus => "status reply",
-                RecipientAction::ShareRetro => "retrospective reply",
-                RecipientAction::Reply | RecipientAction::Response => "response",
-                RecipientAction::ContextSelect => "context selection",
-                RecipientAction::ContextRemove => "context removal",
-                RecipientAction::TeamSend => "team send",
-                RecipientAction::TeamBoard => "team board",
-                RecipientAction::TeamThread => "team thread",
-                RecipientAction::TeamRetract => "team retract",
-                RecipientAction::TeamStatus => "team status",
-                RecipientAction::RevokeSenderConsent => "sender consent revocation",
-            };
-            let id = target_id(target);
-            Cow::Owned(format!(
-                "applying {noun} for {}…",
-                sanitize_disclosable(id, id.len())
-            ))
+    let thread_key = outcome_key(&key.1);
+    match state.recipient_actions.remove(&key) {
+        Some(RecipientActionState::Pending {
+            composed_input: Some(text),
+            ..
+        }) => {
+            state.cursor_position = text.chars().count();
+            state.input_buffer = text;
         }
+        Some(RecipientActionState::Pending {
+            reply: Some(text), ..
+        }) => {
+            if let Some(thread) = &thread_key {
+                state.thread_outcomes.retain_reply(thread, text);
+            }
+        }
+        _ => {}
     }
+    show_notice(state, Some(&key.1), message);
 }
 
+/// The words of an act still in flight (the thread shows them until the outcome replaces them).
+fn pending_notice(action: RecipientAction, target: &RecipientActionTarget) -> Cow<'static, str> {
+    let noun = match action {
+        RecipientAction::Acknowledge => "acknowledgement",
+        RecipientAction::Defer => "defer reply",
+        RecipientAction::ShareStatus => "status reply",
+        RecipientAction::ShareRetro => "retrospective reply",
+        RecipientAction::Reply | RecipientAction::Response => "response",
+        RecipientAction::ContextSelect => "context selection",
+        RecipientAction::ContextRemove => "context removal",
+        RecipientAction::TeamSend => "team send",
+        RecipientAction::TeamBoard => "team board",
+        RecipientAction::TeamThread => "team thread",
+        RecipientAction::TeamRetract => "team retract",
+        RecipientAction::TeamStatus => "team status",
+        RecipientAction::RevokeSenderConsent => "sender consent revocation",
+    };
+    let id = target_id(target);
+    Cow::Owned(format!(
+        "applying {noun} for {}…",
+        sanitize_disclosable(id, id.len())
+    ))
+}
+
+/// The in-flight notices of acts on `surface`'s target.
 pub(crate) fn surface_action_notices<'a>(
-    actions: &'a BTreeMap<(RecipientAction, RecipientActionTarget), RecipientActionState>,
+    actions: &'a std::collections::BTreeMap<
+        (RecipientAction, RecipientActionTarget),
+        RecipientActionState,
+    >,
     surface: &'a ThreadTarget,
     node: Option<&'a str>,
 ) -> impl Iterator<Item = Cow<'a, str>> + 'a {
     actions
         .iter()
         .filter(move |((_, target), _)| surface_matches(surface, node, target))
-        .map(|((action, target), phase)| action_notice(*action, target, phase))
+        .map(|((action, target), _)| pending_notice(*action, target))
 }
 
 fn action_target_is_visible(state: &TuiState, target: &RecipientActionTarget) -> bool {
@@ -369,32 +355,12 @@ pub(crate) fn prune_retro_left_out(
     }
 }
 
+/// An in-flight act changed: the open thread repaints its notices (a visible change also
+/// scrolls to them). Outcomes are never transcript rows.
 pub(crate) fn refresh_action_notices(state: &mut TuiState, visible_changed: bool) {
     if visible_changed && let Some(inspector) = state.thread_inspector.as_mut() {
         inspector.invalidate();
         inspector.scroll_to_end();
-    }
-    let mut message = String::new();
-    for ((action, target), phase) in &state.recipient_actions {
-        if action_target_is_visible(state, target) {
-            continue;
-        }
-        if !message.is_empty() {
-            message.push('\n');
-        }
-        message.push_str(&action_notice(*action, target, phase));
-    }
-    let id = "recipient-actions";
-    if message.is_empty() {
-        state.feedback_blocks.remove(id);
-    } else {
-        crate::adapters::tui::views::show_view(
-            &mut state.feedback_blocks,
-            crate::adapters::tui::views::ViewKind::RecipientOutcome,
-            id,
-            FeedbackLevel::Info,
-            message,
-        );
     }
     state.needs_redraw = true;
 }
@@ -416,12 +382,13 @@ fn surface_matches(
         RecipientActionTarget::Item { item_id } => {
             matches!(surface, ThreadTarget::Item(address) if address.item().as_str() == item_id)
         }
-        RecipientActionTarget::Node { node_id } => node == Some(node_id.as_str()),
+        RecipientActionTarget::Node { node_id } => {
+            matches!(surface, ThreadTarget::Node(open) if open == node_id)
+                || (matches!(surface, ThreadTarget::Item(_)) && node == Some(node_id.as_str()))
+        }
         RecipientActionTarget::Request { .. } => false,
     }
 }
-
-const MAX_RECIPIENT_NOTICES: usize = 8;
 
 fn acknowledge_surface_item(state: &mut TuiState, target: &RecipientActionTarget) {
     if let Some(inspector) = state.thread_inspector.as_mut()
@@ -430,47 +397,65 @@ fn acknowledge_surface_item(state: &mut TuiState, target: &RecipientActionTarget
         inspector.item_state = Some("acknowledged");
         if let RecipientActionTarget::Item { item_id } = target {
             let prefix = format!("  {item_id} · received");
-            if let Some(header) = inspector
-                .content
-                .lines()
-                .find(|line| line.starts_with(&prefix))
-                .map(str::to_owned)
-            {
-                inspector.content = inspector.content.replacen(
-                    &header,
-                    &header.replacen(" · received", " · acknowledged", 1),
-                    1,
-                );
+            let acknowledged = |text: &str| {
+                text.lines()
+                    .find(|line| line.starts_with(&prefix))
+                    .map(|header| {
+                        text.replacen(
+                            header,
+                            &header.replacen(" · received", " · acknowledged", 1),
+                            1,
+                        )
+                    })
+            };
+            if let Some(text) = acknowledged(&inspector.content) {
+                inspector.content = text;
+            }
+            for segment in &mut inspector.segments {
+                if let crate::adapters::tui::thread_body::ThreadSegment::Text(text) = segment
+                    && let Some(updated) = acknowledged(text)
+                {
+                    *text = updated;
+                }
             }
         }
         inspector.invalidate();
     }
 }
 
+/// One outcome line of an item- or node-targeted act (Story 21.8 A13): it joins the target's
+/// session outcome log; the thread of that target paints it, and when that thread is not the
+/// window on top the line is also posted once as an ambient Info notice (S-LOG archives it).
+/// `target: None` is the open thread's own target.
 pub(crate) fn show_notice(
     state: &mut TuiState,
     target: Option<&RecipientActionTarget>,
     message: String,
 ) {
-    if let Some(inspector) = state.thread_inspector.as_mut()
-        && target.is_none_or(|target| {
-            surface_matches(&inspector.target, inspector.node_id.as_deref(), target)
-        })
-    {
-        if inspector.results.len() >= MAX_RECIPIENT_NOTICES {
-            inspector.results.remove(0);
+    use crate::adapters::tui::notifications::{self, NoticeSource};
+    let open = state
+        .thread_inspector
+        .as_ref()
+        .map(|inspector| inspector.outcome_key());
+    let key = match target {
+        Some(target) => outcome_key(target),
+        None => open.clone(),
+    };
+    let on_top = state.modal_stack.top().is_some_and(|frame| {
+        frame.surface == crate::adapters::tui::presentation::Surface::ThreadInspector
+    }) && key.is_some()
+        && open == key;
+    if let Some(key) = &key {
+        state.thread_outcomes.push(key, message.clone());
+        if let Some(inspector) = state.thread_inspector.as_mut()
+            && &inspector.outcome_key() == key
+        {
+            inspector.invalidate();
+            inspector.scroll_to_end();
         }
-        inspector.results.push(message);
-        inspector.invalidate();
-        inspector.scroll_to_end();
-    } else {
-        crate::adapters::tui::views::show_view(
-            &mut state.feedback_blocks,
-            crate::adapters::tui::views::ViewKind::RecipientOutcome,
-            "recipient-actions",
-            FeedbackLevel::Info,
-            message,
-        );
+    }
+    if !on_top {
+        notifications::info(state, NoticeSource::Team, message);
     }
     state.needs_redraw = true;
 }
@@ -480,7 +465,6 @@ mod tests {
     use super::*;
     use crate::adapters::daemon::protocol::{PeerDraftAction, ProtocolError};
     use crate::adapters::tui::state::ThreadInspectorState;
-    use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
 
     #[test]
     fn status_share_and_decline_share_one_pending_key_and_notice() {
@@ -507,27 +491,25 @@ mod tests {
         assert!(!begin_action(&mut state, &decline, false));
         assert_eq!(state.recipient_actions.len(), 1);
         assert_eq!(
-            state.feedback_blocks["recipient-actions"].message,
+            pending_notice(RecipientAction::ShareStatus, &action_key(&share).unwrap().1),
             "applying status reply for ri_status…"
         );
+        assert!(!state.feedback_blocks.contains_key("recipient-actions"));
         state.input_buffer = "unfinished operator text".to_owned();
         abort_unsent_action(&mut state, share, "channel closed".to_owned());
         assert_eq!(state.input_buffer, "unfinished operator text");
-        assert!(matches!(
-            state.recipient_actions.values().next(),
-            Some(RecipientActionState::Completed { notice }) if notice == "channel closed"
-        ));
+        assert!(state.recipient_actions.is_empty());
+        assert_eq!(
+            state.thread_outcomes.lines("ri_status").collect::<Vec<_>>(),
+            ["channel closed"]
+        );
         assert!(begin_action(&mut state, &decline, false));
     }
 
     #[test]
-    fn unrelated_result_does_not_release_composition_and_refusal_restores_its_pin() {
+    fn unrelated_result_does_not_release_composition_and_refusal_restores_text() {
         let mut state = TuiState::new(80, 24);
         state.input_buffer = "line one\n  line two".to_owned();
-        state.pinned_peer_compose = Some(PinnedPeerCompose::new(
-            "node-b".to_owned(),
-            PeerComposeAction::Edit,
-        ));
         let frame = ClientFrame::ResolvePeerDraft {
             node: "node-b".to_owned(),
             action: PeerDraftAction::Edit {
@@ -537,7 +519,6 @@ mod tests {
         assert!(begin_action(&mut state, &frame, true));
         assert_eq!(pending_composition(&state), Some("line one\n  line two"));
         assert!(state.input_buffer.is_empty());
-        assert!(state.pinned_peer_compose.is_none());
         apply_action_result(
             &mut state,
             RecipientAction::Response,
@@ -560,14 +541,6 @@ mod tests {
         );
         assert_eq!(state.input_buffer, "line one\n  line two");
         assert_eq!(state.cursor_position, state.input_buffer.chars().count());
-        assert_eq!(
-            state.pinned_peer_compose.as_ref().unwrap().node_id,
-            "node-b"
-        );
-        assert_eq!(
-            state.pinned_peer_compose.as_ref().unwrap().action,
-            PeerComposeAction::Edit
-        );
         assert!(pending_composition(&state).is_none());
     }
 
@@ -641,16 +614,19 @@ mod tests {
             "an acknowledged command must not reappear as unsent reply composition"
         );
         assert!(
-            matches!(
-                state.recipient_actions.get(&(
-                    RecipientAction::Acknowledge,
-                    RecipientActionTarget::Item {
-                        item_id: "ri-a".to_owned()
-                    },
-                )),
-                Some(RecipientActionState::Completed { .. })
-            ),
+            !state.recipient_actions.contains_key(&(
+                RecipientAction::Acknowledge,
+                RecipientActionTarget::Item {
+                    item_id: "ri-a".to_owned()
+                },
+            )),
             "K09: idempotent Ack terminates its pending marker"
+        );
+        assert!(
+            state
+                .thread_outcomes
+                .lines("ri-a")
+                .any(|line| line.contains("no new action applied"))
         );
     }
 
@@ -718,13 +694,19 @@ mod tests {
                 crate::domain::models::SemanticMessageType::Unknown,
             ),
         );
-        for index in 0..MAX_RECIPIENT_NOTICES + 1 {
-            show_notice(&mut state, None, format!("notice {index}"));
+        let target = RecipientActionTarget::Item {
+            item_id: "notice-item".into(),
+        };
+        for index in 0..17 {
+            show_notice(&mut state, Some(&target), format!("notice {index}"));
         }
-        let results = &state.thread_inspector.as_ref().unwrap().results;
-        assert_eq!(results.len(), MAX_RECIPIENT_NOTICES);
-        assert_eq!(results.first().unwrap(), "notice 1");
-        assert_eq!(results.last().unwrap(), "notice 8");
+        let results = state
+            .thread_outcomes
+            .lines("notice-item")
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 16);
+        assert_eq!(results.first().unwrap(), &"notice 1");
+        assert_eq!(results.last().unwrap(), &"notice 16");
     }
 
     fn retro_frame(item_id: &str, decline: bool) -> ClientFrame {
@@ -756,16 +738,18 @@ mod tests {
         assert!(!begin_action(&mut state, &decline, false));
         assert_eq!(state.recipient_actions.len(), 1);
         assert_eq!(
-            state.feedback_blocks["recipient-actions"].message,
+            pending_notice(RecipientAction::ShareRetro, &key.1),
             "applying retrospective reply for ri_retro…"
         );
+        assert!(!state.feedback_blocks.contains_key("recipient-actions"));
         state.input_buffer = "unfinished operator text".to_owned();
         abort_unsent_action(&mut state, decline.clone(), "channel closed".to_owned());
         assert_eq!(state.input_buffer, "unfinished operator text");
-        assert!(matches!(
-            state.recipient_actions.get(&key),
-            Some(RecipientActionState::Completed { notice }) if notice == "channel closed"
-        ));
+        assert!(!state.recipient_actions.contains_key(&key));
+        assert_eq!(
+            state.thread_outcomes.lines("ri_retro").collect::<Vec<_>>(),
+            ["channel closed"]
+        );
         assert!(begin_action(&mut state, &decline, false));
     }
 

@@ -76,11 +76,12 @@ pub struct LogAwarenessView {
     pub presented: Vec<crate::domain::models::LogVisitCandidate>,
 }
 
-/// What the thread window shows. Slice 8-A opens a received item; the node, sent-thread and
-/// log views are later slices of Story 21.8.
+/// What the thread window shows: a received item (the journal thread) or the response row
+/// of a peer node (the legacy "response" view); the sent-thread and log views are slice 8-C.
 #[derive(Debug, Clone)]
 pub enum ThreadTarget {
     Item(crate::domain::models::ItemAddress),
+    Node(String),
 }
 
 /// What the opening host may do with the thread: act on it (attached writer), only read it
@@ -92,14 +93,37 @@ pub enum ThreadAccess {
     LocalOnly,
 }
 
+/// An in-flight item act, keyed by (action, target) in `TuiState.recipient_actions`. A
+/// settled act leaves the map: its outcome line goes to the thread outcome log.
 pub enum RecipientActionState {
     Pending {
+        /// The text of a typed `/team reply …` submitted from the composer (restored there
+        /// when the daemon refuses it).
         composed_input: Option<String>,
-        pinned_compose: Option<PinnedPeerCompose>,
+        /// The text submitted from the thread's reply field (kept in the thread when the
+        /// daemon refuses it).
+        reply: Option<String>,
     },
-    Completed {
-        notice: String,
-    },
+}
+
+/// A frame-owned reply field (Story 21.8 A8): the text of a reply to the opened item, never
+/// the composer.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadReplyField {
+    pub field: crate::adapters::tui::presentation::text_field::TextField,
+    /// `[d] Discuss` of a story list: the typed verdict is `--discuss`.
+    pub discuss: bool,
+}
+
+impl ThreadReplyField {
+    /// The command this field will run, shown as its prompt.
+    pub fn prompt(&self, item_id: &str) -> String {
+        if self.discuss {
+            format!("/team reply --discuss {item_id} ")
+        } else {
+            format!("/team reply {item_id} ")
+        }
+    }
 }
 
 /// Rows laid out for one (width, content generation, retrospective overlay) and the footer
@@ -109,8 +133,11 @@ pub enum RecipientActionState {
 pub struct ThreadLayoutCache {
     pub body_key: Option<(u16, u64, u32)>,
     pub body: Vec<ratatui::text::Line<'static>>,
+    /// Rows of the body that scroll sideways (wide blocks of a rendered body).
+    pub wide: Vec<std::ops::Range<usize>>,
+    pub widest: usize,
     pub header: Vec<ratatui::text::Line<'static>>,
-    pub footer_key: Option<(u16, u32)>,
+    pub footer_key: Option<(u16, u64)>,
     pub footer_info: Vec<ratatui::text::Line<'static>>,
     pub footer_reader: Vec<ratatui::text::Line<'static>>,
 }
@@ -127,21 +154,40 @@ pub struct ThreadInspectorState {
     pub omitted_before: usize,
     pub omitted_after: usize,
     pub node_id: Option<String>,
+    /// The item view of a node that has an item address, or the node view of an item that
+    /// has a pinned response: attached `Tab` toggles between them.
+    pub can_toggle: bool,
     pub item_state: Option<&'static str>,
     pub context_available: bool,
     pub context_selected: bool,
     pub viewer: crate::adapters::tui::presentation::viewer::Viewer,
+    /// The page as the legacy literal text (tests read it; Source mode paints its segments).
     pub content: String,
+    /// The page as local text and peer bodies (the Rendered mode and the filter paint these).
+    pub segments: Vec<crate::adapters::tui::thread_body::ThreadSegment>,
+    pub turns: Vec<crate::adapters::tui::thread_body::TurnMark>,
+    /// Rendered markdown (default) or the literal source (`v`).
+    pub mode: crate::adapters::tui::presentation::markdown_body::BodyMode,
+    /// The opened item's original body bytes: what `c` copies (never the escaped display).
+    pub original: Option<String>,
     pub message_type: crate::domain::models::SemanticMessageType,
     /// Story 19.22 `AC4(c)` — whether the opened item carries a story list and
     /// which verdicts it offers; `VerdictOffer::None` elsewhere.
     pub verdict_offer: crate::domain::models::VerdictOffer,
-    pub results: Vec<String>,
+    /// The open reply field (attached writers), a child text context of this frame.
+    pub reply: Option<ThreadReplyField>,
+    /// The turn filter (`/`): the pinned identity rows and the opened item always stay.
+    pub search: crate::adapters::tui::presentation::inspector_search::InspectorSearch,
+    /// The block viewport (`Enter` on a wide block) is entered.
+    pub viewport: bool,
     /// Bumped by every change the painted body depends on besides the width.
     pub generation: u64,
     /// `(rows, viewport)` of the last paint: the row list the viewer clamps against is the
     /// one that was painted.
     pub fit: std::cell::Cell<(usize, usize)>,
+    /// `(widest wide block in cells, columns it scrolls in)` of the last paint; the widest
+    /// is 0 when no block is wider than the body.
+    pub wide_fit: std::cell::Cell<(usize, usize)>,
     /// `(writer rail painted whole, page rail painted whole)` at the last paint: a key whose
     /// hint was not painted is inert (`true, true` before the first paint).
     pub rail_live: std::cell::Cell<(bool, bool)>,
@@ -165,19 +211,43 @@ impl ThreadInspectorState {
             omitted_before: 0,
             omitted_after: 0,
             node_id: None,
+            can_toggle: false,
             item_state: None,
             context_available: false,
             context_selected: false,
             viewer: Default::default(),
             content: String::new(),
+            segments: Vec::new(),
+            turns: Vec::new(),
+            mode: crate::adapters::tui::presentation::markdown_body::BodyMode::Rendered,
+            original: None,
             message_type,
             verdict_offer: crate::domain::models::VerdictOffer::None,
-            results: Vec::new(),
+            reply: None,
+            search: Default::default(),
+            viewport: false,
             generation: 0,
             fit: std::cell::Cell::new((0, 0)),
+            wide_fit: std::cell::Cell::new((0, 0)),
             rail_live: std::cell::Cell::new((true, true)),
             layout: std::cell::RefCell::new(ThreadLayoutCache::default()),
             layouts_built: std::cell::Cell::new(0),
+        }
+    }
+
+    /// The opened item's address (`None` on the node view).
+    pub fn item_address(&self) -> Option<&crate::domain::models::ItemAddress> {
+        match &self.target {
+            ThreadTarget::Item(address) => Some(address),
+            ThreadTarget::Node(_) => None,
+        }
+    }
+
+    /// The key of this target in the outcome log: the item id, or `node:<id>`.
+    pub fn outcome_key(&self) -> String {
+        match &self.target {
+            ThreadTarget::Item(address) => address.item().as_str().to_owned(),
+            ThreadTarget::Node(node) => format!("node:{node}"),
         }
     }
 
@@ -190,49 +260,6 @@ impl ThreadInspectorState {
     pub fn scroll_to_end(&mut self) {
         self.viewer.top = usize::MAX;
         self.viewer.follow = false;
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeerComposeAction {
-    Respond,
-    Edit,
-}
-
-/// A compose target is only installed by an explicit response-surface action.
-#[derive(Debug, Clone)]
-pub struct PinnedPeerCompose {
-    pub node_id: String,
-    pub action: PeerComposeAction,
-    pub label: String,
-}
-
-impl PinnedPeerCompose {
-    #[must_use]
-    pub fn new(node_id: String, action: PeerComposeAction) -> Self {
-        use crate::adapters::tui::keymap::render::key_text;
-        use crate::adapters::tui::keymap::table_input::InputCmd;
-        let (send, back) = (
-            key_text(InputCmd::SubmitOrNewline),
-            key_text(InputCmd::ReturnToChat),
-        );
-        let label = match action {
-            PeerComposeAction::Respond => {
-                format!(
-                    "reply to {node_id} — {send} sends to this response; {back} returns to Chat (draft kept)"
-                )
-            }
-            PeerComposeAction::Edit => {
-                format!(
-                    "edit reply to {node_id} — {send} sends the edited reply; {back} returns to Chat (draft kept)"
-                )
-            }
-        };
-        Self {
-            node_id,
-            action,
-            label,
-        }
     }
 }
 
@@ -2315,7 +2342,9 @@ pub struct TuiState {
     pub active_tab_id: TabId,
     pub focus: FocusState,
     pub thread_inspector: Option<ThreadInspectorState>,
-    pub pinned_peer_compose: Option<PinnedPeerCompose>,
+    /// Session-local outcome lines of item- and node-targeted acts (Story 21.8 A13): a
+    /// re-opened thread shows them again.
+    pub thread_outcomes: crate::adapters::tui::thread_inspector::ThreadOutcomes,
     pub recipient_actions: BTreeMap<
         (
             crate::adapters::daemon::protocol::RecipientAction,
@@ -2871,7 +2900,7 @@ impl TuiState {
             active_tab_id: 0,
             focus: super::presentation::reducer::initial_base(),
             thread_inspector: None,
-            pinned_peer_compose: None,
+            thread_outcomes: Default::default(),
             recipient_actions: BTreeMap::new(),
             recipient_context_ids: std::collections::BTreeSet::new(),
             retro_left_out: HashMap::new(),

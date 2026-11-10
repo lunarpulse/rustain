@@ -63,6 +63,7 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
             Context::InspectorSearch
         }
         Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
+        Surface::ThreadInspector => super::thread_inspector::frame_context(state),
         Surface::Decision => super::decision_queue::frame_context(state),
         _ => surface.context(),
     }
@@ -85,6 +86,10 @@ pub(crate) fn inspector_search_mut(
             .get_mut(&key.0)
             .filter(|block| !block.missing)
             .map(|block| &mut block.search.editor),
+        Surface::ThreadInspector => state
+            .thread_inspector
+            .as_mut()
+            .map(|thread| &mut thread.search),
         _ => None,
     }
 }

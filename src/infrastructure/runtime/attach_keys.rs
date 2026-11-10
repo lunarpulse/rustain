@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use super::{
     AttachedTeamRequests, ComposerOutcome, SocketTurnDriver,
     attached_composer_key_with_team_requests, open_thread_for_node, preview_line, retractable_rows,
-    system_message, take_current_peer_compose, thread_flash,
+    system_message, thread_flash,
 };
 use crate::adapters::builtin_commands::{self, CommandHost};
 use crate::adapters::command_registry::{CommandRegistry, CommandSource};
@@ -492,7 +492,10 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             KeyFlow::Continue
         }
         Some(RouteEffect::Leader) => leader_key(ctx, key).await,
-        Some(RouteEffect::Frame(Context::ThreadInspector)) => thread_key(ctx, key).await,
+        Some(RouteEffect::Frame(Context::ThreadInspector | Context::BodyViewport)) => {
+            thread_key(ctx, key).await
+        }
+        Some(RouteEffect::Frame(Context::ThreadReply)) => thread_reply_key(ctx, key).await,
         Some(RouteEffect::Frame(context)) => unreachable!("attached frame context: {context:?}"),
         Some(RouteEffect::Action(_)) => unreachable!("local-only frame action in attached host"),
         Some(RouteEffect::Decision(
@@ -546,6 +549,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                     &node,
                     ctx.state,
                     ctx.read_only,
+                    false,
                 )
                 .await
                 {
@@ -867,6 +871,34 @@ async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
                 thread_flash(ctx.state, error.to_string());
             }
         }
+        ThreadOutcome::Toggle => {
+            let toggled = ctx.state.thread_inspector.as_ref().and_then(|inspector| {
+                let node = match &inspector.target {
+                    crate::adapters::tui::state::ThreadTarget::Item(_) => inspector.node_id.clone(),
+                    crate::adapters::tui::state::ThreadTarget::Node(node) => Some(node.clone()),
+                }?;
+                Some((
+                    node,
+                    matches!(
+                        inspector.target,
+                        crate::adapters::tui::state::ThreadTarget::Item(_)
+                    ),
+                ))
+            });
+            if let Some((node, want_node)) = toggled
+                && let Err(error) = open_thread_for_node(
+                    ctx.workspace,
+                    ctx.conversation,
+                    &node,
+                    ctx.state,
+                    ctx.read_only,
+                    want_node,
+                )
+                .await
+            {
+                thread_flash(ctx.state, error.to_string());
+            }
+        }
         ThreadOutcome::Send { frame, joined } => {
             if ctx.read_only {
                 return KeyFlow::Continue;
@@ -898,6 +930,44 @@ async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             let _ = joined;
             super::queue_recipient_action(ctx.state, frame, ctx.frame_tx, false);
         }
+    }
+    KeyFlow::Continue
+}
+
+/// A key of the thread's reply field that is not text editing (the field edits itself in the
+/// route): `Enter` runs the reply through the `/team reply` parse and dispatch the composer
+/// uses, never through `state.input_buffer`, and closes the thread on an accepted dispatch;
+/// `Esc` clears and leaves the field.
+async fn thread_reply_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    use crate::adapters::tui::thread_inspector::{self, ReplyOutcome};
+    let ReplyOutcome::Submit {
+        item_id,
+        text,
+        discuss,
+    } = thread_inspector::on_reply_key(ctx.state, Key::from_crossterm(&key))
+    else {
+        return KeyFlow::Continue;
+    };
+    if ctx.read_only {
+        return KeyFlow::Continue;
+    }
+    let line = if discuss {
+        format!("/team reply --discuss {item_id} {text}")
+    } else {
+        format!("/team reply {item_id} {text}")
+    };
+    let request = ctx.team_requests.mint();
+    match super::attached_team_line_for_request(&line, request) {
+        super::AttachedTeamLine::Frame(frame @ ClientFrame::ReplyToRecipientItem { .. }) => {
+            if super::queue_recipient_action(ctx.state, frame, ctx.frame_tx, false) {
+                thread_inspector::reply_sent(ctx.state);
+            }
+        }
+        super::AttachedTeamLine::Refused(error) => thread_flash(ctx.state, error),
+        _ => thread_flash(
+            ctx.state,
+            "that reply is not a /team reply — nothing sent".to_owned(),
+        ),
     }
     KeyFlow::Continue
 }
@@ -1025,9 +1095,6 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
                     cmd,
                     Key::from_crossterm(&key),
                 );
-                if ctx.state.input_buffer.is_empty() {
-                    ctx.state.pinned_peer_compose = None;
-                }
             }
         }
         CommandId::Input(InputCmd::OpenSlashPopup) => {
@@ -1179,9 +1246,12 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         .unwrap_or(&ctx.state.input_buffer)
         .is_empty(),
         pending_images: ctx.state.pending_images.len() + large_images,
-        peer_compose: ctx.state.pinned_peer_compose.is_some()
-            || crate::adapters::tui::handlers::recipient_actions::pending_composition(ctx.state)
-                .is_some(),
+        peer_compose: crate::adapters::tui::handlers::recipient_actions::pending_composition(
+            ctx.state,
+        )
+        .is_some()
+            || crate::adapters::tui::handlers::recipient_actions::pending_field_reply(ctx.state)
+            || crate::adapters::tui::thread_inspector::reply_field_has_text(ctx.state),
         pending_decisions: ctx.state.decisions.undecided() - large_images,
     };
     match presentation::reducer::request_quit(ctx.state, facts) {
@@ -1415,13 +1485,8 @@ async fn run_palette_command(ctx: &mut KeyCtx<'_>, name: String, args: Option<St
         return KeyFlow::Continue;
     }
     if name == "quit" && args.is_none() {
-        // Ask with the REAL composer: its unsent draft (and a pinned reply) is
-        // exactly what the decision must count, and nothing is swapped or cleared.
+        // Ask with the real composer so its unsent draft is counted without being cleared.
         return request_quit(ctx);
-    }
-    if ctx.state.pinned_peer_compose.is_some() {
-        ctx.info("finish or cancel your peer reply before running a command from the palette");
-        return KeyFlow::Continue;
     }
     let text = match args {
         Some(args) => format!("/{name} {args}"),
@@ -1508,8 +1573,7 @@ fn local_slash(text: &str) -> Option<LocalSlash> {
 fn run_local_slash(ctx: &mut KeyCtx<'_>, local: LocalSlash) -> KeyFlow {
     if matches!(local, LocalSlash::Quit) {
         // The typed `/quit` line is a command, not an unsent draft: consume it, but
-        // leave every OTHER unsent fact (a pinned peer reply) untouched so the S-QUIT
-        // decision still counts it, and so cancelling loses nothing (RU-14, AC7).
+        // leave every other unsent fact untouched so cancelling loses nothing (RU-14, AC7).
         ctx.state.input_buffer.clear();
         ctx.state.cursor_position = 0;
         ctx.state.input_scroll_offset = 0;
@@ -1520,7 +1584,6 @@ fn run_local_slash(ctx: &mut KeyCtx<'_>, local: LocalSlash) -> KeyFlow {
     ctx.state.input_buffer.clear();
     ctx.state.cursor_position = 0;
     ctx.state.input_scroll_offset = 0;
-    ctx.state.pinned_peer_compose = None;
     ctx.state.needs_redraw = true;
     match local {
         LocalSlash::Detach => KeyFlow::Detach,
@@ -1598,55 +1661,27 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         }
         ComposerOutcome::Submit(text) => text,
     };
-    let compose = match take_current_peer_compose(ctx.state, ctx.conversation) {
-        Ok(compose) => compose,
-        Err(()) => {
-            ctx.state.input_buffer = text;
-            ctx.state.cursor_position = ctx.state.input_buffer.chars().count();
-            thread_flash(
-                ctx.state,
-                "response already settled — your text was not sent".to_owned(),
-            );
-            return KeyFlow::Continue;
-        }
+    let submission = UserSubmission {
+        text,
+        images: vec![],
+        synthetic: false,
+        activation_set: None,
+        agent_snapshot: None,
+        turn_cancel: CancellationToken::new(),
     };
-    if let Some(compose) = compose {
-        ctx.state.input_buffer.clone_from(&text);
-        let action = match compose.action {
-            crate::adapters::tui::state::PeerComposeAction::Respond => {
-                crate::adapters::daemon::protocol::PeerDraftAction::WriteOwn { content: text }
-            }
-            crate::adapters::tui::state::PeerComposeAction::Edit => {
-                crate::adapters::daemon::protocol::PeerDraftAction::Edit { content: text }
-            }
-        };
-        let node = compose.node_id.clone();
-        ctx.state.pinned_peer_compose = Some(compose);
-        let frame = ClientFrame::ResolvePeerDraft { node, action };
-        super::queue_recipient_action(ctx.state, frame, ctx.frame_tx, true);
-    } else {
-        let submission = UserSubmission {
-            text,
-            images: vec![],
-            synthetic: false,
-            activation_set: None,
-            agent_snapshot: None,
-            turn_cancel: CancellationToken::new(),
-        };
-        let view = TurnViewState {
-            conversation: ctx.conversation,
-            streaming: ctx.streaming,
-            state: ctx.state,
-            lifecycle: ctx.lifecycle,
-            session_manager: ctx.session_manager,
-        };
-        ctx.driver.submit(submission, view).await;
-        crate::adapters::tui::handlers::scroll::dispatch_scroll(
-            ctx.view,
-            ctx.state,
-            crate::domain::models::view_state::ScrollDelta::ResumeFollowing,
-        );
-    }
+    let view = TurnViewState {
+        conversation: ctx.conversation,
+        streaming: ctx.streaming,
+        state: ctx.state,
+        lifecycle: ctx.lifecycle,
+        session_manager: ctx.session_manager,
+    };
+    ctx.driver.submit(submission, view).await;
+    crate::adapters::tui::handlers::scroll::dispatch_scroll(
+        ctx.view,
+        ctx.state,
+        crate::domain::models::view_state::ScrollDelta::ResumeFollowing,
+    );
     KeyFlow::Continue
 }
 
@@ -2966,29 +3001,6 @@ pub(crate) mod tests {
         rig.ctrl('p').await;
         rig.type_text("detach").await;
         assert_eq!(rig.enter().await, KeyFlow::Detach);
-        assert!(rig.frames().is_empty());
-    }
-
-    /// B-2: a typed `/quit` over a pinned peer reply asks first and keeps the reply.
-    #[tokio::test]
-    async fn story21_2_attached_typed_quit_counts_a_pinned_peer_reply() {
-        use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
-        let mut rig = Rig::new(false);
-        rig.state.pinned_peer_compose = Some(PinnedPeerCompose::new(
-            "node-a".to_owned(),
-            PeerComposeAction::Respond,
-        ));
-        rig.type_text("/quit").await;
-        rig.state.autocomplete.dismiss();
-        assert_eq!(rig.enter().await, KeyFlow::Continue);
-        assert!(
-            rig.state.quit_confirm.is_some(),
-            "a pinned reply is unsent work"
-        );
-        assert!(
-            rig.state.pinned_peer_compose.is_some(),
-            "asking never drops the pinned reply"
-        );
         assert!(rig.frames().is_empty());
     }
 
@@ -6268,7 +6280,9 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        let body = (0..200).map(|n| format!("line {n}\n")).collect::<String>();
+        let body = (0..200)
+            .map(|n| format!("line {n}\n\n"))
+            .collect::<String>();
         seed_thread_item(
             &journal,
             &thread_peer(),
@@ -6281,6 +6295,9 @@ pub(crate) mod tests {
         .await;
         drop(journal);
         rig.open_thread("ri-witness", ThreadAccess::ReadOnly).await;
+        rig.state.clipboard_copier = Some(std::sync::Arc::new(|_| {
+            crate::adapters::tui::clipboard::ClipboardResult::Osc52Success
+        }));
         rig.state.thread_inspector.as_mut().unwrap().viewer.top = 20;
         rig
     }
@@ -6318,6 +6335,8 @@ pub(crate) mod tests {
             (Key::Ctrl('x'), same.clone()), (Key::Ctrl('p'), same.clone()),
             // No omitted page: both pagers are consumed no-ops; read-only: no action letter is live.
             (Key::Char('p'), same.clone()), (Key::Char('l'), same.clone()),
+            (Key::Char('c'), same.clone()), (Key::Char('/'), same.clone()),
+            (Key::Enter, same.clone()), (Key::Tab, same.clone()), (Key::Char('o'), same.clone()),
             (Key::Char('r'), same.clone()), (Key::Char('d'), same.clone()), (Key::Char('b'), same.clone()),
             (Key::Char('a'), same.clone()), (Key::Char('y'), same.clone()), (Key::Char('s'), same.clone()),
             (Key::Char('n'), same.clone()), (Key::Char('1'), same.clone()), (Key::Char('2'), same.clone()),
@@ -6382,11 +6401,15 @@ pub(crate) mod tests {
             rig.frames().is_empty(),
             "a letter with no action sends nothing"
         );
+        let copied = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let sink = copied.clone();
+        rig.state.clipboard_copier = Some(std::sync::Arc::new(move |text| {
+            sink.lock().push(text.to_owned());
+            crate::adapters::tui::clipboard::ClipboardResult::Osc52Success
+        }));
         assert_eq!(rig.key(Key::Char('c')).await, KeyFlow::Continue);
-        assert!(
-            rig.frames().is_empty(),
-            "`c` has no row in the thread frame"
-        );
+        assert!(rig.frames().is_empty(), "`c` copies without sending");
+        assert_eq!(&*copied.lock(), &["body"]);
         assert_eq!(rig.key(Key::Char('u')).await, KeyFlow::Continue);
         let frames = rig.frames();
         assert!(
@@ -8218,11 +8241,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn story21_4_r4_pending_composition_keeps_the_real_tail_and_caret() {
         use crate::adapters::daemon::protocol::{
-            PeerDraftAction, ProtocolError, RecipientAction, RecipientActionOutcome,
-            RecipientActionTarget,
+            ProtocolError, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
         };
-        use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
-        use crate::domain::models::{PeerRowControl, PeerRowStage, SemanticMessageType};
         fn screen(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
             let buffer = terminal.backend().buffer();
             buffer.content.iter().map(|cell| cell.symbol()).collect()
@@ -8231,33 +8251,12 @@ pub(crate) mod tests {
             for refused in [false, true] {
                 let mut rig = Rig::new(false);
                 rig.state.terminal_width = width;
-                let mut row = system_message("awaiting operator");
-                row.id = "r4-peer".into();
-                rig.domain_tab.conversation.messages.push(row);
-                rig.domain_tab.conversation.peer_row_controls.insert(
-                    "r4-peer".into(),
-                    PeerRowControl {
-                        node_id: "node-r4".into(),
-                        item_address: None,
-                        stories: None,
-                        status: None,
-                        selected_for: None,
-                        retro: None,
-                        message_type: SemanticMessageType::ArchitectureUpdate,
-                        sender_label: "sender".into(),
-                        stage: PeerRowStage::AwaitingOperator,
-                        node_resolvable: true,
-                    },
-                );
-                rig.state.pinned_peer_compose = Some(PinnedPeerCompose::new(
-                    "node-r4".into(),
-                    PeerComposeAction::Respond,
-                ));
                 let reply = (0..12)
                     .map(|n| format!("row-{n:02} 界e\u{301} 👩‍💻 tail"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                rig.paste(&reply).await;
+                let draft = format!("/team reply ri-r4 {reply}");
+                rig.paste(&draft).await;
                 let mut before = rig.paint();
                 let cursor = before.get_cursor_position().unwrap();
                 let original = screen(&before);
@@ -8272,8 +8271,8 @@ pub(crate) mod tests {
                 );
                 assert_eq!(rig.enter().await, KeyFlow::Continue);
                 assert!(matches!(rig.frames().as_slice(),
-                    [ClientFrame::ResolvePeerDraft { node, action: PeerDraftAction::WriteOwn { content } }]
-                    if node == "node-r4" && content == &reply));
+                    [ClientFrame::ReplyToRecipientItem { item_id, text, .. }]
+                    if item_id == "ri-r4" && text == &reply));
                 assert!(rig.state.input_buffer.is_empty());
                 assert_eq!(
                     rig.state.cursor_position, 0,
@@ -8297,9 +8296,9 @@ pub(crate) mod tests {
                 );
                 crate::adapters::tui::handlers::recipient_actions::apply_action_result(
                     &mut rig.state,
-                    RecipientAction::Response,
-                    RecipientActionTarget::Node {
-                        node_id: "node-r4".into(),
+                    RecipientAction::Reply,
+                    RecipientActionTarget::Item {
+                        item_id: "ri-r4".into(),
                     },
                     if refused {
                         RecipientActionOutcome::Refused {
@@ -8311,15 +8310,11 @@ pub(crate) mod tests {
                 );
                 let mut settled = rig.paint();
                 if refused {
-                    assert_eq!(rig.state.input_buffer, reply);
+                    assert_eq!(rig.state.input_buffer, draft);
                     assert!(screen(&settled).contains("row-11"));
                     assert_eq!(settled.get_cursor_position().unwrap(), cursor);
-                    assert!(rig.state.pinned_peer_compose.is_some());
                 } else {
-                    assert!(
-                        rig.state.input_buffer.is_empty()
-                            && rig.state.pinned_peer_compose.is_none()
-                    );
+                    assert!(rig.state.input_buffer.is_empty());
                     assert!(!screen(&settled).contains("row-11"));
                     assert_eq!(settled.get_cursor_position().unwrap().x, 1);
                     rig.enter().await;
@@ -8608,7 +8603,7 @@ pub(crate) mod tests {
         /// Everything a key that must not touch the page leaves alone.
         fn page_state(rig: &Rig) -> String {
             let i = rig.state.thread_inspector.as_ref().expect("thread open");
-            let ThreadTarget::Item(address) = &i.target;
+            let address = i.item_address().unwrap();
             format!(
                 "{:?}",
                 (
@@ -8619,7 +8614,10 @@ pub(crate) mod tests {
                     i.last_non_pinned_ordinal,
                     &i.root_id,
                     address.item().as_str(),
-                    i.results.len(),
+                    rig.state
+                        .thread_outcomes
+                        .lines(address.item().as_str())
+                        .count(),
                     &rig.state.input_buffer,
                     &rig.state.focus,
                 )
@@ -8636,7 +8634,7 @@ pub(crate) mod tests {
 
         fn snapshot(rig: &Rig) -> String {
             let i = rig.state.thread_inspector.as_ref().expect("thread open");
-            let ThreadTarget::Item(address) = &i.target;
+            let address = i.item_address().unwrap();
             format!(
                 "{} | {:?} | {} | {:?}",
                 rig.state.modal_stack.top().expect("a frame").title(),
@@ -8858,16 +8856,11 @@ pub(crate) mod tests {
             assert!(rig.state.thread_inspector.is_none());
             assert_eq!(decision_queue::waiting(&rig.state), 1);
 
-            // An address-less node has no item to view: Info notice, no frame, still queued.
+            // Address-less drafts now open the response view without deciding the draft.
             let mut bare = story21_6_attached_recipient_rig();
             assert_eq!(bare.ch('v').await, KeyFlow::Continue);
-            assert!(bare.state.thread_inspector.is_none());
-            assert_eq!(thread_frames(&bare), 0);
-            assert!(notice_with(
-                &bare,
-                NoticeSeverity::Info,
-                "no item to view — answer it in the decision"
-            ));
+            assert_eq!(thread_frames(&bare), 1);
+            assert!(screen(&mut bare).contains("response actions · node-a"));
             assert!(bare.frames().is_empty());
             assert_eq!(decision_queue::waiting(&bare.state), 1);
         }
@@ -8916,16 +8909,20 @@ pub(crate) mod tests {
                 at(&mut rig, top);
             }
 
-            // Consumed no-ops: nothing at the root of a thread, no omitted later page, no row,
-            // Chat `Tab`/`Enter`. Each leaves the page, the composer and the focus alone.
+            // Keys with no applicable row preserve the page, composer and focus.
             rig.key(Key::PageDown).await;
             let before = page_state(&rig);
             assert_ne!(viewer_top(&rig), 0, "positive control: the viewer scrolled");
+            let mode = rig.state.thread_inspector.as_ref().unwrap().mode;
+            rig.ch('v').await;
+            assert_ne!(rig.state.thread_inspector.as_ref().unwrap().mode, mode);
+            rig.ch('v').await;
+            assert_eq!(rig.state.thread_inspector.as_ref().unwrap().mode, mode);
+            screen(&mut rig);
             for key in [
                 Key::Char('h'),
                 Key::Char('0'),
                 Key::Char('$'),
-                Key::Char('v'),
                 Key::Char('l'),
                 Key::Char('z'),
                 Key::Alt('b'),
@@ -9038,12 +9035,11 @@ pub(crate) mod tests {
             }
         }
 
-        /// What a writer key did to the world: nothing, the composer line it prefilled, or
-        /// the one frame it queued.
+        /// What a writer key did: open its reply field, send one frame, or nothing.
         #[derive(Debug, PartialEq)]
         enum Effect {
             Nothing,
-            Prefill(String),
+            ReplyField(String),
             Frame(String),
         }
 
@@ -9061,9 +9057,24 @@ pub(crate) mod tests {
                     .any(|frame| matches!(frame, ClientFrame::ResolvePeerDraft { .. })),
                 "S-THREAD never resolves a peer draft: {frames:?}"
             );
+            assert_eq!(
+                rig.state.input_buffer, composer,
+                "writer keys never alter the composer"
+            );
             match frames.as_slice() {
-                [] if rig.state.input_buffer != composer => {
-                    Effect::Prefill(rig.state.input_buffer.clone())
+                [] if rig
+                    .state
+                    .thread_inspector
+                    .as_ref()
+                    .is_some_and(|i| i.reply.is_some()) =>
+                {
+                    let i = rig.state.thread_inspector.as_ref().unwrap();
+                    Effect::ReplyField(
+                        i.reply
+                            .as_ref()
+                            .unwrap()
+                            .prompt(i.item_address().unwrap().item().as_str()),
+                    )
                 }
                 [] => Effect::Nothing,
                 [one] => Effect::Frame(format!("{one:?}")),
@@ -9188,7 +9199,7 @@ pub(crate) mod tests {
                 || item_rig(false, Consultation, None, false, true),
                 &['r', 'b', 'u'],
                 &[
-                    ('r', Effect::Prefill(REPLY.to_owned())),
+                    ('r', Effect::ReplyField(REPLY.to_owned())),
                     ('b', defer()),
                     ('u', context(true)),
                 ],
@@ -9199,7 +9210,7 @@ pub(crate) mod tests {
                 || item_rig(false, ArchitectureUpdate, None, false, false),
                 &['d', 'a', 'u'],
                 &[
-                    ('d', Effect::Prefill(REPLY.to_owned())),
+                    ('d', Effect::ReplyField(REPLY.to_owned())),
                     ('a', acknowledge()),
                     ('u', context(true)),
                 ],
@@ -9210,7 +9221,7 @@ pub(crate) mod tests {
                 || item_rig(false, ArchitectureUpdate, None, true, false),
                 &['d', 'u'],
                 &[
-                    ('d', Effect::Prefill(REPLY.to_owned())),
+                    ('d', Effect::ReplyField(REPLY.to_owned())),
                     ('u', context(true)),
                 ],
             )
@@ -9230,7 +9241,7 @@ pub(crate) mod tests {
                 &[
                     (
                         'd',
-                        Effect::Prefill("/team reply --discuss ri-1 ".to_owned()),
+                        Effect::ReplyField("/team reply --discuss ri-1 ".to_owned()),
                     ),
                     ('a', acknowledge()),
                     (
@@ -9260,7 +9271,7 @@ pub(crate) mod tests {
                 busy_in_flight_rig,
                 &['r', 'u'],
                 &[
-                    ('r', Effect::Prefill(REPLY.to_owned())),
+                    ('r', Effect::ReplyField(REPLY.to_owned())),
                     ('u', context(true)),
                 ],
             )
@@ -9319,6 +9330,9 @@ pub(crate) mod tests {
             assert!(rig.state.recipient_context_ids.contains("ri-1"));
 
             let state = page_state(&rig);
+            rig.state.clipboard_copier = Some(std::sync::Arc::new(|_| {
+                crate::adapters::tui::clipboard::ClipboardResult::Osc52Success
+            }));
             assert_eq!(rig.ch('c').await, KeyFlow::Continue);
             assert!(rig.frames().is_empty(), "`c` sends nothing");
             assert_eq!(page_state(&rig), state);
@@ -9392,7 +9406,7 @@ pub(crate) mod tests {
             let earlier = {
                 let i = rig.state.thread_inspector.as_ref().unwrap();
                 assert_eq!(i.root_id.as_deref(), Some("t-root"), "the root is retained");
-                let ThreadTarget::Item(address) = &i.target;
+                let address = i.item_address().unwrap();
                 assert_eq!(
                     address.item().as_str(),
                     "t-open",
@@ -9422,7 +9436,7 @@ pub(crate) mod tests {
             assert!(rig.frames().is_empty());
             let i = rig.state.thread_inspector.as_ref().unwrap();
             assert_eq!(i.root_id.as_deref(), Some("t-root"));
-            let ThreadTarget::Item(address) = &i.target;
+            let address = i.item_address().unwrap();
             assert_eq!(address.item().as_str(), "t-open");
             assert_eq!(i.viewer.top, 0, "back at the top");
             assert!(
@@ -9726,6 +9740,929 @@ pub(crate) mod tests {
                 painted.contains("recipient item 'ri-1' not found"),
                 "the refusal is shown in the frame: {painted}"
             );
+        }
+
+        fn reply_text(rig: &Rig) -> Option<&str> {
+            rig.state
+                .thread_inspector
+                .as_ref()?
+                .reply
+                .as_ref()
+                .map(|r| r.field.as_str())
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_node_view_tab_toggles_item_and_response() {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, true).await;
+            rig.state.terminal_width = 220;
+            set_composer(&mut rig, "saved draft");
+            let node = rig
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .node_id
+                .clone()
+                .unwrap();
+            assert!(screen(&mut rig).contains("item actions · ri-1"));
+            rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
+            let painted = screen(&mut rig);
+            assert!(painted.contains("Thread · response"), "{painted}");
+            assert!(
+                painted.contains(&format!("response actions · {node}")),
+                "{painted}"
+            );
+            rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
+            assert!(screen(&mut rig).contains("item actions · ri-1"));
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_v_on_an_addressless_draft_opens_the_node_view() {
+            let mut rig = story21_6_attached_recipient_rig();
+            set_composer(&mut rig, "saved draft");
+            assert_eq!(top_surface(&rig), Some(Surface::Decision));
+            rig.ch('v').await;
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            let painted = screen(&mut rig);
+            assert!(
+                painted.contains("Thread · response")
+                    && painted.contains("response actions · node-a"),
+                "{painted}"
+            );
+            assert_eq!(decision_queue::waiting(&rig.state), 1);
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_o_opens_the_queued_draft_decision_and_esc_returns_exactly() {
+            let mut rig = story21_6_attached_recipient_rig();
+            rig.ch('v').await;
+            let before = screen(&mut rig);
+            assert!(before.contains("[o] Open decision"), "{before}");
+            let top = rig.state.thread_inspector.as_ref().unwrap().viewer.top;
+            rig.ch('o').await;
+            assert_eq!(top_surface(&rig), Some(Surface::Decision));
+            assert!(
+                rig.state
+                    .decisions
+                    .holds(DecisionKind::RecipientDraftApproval)
+            );
+            rig.ready();
+            rig.esc().await;
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert_eq!(rig.state.thread_inspector.as_ref().unwrap().viewer.top, top);
+            let after = screen(&mut rig);
+            assert!(
+                after.contains("response actions · node-a") && after.contains("[o] Open decision"),
+                "{after}"
+            );
+            assert!(rig.frames().is_empty());
+
+            // The same route on a response linked to a journal item opens that
+            // node's queued decision, not an unrelated draft.
+            let mut linked =
+                item_rig(false, SemanticMessageType::Consultation, None, false, true).await;
+            let node = linked
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .node_id
+                .clone()
+                .unwrap();
+            let control = linked
+                .domain_tab
+                .conversation
+                .peer_row_controls
+                .get_mut("row")
+                .unwrap();
+            control.stage = PeerRowStage::Ready;
+            control.node_resolvable = true;
+            decision_queue::sync_recipient_drafts(
+                &mut linked.state,
+                &linked.domain_tab.conversation,
+                false,
+            );
+            if top_surface(&linked) == Some(Surface::Decision) {
+                linked.ready();
+                linked.esc().await;
+            }
+            linked.press(KeyCode::Tab, KeyModifiers::NONE).await;
+            assert!(screen(&mut linked).contains("[o] Open decision"));
+            let page = linked
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .content
+                .clone();
+            let top = linked.state.thread_inspector.as_ref().unwrap().viewer.top;
+            linked.ch('o').await;
+            assert_eq!(
+                decision_queue::focused_key(&linked.state).unwrap().source,
+                node
+            );
+            linked.ready();
+            linked.esc().await;
+            let inspector = linked.state.thread_inspector.as_ref().unwrap();
+            assert_eq!(inspector.content, page);
+            assert_eq!(inspector.viewer.top, top);
+            assert!(linked.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_o_absent_and_inert_when_stale_other_tab_or_none_queued() {
+            let mut control = story21_6_attached_recipient_rig();
+            control.ch('v').await;
+            assert!(screen(&mut control).contains("[o] Open decision"));
+            control.ch('o').await;
+            assert_eq!(top_surface(&control), Some(Surface::Decision));
+
+            for case in 0..3 {
+                let mut rig = story21_6_attached_recipient_rig();
+                rig.ch('v').await;
+                match case {
+                    0 => {
+                        rig.state.thread_inspector.as_mut().unwrap().target =
+                            ThreadTarget::Node("stale-node".into());
+                    }
+                    1 => {
+                        rig.domain_tab.conversation.id = "other-tab".into();
+                    }
+                    _ => {
+                        rig.domain_tab.conversation.peer_row_controls.clear();
+                        decision_queue::sync_recipient_drafts(
+                            &mut rig.state,
+                            &rig.domain_tab.conversation,
+                            false,
+                        );
+                    }
+                }
+                let painted = screen(&mut rig);
+                assert!(
+                    !painted.contains("[o] Open decision"),
+                    "case {case}: {painted}"
+                );
+                rig.ch('o').await;
+                assert_eq!(
+                    top_surface(&rig),
+                    Some(Surface::ThreadInspector),
+                    "case {case}"
+                );
+                assert!(rig.frames().is_empty());
+            }
+
+            // Retain a genuinely stale queue item (normally kept while its decision
+            // is being read), then expose the node view beneath it.
+            let mut stale = story21_6_attached_recipient_rig();
+            let controls = stale.domain_tab.conversation.peer_row_controls.clone();
+            stale.domain_tab.conversation.peer_row_controls.clear();
+            decision_queue::sync_recipient_drafts(
+                &mut stale.state,
+                &stale.domain_tab.conversation,
+                false,
+            );
+            assert!(stale.state.decisions.items().any(|item| item.is_stale()));
+            stale.domain_tab.conversation.peer_row_controls = controls;
+            presentation::reducer::close(&mut stale.state, Surface::Decision);
+            crate::infrastructure::runtime::thread_open::open_node(
+                &stale.domain_tab.conversation,
+                "node-a",
+                &mut stale.state,
+                ThreadAccess::Writer,
+            )
+            .unwrap();
+            let painted = screen(&mut stale);
+            assert!(!painted.contains("[o] Open decision"), "{painted}");
+            stale.ch('o').await;
+            assert_eq!(top_surface(&stale), Some(Surface::ThreadInspector));
+            assert!(stale.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_node_view_offers_no_draft_rows_and_never_touches_the_composer()
+        {
+            let mut rig = story21_6_attached_recipient_rig();
+            set_composer(&mut rig, "saved draft");
+            rig.state.cursor_position = 3;
+            rig.ch('v').await;
+            let painted = screen(&mut rig);
+            assert!(painted.contains("[o] Open decision"), "{painted}");
+            for key in ['y', 'e', 'n', 'r', 'd'] {
+                assert!(!painted.contains(&format!("[{key}]")), "{painted}");
+                rig.ch(key).await;
+                assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+                assert_eq!(
+                    (&*rig.state.input_buffer, rig.state.cursor_position),
+                    ("saved draft", 3)
+                );
+                assert!(rig.frames().is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_reply_field_prompt_and_enter_send_through_team_reply() {
+            use crate::adapters::daemon::protocol::ReplyVerdict;
+            let stories = || {
+                Some(ReceivedStories::Listed {
+                    stories: vec![ReceivedStory {
+                        key: StoryKey::parse("S1").unwrap(),
+                        holder: StoryHolder::You,
+                    }],
+                })
+            };
+            for (kind, list, key, prompt, verdict) in [
+                (
+                    SemanticMessageType::StoryAssignment,
+                    stories(),
+                    'd',
+                    "/team reply --discuss ri-1",
+                    Some(ReplyVerdict::Discuss),
+                ),
+                (
+                    SemanticMessageType::Consultation,
+                    None,
+                    'r',
+                    "/team reply ri-1",
+                    None,
+                ),
+                (
+                    SemanticMessageType::ArchitectureUpdate,
+                    None,
+                    'd',
+                    "/team reply ri-1",
+                    None,
+                ),
+            ] {
+                let mut rig = item_rig(false, kind, list, false, false).await;
+                set_composer(&mut rig, "saved draft");
+                rig.state.cursor_position = 3;
+                rig.ch(key).await;
+                let painted = screen(&mut rig);
+                assert!(painted.contains(prompt), "{painted}");
+                assert!(
+                    !painted.contains("input already contains text"),
+                    "{painted}"
+                );
+                super::super::handle_attached_paste(&mut rig.state, "x\ny", false);
+                rig.type_text("z").await;
+                assert_eq!(reply_text(&rig), Some("x\nyz"));
+                rig.enter().await;
+                let frames = rig.frames();
+                assert!(
+                    matches!(frames.as_slice(), [ClientFrame::ReplyToRecipientItem { item_id, text, verdict: actual }] if item_id == "ri-1" && text == "x\nyz" && *actual == verdict),
+                    "{frames:?}"
+                );
+                assert!(rig.state.thread_inspector.is_none());
+                assert_eq!(rig.state.input_buffer, "saved draft");
+                assert_eq!(rig.state.cursor_position, 3);
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_empty_enter_does_nothing_and_esc_clears_then_backs() {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            set_composer(&mut rig, "saved draft");
+            rig.ch('r').await;
+            rig.enter().await;
+            assert_eq!(reply_text(&rig), Some(""));
+            assert!(rig.frames().is_empty());
+            rig.type_text("unsent").await;
+            rig.esc().await;
+            assert_eq!(reply_text(&rig), None);
+            rig.ch('r').await;
+            assert_eq!(reply_text(&rig), Some(""));
+            rig.esc().await;
+            rig.esc().await;
+            assert!(rig.state.thread_inspector.is_none());
+            assert_eq!(rig.state.input_buffer, "saved draft");
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_reply_over_64_kib_is_refused_before_anything_is_sent() {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            set_composer(&mut rig, "saved draft");
+            rig.ch('r').await;
+            super::super::handle_attached_paste(&mut rig.state, &"x".repeat(64 * 1024 + 1), false);
+            rig.enter().await;
+            assert!(rig.frames().is_empty());
+            let key = rig.state.thread_inspector.as_ref().unwrap().outcome_key();
+            assert!(
+                rig.state
+                    .thread_outcomes
+                    .lines(&key)
+                    .any(|line| line.contains("reply is longer than 64 KiB")),
+                "the refusal is an outcome line of the open thread"
+            );
+            assert_eq!(reply_text(&rig).unwrap().len(), 64 * 1024 + 1);
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            rig.esc().await;
+            rig.ch('r').await;
+            rig.type_text("short").await;
+            rig.enter().await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::ReplyToRecipientItem { text, .. }] if text == "short")
+            );
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_refused_reply_keeps_its_text_in_the_thread_not_the_composer() {
+            for outcome in [
+                RecipientActionOutcome::Refused {
+                    error: crate::adapters::daemon::protocol::ProtocolError::ReadOnly,
+                },
+                RecipientActionOutcome::Idempotent,
+            ] {
+                let mut rig = item_rig(
+                    false,
+                    SemanticMessageType::ArchitectureUpdate,
+                    None,
+                    false,
+                    false,
+                )
+                .await;
+                set_composer(&mut rig, "saved draft");
+                rig.ch('d').await;
+                rig.type_text("retained reply").await;
+                rig.enter().await;
+                assert!(
+                    matches!(rig.frames().as_slice(), [ClientFrame::ReplyToRecipientItem { text, .. }] if text == "retained reply")
+                );
+                crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                    &mut rig.state,
+                    RecipientAction::Reply,
+                    RecipientActionTarget::Item {
+                        item_id: "ri-1".into(),
+                    },
+                    outcome,
+                );
+                assert_eq!(rig.state.input_buffer, "saved draft");
+                rig.open_thread("ri-1", ThreadAccess::Writer).await;
+                rig.ch('d').await;
+                assert_eq!(reply_text(&rig), Some("retained reply"));
+                assert!(screen(&mut rig).contains("retained reply"));
+                assert!(rig.frames().is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_shift_text_and_readline_chords_reach_the_reply_field() {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            set_composer(&mut rig, "saved draft");
+            rig.press(KeyCode::Char('R'), KeyModifiers::SHIFT).await;
+            assert_eq!(reply_text(&rig), None);
+            assert!(rig.frames().is_empty());
+            rig.ch('r').await;
+            for c in ['R', 'D', 'Y'] {
+                rig.press(KeyCode::Char(c), KeyModifiers::SHIFT).await;
+            }
+            assert_eq!(reply_text(&rig), Some("RDY"));
+            rig.type_text(" word").await;
+            rig.ctrl('a').await;
+            rig.ch('X').await;
+            assert_eq!(reply_text(&rig), Some("XRDY word"));
+            rig.press(KeyCode::End, KeyModifiers::NONE).await;
+            rig.ctrl('w').await;
+            assert_eq!(reply_text(&rig), Some("XRDY "));
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_read_only_never_opens_a_reply_field() {
+            let mut control =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            control.ch('r').await;
+            assert_eq!(reply_text(&control), Some(""));
+            let mut rig =
+                item_rig(true, SemanticMessageType::Consultation, None, false, false).await;
+            set_composer(&mut rig, "saved draft");
+            for key in ['r', 'd'] {
+                rig.ch(key).await;
+                assert_eq!(reply_text(&rig), None);
+                assert!(rig.frames().is_empty());
+            }
+            assert_eq!(rig.state.input_buffer, "saved draft");
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_c_copies_original_body_and_sends_no_frame() {
+            let mut rig = Rig::at(FocusState::Chat, "saved draft");
+            let journal = journal_of(&rig).await;
+            seed_thread_item(
+                &journal,
+                &thread_peer(),
+                "ri-copy",
+                SemanticMessageType::Consultation,
+                None,
+                "original \x1b[31m body",
+                None,
+            )
+            .await;
+            drop(journal);
+            rig.open_thread("ri-copy", ThreadAccess::Writer).await;
+            let copied = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+            let sink = copied.clone();
+            rig.state.clipboard_copier = Some(std::sync::Arc::new(move |text| {
+                sink.lock().push(text.to_owned());
+                crate::adapters::tui::clipboard::ClipboardResult::Osc52Success
+            }));
+            rig.ch('c').await;
+            assert_eq!(&*copied.lock(), &["original \x1b[31m body"]);
+            assert!(rig.frames().is_empty());
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            rig.state.thread_inspector.as_mut().unwrap().original = None;
+            rig.ch('c').await;
+            assert_eq!(copied.lock().len(), 1);
+            assert!(
+                rig.state
+                    .notifications
+                    .records()
+                    .any(|n| n.message.contains("Nothing to copy"))
+            );
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_search_filter_attached_twin() {
+            let mut rig = Rig::at(FocusState::Chat, "saved draft");
+            let journal = journal_of(&rig).await;
+            let peer = thread_peer();
+            for (id, parent, body) in [
+                ("root", None, "root canary"),
+                ("middle", Some("root"), "unique needle"),
+                ("other", Some("middle"), "discard canary"),
+                ("opened", Some("other"), "opened canary"),
+            ] {
+                seed_thread_item(
+                    &journal,
+                    &peer,
+                    id,
+                    SemanticMessageType::Consultation,
+                    parent,
+                    body,
+                    None,
+                )
+                .await;
+            }
+            drop(journal);
+            rig.open_thread("opened", ThreadAccess::Writer).await;
+            let unfiltered = screen(&mut rig);
+            assert!(unfiltered.contains("[/] Search"), "{unfiltered}");
+            let kept = |rig: &Rig, needle: &str| {
+                crate::adapters::tui::thread_body::visible_segments(
+                    rig.state.thread_inspector.as_ref().unwrap(),
+                )
+                .iter()
+                .any(|segment| segment.text().contains(needle))
+            };
+            assert!(
+                kept(&rig, "discard canary"),
+                "positive control: nothing filtered yet"
+            );
+            rig.ch('/').await;
+            rig.type_text("NEEDLE").await;
+            decision_queue::reply::observe(&mut rig.state, "principal", "roster", "ri-arrived", 1);
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert!(rig.state.thread_inspector.as_ref().unwrap().search.editing);
+            rig.enter().await;
+            let filtered = screen(&mut rig);
+            assert!(
+                filtered.contains("unique needle")
+                    && filtered.contains("root canary")
+                    && filtered.contains("opened canary"),
+                "{filtered}"
+            );
+            assert!(
+                !kept(&rig, "discard canary"),
+                "the non-matching turn is filtered out"
+            );
+            assert!(!filtered.contains("discard canary"), "{filtered}");
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            assert!(rig.frames().is_empty());
+            rig.esc().await;
+            assert!(
+                kept(&rig, "discard canary"),
+                "the first Esc clears the filter"
+            );
+            let cleared = screen(&mut rig);
+            assert!(
+                cleared.contains("opened canary") && !cleared.contains("NEEDLE"),
+                "{cleared}"
+            );
+            rig.ch('/').await;
+            rig.type_text("not-present-anywhere").await;
+            rig.enter().await;
+            assert!(
+                rig.state
+                    .notifications
+                    .records()
+                    .any(|n| n.message.contains("Search: no match"))
+            );
+            assert!(kept(&rig, "discard canary"));
+            let unchanged = screen(&mut rig);
+            assert!(
+                unchanged.contains("opened canary") && unchanged.contains("[c] Copy"),
+                "{unchanged}"
+            );
+            assert!(
+                !unchanged.contains("not-present-anywhere"),
+                "the no-match query is cleared: {unchanged}"
+            );
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_l_never_pages_inside_the_viewport() {
+            use crate::adapters::tui::thread_body::ThreadSegment;
+            let mut rig = long_thread_rig("saved draft").await;
+            rig.ch('p').await;
+            let before = rig
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .last_non_pinned_ordinal;
+            assert!(rig.state.thread_inspector.as_ref().unwrap().omitted_after > 0);
+            {
+                let inspector = rig.state.thread_inspector.as_mut().unwrap();
+                let body = inspector
+                    .segments
+                    .iter_mut()
+                    .find_map(|segment| match segment {
+                        ThreadSegment::Body(body) => Some(body),
+                        _ => None,
+                    })
+                    .unwrap();
+                *body = format!("```\n{}\n```", "0123456789".repeat(20));
+                inspector.invalidate();
+            }
+            let painted = screen(&mut rig);
+            assert!(
+                rig.state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .wide_fit
+                    .get()
+                    .0
+                    > 0,
+                "{painted}"
+            );
+            rig.enter().await;
+            assert!(rig.state.thread_inspector.as_ref().unwrap().viewport);
+            let before_scroll = screen(&mut rig);
+            rig.ch('l').await;
+            rig.ch('l').await;
+            let inspector = rig.state.thread_inspector.as_ref().unwrap();
+            assert_eq!(inspector.last_non_pinned_ordinal, before);
+            assert!(inspector.viewer.h_off > 0);
+            let after_scroll = screen(&mut rig);
+            assert_ne!(before_scroll, after_scroll, "the visible wide block moves");
+            assert!(rig.frames().is_empty());
+            rig.esc().await;
+            rig.ch('l').await;
+            assert_ne!(
+                rig.state
+                    .thread_inspector
+                    .as_ref()
+                    .unwrap()
+                    .last_non_pinned_ordinal,
+                before
+            );
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_enter_not_painted_without_a_wide_block() {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            let painted = screen(&mut rig);
+            assert!(!painted.contains("[Enter] Block"), "{painted}");
+            rig.enter().await;
+            assert!(!rig.state.thread_inspector.as_ref().unwrap().viewport);
+            assert!(rig.frames().is_empty());
+            rig.ch('r').await;
+            assert_eq!(reply_text(&rig), Some(""));
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_ack_outcome_lives_in_the_thread_and_survives_reopen() {
+            let mut rig = item_rig(
+                false,
+                SemanticMessageType::ArchitectureUpdate,
+                None,
+                false,
+                false,
+            )
+            .await;
+            set_composer(&mut rig, "saved draft");
+            rig.ch('a').await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::AcknowledgeRecipientItem { item_id }] if item_id == "ri-1")
+            );
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut rig.state,
+                RecipientAction::Acknowledge,
+                RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                RecipientActionOutcome::Applied { reply: None },
+            );
+            assert!(screen(&mut rig).contains("acknowledgement recorded"));
+            rig.esc().await;
+            rig.open_thread("ri-1", ThreadAccess::Writer).await;
+            assert!(screen(&mut rig).contains("acknowledgement recorded"));
+            assert_eq!(rig.state.input_buffer, "saved draft");
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_typed_team_ack_without_a_frame_posts_one_info_notice_and_no_feedback_block()
+         {
+            let mut rig = item_rig(
+                false,
+                SemanticMessageType::ArchitectureUpdate,
+                None,
+                false,
+                false,
+            )
+            .await;
+            rig.esc().await;
+            let blocks = rig.state.feedback_blocks.len();
+            let notices = rig.state.notifications.records().count();
+            set_composer(&mut rig, "/team ack ri-1");
+            rig.submit_composer().await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::AcknowledgeRecipientItem { item_id }] if item_id == "ri-1")
+            );
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut rig.state,
+                RecipientAction::Acknowledge,
+                RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                RecipientActionOutcome::Idempotent,
+            );
+            assert_eq!(rig.state.feedback_blocks.len(), blocks);
+            let new: Vec<_> = rig.state.notifications.records().skip(notices).collect();
+            assert_eq!(new.len(), 1);
+            assert_eq!(new[0].severity, NoticeSeverity::Info);
+            assert_eq!(new[0].source, NoticeSource::Team);
+            assert_eq!(new[0].count, 1);
+            assert!(new[0].action.is_none());
+            assert!(new[0].message.contains("no new action applied"));
+            assert!(rig.frames().is_empty());
+        }
+
+        #[test]
+        fn story21_8_attached_outcome_log_evicts_the_oldest_target_whole_at_33() {
+            let mut rig = Rig::new(false);
+            for target in 0..32 {
+                for line in 0..2 {
+                    rig.state
+                        .thread_outcomes
+                        .push(&format!("item-{target}"), format!("line-{line}"));
+                }
+            }
+            for line in 0..17 {
+                rig.state
+                    .thread_outcomes
+                    .push("item-1", format!("extra-{line}"));
+            }
+            let lines: Vec<_> = rig.state.thread_outcomes.lines("item-1").collect();
+            assert_eq!(lines.len(), 16);
+            assert_eq!(lines[0], "extra-1");
+            rig.state.thread_outcomes.push("item-32", "new".into());
+            assert_eq!(rig.state.thread_outcomes.len(), 32);
+            assert_eq!(rig.state.thread_outcomes.lines("item-0").count(), 0);
+            assert_eq!(rig.state.thread_outcomes.lines("item-1").count(), 16);
+            assert_eq!(
+                rig.state
+                    .thread_outcomes
+                    .lines("item-32")
+                    .collect::<Vec<_>>(),
+                ["new"]
+            );
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_context_inventory_stays_a_transcript_row() {
+            let mut rig = Rig::at(FocusState::Input, "/team context");
+            rig.submit_composer().await;
+            assert!(matches!(
+                rig.frames().as_slice(),
+                [ClientFrame::InspectRecipientContext]
+            ));
+            crate::adapters::tui::handlers::recipient_actions::apply_context_state(
+                &mut rig.state,
+                vec!["ri-1".into()],
+                "inventory canary".into(),
+                true,
+            );
+            assert_eq!(rig.feedback("recipient-context"), Some("inventory canary"));
+            assert!(rig.frames().is_empty());
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_deleted_block_ids_are_absent() {
+            let mut rig = item_rig(
+                false,
+                SemanticMessageType::ArchitectureUpdate,
+                None,
+                false,
+                false,
+            )
+            .await;
+            rig.ch('a').await;
+            assert_eq!(rig.frames().len(), 1);
+            crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                &mut rig.state,
+                RecipientAction::Acknowledge,
+                RecipientActionTarget::Item {
+                    item_id: "ri-1".into(),
+                },
+                RecipientActionOutcome::Applied { reply: None },
+            );
+            assert!(screen(&mut rig).contains("acknowledgement recorded"));
+            for id in ["recipient-actions", "recipient-view"] {
+                assert!(rig.feedback(id).is_none(), "{id}");
+            }
+        }
+
+        async fn reply_witness_rig(_: Key) -> Rig {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            set_composer(&mut rig, "draft");
+            rig.ch('r').await;
+            rig
+        }
+
+        fn reply_witness_digest(rig: &Rig) -> String {
+            format!("reply={} {}", reply_text(rig).is_some(), open_surface(rig))
+        }
+
+        #[tokio::test]
+        async fn story21_3_attached_witness_thread_reply() {
+            let at = |reply, quit| {
+                format!("Continue | reply={reply} quit={quit} focus=Chat input=draft")
+            };
+            let cases = [
+                (Key::Enter, at(true, false)),
+                (Key::Esc, at(false, false)),
+                (Key::Ctrl('c'), at(false, false)),
+                (Key::Ctrl('x'), at(true, false)),
+                (Key::Ctrl('p'), at(true, false)),
+                (Key::Ctrl('q'), at(true, true)),
+            ];
+            witness_rows(
+                Context::ThreadReply,
+                reply_witness_rig,
+                reply_witness_digest,
+                &cases,
+            )
+            .await;
+            let mut rig = reply_witness_rig(Key::Char('R')).await;
+            rig.press(KeyCode::Char('R'), KeyModifiers::SHIFT).await;
+            rig.type_text(" word").await;
+            rig.ctrl('w').await;
+            assert_eq!(reply_text(&rig), Some("R "));
+            assert_eq!(rig.state.input_buffer, "draft");
+            assert!(rig.frames().is_empty());
+        }
+
+        async fn viewport_witness_rig(_: Key) -> Rig {
+            use crate::adapters::tui::thread_body::ThreadSegment;
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            set_composer(&mut rig, "draft");
+            let inspector = rig.state.thread_inspector.as_mut().unwrap();
+            let body = inspector
+                .segments
+                .iter_mut()
+                .find_map(|segment| match segment {
+                    ThreadSegment::Body(body) => Some(body),
+                    _ => None,
+                })
+                .unwrap();
+            *body = format!("```\n{}\n```", "x".repeat(200));
+            inspector.invalidate();
+            screen(&mut rig);
+            rig.enter().await;
+            rig.state.thread_inspector.as_mut().unwrap().viewer.h_off = 10;
+            rig
+        }
+
+        fn viewport_witness_digest(rig: &Rig) -> String {
+            let inspector = rig.state.thread_inspector.as_ref().unwrap();
+            format!(
+                "viewport={} off={} {}",
+                inspector.viewport,
+                inspector.viewer.h_off,
+                open_surface(rig)
+            )
+        }
+
+        #[tokio::test]
+        async fn story21_3_attached_witness_body_viewport() {
+            let probe = viewport_witness_rig(Key::Esc).await;
+            let (widest, cols) = probe
+                .state
+                .thread_inspector
+                .as_ref()
+                .unwrap()
+                .wide_fit
+                .get();
+            let maximum = widest.saturating_sub(cols);
+            let step = crate::adapters::tui::text_geometry::TAB_STOP
+                .min(cols.saturating_sub(2))
+                .max(1);
+            assert!(maximum > 10 + step);
+            let at = |viewport, off, quit| {
+                format!(
+                    "Continue | viewport={viewport} off={off} quit={quit} focus=Chat input=draft"
+                )
+            };
+            let own = [
+                (Key::Esc, at(false, 0, false)),
+                (Key::Ctrl('c'), at(false, 0, false)),
+                (Key::Ctrl('x'), at(true, 10, false)),
+                (Key::Ctrl('p'), at(true, 10, false)),
+                (Key::Ctrl('q'), at(true, 10, true)),
+            ];
+            witness_rows(
+                Context::BodyViewport,
+                viewport_witness_rig,
+                viewport_witness_digest,
+                &own,
+            )
+            .await;
+            let inherited = [
+                (Key::Char('h'), at(true, 10 - step, false)),
+                (Key::Char('l'), at(true, 10 + step, false)),
+                (Key::Char('0'), at(true, 0, false)),
+                (Key::Char('$'), at(true, maximum, false)),
+                (Key::Char('v'), at(true, 10, false)),
+            ];
+            witness_rows(
+                Context::MarkdownBody,
+                viewport_witness_rig,
+                viewport_witness_digest,
+                &inherited,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn story21_8_attached_nonempty_reply_is_protected_by_quit_confirmation() {
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            assert!(rig.state.input_buffer.is_empty());
+            rig.ch('r').await;
+            assert!(!crate::adapters::tui::thread_inspector::reply_field_has_text(&rig.state));
+            rig.type_text("unsent reply").await;
+            assert!(crate::adapters::tui::thread_inspector::reply_field_has_text(&rig.state));
+            rig.ctrl('q').await;
+            assert_eq!(top_surface(&rig), Some(Surface::QuitConfirm));
+            rig.ch('n').await;
+            assert_eq!(top_surface(&rig), Some(Surface::ThreadInspector));
+            assert_eq!(reply_text(&rig), Some("unsent reply"));
+            assert!(rig.frames().is_empty());
+        }
+
+        /// 8B-03: a reply sent from the field and still awaiting its result protects quit.
+        #[tokio::test]
+        async fn story21_8_attached_pending_field_reply_is_protected_by_quit_confirmation() {
+            let mut idle =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            idle.ctrl('q').await;
+            assert_ne!(
+                top_surface(&idle),
+                Some(Surface::QuitConfirm),
+                "positive control: an idle client with nothing pending quits freely"
+            );
+            let mut rig =
+                item_rig(false, SemanticMessageType::Consultation, None, false, false).await;
+            rig.ch('r').await;
+            rig.type_text("awaiting result").await;
+            rig.enter().await;
+            assert!(matches!(
+                rig.frames().as_slice(),
+                [ClientFrame::ReplyToRecipientItem { .. }]
+            ));
+            assert!(rig.state.thread_inspector.is_none());
+            assert!(rig.state.input_buffer.is_empty());
+            rig.ctrl('q').await;
+            assert_eq!(top_surface(&rig), Some(Surface::QuitConfirm));
         }
     }
 }

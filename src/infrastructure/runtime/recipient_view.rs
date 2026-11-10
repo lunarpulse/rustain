@@ -40,6 +40,11 @@ pub struct ReceivedThreadPage {
     pub context_available: bool,
     /// Complete, bounded text ready for the native Info reader.
     pub content: String,
+    /// The page as local text and escaped peer bodies (what the Rendered mode paints).
+    pub segments: Vec<crate::adapters::tui::thread_body::ThreadSegment>,
+    pub turns: Vec<crate::adapters::tui::thread_body::TurnMark>,
+    /// The opened item's original body (what `c` copies), when its body is readable here.
+    pub original: Option<String>,
     pub first_non_pinned_ordinal: Option<usize>,
     pub last_non_pinned_ordinal: Option<usize>,
     pub omitted_before: usize,
@@ -285,6 +290,9 @@ pub(crate) async fn load_received_thread(
     };
 
     let mut content = String::new();
+    let mut bodies: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut turn_starts: Vec<(usize, bool)> = Vec::new();
+    let mut original: Option<String> = None;
     use std::fmt::Write as _;
     let canonical = semantic_type_token(opened.message_type);
     if opened.message_type == SemanticMessageType::Unknown {
@@ -306,7 +314,8 @@ pub(crate) async fn load_received_thread(
                 body.len()
             );
             if context_available {
-                append_safe_body(&mut content, body);
+                bodies.push(append_safe_body(&mut content, body));
+                original = Some(body.clone());
                 content.push('\n');
             } else {
                 content.push_str(if body.len() > BODY_LIMIT {
@@ -331,6 +340,7 @@ pub(crate) async fn load_received_thread(
         );
     }
     for &index in &selected {
+        turn_starts.push((content.len(), pinned(index)));
         let cost = cached_turn_cost(index);
         let reserve = if index == opened_index {
             opened_reserve
@@ -346,7 +356,11 @@ pub(crate) async fn load_received_thread(
                 WITHHELD_PAGE
             });
         } else {
-            append_turn(&mut content, &turns[index], index != opened_index);
+            bodies.extend(append_turn(
+                &mut content,
+                &turns[index],
+                index != opened_index,
+            ));
             content.push('\n');
         }
     }
@@ -355,6 +369,8 @@ pub(crate) async fn load_received_thread(
             "received thread metadata exceeds the bounded page size"
         ));
     }
+    let (segments, turns) =
+        crate::adapters::tui::thread_body::split_segments(&content, &bodies, &turn_starts);
     Ok(ReceivedThreadPage {
         opened_address: opened.address.clone(),
         root_id,
@@ -362,6 +378,9 @@ pub(crate) async fn load_received_thread(
         item_state: opened.state.wire_name(),
         context_available,
         content,
+        segments,
+        turns,
+        original,
         first_non_pinned_ordinal: first,
         last_non_pinned_ordinal: last,
         omitted_before,
@@ -467,7 +486,12 @@ fn turn_cost(turn: &ThreadTurnRef<'_>, opened: bool) -> TurnCost {
     }
 }
 
-fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool) {
+fn append_turn(
+    output: &mut String,
+    turn: &ThreadTurnRef<'_>,
+    include_body: bool,
+) -> Option<std::ops::Range<usize>> {
+    let mut body = None;
     use std::fmt::Write as _;
     match turn {
         ThreadTurnRef::Item(item) => {
@@ -500,7 +524,7 @@ fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool
                         if content.len() <= BODY_LIMIT =>
                     {
                         output.push('\n');
-                        append_safe_body(output, content);
+                        body = Some(append_safe_body(output, content));
                     }
                     RecipientItemState::Received { .. }
                     | RecipientItemState::Acknowledged { .. } => output
@@ -543,13 +567,14 @@ fn append_turn(output: &mut String, turn: &ThreadTurnRef<'_>, include_body: bool
             if include_body {
                 output.push('\n');
                 if reply.content.len() <= BODY_LIMIT {
-                    append_safe_body(output, &reply.content);
+                    body = Some(append_safe_body(output, &reply.content));
                 } else {
                     output.push_str("      content withheld · body exceeds 64 KiB read ceiling");
                 }
             }
         }
     }
+    body
 }
 
 pub(crate) fn safe_display_len(text: &str) -> usize {
@@ -558,7 +583,7 @@ pub(crate) fn safe_display_len(text: &str) -> usize {
         .map(|ch| match ch {
             '\n' => 7,
             '\r' | '\t' => 2,
-            ch if ch.is_control() => 4 + hex_digits(ch as u32),
+            ch if ch.is_control() || is_bidi_format(ch) => 4 + hex_digits(ch as u32),
             ch => ch.len_utf8(),
         })
         .sum::<usize>()
@@ -582,20 +607,84 @@ fn decimal_digits(mut value: u16) -> usize {
     digits
 }
 
-pub(crate) fn append_safe_body(output: &mut String, text: &str) {
+/// The one visible-escape contract for peer text shown in a thread (AD-2116): `\r`, `\t`, other
+/// control characters and the bidi overrides and isolates (U+202A–202E, U+2066–2069) become
+/// visible `\r`, `\t` and `\u{..}`; newlines stay. Applied exactly once, before any markdown
+/// renderer or literal row builder sees the text.
+pub(crate) fn escape_disclosable(text: &str) -> String {
     use std::fmt::Write as _;
-    output.push_str("      ");
+    let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            '\n' => output.push_str("\n      "),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            ch if ch.is_control() => {
-                let _ = write!(output, "\\u{{{:x}}}", ch as u32);
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch != '\n' && (ch.is_control() || is_bidi_format(ch)) => {
+                let _ = write!(escaped, "\\u{{{:x}}}", ch as u32);
             }
-            ch => output.push(ch),
+            ch => escaped.push(ch),
         }
     }
+    escaped
+}
+
+/// The Rendered path parses markdown, whose numeric character references decode to characters
+/// the literal escape above never saw (`&#x202e;`). Show every reference that decodes to a
+/// control or bidi character as the same visible `\u{..}` escape (8B-01); every other
+/// reference stays for the parser. Applied to already escaped text, so it never double-escapes.
+pub(crate) fn defuse_char_references(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("&#") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("&#") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        let (hex, digits) = match tail.strip_prefix(['x', 'X']) {
+            Some(after) => (true, after),
+            None => (false, tail),
+        };
+        let radix = if hex { 16 } else { 10 };
+        let len = digits.chars().take_while(|c| c.is_digit(radix)).count();
+        let decoded = (len > 0 && len <= 8 && digits[len..].starts_with(';'))
+            .then(|| u32::from_str_radix(&digits[..len], radix).ok())
+            .flatten()
+            .map(|code| char::from_u32(code).unwrap_or('\u{fffd}'))
+            .filter(|ch| *ch == '\0' || ch.is_control() || is_bidi_format(*ch));
+        match decoded {
+            Some(ch) => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{{{:x}}}", ch as u32);
+                rest = &digits[len + 1..];
+            }
+            None => {
+                out.push_str("&#");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Bidi overrides, embeddings and isolates: they reorder what is painted around them.
+fn is_bidi_format(ch: char) -> bool {
+    matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Append `text` behind the six-space indent (every line), escaped once. Returns the byte
+/// range of the indented body text in `output` (after the first indent, to its last byte).
+pub(crate) fn append_safe_body(output: &mut String, text: &str) -> std::ops::Range<usize> {
+    output.push_str("      ");
+    let start = output.len();
+    for ch in escape_disclosable(text).chars() {
+        if ch == '\n' {
+            output.push_str("\n      ");
+        } else {
+            output.push(ch);
+        }
+    }
+    start..output.len()
 }
 
 #[cfg(test)]

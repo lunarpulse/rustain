@@ -31,6 +31,7 @@ pub mod terminal;
 pub mod text_geometry;
 #[allow(dead_code)]
 pub mod theme;
+pub mod thread_body;
 pub mod thread_inspector;
 pub mod tool_inspector;
 pub mod version_info;

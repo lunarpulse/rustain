@@ -207,6 +207,21 @@ pub fn route(
             _ => {}
         }
     }
+    // The reply field edits its own text; only `Enter`/`Esc` reach the attached host.
+    if context == Context::ThreadReply {
+        let own = matches!(
+            keymap::resolve(context, host, &[key]),
+            Resolved::Hit(row) if matches!(row.command, CommandId::Thread(_))
+        );
+        return Some(if own && host == Host::Attached {
+            RouteEffect::Frame(context)
+        } else {
+            if !own {
+                app::dispatch_frame_key(state, context, key, host);
+            }
+            RouteEffect::Consumed
+        });
+    }
     if context == Context::InspectorSearch {
         let action = app::dispatch_frame_key(state, context, key, host);
         return Some(if host == Host::Local {

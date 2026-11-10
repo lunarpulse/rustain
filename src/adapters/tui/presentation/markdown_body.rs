@@ -7,7 +7,7 @@ use std::ops::Range;
 use ratatui::text::Line;
 
 use crate::adapters::tui::{
-    markdown::{self, BlockPresentation, RenderOptions},
+    markdown::{self, BlockPresentation, LinkPresentation, RenderOptions},
     theme::Theme,
 };
 
@@ -63,6 +63,27 @@ pub fn layout(
     mode: BodyMode,
     wrap: bool,
 ) -> BodyLayout {
+    layout_links(
+        display_source,
+        inner_width,
+        theme,
+        mode,
+        wrap,
+        LinkPresentation::Explicit,
+    )
+}
+
+/// [`layout`] with the link presentation a surface chooses (peer-authored text: always
+/// [`LinkPresentation::Explicit`], the full URL stays visible, MW-7).
+#[must_use]
+pub fn layout_links(
+    display_source: &str,
+    inner_width: usize,
+    theme: &Theme,
+    mode: BodyMode,
+    wrap: bool,
+    links: LinkPresentation,
+) -> BodyLayout {
     match mode {
         BodyMode::Source => {
             let width = if wrap { inner_width } else { usize::MAX };
@@ -89,7 +110,9 @@ pub fn layout(
                 display_source,
                 inner_width,
                 theme,
-                &RenderOptions::completed().with_blocks(BlockPresentation::Window),
+                &RenderOptions::completed()
+                    .with_blocks(BlockPresentation::Window)
+                    .with_links(links),
             );
             let mut wide = Vec::new();
             let mut widest = 0;

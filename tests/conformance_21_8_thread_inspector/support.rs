@@ -436,21 +436,26 @@ pub fn geometry(rig: &Rig) -> Geometry {
     let cache = inspector.layout.borrow();
     let room = inner.height;
     let body_min = u16::from(room > 0);
-    let rail_room = room.saturating_sub(body_min);
+    // An open reply field or a filter field takes one row below the body (the widget's plan).
+    let field_rows = u16::from(
+        inspector.reply.is_some() || inspector.search.editing || !inspector.search.query.is_empty(),
+    );
+    let field = if room > body_min { field_rows } else { 0 };
+    let rail_room = room.saturating_sub(body_min + field);
     let rows_of = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
     let (info_rows, reader_rows) = (
         rows_of(cache.footer_info.len()),
         rows_of(cache.footer_reader.len()),
     );
     // The widget's one fitting plan: the writer rail is painted only when it fits whole with
-    // the reader rail inside `room - 1`; otherwise the reader rail is clipped to that room.
+    // the reader rail inside `room - 1 - field`; otherwise the reader rail is clipped to that room.
     let footer = if info_rows.saturating_add(reader_rows) <= rail_room {
         info_rows + reader_rows
     } else {
         reader_rows.min(rail_room)
     };
-    let header = rows_of(cache.header.len()).min(room.saturating_sub(body_min + footer));
-    let body = room - header - footer;
+    let header = rows_of(cache.header.len()).min(room.saturating_sub(body_min + field + footer));
+    let body = room - header - field - footer;
     assert_eq!(
         usize::from(body),
         inspector.fit.get().1,

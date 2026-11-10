@@ -109,6 +109,7 @@ pub fn compose(
                 state,
                 shell.stage.map(|(conversation, _)| conversation),
                 modal.title(),
+                show_caret,
             ),
             Surface::Search => {
                 rect = Rect::new(

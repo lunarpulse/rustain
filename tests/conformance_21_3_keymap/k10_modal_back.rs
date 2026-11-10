@@ -214,6 +214,24 @@ fn ctrl_c_in_the_notification_log_closes_it_and_restores_the_caller() {
     assert_eq!(state.focus, FocusState::Chat, "caller restored");
 }
 
+#[test]
+fn ctrl_c_in_thread_block_viewport_returns_to_thread_like_escape() {
+    for key in [Key::Esc, Key::Ctrl('c')] {
+        let mut state = thread();
+        let inspector = state.thread_inspector.as_mut().unwrap();
+        inspector.viewport = true;
+        inspector.viewer.h_off = 16;
+        assert_eq!(press(&mut state, key), InputAction::Consumed);
+        let inspector = state.thread_inspector.as_ref().unwrap();
+        assert!(!inspector.viewport);
+        assert_eq!(inspector.viewer.h_off, 0);
+        assert_eq!(inspector.viewer.top, 20);
+        assert!(is_open(&state, Surface::ThreadInspector));
+        assert_eq!(press(&mut state, key), InputAction::Consumed);
+        assert!(!is_open(&state, Surface::ThreadInspector));
+    }
+}
+
 /// The leader menu: Ctrl+C cancels it silently and restores the origin.
 #[test]
 fn ctrl_c_in_the_leader_menu_cancels_it_silently() {

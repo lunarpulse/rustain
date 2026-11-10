@@ -46,7 +46,7 @@ fn shipped_table_passes_governance() {
 #[test]
 fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
-    assert_eq!(Context::ALL.len(), 62);
+    assert_eq!(Context::ALL.len(), 64);
     assert_eq!(Context::Permission.parents(), &[Context::Decision]);
     assert_eq!(Context::Consent.parents(), &[Context::Decision]);
     assert_eq!(Context::DecisionCompose.parents(), &[Context::CaretField]);
@@ -132,6 +132,60 @@ fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
                     "{context:?}/{host:?}: {key:?}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn thread_child_contexts_have_their_own_host_routes_and_parents() {
+    use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
+    assert_eq!(Context::ThreadReply.parents(), &[Context::CaretField]);
+    assert_eq!(Context::BodyViewport.parents(), &[Context::MarkdownBody]);
+    for key in [
+        Key::Enter,
+        Key::Esc,
+        Key::Ctrl('c'),
+        Key::Ctrl('x'),
+        Key::Ctrl('p'),
+        Key::Ctrl('q'),
+    ] {
+        assert!(
+            matches!(resolve(Context::ThreadReply, Host::Attached, &[key]),
+            Resolved::Hit(row) if row.context == Context::ThreadReply),
+            "{key:?}"
+        );
+        assert!(
+            !matches!(resolve(Context::ThreadReply, Host::Local, &[key]),
+            Resolved::Hit(row) if row.context == Context::ThreadReply),
+            "{key:?}"
+        );
+    }
+    for host in [Host::Local, Host::Attached] {
+        for key in [
+            Key::Esc,
+            Key::Ctrl('c'),
+            Key::Ctrl('x'),
+            Key::Ctrl('p'),
+            Key::Ctrl('q'),
+        ] {
+            assert!(
+                matches!(resolve(Context::BodyViewport, host, &[key]),
+                Resolved::Hit(row) if row.context == Context::BodyViewport),
+                "{host:?} {key:?}"
+            );
+        }
+        for key in [
+            Key::Char('h'),
+            Key::Char('l'),
+            Key::Char('0'),
+            Key::Char('$'),
+            Key::Char('v'),
+        ] {
+            assert!(
+                matches!(resolve(Context::BodyViewport, host, &[key]),
+                Resolved::Hit(row) if row.context == Context::MarkdownBody),
+                "{host:?} {key:?}"
+            );
         }
     }
 }

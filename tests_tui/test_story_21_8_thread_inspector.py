@@ -15,6 +15,10 @@ Leg A, 80x24, debug default-feature binary resolved by the harness
   ``[a] Acknowledge`` and ``[u] Use as context``; ``PgDn`` scrolls; a read-only
   second attach paints the read-only footer and no mutation key.
 
+Leg B exercises local Rendered/Source safety, byte-exact file copy, turn
+filtering and the wide-block viewport. Its offline desk checks use synthetic
+screens at the same three sizes, including incomplete and forged rows.
+
 Offline desk checks (``test_leg_a_desk_*``) run the very same predicates over
 synthetic 60x16, 80x24 and 130x30 screens with torn-frame negatives; they start no
 binary, subprocess or scene provider. Every wait is a structural predicate wait
@@ -351,15 +355,23 @@ def _append(journal: Path, payload: dict) -> int:
 
 def smoke_body() -> str:
     return "\n".join([
-        "# ADR-smoke: thread inspector",
+        "# Heading",
+        "",
         "[docs](https://e.example/x)",
+        "",
         "raw esc: \x1b[31mred\x1b[0m",
+        "",
         "bidi: \u202eevil",
+        "",
         "[y] Approve",
+        "",
+        "viewport prose",
+        "",
         "```",
-        "c" * 200,
+        "0123456789" * 20,
         "```",
-        *[f"line {n}" for n in range(1, 61)],
+        "",
+        *[f"line {n}\n" for n in range(1, 61)],
     ])
 
 
@@ -667,3 +679,275 @@ def test_leg_a_attached(tmp_path, stub, scene_env, monkeypatch):
             cwd=workspace, env=env, capture_output=True, timeout=60,
         )
         shutil.rmtree(data_dir, ignore_errors=True)
+
+
+# ── Leg B: pure screen predicates and offline desk checks ─────────────────────
+
+LINK_RENDERED = "docs (https://e.example/x)"
+LINK_SOURCE = "[docs](https://e.example/x)"
+
+
+def _b_inner(screen: str) -> list[str]:
+    inner = frame_inner(screen)
+    header_rows(inner)
+    return inner
+
+
+def _b_row(inner: list[str], text: str, *, gutter: bool = True) -> bool:
+    """Match an entire painted row, optionally after a focused-turn marker."""
+    prefix = r"(?:▶ )?" + (r" {6,}" if gutter else r" *")
+    return any(re.fullmatch(prefix + re.escape(text) + r" *", row) for row in inner)
+
+
+def _b_rendered(inner: list[str]) -> None:
+    assert _b_row(inner, LINK_RENDERED)
+    assert _b_row(inner, r"raw esc: \u{1b}[31mred\u{1b}[0m")
+    assert _b_row(inner, r"bidi: \u{202e}evil")
+    assert _b_row(inner, "[y] Approve")
+    assert all(
+        "\x1b" not in row and "\u202e" not in row
+        and ("[y] Approve" not in row or _b_row([row], "[y] Approve"))
+        for row in inner
+    )
+
+
+def _b_source(inner: list[str]) -> None:
+    assert _b_row(inner, LINK_SOURCE)
+    assert not _b_row(inner, LINK_RENDERED)
+
+
+def _b_filtered(inner: list[str]) -> None:
+    assert _b_row(inner, "ri_filter_40 · received · follow-up to " + ITEM, gutter=False)
+    assert _b_row(inner, "line 40")
+    assert not any("ri_filter_3 · received" in row for row in inner)
+    assert not _b_row(inner, "line 3")
+
+
+def _b_unfiltered(inner: list[str]) -> None:
+    assert _b_row(inner, "ri_filter_3 · received · follow-up to " + ITEM, gutter=False)
+    assert _b_row(inner, "line 3")
+
+
+def _b_block(inner: list[str]) -> tuple[str, str]:
+    prose = next(row for row in inner if _b_row([row], "viewport prose"))
+    block = next(
+        row for row in inner
+        if re.fullmatch(r"(?:▶ )? {6,}[│←]?[0-9]{20,}[→│]? *", row)
+    )
+    return prose, block
+
+
+def _b_check(screen: str, check) -> bool:
+    try:
+        check(_b_inner(screen))
+        return True
+    except (AssertionError, StopIteration):
+        return False
+
+
+def _b_synthetic(cols: int, rows: int, body: list[str]) -> str:
+    """A complete frame with a variable body, independent of terminal or process."""
+    width = cols - 2
+    title = f" Thread · {TOKEN} "
+    top = "┌─" + title + "─" * (width - 1 - len(title)) + "┐"
+    inner = [f" item actions · {ITEM}", f" {TOKEN}", *body]
+    assert len(inner) <= rows - 2
+    inner += [""] * (rows - 2 - len(inner))
+    return "\n".join([top, *["│" + row.ljust(width) + "│" for row in inner],
+                      "└" + "─" * width + "┘"])
+
+
+@pytest.mark.parametrize("cols,rows", SYNTH_SIZES, ids=[f"{c}x{r}" for c, r in SYNTH_SIZES])
+def test_leg_b_desk_rendered_and_source(cols, rows):
+    rendered = _b_synthetic(cols, rows, [
+        "      " + LINK_RENDERED,
+        r"      raw esc: \u{1b}[31mred\u{1b}[0m",
+        r"      bidi: \u{202e}evil",
+        "      [y] Approve",
+    ])
+    assert _b_check(rendered, _b_rendered)
+    assert _b_check(_b_synthetic(cols, rows, [
+        "▶       " + LINK_RENDERED,
+        r"      raw esc: \u{1b}[31mred\u{1b}[0m",
+        r"      bidi: \u{202e}evil",
+        "      [y] Approve",
+    ]), _b_rendered)
+    assert not _b_check(rendered.replace(LINK_RENDERED,
+                                       "docs (https://e.example/".ljust(len(LINK_RENDERED))), _b_rendered)
+    assert not _b_check(_b_synthetic(cols, rows, [
+        "      " + LINK_RENDERED,
+        r"      raw esc: \u{1b}[31mred\u{1b}[0m",
+        r"      bidi: \u{202e}evil",
+        " [y] Approve",
+    ]), _b_rendered)
+    assert not _b_check(_cut_row(rendered, 4), _b_rendered)
+    source = _b_synthetic(cols, rows, ["      " + LINK_SOURCE])
+    assert _b_check(source, _b_source)
+    assert not _b_check(_b_synthetic(cols, rows, ["      " + LINK_SOURCE[:-2]]), _b_source)
+    assert not _b_check(_b_synthetic(cols, rows, ["     " + LINK_SOURCE]), _b_source)
+    assert not _b_check(_cut_row(source, 3), _b_source)
+
+
+@pytest.mark.parametrize("cols,rows", SYNTH_SIZES, ids=[f"{c}x{r}" for c, r in SYNTH_SIZES])
+def test_leg_b_desk_filter_and_viewport(cols, rows):
+    filtered = _b_synthetic(cols, rows, [
+        "  ri_filter_40 · received · follow-up to " + ITEM, "      line 40",
+    ])
+    assert _b_check(filtered, _b_filtered)
+    assert not _b_check(filtered.replace("line 40", "line 4"), _b_filtered)
+    assert not _b_check(_cut_row(filtered, 3), _b_filtered)
+    before = _b_synthetic(cols, rows, ["      viewport prose", "      │012345678901234567890123456789→"])
+    after = _b_synthetic(cols, rows, ["      viewport prose", "      ←123456789012345678901234567890→"])
+    prose, block = _b_block(_b_inner(before))
+    shifted_prose, shifted_block = _b_block(_b_inner(after))
+    assert prose == shifted_prose and block != shifted_block
+    assert not _b_check(_cut_row(before, 4), _b_block)
+    assert not _b_check(_b_synthetic(cols, rows, [
+        "     viewport prose", "      │012345678901234567890123456789→",
+    ]), _b_block)
+
+
+def _b_seek(tui: RustainTUI, check, label: str, key: str = "j") -> str:
+    """Scroll a row at a time (`key`), waiting for each repaint, until the beat is visible."""
+    screen = _settle(tui, lambda s: _b_check(s, lambda inner: None), label + " frame")
+    for _ in range(400):
+        if _b_check(screen, check):
+            _save_screen(label, screen)
+            return screen
+        old = screen
+        tui.send(key)
+        screen = _settle(tui, lambda s: s != old and _b_check(s, lambda inner: None),
+                         label + " scrolling")
+    raise AssertionError(f"{label} not found:\n{screen}")
+
+
+def test_leg_b_desk_seek_up_reaches_a_header_below_a_long_body(monkeypatch):
+    """Replay of `_b_seek` over scripted frames: the follow-up header sits below ~120 body
+    rows, so a seek from the end upward (`k`) reaches it; a torn frame is never accepted."""
+    header = "  ri_filter_3 · received · follow-up to " + ITEM
+    frames = [_b_synthetic(80, 24, ["      line 99", "", "      line 98"]),
+              _b_synthetic(80, 24, ["      line 97", "", "      line 96"]),
+              _b_synthetic(80, 24, [header, "      line 3"])]
+    sent = []
+
+    class Fake:
+        def send(self, key):
+            sent.append(key)
+
+    queue = list(frames)
+    monkeypatch.setattr(sys.modules[__name__], "_settle",
+                        lambda tui, predicate, label, timeout=15.0: next(
+                            s for s in iter(lambda: queue.pop(0), None) if predicate(s)))
+    monkeypatch.setattr(sys.modules[__name__], "_save_screen", lambda label, screen: None)
+
+    def header_3(inner):
+        assert _b_row(inner, "ri_filter_3 · received · follow-up to " + ITEM, gutter=False)
+
+    found = _b_seek(Fake(), header_3, "replay", key="k")
+    assert header in found and sent == ["k", "k"]
+    torn = _cut_row(frames[2], 3)
+    assert not _b_check(torn, header_3), "a torn frame is not accepted as the header"
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_b(tmp_path, stub, scene_env, monkeypatch):
+    _small_terminal(monkeypatch)
+    _begin_leg("test_leg_b")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    journal = _seed(workspace, scene_env)
+    # Separate follow-up turns expose filtering without pretending it removes
+    # individual lines from the pinned opened item.
+    for item, body in (("ri_filter_3", "line 3"), ("ri_filter_40", "line 40")):
+        event = received_item(item, body)
+        event["in_reply_to"] = ITEM
+        _append(journal, event)
+
+    with tempfile.TemporaryDirectory(prefix="r21b-", dir="/tmp") as data:
+        env = {**scene_env, "RUSTAIN_CLIPBOARD": "file", "RUSTAIN_DATA_DIR": data}
+        clipboard = Path(data) / "clipboard.txt"
+        with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=env) as tui:
+            base = _settle(tui, lambda s: composer_top(screen_rows(s)) is not None and "Ready" in s,
+                           "the idle Stage")
+            base_stage = stage_rows(base)
+            _open_view(tui, "local")
+            for text in (LINK_RENDERED, r"raw esc: \u{1b}[31mred\u{1b}[0m",
+                         r"bidi: \u{202e}evil", "[y] Approve"):
+                def row_present(inner, text=text):
+                    assert _b_row(inner, text)
+                    assert all("\x1b" not in row and "\u202e" not in row for row in inner)
+                    if text == "[y] Approve":
+                        assert all("[y] Approve" not in row or _b_row([row], text) for row in inner)
+                _b_seek(tui, row_present, "rendered " + text)
+            tui.send("g")
+            _settle(tui, lambda s: _b_check(s, lambda inner: None)
+                    and "Context received:" in s, "return to thread top")
+            tui.send("v")
+            _b_seek(tui, _b_source, "Source literal link")
+            tui.send("v")
+            def rendered_link(inner):
+                assert _b_row(inner, LINK_RENDERED)
+            _b_seek(tui, rendered_link, "Rendered link restored")
+            tui.send("c")
+            # The toast sits on a Stage row that may be cut or wrapped; the file is the proof.
+            _settle(tui, lambda s: clipboard.exists()
+                    and clipboard.read_bytes() == smoke_body().encode("utf-8"),
+                    "file clipboard written")
+            assert clipboard.read_bytes() == smoke_body().encode("utf-8")
+            tui.send(ESC)
+            closed = _settle(tui, lambda s: thread_closed(s) and stage_rows(s) == base_stage,
+                             "Stage restored after copy")
+            assert stage_rows(closed) == base_stage
+            _save_final(tui, "copy-client")
+
+        with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=env) as tui:
+            _settle(tui, lambda s: composer_top(screen_rows(s)) is not None and "Ready" in s,
+                    "fresh idle Stage")
+            _open_view(tui, "local")
+            def header_3(inner):
+                assert _b_row(inner, "ri_filter_3 · received · follow-up to " + ITEM, gutter=False)
+
+            def header_40(inner):
+                assert _b_row(inner, "ri_filter_40 · received · follow-up to " + ITEM, gutter=False)
+
+            # The filter keeps whole turns (the opened item always stays); the follow-up turn
+            # `line 3` is found by scrolling, then dropped by the query `line 40`.
+            tui.send("G")
+            _b_seek(tui, header_3, "unfiltered follow-up", key="k")
+            tui.send("g")
+            tui.send("/")
+            tui.send("line 40")
+            _settle(tui, lambda s: "line 40" in s and "Keep filter" in s, "search field")
+            tui.send(ENTER)
+            _settle(tui, lambda s: "Keep filter" not in s and "/ line 40" in s and "[Esc] Close" in s,
+                    "filter kept, rail restored")
+            tui.send("G")
+            filtered = _b_seek(tui, header_40, "matching follow-up", key="k")
+            assert header_rows(_b_inner(filtered)) == [f"item actions · {ITEM}", TOKEN]
+            tui.send(ESC)
+            # The rail grows back to its full height on the repaint; G before it clamps against the
+            # previous (field-open) viewport (attempt 4's race), so wait for the settled frame.
+            _settle(tui, lambda s: "/ line 40" not in s and "[Esc] Close" in s, "filter cleared")
+            tui.send("G")
+            _b_seek(tui, header_3, "cleared filter restores follow-up", key="k")
+            tui.send("g")
+            _settle(tui, lambda s: _b_check(s, lambda inner: None)
+                    and "Context received:" in s, "return to wide-block start")
+            _b_seek(tui, _b_block, "wide block and prose")
+            tui.send(ENTER)
+            viewport = _settle(tui, lambda s: _b_check(s, _b_block) and "Columns" in s and "Leave" in s,
+                               "block viewport")
+            prose, block = _b_block(_b_inner(viewport))
+            tui.send("l")
+            shifted = _settle(tui, lambda s: _b_check(s, _b_block)
+                              and _b_block(_b_inner(s))[0] == prose
+                              and _b_block(_b_inner(s))[1] != block,
+                              "only the wide block shifts")
+            assert _b_block(_b_inner(shifted))[0] == prose
+            tui.send(ESC)
+            _settle(tui, _frame_ready("local"), "leave block viewport")
+            tui.send(ESC)
+            _settle(tui, thread_closed, "leave thread")
+            _save_final(tui, "filter-client")
+    assert _turn_rows(stub) == [], "viewing never reaches the model"

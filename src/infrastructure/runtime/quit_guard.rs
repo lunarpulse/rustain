@@ -57,8 +57,8 @@ pub(crate) fn local_facts(
     // item can no longer be answered, so quitting leaves nothing unanswered for it.
     let large_images = state.decisions.count_live(DecisionKind::LargeImage);
     facts.pending_images = state.pending_images.len() + large_images;
-    facts.peer_compose = state.pinned_peer_compose.is_some()
-        || crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
+    facts.peer_compose =
+        crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
     facts.pending_decisions = (state.decisions.undecided() - large_images)
         - settled_plan_cards(state, conversation, tabs);
     facts

@@ -825,17 +825,21 @@ pub fn open(state: &mut TuiState, key: &DecisionKey) -> bool {
     if key.kind == DecisionKind::ReplyArrived {
         reply::refresh(state);
     }
-    let Some(item) = state.decisions.item(key) else {
-        return false;
-    };
-    if !state.decisions.here(item.conversation_id.as_deref())
-        || presentation::is_open(state, Surface::QuitConfirm)
-        || presentation::typing_top(state)
-    {
+    if !can_open(state, key) {
         return false;
     }
     presentation::reducer::focus_decision(state, key.clone());
     true
+}
+
+/// Whether [`open`] would open `key` now: queued, decidable in this conversation, and neither
+/// the quit guard nor a text field on top. Facts only; `open` itself acts.
+pub fn can_open(state: &TuiState, key: &DecisionKey) -> bool {
+    state.decisions.item(key).is_some_and(|item| {
+        state.decisions.here(item.conversation_id.as_deref())
+            && !presentation::is_open(state, Surface::QuitConfirm)
+            && !presentation::typing_top(state)
+    })
 }
 
 /// Hygiene both hosts run after an owner closes: a decision frame whose item left

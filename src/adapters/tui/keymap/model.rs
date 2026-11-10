@@ -404,6 +404,12 @@ pub enum Context {
     /// The A2A thread inspector (S-THREAD): a received item's thread, paged and scrolled
     /// in its own frame; the writer rows are the attached host's.
     ThreadInspector,
+    /// The thread window's reply field (attached writers): readline editing of the text of a
+    /// reply to the opened item, `Enter` sends, `Esc` clears and leaves.
+    ThreadReply,
+    /// The thread window's block viewport: `h l 0 $` move the wide blocks' offset, thread
+    /// letters are suspended, `Esc` leaves.
+    BodyViewport,
     Login,
     /// A decision frame's own text field (Deny + feedback, the question answer):
     /// readline editing, never the composer.
@@ -438,7 +444,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 62] = [
+    pub const ALL: [Context; 64] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -481,6 +487,8 @@ impl Context {
         Context::Decision,
         Context::DecisionQueue,
         Context::ThreadInspector,
+        Context::ThreadReply,
+        Context::BodyViewport,
         Context::Login,
         Context::DecisionCompose,
         Context::Question,
@@ -548,6 +556,8 @@ impl Context {
             Context::Decision => "Decisions",
             Context::DecisionQueue => "Needs-you list",
             Context::ThreadInspector => "Thread inspector",
+            Context::ThreadReply => "Thread reply field",
+            Context::BodyViewport => "Block viewport",
             Context::Login => "Login",
             Context::DecisionCompose => "Decision field",
             Context::Question => "Question",
@@ -610,6 +620,10 @@ impl Context {
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector | Context::ThreadInspector => &[Context::MarkdownBody],
+            // The block viewport's chain excludes the thread rows: `l` moves columns there.
+            Context::BodyViewport => &[Context::MarkdownBody],
+            // The reply field is a caret field of its own, never the composer.
+            Context::ThreadReply => &[Context::CaretField],
             // The 6-E decision frames: the parent owns Esc, Ctrl+C, Ctrl+Q, `c` and scroll.
             Context::TeamProposal
             | Context::RecipientDraft

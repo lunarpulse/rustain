@@ -680,13 +680,18 @@ Also inherits: Markdown body.
 |---|---|---|---|---|
 | `p` | Show the earlier part of the thread | local, attached | portable |  |
 | `l` | Show the later part of the thread | local, attached | portable |  |
-| `Esc` | Close the thread window | local, attached | portable |  |
+| `Esc` | Close the thread window (first clears a kept filter) | local, attached | portable |  |
 | `Ctrl+C` | Close the thread window (back one frame) | local, attached | portable |  |
+| `c` | Copy the opened item's original body, never the escaped display | local, attached | portable |  |
+| `/` | Filter the thread's turns by a case-insensitive query | local, attached | portable |  |
+| `Enter` | Scroll a block wider than the window sideways, where one exists | local, attached | portable |  |
+| `Tab` | Switch between the item and the response view of this exchange | attached | portable |  |
+| `o` | Open the queued draft decision of this response above the thread window | attached | portable |  |
 | `Ctrl+X` | Open the menu above the thread window | local, attached | portable |  |
 | `Ctrl+P` | Open the command palette above the thread window | local, attached | portable |  |
 | `Ctrl+Q` | Ask to quit without closing the thread window | local, attached | portable |  |
-| `r` | Reply to the opened item; the reply is typed in the composer | attached | portable |  |
-| `d` | Discuss the opened item (or discuss concerns about its story list) in a typed reply | attached | portable |  |
+| `r` | Reply to the opened item in a reply field of this window | attached | portable |  |
+| `d` | Discuss the opened item (or discuss concerns about its story list) in a reply field of this window | attached | portable |  |
 | `b` | Tell the sender you are busy and defer the item for 30 minutes | attached | portable |  |
 | `a` | Acknowledge the item: a receipt only, not an answer | attached | portable |  |
 | `y` | Accept the story assigned to you in the opened item | attached | portable |  |
@@ -696,6 +701,31 @@ Also inherits: Markdown body.
 | `2` | Leave the second retrospective field out of what is shared, or put it back | attached | portable |  |
 | `3` | Leave the third retrospective field out of what is shared, or put it back | attached | portable |  |
 | `u` | Use the opened item as peer context for this conversation, or stop using it | attached | portable |  |
+
+## Thread reply field
+
+Also inherits: Caret text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Send the reply through /team reply and close the thread window | attached | portable |  |
+| `Esc` | Clear the reply and leave its field | attached | portable |  |
+| `Ctrl+C` | Clear the reply and leave its field | attached | portable |  |
+| `Ctrl+X` | Open the menu above this reply field | attached | portable |  |
+| `Ctrl+P` | Open the command palette above this reply field | attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing this reply field | attached | portable |  |
+
+## Block viewport
+
+Also inherits: Markdown body.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Leave the block viewport, back to the thread | local, attached | portable |  |
+| `Ctrl+C` | Leave the block viewport, back to the thread | local, attached | portable |  |
+| `Ctrl+X` | Open the menu above the block viewport | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above the block viewport | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the block viewport | local, attached | portable |  |
 
 ## Login
 
