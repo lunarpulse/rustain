@@ -407,7 +407,6 @@ impl Fixture {
             &self.state.input_buffer,
             1,
             false,
-            rustain::domain::models::DensityMode::Focus,
         )
         .expect("real minimum chat viewport");
         let mut painted = false;

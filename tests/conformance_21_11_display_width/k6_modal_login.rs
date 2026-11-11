@@ -384,7 +384,6 @@ fn story21_4_running_secret_body_and_keys_fit_minimum_and_wide_sheets() {
                     "1\n2\n3\n4\n5\n6\n7\n8",
                     1,
                     false,
-                    rustain::domain::models::visual::DensityMode::Focus,
                 )
                 .unwrap();
                 let region = rustain::adapters::tui::presentation::geometry::modal_region(

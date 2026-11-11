@@ -47,7 +47,6 @@ pub const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &[
     "snapshot_retention_count",
     "skills",
     "runtime",
-    "layout",
     "default_plan_mode",
     "provider",
     "mouse",
@@ -67,6 +66,11 @@ pub const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &[
     "notifications",
     "markdown",
 ];
+
+/// Top-level keys whose settings were retired: old files and `-c` overrides that still carry
+/// them stay valid, are ignored by the loader and raise no unknown-key warning (21-7 RU-21-7-7:
+/// `layout.density_mode` and `layout.auto_panels` went with the density model).
+const RETIRED_TOP_LEVEL_FIELDS: &[&str] = &["layout"];
 
 const CREDENTIAL_PATH_SEGMENTS: &[&str] = &[
     "api_key_env",
@@ -156,7 +160,8 @@ fn provider_hint_for_segments<'a>(segments: &'a [&'a str]) -> &'a str {
 }
 
 fn warn_unknown_config_override_top_level(key: &str, top_level: &str) {
-    if KNOWN_TOP_LEVEL_FIELDS.contains(&top_level) {
+    if KNOWN_TOP_LEVEL_FIELDS.contains(&top_level) || RETIRED_TOP_LEVEL_FIELDS.contains(&top_level)
+    {
         return;
     }
     let message = format!(
@@ -312,27 +317,21 @@ pub fn try_load_with_config_overrides(
 ) -> Result<AppConfig, DomainError> {
     let figment = build_figment(cli, profile_resolver, cli_config_overrides);
 
-    let mut config: AppConfig = figment.extract().map_err(|e| {
+    let config: AppConfig = figment.extract().map_err(|e| {
         DomainError::Config(ConfigError::Extract {
             reason: e.to_string(),
         })
     })?;
 
-    // Post-deserialization validation
-    if let Err(e) = config.layout.auto_panels.validate() {
-        tracing::warn!(
-            "Config layout.auto_panels has invalid value: {} — \
-             falling back to default for that key.",
-            e
-        );
-        config.layout.auto_panels = Default::default();
-    }
-
     // models.dev live pricing: overlay the cached snapshot onto the bundled +
     // user-merged `config.pricing` (config wins, models.dev fills gaps). No
     // network here — the background refresh task keeps the disk cache fresh.
     #[cfg(feature = "models-dev")]
-    crate::adapters::models_dev::merge_into_config(&mut config);
+    let config = {
+        let mut config = config;
+        crate::adapters::models_dev::merge_into_config(&mut config);
+        config
+    };
     Ok(config)
 }
 

@@ -66,8 +66,7 @@ async fn story21_6_review_uses_frame_without_reserving_chat() {
     let mut f = ProposalFixture::start(vec![host.peer("lena-po")]).await;
     host.reset_counts();
     let area = Rect::new(0, 0, 80, 24);
-    let before =
-        layout::compute_layout(area, &f.state.theme, "", 2, false, f.state.density_mode).unwrap();
+    let before = layout::compute_layout(area, &f.state.theme, "", 2, false).unwrap();
     f.conversation.title = "OWNER_TAB".into();
     f.tabs.active_tab_mut().conversation = f.conversation.clone();
     f.tabs.create_tab();
@@ -84,8 +83,7 @@ async fn story21_6_review_uses_frame_without_reserving_chat() {
         InputAction::Consumed
     ));
     let rows = f.paint(80, 24);
-    let after =
-        layout::compute_layout(area, &f.state.theme, "", 2, false, f.state.density_mode).unwrap();
+    let after = layout::compute_layout(area, &f.state.theme, "", 2, false).unwrap();
     assert_eq!(before.chat_pane, after.chat_pane);
     assert_eq!(
         frame_rect(modal_region(&after, area)),
@@ -111,9 +109,7 @@ async fn story21_6_frame_rect_matches_painted_height_at_all_widths() {
     .await;
     for width in [60, 80, 130] {
         let area = Rect::new(0, 0, width, 24);
-        let shell =
-            layout::compute_layout(area, &f.state.theme, "", 1, false, f.state.density_mode)
-                .unwrap();
+        let shell = layout::compute_layout(area, &f.state.theme, "", 1, false).unwrap();
         let rect = frame_rect(modal_region(&shell, area));
         let rows = f.paint(width, 24);
         let top = &rows[rect.y as usize];
@@ -139,18 +135,18 @@ async fn story21_6_frame_rect_matches_painted_height_at_all_widths() {
 }
 
 #[tokio::test]
-async fn k03_dashboard_keeps_a_proposal_decision_surface() {
+async fn k03_monitor_column_keeps_a_proposal_decision_surface() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let mut f = ProposalFixture::start(vec![host.peer("lena-po")]).await;
     host.reset_counts();
     f.submit(
-        json!({"recipients":["lena-po"],"type":"architecture_update","body":"Dashboard draft."}),
+        json!({"recipients":["lena-po"],"type":"architecture_update","body":"Monitor draft."}),
     )
     .await;
-    f.state.density_mode = rustain::domain::models::visual::DensityMode::Dashboard;
-    let rows = f.paint(80, 24);
+    f.state.monitor = true;
+    let rows = f.paint(130, 30);
     assert!(
-        rows.iter().any(|row| row.contains("Dashboard draft.")),
+        rows.iter().any(|row| row.contains("Monitor draft.")),
         "{rows:#?}"
     );
     assert!(matches!(

@@ -641,15 +641,14 @@ pub fn tasks_surface_open(state: &TuiState) -> bool {
         || (monitor_shown(state) && state.mission_control.monitor_tab() == McTab::Tasks)
 }
 
-/// The monitor body is on screen (7E-02): the retained layout paints it where the layout
-/// gives it a rectangle — the sidebar column (Monitor density, a visible column, at least
-/// 120 columns) or Dashboard's panel (any width a frame fits) — until 7-F deletes both.
+/// The monitor body is on screen (7E-02): the layout paints the column where the monitor is on
+/// and the terminal is at least 120 columns wide (the preference is kept below that and the
+/// column is simply not painted, A16).
 #[must_use]
 pub fn monitor_shown(state: &TuiState) -> bool {
     !crate::adapters::tui::presentation::too_small(state)
-        && (state.density_mode == crate::domain::models::visual::DensityMode::Dashboard
-            || (state.sidebar_visible
-                && state.terminal_width >= crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH))
+        && state.monitor
+        && state.terminal_width >= crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH
 }
 
 /// Nothing paints over the monitor: no frame on the stack (frames span the terminal's full

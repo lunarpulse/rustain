@@ -25,6 +25,53 @@ fn seeded_log_blocks() -> Vec<String> {
 
 const ARTIFACT_BODY: &[u8] = b"proof artifact body line\n";
 
+/// The seeded plan of legs D and F: three tasks, the second with a markdown-free result.
+fn seeded_plan() -> rustain::domain::models::plan::Plan {
+    use rustain::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult};
+    let task = |number: u32, title: &str, status: PlanTaskStatus, result: Option<&str>| PlanTask {
+        number,
+        title: title.to_owned(),
+        description: String::new(),
+        depends_on: vec![],
+        status,
+        started_at_ms: None,
+        completed_at_ms: None,
+        result: result.map(|text| TaskResult {
+            text: text.to_owned(),
+            tool_call_count: 1,
+            token_count: None,
+        }),
+        error: None,
+        waiting_on: vec![],
+        delegated_to: None,
+        sub_tasks: vec![],
+    };
+    Plan {
+        id: "p1".to_owned(),
+        title: "Release".to_owned(),
+        tasks: vec![
+            task(
+                1,
+                "Draft notes",
+                PlanTaskStatus::Completed,
+                Some("Notes **drafted**"),
+            ),
+            task(
+                2,
+                "Review result",
+                PlanTaskStatus::Completed,
+                Some("Reviewed OK"),
+            ),
+            task(3, "Publish", PlanTaskStatus::Pending, None),
+        ],
+        estimated_effort: None,
+        status: PlanStatus::Completed,
+        created_at: 1,
+        resolved_at: None,
+        host_message_id: None,
+    }
+}
+
 #[tokio::test]
 #[ignore = "writes the desk-check frames named by RUSTAIN_MISSION_FRAMES"]
 async fn story21_7_smoke_frames_export() {
@@ -118,56 +165,13 @@ async fn story21_7_smoke_frames_export() {
     // Leg D (7-D): the Tasks tab and the task window of the seeded plan (the live leg seeds the
     // same tasks through a saved session).
     for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
-        use rustain::domain::models::plan::{
-            Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
-        };
-        let task =
-            |number: u32, title: &str, status: PlanTaskStatus, result: Option<&str>| PlanTask {
-                number,
-                title: title.to_owned(),
-                description: String::new(),
-                depends_on: vec![],
-                status,
-                started_at_ms: None,
-                completed_at_ms: None,
-                result: result.map(|text| TaskResult {
-                    text: text.to_owned(),
-                    tool_call_count: 1,
-                    token_count: None,
-                }),
-                error: None,
-                waiting_on: vec![],
-                delegated_to: None,
-                sub_tasks: vec![],
-            };
         let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
-        rig.f.tabs.active_tab_mut().conversation.plans.insert(
-            "p1".to_owned(),
-            Plan {
-                id: "p1".to_owned(),
-                title: "Release".to_owned(),
-                tasks: vec![
-                    task(
-                        1,
-                        "Draft notes",
-                        PlanTaskStatus::Completed,
-                        Some("Notes **drafted**"),
-                    ),
-                    task(
-                        2,
-                        "Review result",
-                        PlanTaskStatus::Completed,
-                        Some("Reviewed OK"),
-                    ),
-                    task(3, "Publish", PlanTaskStatus::Pending, None),
-                ],
-                estimated_effort: None,
-                status: PlanStatus::Completed,
-                created_at: 1,
-                resolved_at: None,
-                host_message_id: None,
-            },
-        );
+        rig.f
+            .tabs
+            .active_tab_mut()
+            .conversation
+            .plans
+            .insert("p1".to_owned(), seeded_plan());
         rig.key(Key::Ctrl('x'));
         rig.key(Key::Char('t'));
         rig.f.paint();
@@ -232,5 +236,42 @@ async fn story21_7_smoke_frames_export() {
             lines(&rig).join("\n"),
         )
         .expect("write");
+    }
+    // Leg F (7-F): the read-only monitor beside the main column. The plan is the leg D plan (the
+    // live leg seeds it through a saved session). `Ctrl+X w` paints `Monitor · Tasks` at 130x30
+    // and answers the width remedy (painting no column) below 120 columns; a second `Ctrl+X w`
+    // at 130x30 takes the column away again.
+    for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+        let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
+        rig.f
+            .tabs
+            .active_tab_mut()
+            .conversation
+            .plans
+            .insert("p1".to_owned(), seeded_plan());
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("monitor-off-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+        rig.key(Key::Ctrl('x'));
+        rig.key(Key::Char('w'));
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("monitor-on-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+        if width >= 120 {
+            rig.key(Key::Ctrl('x'));
+            rig.key(Key::Char('w'));
+            rig.f.paint();
+            std::fs::write(
+                dir.join(format!("monitor-toggled-off-{width}x{height}.txt")),
+                lines(&rig).join("\n"),
+            )
+            .expect("write");
+        }
     }
 }

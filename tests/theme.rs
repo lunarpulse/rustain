@@ -284,7 +284,7 @@ fn test_semantic_symbols() {
     assert_eq!(symbols::PEER, '◇');
 }
 
-// ── Task 5.7: BlockBorder and DensityMode enum variants ──
+// ── Task 5.7: BlockBorder enum variants ──
 
 // Covers: UX-DR5 (color detection and degradation)
 #[test]
@@ -306,23 +306,6 @@ fn test_block_border_variants() {
     let json = serde_json::to_string(&BlockBorder::SolidThin).unwrap();
     let deserialized: BlockBorder = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized, BlockBorder::SolidThin);
-}
-
-// Covers: UX-DR5 (color detection and degradation)
-#[test]
-fn test_density_mode_variants() {
-    use rustain::domain::models::DensityMode;
-
-    let variants = [
-        DensityMode::Focus,
-        DensityMode::Monitor,
-        DensityMode::Dashboard,
-    ];
-    assert_eq!(variants.len(), 3);
-
-    let json = serde_json::to_string(&DensityMode::Focus).unwrap();
-    let deserialized: DensityMode = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized, DensityMode::Focus);
 }
 
 // ── Task 5.9: FocusState variant count and structure ──
@@ -389,14 +372,9 @@ fn test_tui_renders_with_theme_colors() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) = layout::compute_layout(
-                area,
-                &state.theme,
-                &state.input_buffer,
-                1,
-                false,
-                rustain::domain::models::visual::DensityMode::Focus,
-            ) {
+            if let Some(app_layout) =
+                layout::compute_layout(area, &state.theme, &state.input_buffer, 1, false)
+            {
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -424,7 +402,6 @@ fn test_tui_renders_with_theme_colors() {
                     false,
                     None, // daily_budget (Story 7.5)
                     None,
-                    rustain::domain::models::visual::DensityMode::Focus,
                     false,
                     None,
                     rustain::adapters::tui::state::LogAwareness::Hidden,

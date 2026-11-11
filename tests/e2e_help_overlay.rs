@@ -356,7 +356,6 @@ fn test_e2e_status_bar_hint_for_new_session() {
     use ratatui::backend::TestBackend;
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
-    use rustain::domain::models::visual::DensityMode;
     use rustain::domain::models::{PermissionMode, StatusState};
 
     // Render status bar directly with hint
@@ -393,7 +392,6 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,

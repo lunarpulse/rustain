@@ -133,7 +133,6 @@ fn test_ask_user_question_card_double_border() {
     use rustain::adapters::tui::notification_log::LogFacts;
     use rustain::adapters::tui::presentation::{self, Shell};
     use rustain::adapters::tui::state::TuiState;
-    use rustain::domain::models::visual::DensityMode;
 
     let mut state = TuiState::new(60, 24);
     let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -150,7 +149,6 @@ fn test_ask_user_question_card_double_border() {
         &state.input_buffer,
         1,
         false,
-        DensityMode::Focus,
     )
     .expect("60x24 is above the floor");
     let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();

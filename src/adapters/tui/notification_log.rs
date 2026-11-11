@@ -623,7 +623,6 @@ mod tests {
     use crate::adapters::tui::notifications::NoticeSource;
     use crate::adapters::tui::{app::handle_input, layout::compute_layout, notifications};
     use crate::domain::events::{DomainInputEvent, DomainKey};
-    use crate::domain::models::visual::DensityMode;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn press(state: &mut TuiState, key: DomainKey) {
@@ -634,15 +633,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
             .draw(|frame| {
-                let layout = compute_layout(
-                    frame.area(),
-                    &state.theme,
-                    &state.input_buffer,
-                    1,
-                    false,
-                    DensityMode::Focus,
-                )
-                .unwrap();
+                let layout =
+                    compute_layout(frame.area(), &state.theme, &state.input_buffer, 1, false)
+                        .unwrap();
                 presentation::compose(
                     frame,
                     state,

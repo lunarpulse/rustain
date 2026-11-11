@@ -54,7 +54,7 @@ pub enum ChatCmd {
     UserMessagePrev,
     /// `}`: jump to the next user message.
     UserMessageNext,
-    /// `Tab`: cycle tool calls, thinking, code blocks and tables in the focused turn (else tab/sidebar cycling).
+    /// `Tab`: cycle tool calls, thinking, code blocks and tables in the focused turn (else next tab).
     CycleInvocation,
     /// `Shift+Tab`: previous tab.
     PrevTab,

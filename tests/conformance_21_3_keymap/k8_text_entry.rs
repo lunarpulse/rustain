@@ -434,7 +434,6 @@ fn permission_feedback_edits_at_a_grapheme_safe_caret() {
             &s.input_buffer,
             1,
             false,
-            rustain::domain::models::visual::DensityMode::Focus,
         )
         .unwrap()
         .input_area

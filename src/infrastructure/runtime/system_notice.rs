@@ -173,7 +173,7 @@ mod tests {
             f.lifecycle.is_live(&f.conversation.id),
             "same live producer"
         );
-        // The advisory is a visible warning toast (Focus density no longer hides it).
+        // The advisory is a visible warning toast.
         assert!(f.state.needs_redraw);
         assert_eq!(f.state.notifications.visible().count(), 1);
     }
@@ -230,12 +230,11 @@ mod tests {
             .collect()
     }
 
-    /// K5 — the default Focus density no longer hides any notice, and no level
+    /// K5 — the default view no longer hides any notice, and no level
     /// moves focus (D2, D8): the consumer is the production front door.
     #[tokio::test]
-    async fn story21_1_focus_density_shows_every_level_and_nothing_moves_focus() {
+    async fn story21_1_default_shows_every_level_and_nothing_moves_focus() {
         use crate::domain::models::FocusState;
-        use crate::domain::models::visual::DensityMode;
         for (level, severity) in [
             (NoticeLevel::Info, NoticeSeverity::Info),
             (NoticeLevel::Advisory, NoticeSeverity::Warning),
@@ -243,11 +242,6 @@ mod tests {
             (NoticeLevel::Error, NoticeSeverity::Error),
         ] {
             let mut f = live_stream();
-            assert_eq!(
-                f.state.density_mode,
-                DensityMode::Focus,
-                "the default density"
-            );
             f.state.focus = FocusState::Input;
             apply(&mut f, level, "visible in focus");
             assert_eq!(
@@ -255,7 +249,6 @@ mod tests {
                 FocusState::Input,
                 "{level:?} never takes focus"
             );
-            assert_eq!(f.state.density_mode, DensityMode::Focus, "no auto-switch");
             let visible: Vec<_> = f.state.notifications.visible().collect();
             assert_eq!(visible.len(), 1, "{level:?}");
             assert_eq!(visible[0].severity, severity);
@@ -399,7 +392,7 @@ mod tests {
     /// (`turn_driver.rs`, the unhonourable-restriction disclosure) emits the
     /// Advisory; the production consumer (`event_loop.rs` SystemNotice arm →
     /// `apply_active_notice`) turns it into a warning toast that is painted in
-    /// the DEFAULT Focus density and never ends the live turn (D2).
+    /// the default view and never ends the live turn (D2).
     #[tokio::test(flavor = "multi_thread")]
     async fn story21_1_fr42a_advisory_from_the_real_turn_driver_is_visible_in_focus() {
         use crate::adapters::filesystem::FileSystemStorage;
@@ -411,7 +404,6 @@ mod tests {
         use crate::adapters::tui::notification_log::LogFacts;
         use crate::adapters::tui::widgets::toast_layer;
         use crate::domain::events::AppEvent;
-        use crate::domain::models::visual::DensityMode;
         use crate::domain::models::{ActiveAgent, SessionManager, SessionState};
         use crate::domain::ports::{ContextAssemblerPort, ContextPort, ToolSetPort};
         use crate::domain::services::approval_runtime::ApprovalRuntime;
@@ -503,9 +495,8 @@ mod tests {
         }
         assert_eq!(advisories.len(), 1, "one FR42-a disclosure: {advisories:?}");
 
-        // The consumer side: a live stream in the default Focus density.
+        // The consumer side: a live stream.
         let mut f = live_stream();
-        assert_eq!(f.state.density_mode, DensityMode::Focus);
         for (level, message) in advisories {
             apply_active_notice(
                 &mut f.state,
@@ -544,7 +535,7 @@ mod tests {
         // the first line are painted (the rest is ellipsized).
         assert!(
             painted.contains("Warning") && painted.contains("Active tool restriction"),
-            "the Advisory is painted in Focus density: {}",
+            "the Advisory is painted by default: {}",
             painted.split_whitespace().collect::<Vec<_>>().join(" ")
         );
     }
@@ -568,7 +559,6 @@ mod tests {
         use crate::adapters::tui::widgets::toast_layer;
         use crate::domain::clock::MockClock;
         use crate::domain::models::NotificationsConfig;
-        use crate::domain::models::visual::DensityMode;
         use ratatui::layout::Rect;
         use ratatui::widgets::Paragraph;
         use ratatui::{Terminal, backend::TestBackend};
@@ -579,15 +569,7 @@ mod tests {
         let mut f = live_stream();
         f.state.notifications =
             NotificationStore::new(clock.clone(), NotificationsConfig::default().clamped());
-        let layout = compute_layout(
-            Rect::new(0, 0, 80, 24),
-            &f.state.theme,
-            "",
-            1,
-            false,
-            DensityMode::Focus,
-        )
-        .unwrap();
+        let layout = compute_layout(Rect::new(0, 0, 80, 24), &f.state.theme, "", 1, false).unwrap();
         f.state
             .notifications
             .set_capacity(toast_layer::capacity_for(layout.chat_pane.height));

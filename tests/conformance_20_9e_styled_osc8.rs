@@ -84,15 +84,7 @@ fn sheet_buffer(login: LoginOverlayState, theme: &Theme) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
         .draw(|frame| {
-            let layout = layout::compute_layout(
-                frame.area(),
-                theme,
-                "",
-                1,
-                false,
-                rustain::domain::models::visual::DensityMode::Focus,
-            )
-            .unwrap();
+            let layout = layout::compute_layout(frame.area(), theme, "", 1, false).unwrap();
             let mut shell = presentation::Shell::new(frame.area(), &layout);
             shell.supports_osc8 = false;
             presentation::compose(

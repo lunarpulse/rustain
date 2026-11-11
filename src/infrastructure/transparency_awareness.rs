@@ -1146,7 +1146,6 @@ mod tests {
                         false,
                         None,
                         None,
-                        crate::domain::models::visual::DensityMode::Focus,
                         false,
                         None,
                         view.display,

@@ -357,11 +357,19 @@ const RULES: &[(&str, &str)] = &[
     // with it (A17: deleted in the slice that orphans it): the sidebar focus slot and the panel
     // enum, the sidebar contexts and commands, the sidebar selection/count/scroll fields, the
     // sidebar open/delete actions and the panel opener. `Surface::History`, `Context::History`,
-    // `history_window::`, `history_inspector::`, `history_bridge::` and `sidebar_visible` (the
-    // monitor column's flag until 7-F) stay legal.
+    // `history_window::`, `history_inspector::` and `history_bridge::` stay legal.
     (
         "mission-21-7-e",
         r"\brender_history_panel\b|\bPanelType\b|\bContext\s*::\s*Sidebar(?:History)?\b|\bFocusState\s*::\s*Sidebar\b|\bSidebarCmd\b|\bsidebar_(?:panel|selected|entry_count|scroll_offset)\b|\b(?:OpenSidebarConversation|DeleteSidebarConversation|PanelOpenOutcome|reveal_sidebar)\b",
+    ),
+    // Story 21.7 slice 7-F (A25, clause f, final): the density model (`DensityMode`, the mode and
+    // its override flag, the transition, the Dashboard panel, the attached density remedy) and
+    // the retired `sidebar_visible` flag (`state.monitor` replaces it), the sidebar focus,
+    // context, commands and fields, the panel opener action and the two retired config keys
+    // (`layout.density_mode`, `layout.auto_panels`/`AutoPanelsConfig`/`on_task_plan`).
+    (
+        "mission-21-7-f",
+        r"\bDensityMode\b|\bdensity_mode\b|\bdensity_user_overridden\b|\bapply_density_transition\b|\bdashboard_panel\b|\bSetDensityMode\b|\bATTACHED_DENSITY\b|\bsidebar_visible\b|\bAutoPanelsConfig\b|\bauto_panels\b|\bon_task_plan\b|\bOpenPanel\b|\bFocusState\s*::\s*Sidebar\b|\bPanelType\b|\bContext\s*::\s*Sidebar\b|\bSidebarCmd\b|\bsidebar_(?:panel|selected|entry_count|scroll_offset)\b",
     ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
@@ -634,6 +642,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "mission-21-7-c",
                     "mission-21-7-d",
                     "mission-21-7-e",
+                    "mission-21-7-f",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2939,7 +2948,7 @@ fn k12_story21_7_e_the_history_sidebar_panel_is_unpinnable_and_the_frame_stays_l
     // painter and bridge, the monitor column's flag, and near-miss names.
     let legal = "fn real() { let _ = Surface::History; let _ = Context::History; \
         history_window::open(s, i, 0); history_inspector::row_text(a, 0, 9); \
-        history_bridge::open(s, i); let _ = s.sidebar_visible; \
+        history_bridge::open(s, i); let _ = s.monitor; \
         let _ = InputAction::OpenHistoryEntry(id); let _ = SurfaceTarget::History; \
         let _ = sidebar_panels; let _ = PanelTypes; }";
     let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
@@ -2957,4 +2966,87 @@ fn k12_story21_7_e_the_history_sidebar_panel_is_unpinnable_and_the_frame_stays_l
     );
     assert!(PINS.is_empty());
     assert!(RULES.iter().any(|(name, _)| *name == "mission-21-7-e"));
+}
+
+// Story 21.7 slice 7-F (A25, clause f, FINAL): the density model, the Dashboard/Focus layout
+// branches, the status chip's inputs, the sidebar focus/context/fields and the two retired
+// config keys are gone from every production part of `src/**`. The clause is RED on a synthetic
+// source through the same scanner function, cannot be pinned (a hard rule), and leaves the
+// monitor's own names (`state.monitor`, `Surface::History`, the Wave panel rows) alone.
+#[test]
+fn k12_story21_7_f_the_density_model_and_the_sidebar_focus_are_unpinnable_and_the_monitor_stays_legal()
+ {
+    for text in [
+        "let d = DensityMode::Focus;",
+        "let d = visual::DensityMode :: Dashboard;",
+        "s.density_mode = d;",
+        "s.density_user_overridden = true;",
+        "handlers::notice::apply_density_transition(s, m, b);",
+        "let p = layout.dashboard_panel;",
+        "let a = InputAction::SetDensityMode(m);",
+        "let c = ATTACHED_DENSITY;",
+        "let v = s.sidebar_visible;",
+        "let c = config.layout.auto_panels;",
+        "let c: AutoPanelsConfig = Default::default();",
+        "let c = a.on_task_plan;",
+        "let a = PaletteAction::OpenPanel(p);",
+        "s.focus = FocusState::Sidebar { panel: p, selected: 0 };",
+        "let p = PanelType::History;",
+        "let c = Context::Sidebar;",
+        "let c = SidebarCmd::SelectNext;",
+        "s.sidebar_panel = None;",
+        "s.sidebar_selected = 3;",
+        "s.sidebar_entry_count = 0;",
+        "s.sidebar_scroll_offset = 0;",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("mission-21-7-f|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("mission-21-7-f|")),
+            "{text}: {errors:?}"
+        );
+    }
+    // Positive controls the clause must not touch: the monitor flag and its layout/availability
+    // names, the History frame, the Wave overlay rows, the retired-key list and near-miss names.
+    let legal = "fn real() { let _ = s.monitor; let _ = layout.sidebar; \
+        let _ = compute_layout(a, t, \"\", 1, s.monitor); let _ = composer_width(w, s.monitor); \
+        let _ = LeaderCmd::Monitor; let _ = MONITOR_NARROW; let _ = Surface::History; \
+        let _ = Context::History; let _ = PanelCmd::WaveRetry; \
+        let _ = RETIRED_TOP_LEVEL_FIELDS; let _ = sidebar_column_width(w); \
+        let _ = SIDEBAR_MIN_WIDTH; let _ = DensityModes; let _ = my_density_mode; \
+        let _ = PanelTypes; let _ = OpenPanels; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("mission-21-7-f|")),
+        "{errors:?}"
+    );
+    let masked = "// DensityMode density_mode dashboard_panel sidebar_visible auto_panels\n\
+        #[cfg(test)] mod tests { fn t() { let _ = DensityMode::Focus; let _ = s.sidebar_visible; } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("mission-21-7-f|"))
+    );
+    assert!(PINS.is_empty());
+    assert!(RULES.iter().any(|(name, _)| *name == "mission-21-7-e"));
+    assert!(
+        RULES.iter().any(|(name, _)| *name == "mission-21-7-f"),
+        "clause f is registered"
+    );
 }

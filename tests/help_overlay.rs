@@ -406,7 +406,6 @@ fn test_status_bar_renders_hint() {
     use ratatui::backend::TestBackend;
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
-    use rustain::domain::models::visual::DensityMode;
     use rustain::domain::models::{PermissionMode, StatusState};
 
     let backend = TestBackend::new(120, 1);
@@ -443,7 +442,6 @@ fn test_status_bar_renders_hint() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -471,7 +469,6 @@ fn test_status_bar_no_hint_when_none() {
     use ratatui::backend::TestBackend;
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
-    use rustain::domain::models::visual::DensityMode;
     use rustain::domain::models::{PermissionMode, StatusState};
 
     let backend = TestBackend::new(120, 1);
@@ -508,7 +505,6 @@ fn test_status_bar_no_hint_when_none() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -538,7 +534,6 @@ fn test_help_overlay_small_terminal_no_crash() {
         notification_log::LogFacts,
         presentation::{Shell, compose, geometry},
     };
-    use rustain::domain::models::visual::DensityMode;
 
     for (width, height, full) in [(60, 16, true), (130, 30, false)] {
         let mut state = TuiState::new(width, height);
@@ -547,15 +542,7 @@ fn test_help_overlay_small_terminal_no_crash() {
         }
         open_help_from_chat(&mut state);
         let area = Rect::new(0, 0, width, height);
-        let layout = compute_layout(
-            area,
-            &state.theme,
-            &state.input_buffer,
-            1,
-            false,
-            DensityMode::Focus,
-        )
-        .unwrap();
+        let layout = compute_layout(area, &state.theme, &state.input_buffer, 1, false).unwrap();
         let shell = Shell::new(area, &layout);
         let rect = geometry::frame_rect(shell.region);
         if full {

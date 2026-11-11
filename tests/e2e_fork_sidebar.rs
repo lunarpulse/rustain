@@ -27,7 +27,7 @@ use rustain::domain::models::conversation::{
     ChatMessage, Conversation, ForkSource, generate_conversation_id,
 };
 use rustain::domain::models::session_meta::SessionMeta;
-use rustain::domain::models::{ConversationSummary, DensityMode, MessageRole};
+use rustain::domain::models::{ConversationSummary, MessageRole};
 use rustain::domain::ports::StoragePort;
 use rustain::domain::services::session_index::SessionIndex;
 
@@ -265,7 +265,6 @@ fn painted_history(index: &SessionIndex) -> Vec<String> {
         &state.input_buffer,
         1,
         false,
-        DensityMode::Focus,
     )
     .expect("a real chat viewport");
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

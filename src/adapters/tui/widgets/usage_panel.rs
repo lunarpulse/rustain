@@ -295,15 +295,8 @@ mod tests {
         let mut paint = |state: &TuiState| {
             terminal
                 .draw(|frame| {
-                    let layout = layout::compute_layout(
-                        frame.area(),
-                        &state.theme,
-                        "",
-                        1,
-                        false,
-                        crate::domain::models::visual::DensityMode::Focus,
-                    )
-                    .unwrap();
+                    let layout =
+                        layout::compute_layout(frame.area(), &state.theme, "", 1, false).unwrap();
                     let shell = presentation::Shell::new(frame.area(), &layout);
                     presentation::compose(
                         frame,
@@ -348,7 +341,6 @@ mod tests {
                     "1\n2\n3\n4\n5\n6\n7\n8",
                     1,
                     false,
-                    crate::domain::models::visual::DensityMode::Focus,
                 )
                 .unwrap();
                 let region = crate::adapters::tui::presentation::geometry::modal_region(

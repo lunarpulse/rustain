@@ -322,3 +322,43 @@ fn config_show_markdown_override_is_a_known_key() {
         .stderr(predicate::str::contains("unknown config key").not());
     assert_no_provider_constructed("markdown override");
 }
+
+/// 21-7 7-F (RU-21-7-7): `layout.density_mode` is a retired key. The Act 2 native driver still
+/// passes `-c layout.density_mode=monitor`: it is accepted, ignored and draws no unknown-key
+/// warning (the control above shows a genuinely unknown key still warns).
+#[test]
+#[serial]
+fn config_show_retired_layout_override_is_accepted_silently() {
+    rustain::infrastructure::provider_factory::PROVIDER_CTOR_COUNT.store(0, Ordering::SeqCst);
+
+    // A26: HOME, config, data and the working directory are this test's own tempdirs; no
+    // inherited RUSTAIN_* setting can reach the binary.
+    let scratch = tempfile::tempdir().unwrap();
+    let path = |name: &str| {
+        let dir = scratch.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    Command::cargo_bin("rustain")
+        .unwrap()
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", path("home"))
+        .env("XDG_CONFIG_HOME", path("xdg-config"))
+        .env("XDG_DATA_HOME", path("xdg-data"))
+        .env("RUSTAIN_CONFIG_DIR", path("config"))
+        .env("RUSTAIN_DATA_DIR", path("data"))
+        .current_dir(path("workspace"))
+        .args([
+            "-c",
+            "layout.density_mode=monitor",
+            "config",
+            "show",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("unknown config key").not())
+        .stdout(predicate::str::contains("density_mode").not());
+    assert_no_provider_constructed("retired layout override");
+}

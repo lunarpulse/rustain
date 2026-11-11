@@ -15,7 +15,6 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::which_key_bar;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::DensityMode;
 
 use rustain::adapters::tui::app::status_tail;
 use rustain::adapters::tui::keymap::render::StatusTail;
@@ -51,10 +50,10 @@ fn position(text: &str, needle: &str) -> usize {
 
 #[test]
 fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
-    // Local, 80 columns: no chord is (n/a) any more (Room, A2A log, Artifacts, Adapters, Agents,
-    // Tasks and History all open Mission Control tabs or frames); the overlays are not either.
+    // Local, 80 columns: only the monitor chord is (n/a) (Room, A2A log, Artifacts, Adapters,
+    // Agents, Tasks and History all open Mission Control tabs or frames); the overlays are not.
     // The Room chord (21-7, 7-A) opens the Mission Control Room tab at every width: available.
-    let narrow = paint(80, 12, &AvailCtx::local(80, DensityMode::Focus));
+    let narrow = paint(80, 12, &AvailCtx::local(80));
     assert!(
         narrow.contains("[R] Room") && !narrow.contains("[R] Room (n/a)"),
         "80 cols: the Room chord is available:\n{narrow}"
@@ -82,21 +81,28 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         narrow.contains("[H] History") && !narrow.contains("[H] History (n/a)"),
         "80 cols: the History chord is available (a frame at every width):\n{narrow}"
     );
-    for painted in [
-        "[P] Profile",
-        "[M] Model",
-        "[U] Usage",
-        "[W] Monitor",
-        "[?] Help",
-    ] {
+    for painted in ["[P] Profile", "[M] Model", "[U] Usage", "[?] Help"] {
         assert!(narrow.contains(painted), "{painted}:\n{narrow}");
         assert!(
             !narrow.contains(&format!("{painted} (n/a)")),
             "{painted} is available:\n{narrow}"
         );
     }
+    // The monitor chord needs a terminal of 120 columns (21-7 7-F, A16): `(n/a)` at 80 and 119,
+    // available at 120 and 130 (the control below).
+    assert!(
+        narrow.contains("[W] Monitor (n/a)"),
+        "80 cols: the monitor chord names its width floor:\n{narrow}"
+    );
+    let floor = paint(119, 12, &AvailCtx::local(119));
+    assert!(floor.contains("[W] Monitor (n/a)"), "119 cols:\n{floor}");
+    let at_floor = paint(120, 12, &AvailCtx::local(120));
+    assert!(
+        at_floor.contains("[W] Monitor") && !at_floor.contains("[W] Monitor (n/a)"),
+        "120 cols:\n{at_floor}"
+    );
     // Local, 130 columns: panels are available.
-    let wide = paint(130, 12, &AvailCtx::local(130, DensityMode::Monitor));
+    let wide = paint(130, 12, &AvailCtx::local(130));
     assert!(
         wide.contains("[H] History") && !wide.contains("(n/a)"),
         "{wide}"
@@ -170,7 +176,7 @@ fn decisions_help_names_the_queue_for_both_hosts() {
         "Decisions: open the Needs-you queue (status cue: Needs you)"
     );
     for (host, avail) in [
-        (Host::Local, AvailCtx::local(130, DensityMode::Focus)),
+        (Host::Local, AvailCtx::local(130)),
         (Host::Attached, AvailCtx::attached(130, false)),
     ] {
         let Resolved::Hit(row) = resolve(Context::Leader, host, &[Key::Char('q')]) else {
@@ -183,10 +189,7 @@ fn decisions_help_names_the_queue_for_both_hosts() {
 
 #[test]
 fn menu_keeps_the_relative_order_of_21_1_and_21_2() {
-    for avail in [
-        AvailCtx::attached(130, false),
-        AvailCtx::local(130, DensityMode::Monitor),
-    ] {
+    for avail in [AvailCtx::attached(130, false), AvailCtx::local(130)] {
         let text = paint(200, 6, &avail);
         let help = position(&text, "[?] Help");
         let notifications = position(&text, "[N] Notifications");

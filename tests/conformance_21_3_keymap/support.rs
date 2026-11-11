@@ -77,7 +77,7 @@ pub fn press_all(state: &mut TuiState, keys: &[Key]) -> Vec<InputAction> {
     keys.iter().map(|key| press(state, *key)).collect()
 }
 
-/// A fresh 80x24 local state (default Focus density, Input focus).
+/// A fresh 80x24 local state (Input focus).
 pub fn fresh() -> TuiState {
     TuiState::new(80, 24)
 }
@@ -140,14 +140,12 @@ pub fn paint_decision(state: &mut TuiState) -> String {
     use rustain::adapters::tui::layout::compute_layout;
     use rustain::adapters::tui::notification_log::LogFacts;
     use rustain::adapters::tui::presentation::{self, Shell};
-    use rustain::domain::models::visual::DensityMode;
     let layout = compute_layout(
         Rect::new(0, 0, 80, 24),
         &state.theme,
         &state.input_buffer,
         1,
         false,
-        DensityMode::Focus,
     )
     .unwrap();
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

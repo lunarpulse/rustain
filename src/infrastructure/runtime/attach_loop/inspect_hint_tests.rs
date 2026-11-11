@@ -31,7 +31,6 @@ fn story21_5_narrow_cue_attached_tool_never_advertises_local_inspection() {
                 &rig.state.input_buffer,
                 1,
                 false,
-                DensityMode::Focus,
             )
             .unwrap();
             let row = (0..width)

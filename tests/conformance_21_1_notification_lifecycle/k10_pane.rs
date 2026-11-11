@@ -649,7 +649,6 @@ fn long_status_row(state: &TuiState, width: u16, long: bool) -> String {
     use rustain::adapters::tui::state::{DailyBudgetState, LogAwareness};
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
-    use rustain::domain::models::visual::DensityMode;
     use rustain::domain::models::{PermissionMode, StatusState, UsageInfo};
     let usage = UsageInfo {
         input_tokens: 123_456,
@@ -700,7 +699,6 @@ fn long_status_row(state: &TuiState, width: u16, long: bool) -> String {
                 false,
                 long.then_some(&budget),
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,

@@ -9,7 +9,6 @@ use rustain::adapters::tui::keymap::{
     self, AvailCtx, Binding, CommandId, Context, Host, Key, render_tips::launchpad_keys,
     table::LeaderCmd, table_chat::ChatCmd, table_input::InputCmd,
 };
-use rustain::domain::models::visual::DensityMode;
 
 fn row(context: Context, host: Host, command: impl Into<CommandId>) -> &'static Binding {
     let command = command.into();
@@ -37,7 +36,7 @@ fn tab_and_inspect_texts_name_thinking() {
 
 #[test]
 fn launchpad_keys_are_the_registry_rows_compact_labels() {
-    let local = AvailCtx::local(130, DensityMode::Focus);
+    let local = AvailCtx::local(130);
     let keys = launchpad_keys(Host::Local, &local);
     let compact = |context, host, command: CommandId| row(context, host, command).compact_label();
     assert_eq!(
@@ -84,7 +83,7 @@ fn launchpad_keys_are_the_registry_rows_compact_labels() {
 
 #[test]
 fn launchpad_keys_follow_availability_by_host_and_width() {
-    let narrow = launchpad_keys(Host::Local, &AvailCtx::local(80, DensityMode::Focus));
+    let narrow = launchpad_keys(Host::Local, &AvailCtx::local(80));
     // History is a frame (Story 21.7 A21), local at every width: the key line names it at 80.
     assert_eq!(narrow.items.len(), 4, "{narrow:?}");
     assert!(narrow.items.iter().any(|item| item.contains("History")));

@@ -171,8 +171,6 @@ pub enum InputAction {
         conversation_id: String,
         key: crate::adapters::tui::decision_queue::DecisionKey,
     },
-    /// Toggle Monitor density from the leader (Ctrl+X, W): Story 21.3 A6.
-    SetDensityMode(crate::domain::models::visual::DensityMode),
     /// `Ctrl+X h` / the palette: open the History window on the session index.
     OpenHistory,
     /// `Enter` in the History window: open the conversation with this id (the host loads it
@@ -322,7 +320,7 @@ pub enum InputAction {
     /// Close the bookmark list panel (Esc in BookmarkList overlay).
     // Covers: Story 4-4, AC10
     CloseBookmarkList,
-    /// Open the cross-conversation search overlay (`/` in sidebar focus).
+    /// Open the cross-conversation search overlay (`/` in the History window).
     // Covers: Story 4-4, AC5 (UX-DR87)
     OpenCrossSearch,
     /// Query updated in the cross-search overlay — event loop should kick
@@ -671,8 +669,7 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
 
 /// Facts the registry's availability rows read in the local host (A5, A10).
 pub(crate) fn local_avail_ctx(state: &TuiState) -> crate::adapters::tui::keymap::AvailCtx {
-    let mut ctx =
-        crate::adapters::tui::keymap::AvailCtx::local(state.terminal_width, state.density_mode);
+    let mut ctx = crate::adapters::tui::keymap::AvailCtx::local(state.terminal_width);
     ctx.leader_available = ctrl_x_opens_leader(state);
     ctx.frame_origin = !state.modal_stack.is_empty();
     ctx.stage_target = state.focus == FocusState::Chat
@@ -767,7 +764,6 @@ pub(crate) fn handle_leader_key(
     let CommandId::Leader(command) = row.command else {
         return InputAction::Consumed;
     };
-    use crate::domain::models::visual::DensityMode;
     match command {
         LeaderCmd::Profile => InputAction::OpenProfileSwitcher,
         LeaderCmd::Model => InputAction::OpenModelSelector,
@@ -792,13 +788,11 @@ pub(crate) fn handle_leader_key(
         LeaderCmd::Tasks => open_tasks(state),
         LeaderCmd::History => InputAction::OpenHistory,
         LeaderCmd::Usage => InputAction::OpenUsagePanel,
-        // A6: Monitor toggles (Focus/Dashboard -> Monitor, Monitor -> Focus).
+        // OD-2 (A16): the registry row gated the chord on the width; the preference is only a flag.
         LeaderCmd::Monitor => {
-            InputAction::SetDensityMode(if state.density_mode == DensityMode::Monitor {
-                DensityMode::Focus
-            } else {
-                DensityMode::Monitor
-            })
+            state.monitor = !state.monitor;
+            state.needs_redraw = true;
+            InputAction::Consumed
         }
         LeaderCmd::Help => {
             presentation::reducer::open(state, Surface::Help);
@@ -929,11 +923,6 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
                 .height_cache
                 .invalidate_all();
             state.tab_render_state(state.active_tab_id).cached_width = Some(*w);
-            // P11: Reset the column if the terminal shrinks below its minimum width
-            // (7-F: the preference is kept instead).
-            if *w < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
-                state.sidebar_visible = false;
-            }
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1712,8 +1701,7 @@ fn filtered_help_scroll_limit(state: &TuiState) -> usize {
         &state.theme,
         &state.input_buffer,
         1,
-        state.sidebar_visible,
-        state.density_mode,
+        state.monitor,
     )
     .map(|layout| {
         presentation::geometry::frame_rect(presentation::geometry::modal_region(&layout, area))
@@ -2369,16 +2357,12 @@ fn submit_message(state: &mut TuiState) -> InputAction {
 }
 
 /// The composer's width-aware projection at the width the layout actually
-/// gives it (sidebar-narrowed main column, not the terminal width).
+/// gives it (monitor-narrowed main column, not the terminal width).
 fn composer_geometry(state: &TuiState) -> input_box::InputGeometry {
     let width = if state.terminal_width == 0 {
         u16::MAX
     } else {
-        crate::adapters::tui::layout::composer_width(
-            state.terminal_width,
-            state.sidebar_visible,
-            state.density_mode,
-        )
+        crate::adapters::tui::layout::composer_width(state.terminal_width, state.monitor)
     };
     input_box::InputGeometry::new(&state.input_buffer, input_box::inner_width(width))
 }

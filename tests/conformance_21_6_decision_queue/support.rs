@@ -23,7 +23,6 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{status_bar, toast_layer};
 use rustain::domain::clock::MockClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{NotificationsConfig, PermissionMode, StatusState};
 use unicode_width::UnicodeWidthStr;
 
@@ -62,7 +61,6 @@ pub fn layout_of(state: &TuiState, width: u16, height: u16) -> AppLayout {
         &state.input_buffer,
         1,
         false,
-        DensityMode::Focus,
     )
     .expect("the terminal is at or above the 60x16 floor")
 }
@@ -206,7 +204,6 @@ pub fn status_row(state: &TuiState, width: u16) -> String {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,

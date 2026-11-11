@@ -703,7 +703,7 @@ impl Default for SearchState {
     }
 }
 
-/// State for the cross-conversation search overlay (`/` in sidebar focus).
+/// State for the cross-conversation search overlay (`/` in the History window).
 ///
 /// Lives in the adapter layer because it's TUI view state. The actual scan
 /// runs in the event loop via `domain::services::cross_search::run_cross_search`
@@ -2140,7 +2140,7 @@ pub struct TuiState {
     /// State for the within-conversation search overlay (Ctrl+F).
     // Covers: UX-DR86, Story 4-4 AC1-AC7
     pub search_state: SearchState,
-    /// State for the cross-conversation search overlay (`/` in sidebar).
+    /// State for the cross-conversation search overlay (`/` in the History window).
     // Covers: UX-DR87, Story 4-4 AC5-AC7
     pub cross_search: CrossSearchState,
     /// Vertical scroll offset within the input box when lines exceed max height.
@@ -2252,9 +2252,6 @@ pub struct TuiState {
     /// `None` once session_count > theme.timing.status_hint_fade_sessions.
     // Covers: UX-DR93
     pub current_hint: Option<String>,
-    /// Current information density mode (Story 8.4b).
-    /// Controls layout density, sidebar visibility policy, and notification routing.
-    pub density_mode: crate::domain::models::visual::DensityMode,
     /// Story 21.13 (D5): the local Stage's fenced-code cap in rows, from
     /// `[markdown] code_max_rows` (clamped to `[1, 1000]`, default 30).
     pub code_max_rows: u16,
@@ -2264,16 +2261,13 @@ pub struct TuiState {
     /// Story 21.9 (D17): the workspace and live provider-lock query the local
     /// launchpad refresh reads. `None` (tests, previews) skips the refresh.
     pub launchpad_env: Option<crate::adapters::tui::launchpad::LaunchpadEnv>,
-    /// Epic-10 hook: auto-trigger logic (e.g., InteractionState::Executing → Monitor)
-    /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
-    /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
-    pub density_user_overridden: bool,
     /// Story 21.3 A12: (custom command name, discovery generation) already announced.
     pub shadows_announced: std::collections::BTreeSet<(String, u64)>,
-    /// Whether the right-hand column (the read-only monitor body) is visible. Until 7-F it
-    /// follows the Monitor density.
+    /// `Ctrl+X w` (OD-2, A16): the user wants the read-only monitor column. Default off; the
+    /// column is painted only while this is set AND the terminal is at least 120 columns wide,
+    /// and the preference is kept when the terminal narrows.
     // Covers: FR107, UX-DR20
-    pub sidebar_visible: bool,
+    pub monitor: bool,
     /// Story 6-3: the task actions' state (the plan the Tasks tab resolves first, the reorder).
     pub task_panel_state: TaskPanelState,
     pub agent_panel_state: AgentPanelState,
@@ -2661,14 +2655,12 @@ impl TuiState {
             is_vscode: false,
             session_count: 0,
             current_hint: None,
-            density_mode: Default::default(),
             code_max_rows: 30,
             reasoning_display: crate::domain::models::ReasoningDisplay::Folded,
             launchpad_env: None,
             session_overrides: std::collections::BTreeMap::new(),
-            density_user_overridden: false,
             shadows_announced: std::collections::BTreeSet::new(),
-            sidebar_visible: false,
+            monitor: false,
             task_panel_state: TaskPanelState::default(),
             agent_panel_state: AgentPanelState::default(),
             bookmark_list_selected: 0,
@@ -3578,7 +3570,7 @@ mod tests {
         use crate::adapters::tui::keymap::{
             AvailCtx, CommandId, Host, Key, LeaderStep, leader_step, table::LeaderCmd,
         };
-        let avail = AvailCtx::local(130, crate::domain::models::visual::DensityMode::Monitor);
+        let avail = AvailCtx::local(130);
         match leader_step(Host::Local, Key::Char('s'), &avail, "Input") {
             LeaderStep::Run(row) => {
                 assert_eq!(row.command, CommandId::Leader(LeaderCmd::Agents));

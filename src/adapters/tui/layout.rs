@@ -16,37 +16,25 @@ pub struct AppLayout {
     pub input_area: Rect,
     /// Tab bar row (shown when tab_count > 1 AND width >= 80).
     pub tab_bar: Option<Rect>,
-    /// Sidebar column (shown when sidebar_visible AND terminal_width >= 120).
+    /// The read-only monitor column (shown when the monitor is on AND terminal_width >= 120).
     pub sidebar: Option<Rect>,
-    /// Dashboard-mode panel area (Story 8.4b AC-4). When in Dashboard mode,
-    /// 70% of the content area is reserved for panel widgets; the bottom 30%
-    /// is compact chat. `None` in Focus/Monitor modes.
-    pub dashboard_panel: Option<Rect>,
 }
 
-/// Minimum terminal width to show sidebar.
+/// Minimum terminal width to show the monitor column.
 pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 
-/// Width of the sidebar column for a terminal `area_width` cells wide.
+/// Width of the monitor column for a terminal `area_width` cells wide.
 fn sidebar_column_width(area_width: u16) -> u16 {
     ((area_width as f32) * 0.3).clamp(30.0, 50.0) as u16
 }
 
 /// Width of the composer rectangle `compute_layout` allocates: the whole
-/// terminal width, except that a visible sidebar (Standard/Monitor, wide
-/// enough terminals) narrows the main column that holds the composer.
+/// terminal width, except that a painted monitor column (the monitor is on and the
+/// terminal is wide enough) narrows the main column that holds the composer.
 /// Composer height, wrapping and caret math must use this width, not the
 /// terminal width (Story 21.11).
-pub fn composer_width(
-    area_width: u16,
-    sidebar_visible: bool,
-    density_mode: crate::domain::models::visual::DensityMode,
-) -> u16 {
-    use crate::domain::models::visual::DensityMode;
-    let sidebar_applies = sidebar_visible
-        && area_width >= SIDEBAR_MIN_WIDTH
-        && !matches!(density_mode, DensityMode::Dashboard | DensityMode::Focus);
-    if sidebar_applies {
+pub fn composer_width(area_width: u16, monitor: bool) -> u16 {
+    if monitor && area_width >= SIDEBAR_MIN_WIDTH {
         area_width.saturating_sub(sidebar_column_width(area_width))
     } else {
         area_width
@@ -55,7 +43,7 @@ pub fn composer_width(
 
 /// Compute the layout based on terminal size and tab count.
 /// Input area height is dynamic based on content (multi-line support).
-/// - >=120x24: full layout with optional sidebar
+/// - >=120x24: full layout with the optional monitor column (`monitor`)
 /// - >=80x24: full layout (with optional tab bar when tab_count > 1)
 /// - 60x16 to 80x24: compact layout (same regions, minimal status, no tab bar)
 /// - <60x16: returns None (terminal too small)
@@ -65,67 +53,20 @@ pub fn compute_layout(
     _theme: &Theme,
     input: &str,
     tab_count: usize,
-    sidebar_visible: bool,
-    density_mode: crate::domain::models::visual::DensityMode,
+    monitor: bool,
 ) -> Option<AppLayout> {
     if area.width < 60 || area.height < 16 {
         return None;
     }
 
-    let input_height = input_box::input_area_height(
-        input,
-        composer_width(area.width, sidebar_visible, density_mode),
-    );
+    let input_height = input_box::input_area_height(input, composer_width(area.width, monitor));
 
     // Show tab bar when multiple tabs are open and terminal is wide enough
     let show_tab_bar = tab_count > 1 && area.width >= 80;
 
-    // Dashboard mode: full-width panel (70%) + compact chat (30%), no sidebar
-    if density_mode == crate::domain::models::visual::DensityMode::Dashboard {
-        let tab_bar_height: u16 = if show_tab_bar { 1 } else { 0 };
-        let content_height = area
-            .height
-            .saturating_sub(input_height + 1 + tab_bar_height); // 1 status bar
-        let panel_height = content_height * 7 / 10;
-        let chat_height = content_height - panel_height;
-
-        let mut y = area.y;
-        let tab_bar = if show_tab_bar {
-            let r = Rect::new(area.x, y, area.width, 1);
-            y += 1;
-            Some(r)
-        } else {
-            None
-        };
-        let dashboard_panel = Some(Rect::new(area.x, y, area.width, panel_height));
-        y += panel_height;
-        let chat_pane = Rect::new(area.x, y, area.width, chat_height);
-        y += chat_height;
-        let status_bar = Rect::new(area.x, y, area.width, 1);
-        y += 1;
-        let input_area = Rect::new(area.x, y, area.width, input_height);
-
-        return Some(AppLayout {
-            tab_bar,
-            chat_pane,
-            status_bar,
-            input_area,
-            sidebar: None,
-            dashboard_panel,
-        });
-    }
-
-    // Focus mode forces sidebar hidden regardless of the sidebar_visible argument
-    let effective_sidebar_visible =
-        if density_mode == crate::domain::models::visual::DensityMode::Focus {
-            false
-        } else {
-            // Monitor and Standard both honour the caller's sidebar_visible.
-            sidebar_visible
-        };
-
-    // Calculate sidebar width: min(50, terminal_width * 0.3) with minimum of 30
-    let show_sidebar = effective_sidebar_visible && area.width >= SIDEBAR_MIN_WIDTH;
+    // The column is painted iff the monitor is on and the terminal is wide enough; below the
+    // minimum width the preference is kept but nothing is painted (A16).
+    let show_sidebar = monitor && area.width >= SIDEBAR_MIN_WIDTH;
     let sidebar_width = if show_sidebar {
         sidebar_column_width(area.width)
     } else {
@@ -133,10 +74,10 @@ pub fn compute_layout(
     };
 
     if sidebar_width > 0 {
-        // Split horizontally: main content | sidebar
+        // Split horizontally: main content | monitor column
         let main_chunks = Layout::horizontal([
             Constraint::Min(1),                // main content area
-            Constraint::Length(sidebar_width), // sidebar
+            Constraint::Length(sidebar_width), // monitor column
         ])
         .split(area);
 
@@ -159,7 +100,6 @@ pub fn compute_layout(
                 status_bar: vertical_chunks[2],
                 input_area: vertical_chunks[3],
                 sidebar: Some(sidebar_rect),
-                dashboard_panel: None,
             })
         } else {
             let vertical_chunks = Layout::vertical([
@@ -175,7 +115,6 @@ pub fn compute_layout(
                 status_bar: vertical_chunks[1],
                 input_area: vertical_chunks[2],
                 sidebar: Some(sidebar_rect),
-                dashboard_panel: None,
             })
         }
     } else if show_tab_bar {
@@ -193,7 +132,6 @@ pub fn compute_layout(
             status_bar: chunks[2],
             input_area: chunks[3],
             sidebar: None,
-            dashboard_panel: None,
         })
     } else {
         let chunks = Layout::vertical([
@@ -209,7 +147,6 @@ pub fn compute_layout(
             status_bar: chunks[1],
             input_area: chunks[2],
             sidebar: None,
-            dashboard_panel: None,
         })
     }
 }
@@ -218,88 +155,47 @@ pub fn compute_layout(
 mod tests {
     use super::*;
 
-    // Story 8.4b layout tests
-
     fn test_theme() -> Theme {
         Theme::for_capability(crate::adapters::tui::color_detect::ColorCapability::TrueColor)
     }
 
     #[test]
-    fn dashboard_layout_splits_70_30() {
-        let area = Rect::new(0, 0, 120, 30);
+    fn story21_7_the_column_is_painted_iff_the_monitor_is_on_and_the_terminal_is_wide_enough() {
         let theme = test_theme();
-        let layout = compute_layout(
-            area,
-            &theme,
-            "",
-            1,
-            false,
-            crate::domain::models::visual::DensityMode::Dashboard,
-        )
-        .unwrap();
+        let wide = Rect::new(0, 0, 120, 30);
+        let on = compute_layout(wide, &theme, "", 1, true).unwrap();
+        let column = on
+            .sidebar
+            .expect("monitor on at 120 columns paints the column");
+        assert_eq!(column.width, 36, "30% of 120");
+        assert_eq!(on.chat_pane.width + column.width, 120);
         assert!(
-            layout.dashboard_panel.is_some(),
-            "Dashboard mode must populate dashboard_panel"
+            compute_layout(wide, &theme, "", 1, false)
+                .unwrap()
+                .sidebar
+                .is_none(),
+            "monitor off: no column at any width"
         );
-        let panel = layout.dashboard_panel.unwrap();
-        let chat = layout.chat_pane;
-        // Content area = 30 - 1 status - 3 input = 26
-        // Panel = 26 * 7/10 = 18, Chat = 8
-        assert!(layout.sidebar.is_none(), "Dashboard: no sidebar");
-        assert_eq!(panel.height, 18);
-        assert_eq!(chat.height, 8);
-        assert_eq!(panel.y + panel.height, chat.y);
+        // The preference is kept below the floor, the column is simply not painted (A16).
+        let narrow = Rect::new(0, 0, 119, 30);
+        let layout = compute_layout(narrow, &theme, "", 1, true).unwrap();
+        assert!(layout.sidebar.is_none(), "119 columns: nothing painted");
+        assert_eq!(layout.chat_pane.width, 119);
     }
 
     #[test]
-    fn focus_forces_sidebar_hidden() {
-        let area = Rect::new(0, 0, 120, 30);
+    fn story21_7_composer_width_excludes_exactly_the_painted_column() {
         let theme = test_theme();
-        let layout = compute_layout(
-            area,
-            &theme,
-            "",
-            1,
-            true, // sidebar_visible=true
-            crate::domain::models::visual::DensityMode::Focus,
-        )
-        .unwrap();
-        assert!(
-            layout.sidebar.is_none(),
-            "Focus mode must hide sidebar regardless of flag"
-        );
-    }
-
-    #[test]
-    fn monitor_preserves_sidebar_behavior() {
-        let area = Rect::new(0, 0, 120, 30);
-        let theme = test_theme();
-        let with_sidebar = compute_layout(
-            area,
-            &theme,
-            "",
-            1,
-            true,
-            crate::domain::models::visual::DensityMode::Monitor,
-        )
-        .unwrap();
-        assert!(
-            with_sidebar.sidebar.is_some(),
-            "Monitor with visible flag: sidebar shown"
-        );
-
-        let without_sidebar = compute_layout(
-            area,
-            &theme,
-            "",
-            1,
-            false,
-            crate::domain::models::visual::DensityMode::Monitor,
-        )
-        .unwrap();
-        assert!(
-            without_sidebar.sidebar.is_none(),
-            "Monitor with hidden flag: sidebar hidden"
-        );
+        for width in [60u16, 80, 119, 120, 130, 200] {
+            for monitor in [false, true] {
+                let layout =
+                    compute_layout(Rect::new(0, 0, width, 30), &theme, "", 1, monitor).unwrap();
+                assert_eq!(
+                    composer_width(width, monitor),
+                    layout.input_area.width,
+                    "{width} monitor={monitor}: one rule for the composer and the layout"
+                );
+            }
+        }
     }
 }

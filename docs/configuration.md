@@ -310,6 +310,17 @@ error_ttl_secs = 60    # default 60
 
 Notifications are session-local and are never written to disk.
 
+### Retired layout keys (`[layout]`)
+
+`[layout] density_mode` and `[layout.auto_panels] on_task_plan` are **retired and
+have no effect**: the Focus/Monitor/Dashboard density model and the plan-start
+auto-open of the Tasks sidebar no longer exist. An old config that still carries
+them loads normally with every other key intact, `config show` no longer lists
+them, and `-c layout.density_mode=…` is accepted without a warning and ignored.
+There is no startup key for the read-only monitor either: it is an explicit
+toggle, `Ctrl+X w`, on terminals at least 120 columns wide (the preference is
+kept when the terminal narrows, and the column paints again when it widens).
+
 ### Code blocks (`[markdown]`)
 
 On the local Stage a fenced code block of an assistant reply that is longer than

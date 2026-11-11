@@ -23,7 +23,6 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::{ChunkAction, DomainInputEvent, DomainKey};
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, FeedbackBlock, FocusState, Message, MessageRole,
     PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
@@ -257,15 +256,9 @@ impl TestHarness {
         let theme = &self.theme;
         self.terminal
             .draw(|frame| {
-                let app_layout = layout::compute_layout(
-                    frame.area(),
-                    theme,
-                    &state.input_buffer,
-                    1,
-                    false,
-                    DensityMode::Focus,
-                )
-                .expect("active-tab fixture fits");
+                let app_layout =
+                    layout::compute_layout(frame.area(), theme, &state.input_buffer, 1, false)
+                        .expect("active-tab fixture fits");
                 let searching = presentation::is_open(state, presentation::Surface::Search);
                 let result = chat_pane::render_with_search(
                     frame,
@@ -370,7 +363,6 @@ impl TestHarness {
                             false,
                             None,
                             None,
-                            DensityMode::Focus,
                             false,
                             None,
                             rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -423,7 +415,7 @@ impl TestHarness {
             .draw(|frame| {
                 let area = frame.area();
                 if let Some(app_layout) =
-                    layout::compute_layout(area, theme, input_buffer, 1, false, DensityMode::Focus)
+                    layout::compute_layout(area, theme, input_buffer, 1, false)
                 {
                     let shell = Shell::new(area, &app_layout);
                     chat_pane::render(
@@ -485,7 +477,6 @@ impl TestHarness {
                                 false,
                                 None, // daily_budget (Story 7.5)
                                 None,
-                                DensityMode::Focus,
                                 false,
                                 None,
                                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -818,15 +809,9 @@ impl TestHarness {
             "assert_status_bar_contains called with empty text — this always passes"
         );
         let buf = self.terminal.backend().buffer();
-        let app_layout = layout::compute_layout(
-            buf.area,
-            &self.theme,
-            &self.state.input_buffer,
-            1,
-            false,
-            DensityMode::Focus,
-        )
-        .expect("assert_status_bar_contains requires a terminal of at least 60x16");
+        let app_layout =
+            layout::compute_layout(buf.area, &self.theme, &self.state.input_buffer, 1, false)
+                .expect("assert_status_bar_contains requires a terminal of at least 60x16");
         let status_row = app_layout.status_bar.y;
         let width = usize::from(buf.area.width);
         let row_start = usize::from(status_row - buf.area.y) * width;

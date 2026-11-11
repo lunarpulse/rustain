@@ -59,7 +59,6 @@ mod tests {
     use crate::adapters::tui::presentation::{Surface, reducer};
     use crate::domain::events::{DomainInputEvent, DomainKey};
     use crate::domain::models::palette::{PaletteAction, SurfaceTarget};
-    use crate::domain::models::visual::DensityMode;
     use crate::domain::models::{FocusState, generate_conversation_id};
     use crate::domain::services::session_index::SessionIndex;
     use ratatui::layout::Rect;
@@ -95,8 +94,7 @@ mod tests {
             &state.theme,
             "",
             1,
-            state.sidebar_visible,
-            state.density_mode,
+            state.monitor,
         )
         .expect("layout")
         .sidebar
@@ -119,14 +117,9 @@ mod tests {
             assert_eq!(leader(&mut state, 'h'), InputAction::OpenHistory, "{width}");
             open_history(&mut state);
             assert_eq!(top_surface(&state), Some(Surface::History), "{width}");
-            // No refusal toast, no column, the density untouched, the base focus where it was.
+            // No refusal toast, no column, the monitor untouched, the base focus where it was.
             assert_eq!(state.notifications.records().count(), 0, "{width}");
-            assert!(
-                !painted_sidebar(&state) && !state.sidebar_visible,
-                "{width}"
-            );
-            assert_eq!(state.density_mode, DensityMode::Focus, "{width}");
-            assert!(!state.density_user_overridden, "{width}");
+            assert!(!painted_sidebar(&state) && !state.monitor, "{width}");
             assert_eq!(state.focus, FocusState::Input, "{width}");
         }
         // The palette entry returns the same action.
@@ -158,9 +151,9 @@ mod tests {
     }
 
     #[test]
-    fn story21_3_every_panel_chord_opens_a_frame_and_the_density_is_not_touched() {
+    fn story21_7_every_panel_chord_opens_a_frame_and_never_turns_the_monitor_on() {
         // `s` and `a` are Mission Control's Agents tab and the Adapters window since Story
-        // 21.7 (7-C): they open frames, never the column, and leave the density alone.
+        // 21.7 (7-C): they open frames and never reveal the column.
         let mut agents = TuiState::new(130, 30);
         assert_eq!(
             leader(&mut agents, 's'),
@@ -170,12 +163,9 @@ mod tests {
         assert_eq!(leader(&mut adapters, 'a'), InputAction::OpenAdapters);
         for state in [&agents, &adapters] {
             assert!(!painted_sidebar(state));
-            assert_eq!(state.density_mode, DensityMode::Focus);
-            assert!(!state.density_user_overridden);
-            assert!(!state.sidebar_visible);
+            assert!(!state.monitor);
         }
-        // `t` is Mission Control's Tasks tab since Story 21.7 (7-D): a frame, never the
-        // column, and the density is left alone.
+        // `t` is Mission Control's Tasks tab since Story 21.7 (7-D): a frame, never the column.
         let mut tasks = TuiState::new(130, 30);
         assert_eq!(
             leader(&mut tasks, 't'),
@@ -186,17 +176,13 @@ mod tests {
             Surface::MissionControl
         ));
         assert!(!painted_sidebar(&tasks));
-        assert_eq!(tasks.density_mode, DensityMode::Focus);
-        assert!(!tasks.density_user_overridden);
-        assert!(!tasks.sidebar_visible);
-        // Control: in Monitor density `Ctrl+X h` still opens the window and the column stays.
+        assert!(!tasks.monitor);
+        // Control: with the monitor on `Ctrl+X h` still opens the window and the column stays.
         let mut monitor = TuiState::new(130, 30);
-        monitor.density_mode = DensityMode::Monitor;
-        monitor.sidebar_visible = true;
+        monitor.monitor = true;
         assert_eq!(leader(&mut monitor, 'h'), InputAction::OpenHistory);
         open_history(&mut monitor);
         assert_eq!(top_surface(&monitor), Some(Surface::History));
-        assert!(!monitor.density_user_overridden, "no reveal in Monitor");
         assert!(painted_sidebar(&monitor));
     }
 
@@ -209,7 +195,7 @@ mod tests {
             matches!(action, InputAction::Consumed | InputAction::Ignored),
             "{action:?}"
         );
-        assert!(!state.sidebar_visible && state.focus == FocusState::Chat);
+        assert!(!state.monitor && state.focus == FocusState::Chat);
         assert!(state.modal_stack.is_empty());
     }
 
@@ -251,8 +237,7 @@ mod tests {
         assert!(!state.needs_redraw, "no Tasks surface: no repaint");
         // The monitor column on its default tab (Tasks) is one: the elapsed time keeps moving.
         let mut monitor = TuiState::new(130, 30);
-        monitor.density_mode = DensityMode::Monitor;
-        monitor.sidebar_visible = true;
+        monitor.monitor = true;
         monitor.needs_redraw = false;
         tick_status(&mut monitor, &conversation, 50);
         assert!(

@@ -13,7 +13,7 @@ use rustain::adapters::tui::presentation::{Shell, Surface, compose, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::visual::DeleteConfirmTarget;
-use rustain::domain::models::{ConversationSummary, DensityMode, FocusState, StatusState};
+use rustain::domain::models::{ConversationSummary, FocusState, StatusState};
 use rustain::domain::services::session_index::SessionIndex;
 
 use ratatui::Terminal;
@@ -57,15 +57,8 @@ fn numbered_index(count: usize) -> SessionIndex {
 fn paint(state: &TuiState) -> Vec<String> {
     let (width, height) = (state.terminal_width, state.terminal_height);
     let area = Rect::new(0, 0, width, height);
-    let layout = compute_layout(
-        area,
-        &state.theme,
-        &state.input_buffer,
-        1,
-        false,
-        DensityMode::Focus,
-    )
-    .expect("a real chat viewport");
+    let layout = compute_layout(area, &state.theme, &state.input_buffer, 1, false)
+        .expect("a real chat viewport");
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| {
@@ -115,7 +108,7 @@ fn test_ctrl_x_h_opens_the_history_window() {
             24,
             rustain::adapters::tui::color_detect::ColorCapability::TrueColor,
         );
-        assert!(!state.sidebar_visible);
+        assert!(!state.monitor);
 
         // The chord asks the host to open the History window; a second chord yields the very
         // same request (there is no panel toggle and no 120-column refusal any more).
@@ -132,7 +125,7 @@ fn test_ctrl_x_h_opens_the_history_window() {
             matches!(action, InputAction::Consumed | InputAction::Ignored),
             "{action:?}"
         );
-        assert!(!state.sidebar_visible);
+        assert!(!state.monitor);
         assert!(!is_open(&state, Surface::History), "Ctrl+H opens nothing");
     }
 }
@@ -194,7 +187,7 @@ fn test_tab_from_chat_with_sidebar_never_focuses_sidebar() {
     // dispatcher (the action; focus stays on Chat) and the registry text every help surface
     // prints.
     let mut state = make_state();
-    state.sidebar_visible = true;
+    state.monitor = true;
     state.focus = FocusState::Chat;
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
@@ -223,7 +216,7 @@ fn test_tab_from_chat_without_sidebar_switches_tab() {
     // and sidebar is hidden. Harness has no event loop, so verify action
     // and simulate the fallback.
     let mut state = make_state();
-    state.sidebar_visible = false;
+    state.monitor = false;
     state.focus = FocusState::Chat;
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
@@ -237,7 +230,7 @@ fn test_tab_in_history_window_is_consumed_and_keeps_the_frame() {
     // focus. The History window is a modal frame: an unbound Tab is consumed and neither closes
     // it nor moves the selection.
     let mut state = make_state();
-    state.sidebar_visible = true;
+    state.monitor = true;
     open_history(&mut state, &numbered_index(3));
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
@@ -395,14 +388,14 @@ fn test_session_index_remove_updates_index() {
     assert!(index.get("c").is_some());
 }
 
-// ── AC11: Resize hides the sidebar column when too narrow ───────────────────
-// (7-E: the column paints `Monitor · <Tab>` and is never a focus target; the P11 shrink
-// reset still hides it below 120 columns and leaves the focus where it was.)
+// ── AC11: Resize keeps the monitor preference below 120 columns (A16) ───────
+// (7-F: the column paints `Monitor · <Tab>` and is never a focus target; the P11 shrink reset
+// is gone: the preference survives, the layout simply does not paint the column below 120.)
 
 #[test]
-fn test_resize_hides_sidebar_when_narrow() {
+fn test_resize_keeps_the_monitor_preference_when_narrow() {
     let mut state = make_state();
-    state.sidebar_visible = true;
+    state.monitor = true;
     state.focus = FocusState::Chat;
 
     // Simulate resize to below SIDEBAR_MIN_WIDTH
@@ -411,19 +404,19 @@ fn test_resize_hides_sidebar_when_narrow() {
         &DomainInputEvent::Resize(80, 24), // 80 < 120 (SIDEBAR_MIN_WIDTH)
     );
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.sidebar_visible);
+    assert!(state.monitor, "the preference is kept; nothing is painted");
     assert_eq!(state.focus, FocusState::Chat, "the column never held focus");
 }
 
 #[test]
 fn test_resize_keeps_sidebar_when_wide_enough() {
     let mut state = make_state();
-    state.sidebar_visible = true;
+    state.monitor = true;
     state.focus = FocusState::Chat;
 
     // Resize to exactly SIDEBAR_MIN_WIDTH — should keep sidebar
     let _action = handle_input(&mut state, &DomainInputEvent::Resize(120, 24));
-    assert!(state.sidebar_visible);
+    assert!(state.monitor);
     assert_eq!(state.focus, FocusState::Chat);
 }
 

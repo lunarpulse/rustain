@@ -351,14 +351,15 @@ fn retained_wave_rows_in_chat_ignore_an_armed_reorder() {
     }
 }
 
-/// DF-262: shrinking below 120 columns drops the Monitor sidebar column; Chat has no task
-/// verb at any width. Replaces the old drill-down fallback (an open drill-down survived 120 and was
-/// dropped at 119, so `r s e c` stopped being task verbs): there is no drill-down, so `r s e` are
-/// Chat keys with nothing to do both before and after the resize, and `c` always copies.
+/// DF-262 / A16: shrinking below 120 columns keeps the monitor preference (the column is simply
+/// not painted; the P11 reset is gone); Chat has no task verb at any width. Replaces the old
+/// drill-down fallback (an open drill-down survived 120 and was dropped at 119, so `r s e c`
+/// stopped being task verbs): there is no drill-down, so `r s e` are Chat keys with nothing to
+/// do both before and after the resize, and `c` always copies.
 #[test]
-fn narrow_resize_drops_the_sidebar_and_chat_has_no_task_verbs() {
+fn narrow_resize_keeps_the_monitor_preference_and_chat_has_no_task_verbs() {
     let mut state = TuiState::new(160, 40);
-    state.sidebar_visible = true;
+    state.monitor = true;
     state.focus = FocusState::Chat;
     state.task_panel_state.last_executed_plan_id = Some("plan-1".to_owned());
 
@@ -366,7 +367,7 @@ fn narrow_resize_drops_the_sidebar_and_chat_has_no_task_verbs() {
     let resize =
         |state: &mut TuiState, width| handle_input(state, &DomainInputEvent::Resize(width, 40));
     assert_eq!(resize(&mut state, 120), InputAction::Consumed);
-    assert!(state.sidebar_visible);
+    assert!(state.monitor);
     assert_eq!(
         press(&mut state, Key::Char('r')),
         InputAction::Ignored,
@@ -374,7 +375,7 @@ fn narrow_resize_drops_the_sidebar_and_chat_has_no_task_verbs() {
     );
 
     assert_eq!(resize(&mut state, 119), InputAction::Consumed);
-    assert!(!state.sidebar_visible);
+    assert!(state.monitor, "the preference is kept below 120 (A16)");
     assert_eq!(
         (state.focus.clone(), state.terminal_width),
         (FocusState::Chat, 119)

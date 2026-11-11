@@ -277,7 +277,7 @@ fn ac10_plan_start_leaves_the_sidebar_closed_at_any_width() {
             &conv.id,
             "test-plan"
         ));
-        assert!(!state.sidebar_visible, "width {width}");
+        assert!(!state.monitor, "width {width}");
         assert!(state.history_window.is_none(), "width {width}");
     }
 }
@@ -335,7 +335,7 @@ fn ac1_chord_opens_tasks_tab() {
     assert_eq!(action, InputAction::OpenMissionControl(McTab::Tasks));
     assert!(mission_control::is_top(&state));
     assert_eq!(state.mission_control.tab, McTab::Tasks);
-    assert!(!state.sidebar_visible, "no sidebar opens any more");
+    assert!(!state.monitor, "no sidebar opens any more");
 }
 
 // ac1_chord_warns_at_narrow_terminal (old): the sidebar needed >= 120 columns. The tab is a
@@ -382,7 +382,7 @@ fn ac1_esc_closes_the_tab_and_a_later_plan_start_opens_nothing() {
         state.modal_stack.top().is_none(),
         "a plan start opens no frame"
     );
-    assert!(!state.sidebar_visible);
+    assert!(!state.monitor);
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn ac1_plan_execution_started_opens_nothing_and_follows_the_plan() {
         &conv.id,
         "test-plan"
     ));
-    assert!(!state.sidebar_visible);
+    assert!(!state.monitor);
     assert!(state.history_window.is_none(), "no History frame payload");
     assert!(state.modal_stack.top().is_none(), "no frame opens");
     assert_eq!(state.focus, focus_before, "focus does not move");
@@ -416,23 +416,22 @@ fn ac1_plan_execution_started_opens_nothing_and_follows_the_plan() {
 }
 
 // ac1_auto_open_suppressed_by_config (old): `on_task_plan = "none"` suppressed the auto-open.
-// With no auto-open there is nothing for the setting to suppress: a plan start opens nothing
-// regardless of any configured value (same assertion as above, for the config's two values).
+// With no auto-open (and the `[layout.auto_panels]` key retired, RU-21-7-7) there is nothing for
+// the setting to suppress: an old config still loads whatever it says, and a plan start opens
+// nothing regardless (same assertion as above, for the old valid and invalid values).
 #[test]
-fn ac1_plan_start_opens_nothing_for_either_configured_value() {
-    use rustain::domain::models::AutoPanelsConfig;
-    for value in ["tasks", "none"] {
-        let cfg = AutoPanelsConfig {
-            on_task_plan: value.into(),
-        };
-        assert!(cfg.validate().is_ok());
+fn ac1_plan_start_opens_nothing_whatever_an_old_config_says() {
+    use rustain::domain::models::AppConfig;
+    for value in ["tasks", "none", "history"] {
+        let old = format!("[layout.auto_panels]\non_task_plan = \"{value}\"\n");
+        toml::from_str::<AppConfig>(&old).expect("the retired key is ignored, not an error");
         let conv = make_conv_with_plan(make_plan(
             PlanStatus::Executing,
             vec![make_task(1, "T", PlanTaskStatus::Running)],
         ));
         let mut state = TuiState::new(160, 24);
         handle_plan_execution_started(&mut state, &conv, &conv.id, "test-plan");
-        assert!(!state.sidebar_visible, "{value}");
+        assert!(!state.monitor, "{value}");
         assert!(state.modal_stack.top().is_none(), "{value}");
     }
 }
@@ -453,7 +452,7 @@ fn ac1_repeated_plan_starts_post_no_hint_and_open_nothing() {
         handle_plan_execution_started(&mut state, &conv, &conv.id, "test-plan");
     }
     assert_eq!(state.notifications.len(), before, "no hint toast");
-    assert!(!state.sidebar_visible);
+    assert!(!state.monitor);
     assert!(state.modal_stack.top().is_none());
 }
 
@@ -731,28 +730,8 @@ fn ac1_plan_start_event_for_other_conversation_ignored() {
     let matched =
         handle_plan_execution_started(&mut state, &conv, "different-conversation-id", "test-plan");
     assert!(!matched);
-    assert!(!state.sidebar_visible);
+    assert!(!state.monitor);
     assert!(state.task_panel_state.last_executed_plan_id.is_none());
-}
-
-// pd4_default_auto_open_setting_is_tasks (old): `TuiState::auto_open_on_task_plan` defaulted
-// to "tasks". The runtime field is deleted with the auto-open (A19); the configured default
-// and its validation (the part that still exists in the profile schema) stay pinned.
-#[test]
-fn pd4_default_auto_open_setting_is_tasks() {
-    use rustain::domain::models::AutoPanelsConfig;
-    assert_eq!(AutoPanelsConfig::default().on_task_plan, "tasks");
-}
-
-#[test]
-fn pd4_auto_panels_config_validates_known_values() {
-    use rustain::domain::models::AutoPanelsConfig;
-    let mut cfg = AutoPanelsConfig::default();
-    assert!(cfg.validate().is_ok());
-    cfg.on_task_plan = "none".into();
-    assert!(cfg.validate().is_ok());
-    cfg.on_task_plan = "history".into();
-    assert!(cfg.validate().is_err());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

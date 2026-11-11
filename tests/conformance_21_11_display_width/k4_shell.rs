@@ -34,7 +34,6 @@ use rustain::adapters::tui::widgets::{
 };
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use rustain::domain::models::tab::TabManager;
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{MessageRole, PermissionMode, StatusState, now_unix};
 use rustain::domain::services::cross_search::CrossSearchResult;
 use rustain::domain::services::search::SearchMatch;
@@ -142,7 +141,6 @@ fn status(
             false,
             None,
             None,
-            DensityMode::Focus,
             false,
             None,
             awareness,

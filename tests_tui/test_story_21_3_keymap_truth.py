@@ -101,9 +101,9 @@ CONFIG = (
     '[permissions]\nalways_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]\n'
     "\n[notifications]\ninfo_ttl_secs = 30\n"
 )
-# `keymap/table.rs` PANEL_NARROW: the remedy a local sidebar-panel chord answers below 120 columns.
-PANEL_REMEDY = "This panel needs a terminal at least 120 columns wide: widen the window and try again."
-PANEL_WITNESS = "This panel needs a terminal at least 120"
+# `keymap/table.rs` MONITOR_NARROW: the remedy `Ctrl+X w` answers below 120 columns (A16).
+MONITOR_REMEDY = "The monitor needs a terminal at least 120 columns wide: widen the window and try again."
+MONITOR_WITNESS = "The monitor needs a terminal at least 120"
 PROBE_OK = (b'{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],'
             b'"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}')
 
@@ -124,28 +124,25 @@ OVERLAYS = {
     "1874": ("Mission Control · Tasks", "┌Mission Control · Tasks", None, "[Esc] Back"),
     "1868": ("History", "┌History", None, "[Esc] Back"),
 }
-# panels: none left (21-7 7-E: History is a frame at every width, a row of OVERLAYS above).
-PANELS = {}
 DECISIONS = "1871"   # `Ctrl+X q`: Info toast, left visible for the `x` row to clear
 CLEAR = "1878"       # `Ctrl+X x`
-MONITOR = "1877"     # `Ctrl+X w`: density toggle, run LAST (it moves focus off the composer)
+MONITOR = "1877"     # `Ctrl+X w`: refused at 80x24 with the width remedy, run LAST
 QUIT = "1811"        # `Ctrl+X Ctrl+Q`: the process exits (leg B ends with it)
 SILENT = ("181b", "1803", "180d")  # Esc, Ctrl+C, Enter (empty composer): close the menu, say nothing
 EXPECTED_WITNESS = {
     **{hex_: spec[0] for hex_, spec in OVERLAYS.items()},
-    **{hex_: PANEL_WITNESS for hex_ in PANELS},
     DECISIONS: "No decisions waiting",
-    MONITOR: "Density: Monitor",
+    MONITOR: MONITOR_WITNESS,
     CLEAR: "", "181b": "", "1803": "", "180d": "", QUIT: "",
 }
 MENU_PRESENT = (
     "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters", "[S] Agents",
     "[L] A2A log", "[R] Room", "[E] Artifacts", "[T] Tasks", "[U] Usage",
-    "[H] History", "[W] Monitor", "[?] Help", "[N] Notifications", "[X] Clear toasts",
+    "[H] History", "[W] Monitor (n/a)", "[?] Help", "[N] Notifications", "[X] Clear toasts",
     "[Q] Decisions", "[Enter] Send", "[Esc] Cancel",
 )
 MENU_ABSENT = ("[F]", "[D]", "Dashboard", "Evidence", "Watch", "[L] Log", "Detach",
-               "[U] Usage (n/a)", "[W] Monitor (n/a)", "[P] Profile (n/a)", "[M] Model (n/a)",
+               "[U] Usage (n/a)", "[P] Profile (n/a)", "[M] Model (n/a)",
                "[L] A2A log (n/a)", "[E] Artifacts (n/a)", "[A] Adapters (n/a)", "[S] Agents (n/a)",
                "[T] Tasks (n/a)")
 
@@ -201,12 +198,12 @@ def _toasts(screen):
 
 
 def _remedy_toast(screen):
-    """The panel remedy toast: `Info <remedy>`, cut by the 80-column row with `…`."""
+    """The monitor remedy toast: `Info <remedy>`, cut by the 80-column row with `…`."""
     for text in _toasts(screen):
-        match = re.search(r"(?<![A-Za-z0-9])Info (This panel needs a terminal at least 120.*)$", text)
+        match = re.search(r"(?<![A-Za-z0-9])Info (The monitor needs a terminal at least 120.*)$", text)
         if match:
             body = match.group(1)
-            if body == PANEL_REMEDY or (body.endswith("…") and PANEL_REMEDY.startswith(body[:-1])):
+            if body == MONITOR_REMEDY or (body.endswith("…") and MONITOR_REMEDY.startswith(body[:-1])):
                 return text
     return None
 
@@ -460,8 +457,8 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
     release = threading.Event()  # lets the held leg B reply finish
     turn_phase = threading.Event()  # set when leg B starts: only then is a streamed request legitimate
     lock = threading.Lock()
-    ws_main, ws_panels, ws_edit, ws_plan = root / "wm", root / "wp", root / "we", root / "wc"
-    for ws in (ws_main, ws_panels, ws_edit, ws_plan):
+    ws_main, ws_edit, ws_plan = root / "wm", root / "we", root / "wc"
+    for ws in (ws_main, ws_edit, ws_plan):
         (ws / ".rustain").mkdir(parents=True)
         (ws / ".rustain" / "config.toml").write_text(CONFIG)
         (ws / ".env").write_text("")  # keep the shared harness from copying a developer .env
@@ -631,8 +628,8 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
         _clear_toasts(tui, sent, "clear no-binding")
 
         # Every local fixture row, as its raw bytes. Order: silent rows while the composer is
-        # focused, the toast row and the `x` row that clears it, the overlays, the density
-        # toggle last (it moves focus off the composer), the panel rows in fresh processes.
+        # focused, the toast row and the `x` row that clears it, the overlays, the monitor row
+        # last (a refused chord at 80 columns).
         for hex_ in SILENT:
             _silent_row(tui, evidence, sent, hex_, rows[hex_]["key"])
             assert tui.child.isalive(), hex_
@@ -653,36 +650,18 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
         for hex_ in OVERLAYS:
             _overlay_row(tui, evidence, sent, hex_, rows[hex_], rows[hex_]["key"])
 
+        # `Ctrl+X w` at 80x24: the monitor needs 120 columns, so the row answers its width remedy
+        # (OD-2, A16: help and which-key already show it `(n/a)`), toggles nothing, paints no column.
         row = rows[MONITOR]
         _open_leader(tui, sent, row["key"])
         _send(tui, sent, row["key"], bytes.fromhex(MONITOR)[1:])
-        screen = _wait(tui, lambda s: not _menu(s) and harness.toast_present(s, row["witness"], "Info", rows=3),
-                       f"{row['key']}: {row['witness']!r} toast, menu closed")
+        screen = _wait(tui, lambda s: _closed(s) and _remedy_toast(s) is not None,
+                       f"{row['key']}: the narrow-terminal remedy toast, menu closed")
+        assert row["witness"] in screen, screen
+        assert "Monitor ·" not in screen, "no monitor column below 120 columns"
         _capture(tui, evidence, f"row-{MONITOR}", screen)
-        # The same chord toggles back (Monitor -> Focus).
-        _open_leader(tui, sent, f"{row['key']} again")
-        _send(tui, sent, f"{row['key']} again", bytes.fromhex(MONITOR)[1:])
-        screen = _wait(tui, lambda s: _closed(s) and harness.toast_present(s, "Density: Focus", "Info", rows=3),
-                       "Density: Focus toast, menu closed")
-        _capture(tui, evidence, f"row-{MONITOR}-back", screen)
         assert tui.child.isalive()
         tui.stop()
-
-        # ------------------------------------------------------ panel rows: one process each
-        for hex_, item in PANELS.items():
-            row = rows[hex_]
-            panel = start("panels", ws_panels)
-            try:
-                screen = _open_leader(panel, sent, row["key"])
-                assert item in _menu(screen), (item, _menu(screen))
-                _send(panel, sent, row["key"], bytes.fromhex(hex_)[1:])
-                screen = _wait(panel, lambda s: _closed(s) and _remedy_toast(s) is not None,
-                               f"{row['key']}: the narrow-terminal remedy toast, menu closed")
-                assert row["witness"] in screen, screen
-                assert _remedy_toast(screen) is not None, screen
-                _capture(panel, evidence, f"row-{hex_}", screen)
-            finally:
-                panel.stop()
 
         # ------------------------------------------------------ leg B (3-B1): readline bytes, Help over a held stream
         turn_phase.set()

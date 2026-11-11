@@ -21,7 +21,6 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::toast_layer;
 use rustain::domain::clock::MockClock;
 use rustain::domain::models::NotificationsConfig;
-use rustain::domain::models::visual::DensityMode;
 use unicode_width::UnicodeWidthStr;
 
 /// A `TuiState` whose notification store runs on a `MockClock` with the
@@ -46,15 +45,8 @@ pub fn clocked_with(
 }
 
 pub fn layout_of(state: &TuiState, width: u16, height: u16) -> AppLayout {
-    compute_layout(
-        Rect::new(0, 0, width, height),
-        &state.theme,
-        "",
-        1,
-        false,
-        DensityMode::Focus,
-    )
-    .expect("the terminal is at or above the 60x16 floor")
+    compute_layout(Rect::new(0, 0, width, height), &state.theme, "", 1, false)
+        .expect("the terminal is at or above the 60x16 floor")
 }
 
 pub fn advance(clock: &MockClock, by: Duration) {

@@ -13,7 +13,7 @@
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, T", "pty_hex": "1874", "witness": "Mission Control · Tasks"},
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, U", "pty_hex": "1875", "witness": "Usage & Cost"},
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, H", "pty_hex": "1868", "witness": "History"},
-    {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, W", "pty_hex": "1877", "witness": "Density: Monitor"},
+    {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, W", "pty_hex": "1877", "witness": "The monitor needs a terminal at least 120"},
     {"context": "Leader", "host": "attached", "key": "Ctrl+X, D", "pty_hex": "1864", "witness": ""},
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, ?", "pty_hex": "183f", "witness": "Keybindings"},
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, N", "pty_hex": "186e", "witness": "Notifications"},

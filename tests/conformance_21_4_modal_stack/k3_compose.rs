@@ -13,7 +13,6 @@ use rustain::adapters::tui::{
     quit_confirm::{self, QuitFacts, QuitHost, QuitRequest},
     state::TuiState,
 };
-use rustain::domain::models::visual::DensityMode;
 
 pub(super) fn layout(state: &TuiState) -> AppLayout {
     compute_layout(
@@ -22,7 +21,6 @@ pub(super) fn layout(state: &TuiState) -> AppLayout {
         &state.input_buffer,
         1,
         false,
-        DensityMode::Focus,
     )
     .unwrap()
 }
@@ -343,9 +341,9 @@ fn tiny_terminal_painter_keeps_the_shared_minimum_size_message() {
 fn wide_monitor_column_cells_below_the_frame_are_dimmed_without_reflow() {
     let mut state = TuiState::new(130, 30);
     let area = Rect::new(0, 0, 130, 30);
-    let before = compute_layout(area, &state.theme, "", 2, true, DensityMode::Monitor).unwrap();
+    let before = compute_layout(area, &state.theme, "", 2, true).unwrap();
     open_quit(&mut state);
-    let after = compute_layout(area, &state.theme, "", 2, true, DensityMode::Monitor).unwrap();
+    let after = compute_layout(area, &state.theme, "", 2, true).unwrap();
     assert_eq!(
         (after.sidebar, after.chat_pane, after.input_area),
         (before.sidebar, before.chat_pane, before.input_area)
@@ -398,8 +396,7 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
                 // CrossSearch is opened from the History frame (old -> new: focus `Sidebar`).
                 use rustain::adapters::tui::history_window;
                 use rustain::domain::services::session_index::SessionIndex;
-                state.sidebar_visible = true;
-                state.density_mode = DensityMode::Monitor;
+                state.monitor = true;
                 history_window::open(&mut state, &SessionIndex::new(), 0);
                 super::k7_cross_search::paint(&state);
                 let history_focus = state.focus.clone();
@@ -433,8 +430,7 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
                         &state.theme,
                         &state.input_buffer,
                         1,
-                        state.sidebar_visible,
-                        state.density_mode,
+                        state.monitor,
                     )
                     .unwrap();
                     let shell = Shell::new(frame.area(), &layout);
@@ -491,8 +487,7 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
                 &state.theme,
                 &state.input_buffer,
                 1,
-                state.sidebar_visible,
-                state.density_mode,
+                state.monitor,
             )
             .unwrap();
             let rect = geometry::frame_rect(geometry::modal_region(&shell_layout, before.0.area));

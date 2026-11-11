@@ -93,8 +93,7 @@ fn render_search_frame(state: &TuiState) -> Terminal<TestBackend> {
                 &state.theme,
                 &state.input_buffer,
                 1,
-                state.sidebar_visible,
-                state.density_mode,
+                state.monitor,
             )
             .unwrap();
             let shell = Shell::new(frame.area(), &layout);

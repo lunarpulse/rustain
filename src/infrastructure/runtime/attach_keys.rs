@@ -3877,7 +3877,6 @@ pub(crate) mod tests {
             "",
             1,
             false,
-            crate::domain::models::visual::DensityMode::Focus,
         )
         .unwrap();
         assert!(
@@ -4781,7 +4780,6 @@ pub(crate) mod tests {
                     &state.input_buffer,
                     1,
                     false,
-                    crate::domain::models::visual::DensityMode::Focus,
                 )
                 .unwrap()
                 .input_area
@@ -4921,7 +4919,6 @@ pub(crate) mod tests {
                     input,
                     1,
                     false,
-                    crate::domain::models::visual::DensityMode::Focus,
                 )
                 .unwrap();
                 let shell = crate::adapters::tui::presentation::Shell::new(area, &layout);
@@ -7149,7 +7146,6 @@ pub(crate) mod tests {
             layout::compute_layout,
             presentation::{Shell, geometry},
         };
-        use crate::domain::models::visual::DensityMode;
         use ratatui::widgets::Paragraph;
         use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Modifier};
         let row = |buffer: &Buffer, rect: Rect, y| -> String {
@@ -7183,15 +7179,7 @@ pub(crate) mod tests {
                             )
                             .unwrap_or(&state.input_buffer);
                         let area = Rect::new(0, 0, width, height);
-                        let layout = compute_layout(
-                            area,
-                            &state.theme,
-                            display,
-                            1,
-                            false,
-                            DensityMode::Focus,
-                        )
-                        .unwrap();
+                        let layout = compute_layout(area, &state.theme, display, 1, false).unwrap();
                         assert_eq!(layout.input_area.height, if full { 10 } else { 3 });
                         assert!(layout.sidebar.is_none());
                         let shell = Shell::new(area, &layout);
@@ -7607,7 +7595,6 @@ pub(crate) mod tests {
             layout::compute_layout,
             presentation::{Shell, geometry},
         };
-        use crate::domain::models::visual::DensityMode;
         use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             for full in [false, true] {
@@ -7650,9 +7637,7 @@ pub(crate) mod tests {
                     assert_eq!(rig.state.focus, FocusState::Input);
                     let state = &rig.state;
                     let area = Rect::new(0, 0, width, height);
-                    let layout =
-                        compute_layout(area, &state.theme, &draft, 1, false, DensityMode::Focus)
-                            .unwrap();
+                    let layout = compute_layout(area, &state.theme, &draft, 1, false).unwrap();
                     let shell = Shell::new(area, &layout);
                     let rect = geometry::frame_rect(shell.region);
                     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

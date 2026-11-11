@@ -117,15 +117,15 @@ fn tasks_enter_opens_the_task_window_and_history_enter_opens_the_entry() {
     );
 }
 
-/// DF-262: shrinking below the sidebar width drops the Monitor sidebar column; a wide resize
-/// keeps it. The History window is a frame of its own (21-7 7-E): a resize at any width leaves
-/// it open on top with focus untouched (the column no longer holds focus or History).
+/// A16: shrinking below the monitor's width keeps the preference (the column is simply not
+/// painted); a wide resize keeps it too. The History window is a frame of its own (21-7 7-E): a
+/// resize at any width leaves it open on top with focus untouched.
 #[test]
-fn narrow_resize_clears_the_sidebar_column_and_keeps_the_history_frame() {
+fn narrow_resize_keeps_the_monitor_preference_and_the_history_frame() {
     let setup = || {
         let mut s = history_open();
         s.terminal_width = 130;
-        s.sidebar_visible = true;
+        s.monitor = true;
         s
     };
     let history_on_top = |s: &TuiState| {
@@ -136,13 +136,13 @@ fn narrow_resize_clears_the_sidebar_column_and_keeps_the_history_frame() {
     let focus = s.focus.clone();
     let resize = |s: &mut TuiState, width| handle_input(s, &DomainInputEvent::Resize(width, 30));
     assert_eq!(resize(&mut s, 100), InputAction::Consumed);
-    assert!(!s.sidebar_visible);
+    assert!(s.monitor, "the preference is kept below 120 (A16)");
     assert!(history_on_top(&s), "the History frame survives the resize");
     assert_eq!(s.focus, focus);
 
     let mut s = setup();
     resize(&mut s, 140);
-    assert!(s.sidebar_visible);
+    assert!(s.monitor);
     assert!(history_on_top(&s));
 }
 

@@ -156,9 +156,9 @@ pub use config::AppConfig;
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
 pub use config::{
-    AuthHeaderScheme, AutoApprovePolicy, AutoPanelsConfig, DaemonConfig, LayoutConfig,
-    MarkdownConfig, MouseConfig, NotificationTtlSecs, NotificationsConfig, ProviderConfig,
-    ReasoningDisplay, SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
+    AuthHeaderScheme, AutoApprovePolicy, DaemonConfig, MarkdownConfig, MouseConfig,
+    NotificationTtlSecs, NotificationsConfig, ProviderConfig, ReasoningDisplay, SearchConfig,
+    SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::{ContentBlockType, ResponseSpan, ResponseSpanBuilder};
@@ -402,4 +402,4 @@ pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,
 };
 #[allow(unused_imports)]
-pub use visual::{BlockBorder, DensityMode, symbols};
+pub use visual::{BlockBorder, symbols};

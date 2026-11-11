@@ -40,7 +40,6 @@ pub fn render(
     pinned_active: bool,
     daily_budget: Option<&DailyBudgetState>,
     active_profile: Option<&ActiveProfileSnapshot>,
-    density_mode: crate::domain::models::visual::DensityMode,
     tab_read_only: bool,
     attached: Option<&crate::adapters::tui::state::AttachInfo>,
     log_awareness: LogAwareness,
@@ -95,20 +94,6 @@ pub fn render(
 
     let model_span_index = left_spans.len();
     left_spans.push(Span::styled(model_label, Style::default().fg(fg)));
-
-    // Story 8.4b AC-5: Density mode indicator chip [F]/[M]/[D]
-    {
-        use crate::domain::models::visual::DensityMode;
-        let indicator = density_mode.indicator_char();
-        let indicator_style = match density_mode {
-            DensityMode::Focus => Style::default().fg(theme.colors.fg_muted),
-            DensityMode::Monitor => Style::default().fg(theme.colors.accent),
-            DensityMode::Dashboard => Style::default()
-                .fg(theme.colors.accent)
-                .add_modifier(Modifier::BOLD),
-        };
-        left_spans.push(Span::styled(format!(" [{}]", indicator), indicator_style));
-    }
 
     if tab_read_only {
         left_spans.push(Span::styled(
@@ -639,7 +624,6 @@ pub fn format_token_usage(usage: &UsageInfo) -> String {
 mod tests {
     use super::*;
     use crate::domain::models::StatusState;
-    use crate::domain::models::visual::DensityMode;
 
     #[test]
     fn test_format_token_count_small() {
@@ -734,7 +718,6 @@ mod tests {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,
@@ -793,7 +776,6 @@ mod tests {
                 false,
                 Some(&db),
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,
@@ -855,7 +837,6 @@ mod tests {
                 false,
                 Some(&db),
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,
@@ -947,7 +928,6 @@ mod tests {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 true,
                 None,
                 LogAwareness::Hidden,
@@ -995,7 +975,6 @@ mod tests {
                     false,
                     None,
                     None,
-                    DensityMode::Focus,
                     false,
                     None,
                     LogAwareness::Hidden,
@@ -1052,7 +1031,6 @@ mod tests {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,
@@ -1075,7 +1053,6 @@ mod tests {
         model: &str,
         session_title: Option<&str>,
         hint: Option<&str>,
-        density: DensityMode,
         awareness: LogAwareness,
     ) -> ratatui::buffer::Buffer {
         let mut t = Terminal::new(TestBackend::new(width, 1)).unwrap();
@@ -1108,7 +1085,6 @@ mod tests {
                 false,
                 None,
                 None,
-                density,
                 false,
                 None,
                 awareness,
@@ -1148,8 +1124,7 @@ mod tests {
             (LogAwareness::Unseen(0), None),
             (LogAwareness::Hidden, None),
         ] {
-            let buffer =
-                draw_reminder_bar(200, "sonnet-4-6", None, None, DensityMode::Focus, awareness);
+            let buffer = draw_reminder_bar(200, "sonnet-4-6", None, None, awareness);
             let row = row_text(&buffer);
             match expected {
                 Some(segment) => {
@@ -1166,35 +1141,21 @@ mod tests {
     }
 
     #[test]
-    fn log_reminder_is_passive_in_every_density() {
-        // AC2: muted meta styling on the status background, no added
-        // emphasis, in Focus, Monitor and Dashboard alike.
+    fn log_reminder_is_passive() {
+        // AC2: muted meta styling on the status background, no added emphasis.
         let theme = Theme::dark();
         let expected = theme.typography.meta.fg(theme.colors.fg_muted);
-        for density in [
-            DensityMode::Focus,
-            DensityMode::Monitor,
-            DensityMode::Dashboard,
-        ] {
-            let buffer = draw_reminder_bar(
-                120,
-                "sonnet-4-6",
-                None,
-                None,
-                density,
-                LogAwareness::Unseen(7),
+        let buffer = draw_reminder_bar(120, "sonnet-4-6", None, None, LogAwareness::Unseen(7));
+        assert_eq!(right_edge(&buffer, 6), "log: 7");
+        assert!(!row_text(&buffer).contains("^X menu"));
+        for x in 114..120 {
+            let cell = buffer.cell((x, 0)).unwrap();
+            assert_eq!(cell.fg, expected.fg.unwrap());
+            assert_eq!(cell.bg, theme.colors.status_bg);
+            assert_eq!(
+                cell.modifier, expected.add_modifier,
+                "no emphasis beyond the meta token"
             );
-            assert_eq!(right_edge(&buffer, 6), "log: 7", "{density:?}");
-            assert!(!row_text(&buffer).contains("^X menu"), "{density:?}");
-            for x in 114..120 {
-                let cell = buffer.cell((x, 0)).unwrap();
-                assert_eq!(cell.fg, expected.fg.unwrap(), "{density:?}");
-                assert_eq!(cell.bg, theme.colors.status_bg, "{density:?}");
-                assert_eq!(
-                    cell.modifier, expected.add_modifier,
-                    "no emphasis beyond the meta token ({density:?})"
-                );
-            }
         }
     }
 
@@ -1211,14 +1172,8 @@ mod tests {
                 (LogAwareness::Unavailable, "log: ?"),
             ] {
                 for (model, session) in [(long_model, None), ("m", Some(cjk_session))] {
-                    let buffer = draw_reminder_bar(
-                        width,
-                        model,
-                        session,
-                        Some("^X d detach"),
-                        DensityMode::Focus,
-                        awareness,
-                    );
+                    let buffer =
+                        draw_reminder_bar(width, model, session, Some("^X d detach"), awareness);
                     let row = row_text(&buffer);
                     let tail = if row.contains("^X menu") { TAIL } else { "" };
                     assert!(
@@ -1229,31 +1184,17 @@ mod tests {
             }
         }
         // Exactly the segment's width: the segment alone, no separator.
-        let exact = draw_reminder_bar(
-            6,
-            long_model,
-            None,
-            None,
-            DensityMode::Focus,
-            LogAwareness::Unseen(7),
-        );
+        let exact = draw_reminder_bar(6, long_model, None, None, LogAwareness::Unseen(7));
         assert_eq!(row_text(&exact), "log: 7");
         // Narrower than the segment: omitted whole, never a partial number.
-        let narrow = draw_reminder_bar(
-            5,
-            "m",
-            None,
-            None,
-            DensityMode::Focus,
-            LogAwareness::Unseen(7),
-        );
+        let narrow = draw_reminder_bar(5, "m", None, None, LogAwareness::Unseen(7));
         assert!(!row_text(&narrow).contains('7'), "{}", row_text(&narrow));
         assert!(!row_text(&narrow).contains("log"), "{}", row_text(&narrow));
     }
 
     // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
-    // A minimal real status row: the left side is ` {model} [F] │ Normal │
-    // Ready` (22 cells + the model's cells), the hint is right-aligned in what
+    // A minimal real status row: the left side is ` {model} │ Normal │
+    // Ready` (18 cells + the model's cells), the hint is right-aligned in what
     // remains after the optional log reservation.
 
     const C: &str = "界";
@@ -1296,7 +1237,6 @@ mod tests {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 awareness,
@@ -1323,14 +1263,14 @@ mod tests {
     fn display_width_status_hint_respects_the_log_reservation_edge() {
         // 60 columns, `^X menu` reserved with its gap (8 cells) and `log: 7`
         // reserved with its gap (7 cells): the left region is 45 cells; beside
-        // `模型` (26) that leaves 18 hint cells.
+        // `模型` (22) that leaves 22 hint cells.
         let cases: Vec<(String, bool)> = vec![
-            ("h".repeat(18), true),
-            ("h".repeat(19), false),
-            (format!("{G}{}", "h".repeat(16)), true),
-            (format!("{G}{}", "h".repeat(17)), false),
-            (format!("{C}{}", "h".repeat(16)), true),
-            (format!("{C}{}", "h".repeat(17)), false),
+            ("h".repeat(22), true),
+            ("h".repeat(23), false),
+            (format!("{G}{}", "h".repeat(20)), true),
+            (format!("{G}{}", "h".repeat(21)), false),
+            (format!("{C}{}", "h".repeat(20)), true),
+            (format!("{C}{}", "h".repeat(21)), false),
         ];
         for (hint, fits) in cases {
             let buffer = draw_minimal(60, "模型", Some(&hint), None, LogAwareness::Unseen(7));
@@ -1395,7 +1335,6 @@ mod tests {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 awareness,
@@ -1493,9 +1432,9 @@ mod tests {
         assert!(row.contains("Log !3 ^X d detach"), "{row}");
 
         // 80 columns: the `^X menu` tail leaves 72 cells and the left side is
-        // ~23 cells, a 46-cell hint fits alone (70) but not beside the
+        // ~19 cells, a 50-cell hint fits alone (70) but not beside the
         // 6-cell badge (77).
-        let hint = "h".repeat(46);
+        let hint = "h".repeat(50);
         let row = draw_notice_bar(
             80,
             &StatusState::Idle,
@@ -1544,7 +1483,6 @@ mod tests {
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 awareness,
@@ -1561,8 +1499,8 @@ mod tests {
         let buffer = draw_minimal(60, &model, None, None, LogAwareness::Unseen(7));
         let row = glyph_row(&buffer);
         assert_eq!(geom::cells(&row), 60, "{row}");
-        assert_eq!(row.matches(G).count(), 15, "{row}");
-        assert!(row.contains(" [F] │ Normal │ Ready"), "{row}");
+        assert_eq!(row.matches(G).count(), 17, "{row}");
+        assert!(row.contains(" │ Normal │ Ready"), "{row}");
         assert!(row.trim_end().ends_with("log: 7"), "{row}");
         assert!(!row.contains("^X menu"), "{row}");
     }
@@ -1612,7 +1550,6 @@ mod tests {
                                 false,
                                 None,
                                 None,
-                                DensityMode::Focus,
                                 false,
                                 attached.as_ref(),
                                 LogAwareness::Unseen(5),
@@ -1622,9 +1559,9 @@ mod tests {
                         .unwrap();
                     let row = row_text(terminal.backend().buffer());
                     let core = if attached.is_some() {
-                        " (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready"
+                        " (daemon) │ attached │ Normal │ ↑109 ↓19 │ Ready"
                     } else {
-                        " (daemon) [F] │ Normal │ ↑109 ↓19 │ Ready"
+                        " (daemon) │ Normal │ ↑109 ↓19 │ Ready"
                     };
                     assert!(row.starts_with(core), "{width}: {row}");
                     assert!(row.contains("log: 5"), "{width}: {row}");
@@ -1720,9 +1657,11 @@ mod tests {
 
     #[test]
     fn story21_3_tail_yields_whole_when_status_facts_need_the_space() {
-        let fits = draw_tail_bar(31, LogAwareness::Hidden, NoticeBadges::default());
+        // The boundary moved four cells narrower with the density chip (31/30 before 7-F): the
+        // tail fits at 27 and yields whole at 26.
+        let fits = draw_tail_bar(27, LogAwareness::Hidden, NoticeBadges::default());
         assert!(fits.ends_with(TAIL) && fits.contains("Ready"), "{fits}");
-        let narrow = draw_tail_bar(30, LogAwareness::Hidden, NoticeBadges::default());
+        let narrow = draw_tail_bar(26, LogAwareness::Hidden, NoticeBadges::default());
         assert!(
             !narrow.contains('^') && !narrow.contains("menu"),
             "{narrow}"

@@ -153,7 +153,6 @@ pub struct ConfigDisplay {
     default_plan_mode: bool,
     skills: SkillsDisplay,
     runtime: RuntimeDisplay,
-    layout: LayoutDisplay,
     provider: std::collections::BTreeMap<String, ProviderDisplay>,
     mouse: MouseDisplay,
     tool_progress: ToolProgressDisplay,
@@ -195,17 +194,6 @@ struct EventBusDisplay {
 #[derive(Debug, Serialize)]
 struct RuntimeDisplay {
     event_bus: EventBusDisplay,
-}
-
-#[derive(Debug, Serialize)]
-struct AutoPanelsDisplay {
-    on_task_plan: String,
-}
-
-#[derive(Debug, Serialize)]
-struct LayoutDisplay {
-    auto_panels: AutoPanelsDisplay,
-    density_mode: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -402,12 +390,6 @@ impl ConfigDisplay {
                 event_bus: EventBusDisplay {
                     raw_capacity: config.runtime.event_bus.raw_capacity,
                 },
-            },
-            layout: LayoutDisplay {
-                auto_panels: AutoPanelsDisplay {
-                    on_task_plan: config.layout.auto_panels.on_task_plan.clone(),
-                },
-                density_mode: format!("{:?}", config.layout.density_mode).to_lowercase(),
             },
             provider,
             mouse: MouseDisplay {

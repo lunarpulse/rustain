@@ -10,22 +10,22 @@ use rustain::adapters::tui::{
     theme::Theme,
     widgets::status_bar,
 };
-use rustain::domain::models::{PermissionMode, StatusState, visual::DensityMode};
+use rustain::domain::models::{PermissionMode, StatusState};
 
 #[test]
 fn region_ends_above_the_status_row() {
-    // Every layout branch, including the optional tab/sidebar combinations.
+    // Every layout branch, including the optional tab/monitor-column combinations.
     // Offset origins catch confusing Stage height with its absolute bottom.
     let witnesses = [
-        ("focus", 80, 1, false, DensityMode::Focus),
-        ("tabs", 80, 2, false, DensityMode::Focus),
-        ("sidebar", 130, 1, true, DensityMode::Monitor),
-        ("sidebar-tabs", 130, 2, true, DensityMode::Monitor),
-        ("monitor-narrow", 80, 1, true, DensityMode::Monitor),
-        ("dashboard", 130, 1, true, DensityMode::Dashboard),
-        ("dashboard-tabs", 130, 2, true, DensityMode::Dashboard),
+        ("off", 80, 1, false),
+        ("tabs", 80, 2, false),
+        ("sidebar", 130, 1, true),
+        ("sidebar-tabs", 130, 2, true),
+        // The preference is kept below 120 columns; the column is simply not painted (A16).
+        ("monitor-narrow", 80, 1, true),
+        ("monitor-narrow-119", 119, 1, true),
     ];
-    for (name, width, tabs, sidebar, density) in witnesses {
+    for (name, width, tabs, monitor) in witnesses {
         for full in [false, true] {
             let area = Rect::new(3, 2, width, 30);
             let input = if full {
@@ -33,17 +33,12 @@ fn region_ends_above_the_status_row() {
             } else {
                 String::new()
             };
-            let layout =
-                compute_layout(area, &Theme::dark(), &input, tabs, sidebar, density).unwrap();
+            let layout = compute_layout(area, &Theme::dark(), &input, tabs, monitor).unwrap();
             assert_eq!(layout.tab_bar.is_some(), tabs > 1, "{name}");
             assert_eq!(
                 layout.sidebar.is_some(),
                 name.starts_with("sidebar"),
                 "{name}"
-            );
-            assert_eq!(
-                layout.dashboard_panel.is_some(),
-                density == DensityMode::Dashboard
             );
             assert_eq!(layout.input_area.height, if full { 10 } else { 3 });
             let region = geometry::modal_region(&layout, area);
@@ -241,7 +236,6 @@ fn paint_busy_status(frame: &mut Frame, model: &str, theme: &Theme) {
         false,
         None,
         None,
-        DensityMode::Focus,
         false,
         None,
         LogAwareness::Unseen(7),
@@ -301,7 +295,7 @@ fn dense_which_key_keeps_every_registry_key_with_a_full_composer() {
                 }
                 assert!(state.pending_leader.is_some());
                 let mut avail = match host {
-                    Host::Local => AvailCtx::local(width, DensityMode::Focus),
+                    Host::Local => AvailCtx::local(width),
                     Host::Attached => AvailCtx::attached(width, false),
                 };
                 avail.frame_origin = frame_origin;

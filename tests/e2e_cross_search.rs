@@ -20,7 +20,7 @@ use rustain::adapters::tui::state::{CrossSearchState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::cross_search;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::{DensityMode, FocusState};
+use rustain::domain::models::FocusState;
 use rustain::domain::services::cross_search::CrossSearchResult;
 use rustain::domain::services::session_index::SessionIndex;
 
@@ -32,15 +32,8 @@ fn history_state() -> TuiState {
     let mut s = TuiState::new(130, 30);
     history_window::open(&mut s, &SessionIndex::new(), 1_700_000_000);
     let area = ratatui::layout::Rect::new(0, 0, 130, 30);
-    let layout = compute_layout(
-        area,
-        &s.theme,
-        &s.input_buffer,
-        1,
-        false,
-        DensityMode::Focus,
-    )
-    .expect("a real chat viewport");
+    let layout =
+        compute_layout(area, &s.theme, &s.input_buffer, 1, false).expect("a real chat viewport");
     let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
     terminal
         .draw(|frame| {

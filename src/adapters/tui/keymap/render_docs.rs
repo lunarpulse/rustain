@@ -10,7 +10,6 @@ use regex::Regex;
 use super::govern::{description, validate_rows};
 use super::model::{AvailCtx, Availability, Binding, Context, Host, Hosts, Reach, sequence_label};
 use super::resolve::table;
-use crate::domain::models::visual::DensityMode;
 
 const REGEN: &str =
     "RUSTAIN_WRITE_KEYMAP_DOC=1 cargo test --test tui conformance_21_3_keymap::k6_docs";
@@ -37,11 +36,11 @@ fn availability_note(row: &Binding) -> String {
     let mut notes = Vec::new();
     if row.hosts.includes(Host::Local)
         && matches!(
-            row.availability(&AvailCtx::local(80, DensityMode::Focus)),
+            row.availability(&AvailCtx::local(80)),
             Availability::Unavailable(_)
         )
         && matches!(
-            row.availability(&AvailCtx::local(130, DensityMode::Monitor)),
+            row.availability(&AvailCtx::local(130)),
             Availability::Available
         )
     {
@@ -52,7 +51,7 @@ fn availability_note(row: &Binding) -> String {
     {
         // A host-only limitation gets the host remedy; remaining legacy fields
         // retain their own explicitly declared no-cursor reason.
-        let local = row.availability(&AvailCtx::local(130, DensityMode::Monitor));
+        let local = row.availability(&AvailCtx::local(130));
         notes.push(if row.hosts.includes(Host::Local) && local.is_available() {
             "not available in an attached session"
         } else {

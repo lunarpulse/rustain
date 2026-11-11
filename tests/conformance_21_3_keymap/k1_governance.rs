@@ -14,7 +14,6 @@ use rustain::adapters::tui::keymap::table::{GlobalCmd, LeaderCmd};
 use rustain::adapters::tui::keymap::{
     AvailCtx, Binding, CommandId, Context, Key, Reach, Violation, bind, table, validate,
 };
-use rustain::domain::models::visual::DensityMode;
 
 fn quit() -> CommandId {
     CommandId::Global(GlobalCmd::QuitRequest)
@@ -406,10 +405,7 @@ fn every_command_a_surface_displays_is_a_registered_row() {
             .collect()
     };
     let mut displayed: Vec<CommandId> = Vec::new();
-    for avail in [
-        AvailCtx::local(130, DensityMode::Focus),
-        AvailCtx::attached(130, false),
-    ] {
+    for avail in [AvailCtx::local(130), AvailCtx::attached(130, false)] {
         for item in leader_menu(&avail) {
             let found = find(&|r| r.context == Context::Leader && r.label == item.name);
             assert!(!found.is_empty(), "menu entry {item:?} has no row");

@@ -740,15 +740,7 @@ mod mixed_width {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let layout = compute_layout(
-                    area,
-                    &theme,
-                    &draft,
-                    1,
-                    false,
-                    rustain::domain::models::visual::DensityMode::Focus,
-                )
-                .unwrap();
+                let layout = compute_layout(area, &theme, &draft, 1, false).unwrap();
                 status_bar::render(
                     frame,
                     layout.status_bar,
@@ -776,7 +768,6 @@ mod mixed_width {
                     false,
                     None,
                     None,
-                    rustain::domain::models::visual::DensityMode::Focus,
                     false,
                     None,
                     rustain::adapters::tui::state::LogAwareness::default(),

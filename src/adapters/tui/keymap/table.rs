@@ -66,6 +66,11 @@ pub fn attached_mission_remedy() -> &'static str {
 }
 /// Interim ownership remedy, shared by leader rows and nested palette actions.
 pub const CLOSE_WINDOW_FIRST: &str = "Please close the window first to open this surface.";
+/// The local refusal of `Ctrl+X w` below the monitor's minimum width (A16).
+pub const MONITOR_NARROW: &str =
+    "The monitor needs a terminal at least 120 columns wide: widen the window and try again.";
+/// The text the native smoke finds after `Ctrl+X w` at 80x24: the head of [`MONITOR_NARROW`].
+const MONITOR_WITNESS: &str = "The monitor needs a terminal at least 120";
 
 fn base_target(c: &AvailCtx) -> Availability {
     if c.frame_origin {
@@ -247,10 +252,21 @@ fn attached_profile(c: &AvailCtx) -> Availability {
 fn attached_sign_in(c: &AvailCtx) -> Availability {
     local_surface(c, ATTACHED_SIGN_IN)
 }
-fn attached_density(c: &AvailCtx) -> Availability {
+/// The monitor toggle (A16): local only, and only where the column can be painted. The
+/// preference itself is never refused below the floor by the layout; the chord is, with the
+/// width remedy, so help and which-key say what happens. A window on the stack comes first
+/// (close it, then the width remedy applies).
+fn monitor_toggle(c: &AvailCtx) -> Availability {
     match c.host {
         Host::Attached => Availability::Unavailable(attached_mission_remedy()),
-        Host::Local => host_gate(c, attached_mission_remedy()),
+        Host::Local => match host_gate(c, attached_mission_remedy()) {
+            Availability::Available
+                if c.width < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH =>
+            {
+                Availability::Unavailable(MONITOR_NARROW)
+            }
+            other => other,
+        },
     }
 }
 /// A Mission Control tab: local at every width, refused in the attached host (A20).
@@ -313,7 +329,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('t')], LeaderCmd::Tasks, "Tasks").avail(attached_mission).help(C, "Ctrl+X, T", "Mission Control: Tasks tab (the active conversation's plan; Enter opens the task window)").witness("Mission Control · Tasks"),
     l(&[Key::Char('u')], LeaderCmd::Usage, "Usage").avail(attached_panel).help(C, "Ctrl+X, U", "Usage / cost").witness("Usage & Cost"),
     l(&[Key::Char('h')], LeaderCmd::History, "History").avail(attached_mission).help(C, "Ctrl+X, H", "History window (past conversations; Enter opens one, d deletes one, / searches)").witness("History"),
-    l(&[Key::Char('w')], LeaderCmd::Monitor, "Monitor").avail(attached_density).help(C, "Ctrl+X, W", "Toggle Monitor mode (sidebar + banners); again returns to Focus").witness("Density: Monitor"),
+    l(&[Key::Char('w')], LeaderCmd::Monitor, "Monitor").avail(monitor_toggle).help(C, "Ctrl+X, W", "Toggle the read-only monitor (wide terminals)").witness(MONITOR_WITNESS),
     l(&[Key::Char('d')], LeaderCmd::Detach, "Detach").slash("/detach").attached().help(C, "Ctrl+X, D", "Detach from the daemon (attached client only)"),
     l(&[Key::Char('?')], LeaderCmd::Help, "Help").help(C, "Ctrl+X, ?", "This help overlay").witness("Keybindings"),
     l(&[Key::Char('n')], LeaderCmd::Notifications, "Notifications").slash("/notifications").help(C, "Ctrl+X, N", "Notification Log (also /notifications); Log !N counts unseen warnings and errors").witness("Notifications"),

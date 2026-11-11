@@ -5,9 +5,11 @@
 //! and K6 (the Artifacts tab and the artifact window). Slice 7-C adds K7 (the Agents tab and the
 //! agent window) and K8 (the Adapters window). Slice 7-D adds K9 (the Tasks tab and the task
 //! window). Slice 7-E adds K10 (History as an L2 frame) and the body half of K11 (the monitor
-//! column paints the current tab body read-only). K12 clauses (a)-(e) are `mission-21-7-a`..`-e`
-//! in the one cutover scanner (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add
-//! their keystones here.
+//! column paints the current tab body read-only). Slice 7-F adds the toggle half of K11
+//! (`Ctrl+X w`, default off, 120 columns, the preference kept when narrowing) and the final K12
+//! (`k12_cutover`: every RU-4 chord is truthful in both hosts). K12 clauses (a)-(f) are
+//! `mission-21-7-a`..`-f` in the one cutover scanner
+//! (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add their keystones here.
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
 //! through a production door: the room journal is written by the production `NodeJournal`
@@ -52,3 +54,6 @@ mod k10_history;
 
 #[path = "conformance_21_7_mission_control/k11_monitor.rs"]
 mod k11_monitor;
+
+#[path = "conformance_21_7_mission_control/k12_cutover.rs"]
+mod k12_cutover;

@@ -88,7 +88,6 @@ fn test_permission_queue_push_pop() {
             "",
             1,
             false,
-            rustain::domain::models::visual::DensityMode::Focus,
         )
         .unwrap();
         let mut terminal =

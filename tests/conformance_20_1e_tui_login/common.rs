@@ -315,15 +315,9 @@ impl Tui {
         let theme = Theme::dark();
         terminal
             .draw(|frame| {
-                let layout = compute_layout(
-                    frame.area(),
-                    &theme,
-                    &self.state.input_buffer,
-                    1,
-                    false,
-                    self.state.density_mode,
-                )
-                .expect("fixture terminal meets the minimum");
+                let layout =
+                    compute_layout(frame.area(), &theme, &self.state.input_buffer, 1, false)
+                        .expect("fixture terminal meets the minimum");
                 let mut shell = Shell::new(frame.area(), &layout);
                 shell.supports_osc8 = supports_osc8;
                 presentation::compose(

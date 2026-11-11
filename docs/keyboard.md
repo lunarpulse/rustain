@@ -31,7 +31,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, T` | Mission Control: Tasks tab (the active conversation's plan; Enter opens the task window) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, U` | Usage / cost | local, attached | portable | not available in an attached session |
 | `Ctrl+X, H` | History window (past conversations; Enter opens one, d deletes one, / searches) | local, attached | portable | not available in an attached session |
-| `Ctrl+X, W` | Toggle Monitor mode (sidebar + banners); again returns to Focus | local, attached | portable | not available in an attached session |
+| `Ctrl+X, W` | Toggle the read-only monitor (wide terminals) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, D` | Detach from the daemon (attached client only) | attached | portable |  |
 | `Ctrl+X, ?` | This help overlay | local, attached | portable |  |
 | `Ctrl+X, N` | Notification Log (also /notifications); Log !N counts unseen warnings and errors | local, attached | portable |  |

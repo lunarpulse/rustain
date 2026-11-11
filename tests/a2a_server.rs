@@ -3621,7 +3621,6 @@ async fn story_19_16g_a_served_retract_reaches_a_closed_log_reminder() {
                 false,
                 None,
                 None,
-                rustain::domain::models::visual::DensityMode::Focus,
                 false,
                 None,
                 view.display,

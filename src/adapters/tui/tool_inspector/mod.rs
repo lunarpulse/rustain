@@ -633,8 +633,7 @@ pub(crate) fn frame_rect(
         &state.theme,
         &state.input_buffer,
         tab_count,
-        state.sidebar_visible,
-        state.density_mode,
+        state.monitor,
     )?;
     Some(crate::adapters::tui::presentation::geometry::frame_rect(
         crate::adapters::tui::presentation::geometry::modal_region(&shell, area),

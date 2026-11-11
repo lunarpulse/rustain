@@ -1,6 +1,7 @@
-//! K11 (body half) / AC21 / A14 / A16 (21-7 slice 7-E): the sidebar column — Monitor density
-//! until 7-F — paints the current Mission Control tab body read-only under a muted
-//! `Monitor · <Tab>` title: no selection, no rail, no tab row, never a focus or a key target.
+//! K11 (body half 7-E, toggle half 7-F) / AC21 / AC23 / A16: the read-only monitor column
+//! (`Ctrl+X w`, default off, at least 120 columns) paints the current Mission Control tab body
+//! under a muted `Monitor · <Tab>` title: no selection, no rail, no tab row, never a focus or a
+//! key target.
 //! A Room body painted there counts as presented (the head poll runs while it is on screen);
 //! a Messages body painted there never commits a log visit. Every fixture goes through a
 //! production door: the draw is the production `event_loop::render`, keys travel as crossterm
@@ -9,11 +10,12 @@ use super::support::*;
 use crate::conformance_21_8_thread_inspector::support::Item;
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::Key;
+use rustain::adapters::tui::keymap::table::{MONITOR_NARROW, attached_mission_remedy};
+use rustain::adapters::tui::keymap::{AvailCtx, Host, LeaderStep, leader_step};
 use rustain::adapters::tui::mission_control::McTab;
 use rustain::adapters::tui::presentation::Surface;
 use rustain::domain::models::SemanticMessageType;
 use rustain::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
-use rustain::domain::models::visual::DensityMode;
 use rustain::infrastructure::runtime::panel_bridge::room_head_poll_due;
 use rustain::infrastructure::runtime::transparency_bridge;
 
@@ -54,9 +56,9 @@ fn plan() -> Plan {
     }
 }
 
-/// A 130x30 terminal with the column on (Monitor density) and a plan in the active
-/// conversation, drawn once by the production host.
-async fn monitored() -> Rig {
+/// A 130x30 terminal with a plan in the active conversation, drawn by the production host,
+/// the monitor still off.
+async fn planned() -> Rig {
     let mut rig = Rig::plain(Workspace::new().await, 130, 30).await;
     rig.f
         .tabs
@@ -65,14 +67,19 @@ async fn monitored() -> Rig {
         .plans
         .insert("p1".to_owned(), plan());
     rig.f.h.state.task_panel_state.last_executed_plan_id = Some("p1".to_owned());
+    rig
+}
+
+/// [`planned`] with the monitor on, drawn once.
+async fn monitored() -> Rig {
+    let mut rig = planned().await;
     show_column(&mut rig);
     rig.paint();
     rig
 }
 
 fn show_column(rig: &mut Rig) {
-    rig.f.h.state.density_mode = DensityMode::Monitor;
-    rig.f.h.state.sidebar_visible = true;
+    rig.f.h.state.monitor = true;
 }
 
 /// The rows painted inside the column rectangle (the layout the production draw used).
@@ -154,7 +161,7 @@ async fn the_column_follows_the_last_tab_the_hub_was_on() {
 }
 
 #[tokio::test]
-async fn no_key_routes_to_the_column_in_any_focus_and_the_same_key_acts_in_the_hub() {
+async fn monitor_is_never_a_focus_or_key_target() {
     use rustain::domain::models::FocusState;
     for focus in [FocusState::Input, FocusState::Chat] {
         let mut rig = monitored().await;
@@ -182,6 +189,16 @@ async fn no_key_routes_to_the_column_in_any_focus_and_the_same_key_acts_in_the_h
         }
         assert_eq!(column(&rig), before, "{focus:?}: the column did not move");
     }
+    // Positive control: with the column shown the same printable keys still reach their normal
+    // owner (the composer in Input focus): the column swallows nothing.
+    let mut rig = monitored().await;
+    rig.f.h.state.focus = rustain::domain::models::FocusState::Input;
+    rig.key(Key::Char('j'));
+    rig.key(Key::Char('k'));
+    assert_eq!(
+        rig.f.h.state.input_buffer, "jk",
+        "the composer owns printable keys"
+    );
     // Positive control: with the hub on Tasks the same `j` moves its selection.
     let mut rig = monitored().await;
     assert_eq!(rig.f.press(Key::Ctrl('x')), InputAction::Consumed);
@@ -285,7 +302,7 @@ async fn a_room_painted_in_the_column_is_presented_and_polled_even_under_a_frame
     // Negative control: the column hidden (and no hub): nothing is presented, the counter
     // starts over.
     rig.f.press(Key::Esc);
-    rig.f.h.state.sidebar_visible = false;
+    rig.f.h.state.monitor = false;
     rig.paint();
     assert!(!rustain::adapters::tui::mission_control::room_projection_presented(&rig.f.h.state));
     assert_eq!(
@@ -367,66 +384,104 @@ async fn untrusted_row_text_never_reaches_the_column_as_controls() {
     assert!(all.contains("evil"), "{all}");
 }
 
-/// 7E-02: Dashboard density paints the monitor body in `dashboard_panel` (until 7-F deletes the
-/// layout), at any width, without `sidebar_visible`: the Tasks rows are built for it and a Room
-/// painted there is presented.
+/// A16 / AC23: `Ctrl+X w` toggles the column at 130 columns: default off, then the body under
+/// `Monitor · Tasks` (the default tab), then gone again. No toast: the toggle is silent.
 #[tokio::test]
-async fn the_dashboard_panel_is_a_monitor_the_gate_admits() {
-    let mut rig = Rig::plain(room_workspace(&NODES).await, 100, 30).await;
-    rig.f
-        .tabs
-        .active_tab_mut()
-        .conversation
-        .plans
-        .insert("p1".to_owned(), plan());
-    rig.f.h.state.task_panel_state.last_executed_plan_id = Some("p1".to_owned());
-    rig.f.h.state.density_mode = DensityMode::Dashboard;
-    assert!(
-        !rig.f.h.state.sidebar_visible,
-        "Dashboard keeps the flag false"
-    );
+async fn ctrl_x_w_toggles_the_column_on_and_off_at_130_columns() {
+    let mut rig = planned().await;
     rig.paint();
-    let panel = rig
-        .f
-        .layout()
-        .dashboard_panel
-        .expect("the Dashboard panel is laid out");
-    let all = lines(&rig);
-    let rows: Vec<String> = (panel.y..panel.bottom())
-        .map(|y| {
-            all[usize::from(y)]
-                .chars()
-                .skip(usize::from(panel.x))
-                .collect()
-        })
-        .collect();
+    assert!(!rig.f.h.state.monitor, "the monitor defaults to off");
+    assert!(rig.f.layout().sidebar.is_none());
+    assert!(!lines(&rig).iter().any(|row| row.contains("Monitor ·")));
+    assert_eq!(rig.key(Key::Ctrl('x')), InputAction::Consumed);
+    assert_eq!(rig.key(Key::Char('w')), InputAction::Consumed);
+    assert!(rig.f.h.state.monitor);
+    assert_eq!(rig.f.h.state.notifications.records().count(), 0);
+    rig.paint();
+    let rows = column(&rig);
     assert!(rows[0].contains("Monitor · Tasks"), "{rows:?}");
-    assert!(
-        rows.join("\n").contains("Compile"),
-        "the Tasks rows were built for the painted panel: {rows:?}"
-    );
-    // A Room painted there is presented (head awareness) and polled once a second.
-    attach_journal(&mut rig);
-    rustain::infrastructure::runtime::room_bridge::refresh_mission_tab(
-        &rig.app,
-        &mut rig.f.h.state,
-        "conv",
-        McTab::Room,
-        rustain::domain::models::PermissionMode::Normal,
-    )
-    .await;
-    // The hub visited Room and closed: the column follows the last tab.
-    rustain::adapters::tui::presentation::reducer::open_mission_control(
-        &mut rig.f.h.state,
-        McTab::Room,
-    );
-    rustain::adapters::tui::presentation::reducer::back(&mut rig.f.h.state);
+    assert!(rows.join("\n").contains("Compile"), "{rows:?}");
+    assert_eq!(rig.key(Key::Ctrl('x')), InputAction::Consumed);
+    assert_eq!(rig.key(Key::Char('w')), InputAction::Consumed);
+    assert!(!rig.f.h.state.monitor);
     rig.paint();
-    assert!(rustain::adapters::tui::mission_control::room_projection_presented(&rig.f.h.state));
-    assert_eq!(
-        (0..4)
-            .filter(|_| room_head_poll_due(&mut rig.f.h.state, TICK))
-            .count(),
-        1
-    );
+    assert!(rig.f.layout().sidebar.is_none());
+    assert!(!lines(&rig).iter().any(|row| row.contains("Monitor ·")));
+}
+
+fn remedies(rig: &Rig) -> Vec<String> {
+    rig.f
+        .h
+        .state
+        .notifications
+        .records()
+        .map(|record| record.message.clone())
+        .collect()
+}
+
+/// A16 / AC23: below 120 columns the chord answers the width remedy and paints nothing; the
+/// preference survives a narrowing resize (the old P11 reset is gone), is not painted while
+/// narrow, is not turned off by the refused chord, and paints again when the terminal widens.
+#[tokio::test]
+async fn below_120_columns_the_chord_is_refused_and_the_preference_survives_a_resize() {
+    let mut rig = Rig::plain(Workspace::new().await, 80, 24).await;
+    rig.paint();
+    rig.key(Key::Ctrl('x'));
+    assert_eq!(rig.key(Key::Char('w')), InputAction::Consumed);
+    assert!(!rig.f.h.state.monitor, "refused: nothing toggled");
+    assert!(remedies(&rig).iter().any(|m| m == MONITOR_NARROW));
+    rig.paint();
+    assert!(!lines(&rig).iter().any(|row| row.contains("Monitor ·")));
+
+    let mut rig = monitored().await;
+    for narrow in [119u16, 100, 80] {
+        rig.resize(narrow, 30);
+        rig.paint();
+        assert!(rig.f.h.state.monitor, "{narrow}: the preference is kept");
+        assert!(rig.f.layout().sidebar.is_none(), "{narrow}");
+        assert!(
+            !lines(&rig).iter().any(|row| row.contains("Monitor ·")),
+            "{narrow}: not painted"
+        );
+        rig.key(Key::Ctrl('x'));
+        assert_eq!(rig.key(Key::Char('w')), InputAction::Consumed);
+        assert!(
+            rig.f.h.state.monitor,
+            "{narrow}: the refused chord leaves it on"
+        );
+    }
+    assert!(remedies(&rig).iter().any(|m| m == MONITOR_NARROW));
+    // Widening to exactly the floor paints the column again, still on Tasks.
+    rig.resize(120, 30);
+    rig.paint();
+    let rows = column(&rig);
+    assert!(rows[0].contains("Monitor · Tasks"), "{rows:?}");
+    // And the chord acts again at the floor.
+    rig.key(Key::Ctrl('x'));
+    rig.key(Key::Char('w'));
+    assert!(!rig.f.h.state.monitor);
+}
+
+/// A16 / A20 / AC23: the attached host refuses the chord at every width with the one A20 remedy
+/// (the local host runs it from 120 columns: the controls).
+#[test]
+fn the_attached_host_refuses_the_monitor_chord_with_the_one_a20_remedy() {
+    for width in [60u16, 80, 119, 120, 130] {
+        let attached = AvailCtx::attached(width, false);
+        match leader_step(Host::Attached, Key::Char('w'), &attached, "Input") {
+            LeaderStep::Unavailable(_, remedy) => {
+                assert_eq!(remedy, attached_mission_remedy(), "{width}");
+            }
+            other => panic!("attached `w` must be refused: {other:?}"),
+        }
+        let local = AvailCtx::local(width);
+        match leader_step(Host::Local, Key::Char('w'), &local, "Input") {
+            LeaderStep::Run(_) => assert!(width >= 120, "{width}: runs only from 120"),
+            LeaderStep::Unavailable(_, remedy) => {
+                assert!(width < 120, "{width}: refused only below 120");
+                assert_eq!(remedy, MONITOR_NARROW, "{width}");
+            }
+            other => panic!("local `w` must run or be refused: {other:?}"),
+        }
+    }
 }

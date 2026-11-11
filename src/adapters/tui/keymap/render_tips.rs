@@ -136,7 +136,7 @@ pub fn launchpad_keys(host: Host, avail: &AvailCtx) -> LaunchpadKeys {
 /// case (`j`,`k` / `J`,`K`) share one item (`j/k scroll`).
 fn chat_items(host: Host, stage_target: bool) -> Vec<String> {
     let mut avail = match host {
-        Host::Local => AvailCtx::local(0, crate::domain::models::visual::DensityMode::Focus),
+        Host::Local => AvailCtx::local(0),
         Host::Attached => AvailCtx::attached(0, false),
     };
     avail.stage_target = stage_target && host == Host::Local;

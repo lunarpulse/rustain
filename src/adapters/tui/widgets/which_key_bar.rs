@@ -175,11 +175,10 @@ fn item_spans<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::visual::DensityMode;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn local(width: u16) -> AvailCtx {
-        AvailCtx::local(width, DensityMode::Focus)
+        AvailCtx::local(width)
     }
 
     fn paint(width: u16, height: u16, avail: &AvailCtx) -> String {
@@ -224,7 +223,7 @@ mod tests {
 
     #[test]
     fn story21_3_which_key_shows_r_e_and_enter_send_generated_from_the_registry() {
-        let text = paint(130, 12, &AvailCtx::local(130, DensityMode::Monitor));
+        let text = paint(130, 12, &AvailCtx::local(130));
         assert!(text.contains("[R] Room"), "{text}");
         assert!(text.contains("[E] Artifacts"), "{text}");
         assert!(text.contains("[H] History"), "{text}");

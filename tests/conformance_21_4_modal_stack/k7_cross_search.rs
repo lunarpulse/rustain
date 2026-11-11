@@ -12,7 +12,6 @@ use rustain::adapters::tui::{
     handlers::export::{self, CrossSearchResultsOutcome as Outcome, CrossSearchScanAction as Scan},
     presentation::{self, Surface},
 };
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::services::{cross_search::CrossSearchResult, session_index::SessionIndex};
 
 /// One production compose of the open frames, as the draw does: a History key acts only if its
@@ -20,15 +19,7 @@ use rustain::domain::services::{cross_search::CrossSearchResult, session_index::
 pub(super) fn paint(state: &TuiState) {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     let area = Rect::new(0, 0, state.terminal_width, state.terminal_height);
-    let layout = compute_layout(
-        area,
-        &state.theme,
-        &state.input_buffer,
-        1,
-        state.sidebar_visible,
-        state.density_mode,
-    )
-    .unwrap();
+    let layout = compute_layout(area, &state.theme, &state.input_buffer, 1, state.monitor).unwrap();
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal
         .draw(|frame| {
@@ -50,8 +41,7 @@ pub(super) fn paint(state: &TuiState) {
 /// stack frame, opened on an empty session index and painted once.
 pub(super) fn history() -> TuiState {
     let mut state = TuiState::new(130, 30);
-    state.sidebar_visible = true;
-    state.density_mode = DensityMode::Monitor;
+    state.monitor = true;
     history_window::open(&mut state, &SessionIndex::new(), 0);
     paint(&state);
     state
@@ -295,8 +285,7 @@ fn fitted_cross_search_keeps_query_selected_result_and_primary_keys() {
                 &h.state.theme,
                 draft,
                 tabs.tab_count(),
-                h.state.sidebar_visible,
-                h.state.density_mode,
+                h.state.monitor,
             )
             .unwrap();
             let status = h.terminal.backend().buffer();
@@ -673,8 +662,7 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
             &h.state.theme,
             &h.state.input_buffer,
             tabs.tab_count(),
-            h.state.sidebar_visible,
-            h.state.density_mode,
+            h.state.monitor,
         )
         .unwrap()
     };
@@ -741,8 +729,7 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
             &h.state.theme,
             &h.state.input_buffer,
             tabs.tab_count(),
-            h.state.sidebar_visible,
-            h.state.density_mode,
+            h.state.monitor,
         )
         .unwrap();
         assert_eq!(actual.chat_pane, rect);
@@ -994,8 +981,7 @@ fn a_real_stream_keeps_appending_under_cross_search() {
         content: "first line\n".into(),
         parent_tool_use_id: None,
     });
-    h.state.sidebar_visible = true;
-    h.state.density_mode = DensityMode::Monitor;
+    h.state.monitor = true;
     history_window::open(&mut h.state, &SessionIndex::new(), 0);
     h.state.input_buffer = "kept draft".into();
     h.state.cursor_position = 4;

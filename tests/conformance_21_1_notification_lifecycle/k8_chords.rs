@@ -12,7 +12,6 @@ use rustain::adapters::tui::keymap::{AvailCtx, Context, Host, Key, Resolved, res
 use rustain::adapters::tui::notifications::NoticeSeverity;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::DensityMode;
 
 use super::support::{clocked, notify};
 
@@ -56,7 +55,7 @@ fn k8_ctrl_x_n_opens_the_log_with_the_origin_focus_as_its_caller() {
 #[test]
 fn k8_the_menu_paints_n_and_x_in_both_hosts_and_every_painted_chord_routes() {
     for (label, avail) in [
-        ("Local", AvailCtx::local(130, DensityMode::Focus)),
+        ("Local", AvailCtx::local(130)),
         ("Attached", AvailCtx::attached(130, false)),
     ] {
         let items = leader_menu(&avail);
@@ -88,7 +87,7 @@ fn k8_the_menu_paints_n_and_x_in_both_hosts_and_every_painted_chord_routes() {
         ));
     }
     for (label, avail) in [
-        ("Local", AvailCtx::local(130, DensityMode::Focus)),
+        ("Local", AvailCtx::local(130)),
         ("Attached", AvailCtx::attached(130, false)),
     ] {
         let items = leader_menu(&avail);

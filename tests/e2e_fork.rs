@@ -951,7 +951,6 @@ fn test_e2e_fork_blocked_during_permission_overlay() {
         "",
         1,
         false,
-        rustain::domain::models::visual::DensityMode::Focus,
     )
     .unwrap();
     let mut painted = false;

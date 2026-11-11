@@ -2548,7 +2548,7 @@ mod tests {
     }
 
     /// Story 21.1 AC4 — the board's background path is an attributed Warning
-    /// notice in the store (visible in every density), not a hidden advisory.
+    /// notice in the store, not a hidden advisory.
     #[test]
     fn story21_1_a_background_board_answer_is_an_attributed_warning_notice() {
         use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource};
@@ -2558,7 +2558,6 @@ mod tests {
         tabs.create_tab();
         let active = tabs.active_tab().conversation.id.clone();
         let mut state = TuiState::new(120, 40);
-        state.density_mode = crate::domain::models::visual::DensityMode::Focus;
         team_board_ready(&active, &mut state, &mut tabs, &issuing, "board".to_owned());
         let record = state
             .notifications
@@ -2645,7 +2644,6 @@ mod tests {
         tabs.create_tab();
         let active_conversation_id = tabs.active_tab().conversation.id.clone();
         let mut state = TuiState::new(120, 40);
-        state.density_mode = crate::domain::models::visual::DensityMode::Focus;
 
         let sending_row = TeamSendRow {
             alias: "jun-dev".to_owned(),
@@ -4398,9 +4396,9 @@ mod log_awareness_tests {
         let mut client = Client::launch(workspace.path());
         assert_eq!(client.poll().await, LogAwareness::Unseen(3));
 
-        // Unrelated input, density/tab-bar state and feedback dismissal do
+        // Unrelated input, monitor/tab-bar state and feedback dismissal do
         // not clear; redraws without a log visit do not clear.
-        client.state.density_mode = crate::domain::models::visual::DensityMode::Monitor;
+        client.state.monitor = true;
         client.slash("status").await;
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Unseen(3));

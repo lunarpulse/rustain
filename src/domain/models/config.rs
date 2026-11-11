@@ -193,43 +193,6 @@ impl Default for PlanConfig {
     }
 }
 
-/// Auto-open behavior for sidebar panels triggered by domain events.
-///
-/// Story 6.3 (PD4): `on_task_plan` controls whether the Tasks panel auto-opens
-/// when a plan begins executing. Accepted values: `"tasks"` (default — open
-/// the Tasks panel) or `"none"` (no auto-open; user must use Ctrl+X, T).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutoPanelsConfig {
-    #[serde(default = "AutoPanelsConfig::default_on_task_plan")]
-    pub on_task_plan: String,
-}
-
-impl AutoPanelsConfig {
-    fn default_on_task_plan() -> String {
-        "tasks".to_string()
-    }
-
-    /// Returns `Ok(())` if the config holds only recognized values, else an
-    /// error describing the offending key. Called by the TOML loader.
-    pub fn validate(&self) -> Result<(), String> {
-        match self.on_task_plan.as_str() {
-            "tasks" | "none" => Ok(()),
-            other => Err(format!(
-                "[layout.auto_panels] on_task_plan = {:?} is invalid; expected \"tasks\" or \"none\"",
-                other
-            )),
-        }
-    }
-}
-
-impl Default for AutoPanelsConfig {
-    fn default() -> Self {
-        Self {
-            on_task_plan: Self::default_on_task_plan(),
-        }
-    }
-}
-
 /// Mouse configuration. Story 16.8, AC6 + AC14.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseConfig {
@@ -473,26 +436,6 @@ impl Default for MarkdownConfig {
         Self {
             code_max_rows: Self::default_code_max_rows(),
             reasoning: Self::default_reasoning(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayoutConfig {
-    #[serde(default)]
-    pub auto_panels: AutoPanelsConfig,
-    /// Story 8.4b — initial density mode at startup. Default: Focus.
-    /// Overridable at runtime via Ctrl+X, F/W/D chords; the runtime change
-    /// does NOT persist back to the profile TOML.
-    #[serde(default)]
-    pub density_mode: crate::domain::models::visual::DensityMode,
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self {
-            auto_panels: AutoPanelsConfig::default(),
-            density_mode: crate::domain::models::visual::DensityMode::default(),
         }
     }
 }
@@ -829,8 +772,6 @@ pub struct AppConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
-    #[serde(default)]
-    pub layout: LayoutConfig,
     /// Start new sessions in Plan mode by default.
     #[serde(default)]
     pub default_plan_mode: bool,
@@ -1069,7 +1010,6 @@ impl Default for AppConfig {
             snapshot_retention_count: Some(100),
             skills: SkillsConfig::default(),
             runtime: RuntimeConfig::default(),
-            layout: LayoutConfig::default(),
             default_plan_mode: false,
             provider: std::collections::BTreeMap::new(),
             mouse: MouseConfig::default(),

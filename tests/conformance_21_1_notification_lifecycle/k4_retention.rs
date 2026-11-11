@@ -15,7 +15,6 @@ use rustain::adapters::tui::state::{LogAwareness, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::status_bar;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{PermissionMode, StatusState};
 
 use super::support::{advance, clocked, draw, notify, row_text};
@@ -53,7 +52,6 @@ pub(super) fn status_row(state: &TuiState, width: u16, hint: Option<&str>) -> St
                 false,
                 None,
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 LogAwareness::Hidden,

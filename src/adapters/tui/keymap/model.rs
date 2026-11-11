@@ -6,7 +6,6 @@
 //! same rows.
 
 use crate::domain::events::{DomainInputEvent, DomainKey};
-use crate::domain::models::visual::DensityMode;
 
 use super::table::{GlobalCmd, LeaderCmd};
 use super::table_block::{BlockCmd, BodyCmd};
@@ -710,7 +709,6 @@ impl Hosts {
 pub struct AvailCtx {
     pub host: Host,
     pub width: u16,
-    pub density: DensityMode,
     pub read_only: bool,
     /// False while a confirmation owns the keyboard: `Ctrl+X` is unavailable.
     pub leader_available: bool,
@@ -721,11 +719,10 @@ pub struct AvailCtx {
 }
 
 impl AvailCtx {
-    pub const fn local(width: u16, density: DensityMode) -> Self {
+    pub const fn local(width: u16) -> Self {
         Self {
             host: Host::Local,
             width,
-            density,
             read_only: false,
             leader_available: true,
             frame_origin: false,
@@ -737,7 +734,6 @@ impl AvailCtx {
         Self {
             host: Host::Attached,
             width,
-            density: DensityMode::Focus,
             read_only,
             leader_available: true,
             frame_origin: false,

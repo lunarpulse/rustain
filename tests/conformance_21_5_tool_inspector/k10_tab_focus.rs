@@ -501,7 +501,7 @@ fn zero_and_single_invocation_preserve_sidebar_and_tab_fallthrough() {
             f.tabs.create_tab();
             f.tabs.switch_to_prev();
             f.load();
-            f.h.state.sidebar_visible = sidebar;
+            f.h.state.monitor = sidebar;
             f.h.state.focus = FocusState::Chat;
             f.paint();
             assert_eq!(f.tabs.tab_count(), 2);
@@ -515,7 +515,7 @@ fn zero_and_single_invocation_preserve_sidebar_and_tab_fallthrough() {
             // A real multi-call focused turn, with the same sidebar setting,
             // positively proves the decoder/effect can select and paint a tool.
             let (mut control, ids) = three(false);
-            control.h.state.sidebar_visible = sidebar;
+            control.h.state.monitor = sidebar;
             control.tabs.active_tab_mut().view_state.focused_turn =
                 Some(control.conversation().turns[0].id.clone());
             control.focus_call(&ids[0]);

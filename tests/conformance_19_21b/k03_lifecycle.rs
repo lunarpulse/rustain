@@ -130,12 +130,10 @@ async fn story21_6_review_at_minimum_viewport_keeps_body_and_rail() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let mut f = fixture(&host).await;
     let area = Rect::new(0, 0, 60, 16);
-    let before =
-        layout::compute_layout(area, &f.state.theme, "", 1, false, f.state.density_mode).unwrap();
+    let before = layout::compute_layout(area, &f.state.theme, "", 1, false).unwrap();
     f.key(DomainInputEvent::KeyPress('r')).await;
     let rows = f.paint(60, 16);
-    let after =
-        layout::compute_layout(area, &f.state.theme, "", 1, false, f.state.density_mode).unwrap();
+    let after = layout::compute_layout(area, &f.state.theme, "", 1, false).unwrap();
     assert_eq!(before.chat_pane, after.chat_pane);
     let frame = frame_rect(modal_region(&after, area));
     assert_eq!(frame, modal_region(&after, area));
@@ -162,15 +160,8 @@ async fn story21_6_full_composer_leaves_frame_body_and_gate_at_60_by_16() {
         .collect::<Vec<_>>()
         .join("\n");
     let area = Rect::new(0, 0, 60, 16);
-    let shell = layout::compute_layout(
-        area,
-        &f.state.theme,
-        &f.state.input_buffer,
-        1,
-        false,
-        f.state.density_mode,
-    )
-    .unwrap();
+    let shell =
+        layout::compute_layout(area, &f.state.theme, &f.state.input_buffer, 1, false).unwrap();
     let frame = frame_rect(modal_region(&shell, area));
     let rows = f.paint(60, 16);
     assert!(frame.height >= 5, "{frame:?}");

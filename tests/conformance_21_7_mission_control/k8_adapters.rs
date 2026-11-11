@@ -229,7 +229,7 @@ fn the_attached_host_refuses_the_adapters_chord_with_the_one_a20_remedy() {
             other => panic!("attached `a` must be refused: {other:?}"),
         }
         // Control: the same chord runs in the local host at the same width.
-        let local = AvailCtx::local(width, rustain::domain::models::visual::DensityMode::Focus);
+        let local = AvailCtx::local(width);
         assert!(matches!(
             leader_step(Host::Local, Key::Char('a'), &local, "Input"),
             LeaderStep::Run(_)

@@ -15,6 +15,11 @@ Leg E (slice 7-E, 80x24): two saved sessions; the launchpad key line names `^X h
 `Ctrl+X h` paints the `History` frame with both titles and the rail; `j` then `Enter` opens the
 second (older) session and its transcript row is on the Stage with the frame gone.
 
+Leg F (slice 7-F, 130x30, declared: the monitor exists only from 120 columns): a saved session with
+a plan; `Ctrl+X w` paints the right column titled `Monitor · Tasks` with the task rows beside the
+intact main column; a second `Ctrl+X w` takes it away. A second process at 80x24: `Ctrl+X w`
+answers the width remedy toast and paints no column.
+
 Offline first: RUSTAIN_MISSION_DESKCHECK=1 with RUSTAIN_MISSION_FRAMES=<dir> consumes only the
 frames written by the ignored Rust test `story21_7_smoke_frames_export` (60x16, 80x24, 130x30);
 no binary or subprocess is started. Every predicate passes on the intended frame and fails on
@@ -302,6 +307,82 @@ def transcript_ok(screen):
     return HISTORY_ROW in screen and _frame_top(_rows(screen), HISTORY_TITLE) is None
 
 
+MONITOR_TITLE = "Monitor · Tasks"
+MONITOR_REMEDY_HEAD = "Info The monitor needs a terminal at least 120"
+
+
+def _monitor_bounds(rows):
+    """(title row, bottom row, left border x) of the monitor column, else (None, None, None): the
+    title row ends with `┌Monitor · Tasks──┐` and the bottom border `└──┘` sits at the same x."""
+    for top, row in enumerate(rows):
+        if re.fullmatch(r".*┌" + re.escape(MONITOR_TITLE) + r"─*┐", row):
+            x = row.rindex("┌")
+            for bottom in range(top + 1, len(rows)):
+                if len(rows[bottom]) > x and re.fullmatch(r"└─*┘", rows[bottom][x:]):
+                    return top, bottom, x
+            return top, None, x
+    return None, None, None
+
+
+def monitor_column_ok(screen):
+    """The column's title row, every row down to its bottom border closed by `│` at the left
+    border's x and at the right edge, the seeded task row inside the column, the main column's
+    status row beside it, and no Mission Control frame or rail anywhere."""
+    rows = _rows(screen)
+    top, bottom, x = _monitor_bounds(rows)
+    if top is None or bottom is None or bottom < top + 4:
+        return False
+    inside = rows[top + 1:bottom]
+    closed = all(len(row) > x and row[x] == "│" and row.endswith("│") for row in inside)
+    task = any(re.fullmatch(r".*│[^│]*\b2\. .*" + TASK_ROW + r".*│", row) for row in inside)
+    status = any(STATUS in row[:x] for row in inside)
+    clean = "Mission Control" not in screen and "[Esc] Back" not in screen
+    return closed and task and status and clean
+
+
+def monitor_off_ok(screen):
+    """No monitor column (no `Monitor ·` title anywhere) with the status row intact."""
+    return "Monitor ·" not in screen and any(STATUS in row for row in _rows(screen))
+
+
+def monitor_remedy_ok(screen):
+    """The width remedy toast (cut by the row with `…` at 80 columns) on its own row, the status
+    row intact below it, and no column."""
+    rows = _rows(screen)
+    toast = any(re.fullmatch(r"\s*" + re.escape(MONITOR_REMEDY_HEAD) + r".*", row) for row in rows)
+    return toast and monitor_off_ok(screen)
+
+
+def torn_monitor(screen):
+    rows = _rows(screen)
+    top, bottom, x = _monitor_bounds(rows)
+    task = next(i for i, row in enumerate(rows) if TASK_ROW in row)
+    status = next(i for i, row in enumerate(rows) if STATUS in row)
+    controls = {
+        "title cut mid-row": "\n".join(rows[:top] + [rows[top][: x + 9]] + rows[top + 1:]),
+        "title swapped": "\n".join(rows[:top] + [rows[top].replace("Tasks", "Room ")] + rows[top + 1:]),
+        "task row missing": "\n".join(rows[:task] + [rows[task].replace(TASK_ROW, " " * len(TASK_ROW))] + rows[task + 1:]),
+        "task row cut mid-row": "\n".join(rows[:task] + [rows[task][: rows[task].index(TASK_ROW) + 4]] + rows[task + 1:]),
+        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
+        "right border missing": "\n".join(rows[:top + 2] + [rows[top + 2].rstrip("│").rstrip()] + rows[top + 3:]),
+        "bottom border missing": "\n".join(rows[:bottom] + rows[bottom + 1:]),
+        "hub frame painted over": screen + "\n┌Mission Control · Tasks─┐",
+    }
+    return controls
+
+
+def torn_remedy(screen):
+    rows = _rows(screen)
+    toast = next(i for i, row in enumerate(rows) if MONITOR_REMEDY_HEAD in row)
+    status = next(i for i, row in enumerate(rows) if STATUS in row)
+    return {
+        "toast cut mid-row": "\n".join(rows[:toast] + [rows[toast][: rows[toast].index("The monitor") + 11]] + rows[toast + 1:]),
+        "toast missing": "\n".join(rows[:toast] + rows[toast + 1:]),
+        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
+        "a column painted": "\n".join(rows + ["    ┌Monitor · Tasks──┐"]),
+    }
+
+
 def _deskcheck():
     frames = Path(os.environ["RUSTAIN_MISSION_FRAMES"])
     for width, height in SIZES:
@@ -376,6 +457,26 @@ def _deskcheck():
             assert not history_frame_ok(torn), f"{name}: torn History control `{label}` must fail:\n{torn}"
         for label, torn in torn_launchpad(launch).items():
             assert not launchpad_key_ok(torn), f"{name}: torn launchpad control `{label}` must fail:\n{torn}"
+    for width, height in SIZES:
+        name = f"{width}x{height}"
+        off = (frames / f"monitor-off-{name}.txt").read_text(encoding="utf-8")
+        on = (frames / f"monitor-on-{name}.txt").read_text(encoding="utf-8")
+        history = (frames / f"history-open-{name}.txt").read_text(encoding="utf-8")
+        assert monitor_off_ok(off), f"{name}: the monitor-off frame must pass\n{off}"
+        assert not monitor_column_ok(off) and not monitor_remedy_ok(off), name
+        if width >= 120:
+            toggled = (frames / f"monitor-toggled-off-{name}.txt").read_text(encoding="utf-8")
+            assert monitor_column_ok(on), f"{name}: the monitor column must pass\n{on}"
+            assert not monitor_off_ok(on) and not monitor_remedy_ok(on), name
+            assert monitor_off_ok(toggled) and not monitor_column_ok(toggled), name
+            for label, torn in torn_monitor(on).items():
+                assert not monitor_column_ok(torn), f"{name}: torn monitor control `{label}` must fail:\n{torn}"
+        else:
+            assert monitor_remedy_ok(on), f"{name}: the width remedy must pass\n{on}"
+            assert monitor_off_ok(on) and not monitor_column_ok(on), name
+            for label, torn in torn_remedy(on).items():
+                assert not monitor_remedy_ok(torn), f"{name}: torn remedy control `{label}` must fail:\n{torn}"
+        assert not monitor_column_ok(history) and not monitor_remedy_ok(history), name
     print("desk-check ok", [f"{w}x{h}" for w, h in SIZES])
 
 
@@ -758,3 +859,58 @@ def test_leg_e_history_window_at_80x24(monkeypatch):
                 (evidence / f"{name}.txt").write_text(frame, encoding="utf-8")
             (evidence / "run.json").write_text(json.dumps(
                 {"viewport": [80, 24], "binary": binary, "result": "PASS"}) + "\n")
+
+
+def _start_leg_f(monkeypatch, workspace, env, cols, rows, session_id):
+    monkeypatch.setattr(harness, "TERM_COLS", cols)
+    monkeypatch.setattr(harness, "TERM_ROWS", rows)
+    return RustainTUI(fresh=False, build=False, workspace=workspace, env_overrides=env,
+                      extra_args=["--session", session_id])
+
+
+@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24(monkeypatch):
+    """Leg F (7-F, declared 130x30: the monitor exists only from 120 columns): a saved session
+    with a plan; `Ctrl+X w` -> the right column titled `Monitor · Tasks` with the task rows
+    beside the intact main column; `Ctrl+X w` again -> the column is gone. A second process at
+    80x24: `Ctrl+X w` -> the width remedy toast and no column. Hermetic."""
+    session_id = "story21-7-plan"
+    with tempfile.TemporaryDirectory(prefix="21-7-f-") as root:
+        root = Path(root)
+        workspace = root / "workspace"
+        sessions = workspace / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / f"{session_id}.meta.json").write_text(json.dumps(_plan_session(session_id)))
+        (workspace / ".env").write_text("")
+        home = root / "home"
+        home.mkdir()
+        data = root / "data"
+        data.mkdir()
+        env = {"HOME": str(home), "RUSTAIN_PROFILE": "", "RUSTAIN_CLIPBOARD": "file",
+               "RUSTAIN_DATA_DIR": str(data)}
+        evidence_parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir()))
+        evidence = evidence_parent / "21-7-leg-f"
+        evidence.mkdir(parents=True, exist_ok=True)
+        binary = str(harness._resolve_binary()[0])
+        with _start_leg_f(monkeypatch, workspace, env, 130, 30, session_id) as tui, \
+                (evidence / "raw-130x30.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            off = tui.wait_until(monitor_off_ok, "no monitor column by default", timeout=15)
+            tui.send(CTRL_X + "w")
+            on = tui.wait_until(monitor_column_ok, "the Monitor · Tasks column beside the main column", timeout=15)
+            tui.send(CTRL_X + "w")
+            gone = tui.wait_until(monitor_off_ok, "the column is gone after the second toggle", timeout=15)
+            for name, frame in (("monitor-off", off), ("monitor-on", on), ("monitor-toggled-off", gone)):
+                (evidence / f"{name}-130x30.txt").write_text(frame, encoding="utf-8")
+        with _start_leg_f(monkeypatch, workspace, env, 80, 24, session_id) as tui, \
+                (evidence / "raw-80x24.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            tui.send(CTRL_X + "w")
+            remedy = tui.wait_until(monitor_remedy_ok, "the width remedy toast and no column", timeout=15)
+            (evidence / "monitor-remedy-80x24.txt").write_text(remedy, encoding="utf-8")
+        (evidence / "run.json").write_text(json.dumps(
+            {"viewports": [[130, 30], [80, 24]], "binary": binary, "result": "PASS"}) + "\n")

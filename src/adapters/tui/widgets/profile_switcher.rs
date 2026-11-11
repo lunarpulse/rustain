@@ -285,7 +285,6 @@ mod tests {
                             "1\n2\n3\n4\n5\n6\n7\n8",
                             1,
                             false,
-                            crate::domain::models::visual::DensityMode::Focus,
                         )
                         .unwrap();
                         let region = crate::adapters::tui::presentation::geometry::modal_region(

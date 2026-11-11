@@ -1,5 +1,5 @@
 //! Stage item selection (tool calls, code blocks, tables); the runtime retains
-//! sidebar/tab fallthrough.
+//! tab fallthrough.
 use crate::adapters::tui::{state::TuiState, widgets::chat_pane};
 use crate::domain::models::{AnchorMode, Turn, turn::item_belongs_to_turn, view_state::ViewState};
 

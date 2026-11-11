@@ -11,7 +11,6 @@ use rustain::adapters::tui::widgets::{command_palette, which_key_bar};
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
-use rustain::domain::models::visual::DensityMode;
 
 // ============================================================
 // Unit: PaletteRegistry (Task 9.1)
@@ -571,15 +570,7 @@ fn test_command_palette_renders_caller_geometry() {
             PaletteScope::SlashCommand,
         )];
         let area = ratatui::layout::Rect::new(0, 0, width, height);
-        let layout = compute_layout(
-            area,
-            &state.theme,
-            &state.input_buffer,
-            1,
-            false,
-            DensityMode::Focus,
-        )
-        .unwrap();
+        let layout = compute_layout(area, &state.theme, &state.input_buffer, 1, false).unwrap();
         let shell = Shell::new(area, &layout);
         let rect = geometry::frame_rect(shell.region);
         if full {
@@ -683,13 +674,7 @@ fn test_which_key_bar_renders_chord_labels() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let _ = which_key_bar::render(
-                frame,
-                area,
-                &theme,
-                &AvailCtx::local(120, DensityMode::Focus),
-                None,
-            );
+            let _ = which_key_bar::render(frame, area, &theme, &AvailCtx::local(120), None);
         })
         .unwrap();
 

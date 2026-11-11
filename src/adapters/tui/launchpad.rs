@@ -15,7 +15,6 @@ use crate::adapters::builtin_commands::{self, CommandHost};
 use crate::adapters::tui::keymap::render_tips::{LaunchpadKeys, launchpad_keys};
 use crate::adapters::tui::keymap::{AvailCtx, Host};
 use crate::adapters::tui::text_geometry as geom;
-use crate::domain::models::visual::DensityMode;
 
 /// The launchpad column never exceeds this many cells.
 pub const MAX_COLUMN: usize = 72;
@@ -327,7 +326,7 @@ pub fn plan(facts: Option<&LaunchpadFacts>, rows: usize, cols: usize) -> Vec<Row
     };
     let width = u16::try_from(width).unwrap_or(u16::MAX);
     let avail = match host {
-        Host::Local => AvailCtx::local(width, DensityMode::Focus),
+        Host::Local => AvailCtx::local(width),
         Host::Attached => AvailCtx::attached(width, false),
     };
     let keys = launchpad_keys(host, &avail);

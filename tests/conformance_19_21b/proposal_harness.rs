@@ -271,8 +271,7 @@ impl ProposalFixture {
             &self.state.theme,
             &self.state.input_buffer,
             self.tabs.tab_count(),
-            self.state.sidebar_visible,
-            self.state.density_mode,
+            self.state.monitor,
         )
         .expect("fixture viewport meets the TUI minimum");
         let facts = rustain::adapters::tui::notification_log::LogFacts {

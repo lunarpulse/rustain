@@ -19,7 +19,6 @@ use rustain::adapters::tui::quit_confirm::{
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::DensityMode;
 
 fn key(c: char) -> DomainInputEvent {
     DomainInputEvent::KeyPress(c)
@@ -150,7 +149,7 @@ fn k5_help_and_hints_tell_the_truth() {
 #[test]
 fn k6_leader_inventory_is_complete_untimed_and_structurally_clean() {
     for (label, avail) in [
-        ("Local", AvailCtx::local(130, DensityMode::Focus)),
+        ("Local", AvailCtx::local(130)),
         ("Attached", AvailCtx::attached(130, false)),
     ] {
         let items = leader_menu(&avail);

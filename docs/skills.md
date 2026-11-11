@@ -200,6 +200,6 @@ next message; that presentation boundary does not weaken execution policy.
 
 ### Where you see the unmatched-items warning
 
-The warning is a notice like any other: it appears as a toast in **every**
-density mode (`Focus`, `Monitor`, `Dashboard`), and it stays reviewable after the
-toast expires in the Notification Log — `Ctrl+X` then `n`, or `/notifications`.
+The warning is a notice like any other: it appears as a toast, and it stays
+reviewable after the toast expires in the Notification Log — `Ctrl+X` then `n`,
+or `/notifications`.

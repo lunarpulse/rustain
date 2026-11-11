@@ -722,7 +722,6 @@ fn k9_a_toast_painted_over_link_runs_leaves_no_envelope_under_or_around_it() {
     use rustain::adapters::tui::notification_log::LogFacts;
     use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
     use rustain::adapters::tui::widgets::toast_layer;
-    use rustain::domain::models::visual::DensityMode;
 
     let row = "[docs](https://e.test/a) [more docs](https://e.test/b) [x](https://e.test/c) ";
     let paragraph = row.repeat(12);
@@ -740,15 +739,8 @@ fn k9_a_toast_painted_over_link_runs_leaves_no_envelope_under_or_around_it() {
                     "the daemon went away",
                 );
             }
-            let layout = compute_layout(
-                Rect::new(0, 0, width, height),
-                &state.theme,
-                "",
-                1,
-                false,
-                DensityMode::Focus,
-            )
-            .expect("the terminal is at or above the 60x16 floor");
+            let layout = compute_layout(Rect::new(0, 0, width, height), &state.theme, "", 1, false)
+                .expect("the terminal is at or above the 60x16 floor");
             notifications::begin_draw(&mut state);
             state
                 .notifications

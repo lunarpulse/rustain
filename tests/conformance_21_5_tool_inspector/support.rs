@@ -298,8 +298,7 @@ impl Fixture {
             &self.h.state.theme,
             &self.h.state.input_buffer,
             self.tabs.tabs().len(),
-            self.h.state.sidebar_visible,
-            self.h.state.density_mode,
+            self.h.state.monitor,
         )
         .unwrap()
     }

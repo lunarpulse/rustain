@@ -613,8 +613,7 @@ fn bb1b_ii_capture(
         &h.state.theme,
         draft,
         tabs.tab_count(),
-        h.state.sidebar_visible,
-        h.state.density_mode,
+        h.state.monitor,
     )
     .unwrap();
     assert!(
@@ -895,8 +894,7 @@ fn bb1b_ii_aux_capture(
         &h.state.theme,
         draft,
         tabs.tab_count(),
-        h.state.sidebar_visible,
-        h.state.density_mode,
+        h.state.monitor,
     )
     .unwrap();
     assert!(

@@ -64,7 +64,6 @@ use crate::domain::events::ChunkAction;
 use crate::domain::models::session::SessionState;
 use crate::domain::models::session_meta::now_unix;
 use crate::domain::models::turn::{InvocationStatus, Turn, TurnPart, tool_call_id_for};
-use crate::domain::models::visual::DensityMode;
 use crate::domain::models::{
     ChannelKind, ChatMessage, Conversation, FocusState, MessageRole, PermissionMode,
     SessionManager, StatusState, StreamingState, ToolCall, ToolCallInfo, ToolResultInfo,
@@ -1965,7 +1964,6 @@ fn paint_attached(
             .unwrap_or(&state.input_buffer),
         1,
         false,
-        DensityMode::Focus,
     ) else {
         crate::adapters::tui::presentation::paint_too_small(f, area);
         return None;
@@ -2054,7 +2052,6 @@ fn paint_attached(
             false,
             None,
             None,
-            DensityMode::Focus,
             false,
             Some(attach_info),
             state.log_awareness.display,
@@ -2957,7 +2954,6 @@ mod tests {
             &rig.state.input_buffer,
             1,
             false,
-            DensityMode::Focus,
         )
         .unwrap();
         let lines = crate::adapters::tui::widgets::feedback_block::render_feedback_lines(
@@ -3074,7 +3070,6 @@ mod tests {
             &rig.state.input_buffer,
             1,
             false,
-            DensityMode::Focus,
         )
         .unwrap();
         assert!(
@@ -3201,7 +3196,6 @@ mod tests {
                     &rig.state.input_buffer,
                     1,
                     false,
-                    DensityMode::Focus,
                 )
                 .unwrap();
                 let rect =
@@ -3283,7 +3277,6 @@ mod tests {
                     &rig.state.input_buffer,
                     1,
                     false,
-                    DensityMode::Focus,
                 )
                 .unwrap()
                 .chat_pane;
@@ -3486,7 +3479,6 @@ mod tests {
                     &rig.state.input_buffer,
                     1,
                     false,
-                    DensityMode::Focus,
                 )
                 .unwrap();
                 let before = attached_screen(&rig.paint());
@@ -3862,7 +3854,6 @@ mod tests {
                 &local.input_buffer,
                 1,
                 false,
-                DensityMode::Focus,
             )
             .unwrap();
             let status = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
@@ -3932,7 +3923,6 @@ mod tests {
                     &attached.state.input_buffer,
                     1,
                     false,
-                    DensityMode::Focus,
                 )
                 .unwrap();
                 let local_shell = Shell::new(area, &layout);
@@ -8994,7 +8984,6 @@ mod tests {
                         "",
                         1,
                         false,
-                        DensityMode::Focus,
                     )
                     .unwrap();
                     let shell = crate::adapters::tui::presentation::Shell::new(f.area(), &layout);
@@ -10022,7 +10011,6 @@ mod display_width_tests {
                     display_input,
                     1,
                     false,
-                    DensityMode::Focus,
                 )
                 .unwrap();
                 input_area = layout.input_area;

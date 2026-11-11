@@ -404,8 +404,6 @@ pub async fn run(
     let login_ctx =
         crate::adapters::tui::login_runtime::LoginCtx::new(app_state.event_bus.clone(), live);
     state.skill_registry = skill_activator.registry_arc();
-    // Story 8.4b AC-9: seed initial density mode from config
-    state.density_mode = config.layout.density_mode;
     crate::adapters::tui::handlers::config::apply_markdown_config(&mut state, &config.markdown);
     launchpad_facts::install(&mut state, &workspace_path, &app_state.provider_registry);
 
@@ -2555,14 +2553,6 @@ pub async fn run(
                                         dq::open(&mut state, &key);
                                         state.needs_redraw = true;
                                     }
-                                }
-                                InputAction::SetDensityMode(mode) => {
-                                    if state.density_mode == mode {
-                                        notifications::info(&mut state, NoticeSource::Density, format!("Already in {} mode", mode.display_label()));
-                                    } else {
-                                        handlers::notice::apply_density_transition(&mut state, mode, &app_state.event_bus);
-                                    }
-                                    state.needs_redraw = true;
                                 }
                                 InputAction::OpenMissionControl(tab) => room_bridge::refresh_mission_tab(&app_state, &mut state, &conversation.id, tab, security.current_mode()).await,
                                 InputAction::OpenMessages => transparency_bridge::open_messages(&app_state, &mut state, &conversation.id).await,
@@ -6949,22 +6939,14 @@ pub fn render(
             active_profile: ref _active_profile,
             ref selected_model,
             ref image_indicator,
-            density_mode,
-            sidebar_visible,
+            monitor,
             ..
         } = *state;
 
         let display_model = selected_model.as_deref().unwrap_or(config_model);
         let area = frame.area();
 
-        match layout::compute_layout(
-            area,
-            theme,
-            input_buffer,
-            tab_count,
-            sidebar_visible,
-            density_mode,
-        ) {
+        match layout::compute_layout(area, theme, input_buffer, tab_count, monitor) {
             Some(app_layout) => {
                 let mut shell = presentation::Shell::new(area, &app_layout);
                 shell.stage = tab_manager_for_bar.map(|tm| {
@@ -6990,7 +6972,7 @@ pub fn render(
                 }
 
                 // The column paints the current Mission Control tab body, read-only (A16).
-                if let Some(column) = app_layout.sidebar.or(app_layout.dashboard_panel) {
+                if let Some(column) = app_layout.sidebar {
                     monitor::render(frame, column, state);
                 }
 
@@ -7154,7 +7136,6 @@ pub fn render(
                         }),
                         state.daily_budget.as_ref(),
                         state.active_profile.as_ref(),
-                        density_mode,
                         tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
                         None, // Story 12.2c — local TUI is not an attach client
                         state.log_awareness.display,
@@ -7896,7 +7877,7 @@ mod tests {
                         &NotificationsConfig::default(),
                         clock.clone(),
                     );
-                    state.sidebar_visible = sidebar;
+                    state.monitor = sidebar;
                     if kind == DecisionKind::LargeImage {
                         decision_queue::raise_large_image(
                             &mut state,

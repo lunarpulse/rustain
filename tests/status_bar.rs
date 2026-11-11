@@ -7,7 +7,6 @@ use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::status_bar;
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{PermissionMode, StatusState, UsageInfo};
 
 #[allow(clippy::too_many_arguments)]
@@ -92,7 +91,6 @@ fn render_status_bar_ml(
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -327,7 +325,6 @@ fn test_status_bar_shows_active_agent() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -381,7 +378,6 @@ fn test_status_bar_hides_agent_when_none() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -435,7 +431,6 @@ fn test_status_bar_agent_name_truncated() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,

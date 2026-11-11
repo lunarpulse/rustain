@@ -9,14 +9,13 @@ use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::DensityMode;
 
 use super::support::{is_inert, press};
 
 /// A wide state: panels are available (>= 120 columns).
 fn wide() -> TuiState {
     let mut state = TuiState::new(130, 30);
-    state.density_mode = DensityMode::Monitor;
+    state.monitor = true;
     state
 }
 
@@ -209,24 +208,21 @@ fn every_leader_follow_up_runs_its_command_by_value() {
         InputAction::FocusDecisions
     );
 
-    // `w` toggles Monitor: Focus -> Monitor, Monitor -> Focus (A6).
+    // `w` toggles the read-only monitor (OD-2, A16): default off, on, off; silent (no notice);
+    // refused with the width remedy below 120 columns and then it toggles nothing.
     let mut state = TuiState::new(130, 30);
-    assert_eq!(state.density_mode, DensityMode::Focus);
+    assert!(!state.monitor);
+    assert_eq!(leader(&mut state, Key::Char('w')), InputAction::Consumed);
+    assert!(state.monitor);
+    assert!(notices(&state).is_empty(), "w: no notice on a run");
+    assert_eq!(leader(&mut state, Key::Char('w')), InputAction::Consumed);
+    assert!(!state.monitor);
+    let mut state = TuiState::new(80, 24);
+    assert_eq!(leader(&mut state, Key::Char('w')), InputAction::Consumed);
+    assert!(!state.monitor, "refused below 120 columns");
     assert_eq!(
-        leader(&mut state, Key::Char('w')),
-        InputAction::SetDensityMode(DensityMode::Monitor)
-    );
-    let mut state = wide();
-    assert_eq!(
-        leader(&mut state, Key::Char('w')),
-        InputAction::SetDensityMode(DensityMode::Focus)
-    );
-    // Dashboard -> Monitor (the toggle leaves every non-Monitor density for Monitor).
-    let mut state = TuiState::new(130, 30);
-    state.density_mode = DensityMode::Dashboard;
-    assert_eq!(
-        leader(&mut state, Key::Char('w')),
-        InputAction::SetDensityMode(DensityMode::Monitor)
+        notices(&state).last().map(|(_, message)| message.as_str()),
+        Some(rustain::adapters::tui::keymap::table::MONITOR_NARROW)
     );
 
     // `?` opens Help over the origin; `n` opens the Notification Log.

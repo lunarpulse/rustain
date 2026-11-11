@@ -13,7 +13,7 @@ use rustain::adapters::tui::{
     widgets::input_box,
 };
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::{FocusState, visual::DensityMode};
+use rustain::domain::models::FocusState;
 
 use super::support::*;
 
@@ -46,20 +46,13 @@ fn resize(state: &mut TuiState, width: u16, height: u16) {
 
 /// The production local composer draw: `compute_layout` decides the rectangle
 /// (and so the height), `input_box::render` paints it with the state's scroll.
-fn draw(state: &TuiState, density: DensityMode) -> Drawn {
+fn draw(state: &TuiState) -> Drawn {
     let (width, height) = (state.terminal_width, state.terminal_height);
     let theme = Theme::dark();
     let mut input_area = Rect::default();
     let painted = paint(width, height, |frame| {
-        let layout = compute_layout(
-            frame.area(),
-            &theme,
-            &state.input_buffer,
-            1,
-            state.sidebar_visible,
-            density,
-        )
-        .expect("supported size");
+        let layout = compute_layout(frame.area(), &theme, &state.input_buffer, 1, state.monitor)
+            .expect("supported size");
         input_area = layout.input_area;
         input_box::render(
             frame,
@@ -90,7 +83,7 @@ fn text_rows(drawn: &Drawn) -> &[String] {
 fn k2_cjk_wraps_and_the_caret_follows_in_a_60_column_composer() {
     let mut state = state_at(60, 24);
     paste(&mut state, &C.repeat(30));
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert_eq!(drawn.input_area.height, 4, "two text rows + borders");
     let rows = text_rows(&drawn);
     assert_eq!(rows[0].matches(C).count(), 29, "{:?}", drawn.rows);
@@ -103,7 +96,7 @@ fn k2_cjk_wraps_and_the_caret_follows_in_a_60_column_composer() {
     // ASCII positive control at the same width.
     let mut ascii = state_at(60, 24);
     paste(&mut ascii, &"a".repeat(70));
-    let drawn = draw(&ascii, DensityMode::Focus);
+    let drawn = draw(&ascii);
     assert_eq!(drawn.input_area.height, 4);
     assert_eq!(text_rows(&drawn)[0].matches('a').count(), 58);
     assert_eq!(text_rows(&drawn)[1].matches('a').count(), 12);
@@ -113,7 +106,7 @@ fn k2_cjk_wraps_and_the_caret_follows_in_a_60_column_composer() {
 fn k2_exact_full_final_row_gets_a_blank_caret_row() {
     let mut state = state_at(60, 24);
     paste(&mut state, &"a".repeat(58));
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert_eq!(
         drawn.input_area.height, 4,
         "58 cells fill the row; the caret needs one more"
@@ -125,7 +118,7 @@ fn k2_exact_full_final_row_gets_a_blank_caret_row() {
     // One cell fewer needs no slot row.
     let mut shy = state_at(60, 24);
     paste(&mut shy, &"a".repeat(57));
-    assert_eq!(draw(&shy, DensityMode::Focus).input_area.height, 3);
+    assert_eq!(draw(&shy).input_area.height, 3);
 }
 
 #[test]
@@ -164,7 +157,7 @@ fn k2_grapheme_navigation_and_edits_never_split_g_or_a() {
     let mut caret = state_at(80, 24);
     paste(&mut caret, &format!("{G}x"));
     key(&mut caret, DomainKey::Left);
-    let drawn = draw(&caret, DensityMode::Focus);
+    let drawn = draw(&caret);
     assert_eq!(drawn.caret.x, drawn.input_area.x + 1 + 2);
 }
 
@@ -197,7 +190,7 @@ fn k2_up_and_down_move_by_visual_rows_and_stay_on_grapheme_stops() {
     let mut recall = state_at(80, 24);
     recall.input_history.push("older entry".to_owned());
     paste(&mut recall, &"a".repeat(79)); // 78-cell inner width: wraps to two rows
-    assert_eq!(draw(&recall, DensityMode::Focus).input_area.height, 4);
+    assert_eq!(draw(&recall).input_area.height, 4);
     key(&mut recall, DomainKey::Home);
     key(&mut recall, DomainKey::Up);
     assert_eq!(recall.cursor_position, 0, "row 2 -> row 1 is a caret move");
@@ -223,10 +216,9 @@ fn k2_up_and_down_move_by_visual_rows_and_stay_on_grapheme_stops() {
 #[test]
 fn k2_monitor_sidebar_narrows_the_composer_that_height_and_wrap_use() {
     let mut state = state_at(130, 30);
-    state.sidebar_visible = true;
-    state.density_mode = DensityMode::Monitor;
+    state.monitor = true;
     paste(&mut state, &C.repeat(45)); // 90 cells: fits 128, not the ~91-column main rect
-    let drawn = draw(&state, DensityMode::Monitor);
+    let drawn = draw(&state);
     assert_eq!(
         drawn.input_area.height, 4,
         "wraps in the sidebar-narrowed rectangle"
@@ -241,17 +233,17 @@ fn k2_monitor_sidebar_narrows_the_composer_that_height_and_wrap_use() {
     // Without the sidebar the same draft fits one 128-cell row.
     let mut plain = state_at(130, 30);
     paste(&mut plain, &C.repeat(45));
-    assert_eq!(draw(&plain, DensityMode::Focus).input_area.height, 3);
+    assert_eq!(draw(&plain).input_area.height, 3);
 }
 
 #[test]
 fn k2_resize_rewraps_and_keeps_the_caret_visible() {
     let mut state = state_at(130, 30);
     paste(&mut state, &C.repeat(45));
-    assert_eq!(draw(&state, DensityMode::Focus).input_area.height, 3);
+    assert_eq!(draw(&state).input_area.height, 3);
     resize(&mut state, 60, 24);
     state.terminal_height = 24;
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert_eq!(drawn.input_area.height, 4);
     assert_eq!(drawn.caret.y, drawn.input_area.y + 2);
 }
@@ -262,7 +254,7 @@ fn k2_more_than_eight_rows_scroll_in_visual_rows() {
     state.multiline_mode = true;
     let body: String = (0..12).map(|i| format!("row{i:02}\n")).collect::<String>() + "last";
     paste(&mut state, &body);
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert_eq!(drawn.input_area.height, 10, "eight text rows + borders");
     let rows = text_rows(&drawn);
     assert!(rows[7].contains("last"), "{:?}", drawn.rows);
@@ -275,12 +267,12 @@ fn k2_more_than_eight_rows_scroll_in_visual_rows() {
     for _ in 0..8 {
         key(&mut state, DomainKey::Up);
     }
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert!(text_rows(&drawn)[0].contains("row04"), "{:?}", drawn.rows);
     // A soft-wrapped logical line counts as several visual rows for scrolling.
     let mut wrapped = state_at(60, 24);
     paste(&mut wrapped, &"w".repeat(58 * 10));
-    let drawn = draw(&wrapped, DensityMode::Focus);
+    let drawn = draw(&wrapped);
     assert_eq!(drawn.input_area.height, 10);
     assert_eq!(
         drawn.caret.y,
@@ -294,7 +286,7 @@ fn k2_blank_lines_and_tabs_have_one_projection() {
     let mut state = state_at(80, 24);
     state.multiline_mode = true;
     paste(&mut state, "a\n\n\tb");
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert_eq!(drawn.input_area.height, 5, "three rows: a, blank, tabbed b");
     let rows = text_rows(&drawn);
     assert!(
@@ -356,6 +348,6 @@ fn k2_history_autocomplete_and_original_bytes_are_preserved() {
     assert_eq!(state.input_buffer, draft);
     assert_eq!(state.cursor_position, draft.chars().count());
     // A recalled wide draft paints and keeps its caret in the box.
-    let drawn = draw(&state, DensityMode::Focus);
+    let drawn = draw(&state);
     assert!(drawn.caret.x < drawn.input_area.x + drawn.input_area.width - 1);
 }

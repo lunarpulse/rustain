@@ -258,19 +258,12 @@ mod tests {
         use crate::adapters::tui::{
             keymap::Host, layout::compute_layout, notification_log::LogFacts, presentation,
         };
-        use crate::domain::models::visual::DensityMode;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
             .draw(|frame| {
-                let layout = compute_layout(
-                    frame.area(),
-                    &state.theme,
-                    &state.input_buffer,
-                    1,
-                    false,
-                    DensityMode::Focus,
-                )
-                .unwrap();
+                let layout =
+                    compute_layout(frame.area(), &state.theme, &state.input_buffer, 1, false)
+                        .unwrap();
                 presentation::compose(
                     frame,
                     state,

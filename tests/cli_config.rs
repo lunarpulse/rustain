@@ -886,3 +886,107 @@ async fn config_path_json_renders_parseable_array() {
     );
     assert_eq!(parsed.as_array().unwrap().len(), 7);
 }
+
+/// Test-local environment isolation: points the default-path resolution at tempdirs and clears
+/// every `RUSTAIN_*` variable, restoring the previous values when dropped.
+struct ScratchEnv(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+
+impl ScratchEnv {
+    fn enter(root: &std::path::Path) -> Self {
+        let mut saved = Vec::new();
+        let rustain: Vec<std::ffi::OsString> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| key.to_string_lossy().starts_with("RUSTAIN_"))
+            .collect();
+        for key in rustain {
+            saved.push((key.clone(), std::env::var_os(&key)));
+            unsafe { std::env::remove_var(&key) };
+        }
+        for (key, sub) in [
+            ("HOME", "home"),
+            ("XDG_CONFIG_HOME", "xdg-config"),
+            ("XDG_DATA_HOME", "xdg-data"),
+            ("RUSTAIN_CONFIG_DIR", "config"),
+            ("RUSTAIN_DATA_DIR", "data"),
+        ] {
+            let path = root.join(sub);
+            std::fs::create_dir_all(&path).unwrap();
+            saved.push((key.into(), std::env::var_os(key)));
+            unsafe { std::env::set_var(key, &path) };
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for ScratchEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..).rev() {
+            match value {
+                Some(value) => unsafe { std::env::set_var(&key, value) },
+                None => unsafe { std::env::remove_var(&key) },
+            }
+        }
+    }
+}
+/// 21-7 7-F (A19, RU-21-7-7): an old config carrying `[layout] density_mode` and
+/// `[layout.auto_panels]` (even an invalid `on_task_plan`, once reset with a warning) loads with
+/// every other key intact; `config show` lists no layout rows; the Act 2 override
+/// `-c layout.density_mode=monitor` is accepted and changes nothing.
+#[test]
+#[serial]
+fn story21_7_retired_layout_keys_are_ignored_and_every_other_key_loads() {
+    // A26: HOME, XDG, config and data directories are this test's own tempdirs and every
+    // inherited RUSTAIN_* setting is cleared for its duration (restored on drop; `#[serial]`).
+    let dir = tempfile::tempdir().unwrap();
+    let _env = ScratchEnv::enter(dir.path());
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"model = "kept-model"
+log_level = "debug"
+
+[layout]
+density_mode = "dashboard"
+
+[layout.auto_panels]
+on_task_plan = "history"
+
+[mouse]
+wheel_lines = 7
+"#,
+    )
+    .unwrap();
+    let args = ["rustain", "--config-file", config_path.to_str().unwrap()];
+    let noop = rustain::adapters::profile_resolver::noop::NoopProfileResolver;
+    let config = rustain::infrastructure::config::try_load(&cli_from(&args), &noop)
+        .expect("an old config with the retired keys still loads");
+    assert_eq!(config.model, "kept-model");
+    assert_eq!(config.log_level, "debug");
+    assert_eq!(config.mouse.wheel_lines, 7);
+
+    let shown =
+        serde_json::to_string(&config_cmd::ConfigDisplay::from_config(&config, None)).unwrap();
+    for retired in ["layout", "density_mode", "auto_panels", "on_task_plan"] {
+        assert!(
+            !shown.contains(retired),
+            "`{retired}` in config show: {shown}"
+        );
+    }
+    assert!(shown.contains("kept-model"), "positive control: {shown}");
+
+    let overrides = rustain::infrastructure::config::parse_config_overrides(&[
+        "layout.density_mode=monitor".to_string(),
+    ])
+    .expect("the Act 2 override is still a valid -c key");
+    let overridden = rustain::infrastructure::config::try_load_with_config_overrides(
+        &cli_from(&args),
+        &noop,
+        Some(&overrides),
+    )
+    .expect("the retired override is accepted");
+    assert_eq!(
+        serde_json::to_value(&overridden).unwrap(),
+        serde_json::to_value(&config).unwrap(),
+        "the retired override has no effect"
+    );
+}

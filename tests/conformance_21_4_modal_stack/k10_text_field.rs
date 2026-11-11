@@ -9,7 +9,7 @@ use rustain::adapters::tui::{
     state::TuiState,
 };
 use rustain::domain::events::DomainInputEvent;
-use rustain::domain::models::{FocusState, TabManager, visual::DensityMode};
+use rustain::domain::models::{FocusState, TabManager};
 use rustain::domain::services::session_index::SessionIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,8 +44,7 @@ impl Field {
         if self == Self::Cross {
             // CrossSearch is opened from the History frame; the Monitor column no longer
             // paints History (old -> new: the sidebar-focus fixture is gone).
-            state.sidebar_visible = true;
-            state.density_mode = DensityMode::Monitor;
+            state.monitor = true;
         }
         state.focus = FocusState::Input;
     }

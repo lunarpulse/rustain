@@ -18,7 +18,6 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::models::tool_call::ApprovalSource;
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, FocusState, MessageRole,
     PermissionMode, StatusState, StopReason, StreamingState, ToolCallInfo,
@@ -56,7 +55,7 @@ fn render_full_layout(
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let app_layout = layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus)
+            let app_layout = layout::compute_layout(area, &theme, "", 1, false)
                 .expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
@@ -96,7 +95,6 @@ fn render_full_layout(
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -258,7 +256,7 @@ fn test_permission_prompt_in_full_layout() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let app_layout = layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus)
+            let app_layout = layout::compute_layout(area, &theme, "", 1, false)
                 .expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
@@ -299,7 +297,6 @@ fn test_permission_prompt_in_full_layout() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
@@ -364,7 +361,7 @@ fn test_ask_user_question_in_full_layout() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let app_layout = layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus)
+            let app_layout = layout::compute_layout(area, &theme, "", 1, false)
                 .expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
@@ -405,7 +402,6 @@ fn test_ask_user_question_in_full_layout() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
-                DensityMode::Focus,
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
