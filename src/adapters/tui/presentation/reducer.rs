@@ -56,6 +56,7 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 | Surface::ToolInspector(_)
                 | Surface::BlockViewer(_)
                 | Surface::ThreadInspector
+                | Surface::MissionControl
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
@@ -81,6 +82,44 @@ pub fn open_thread(
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
     opened
+}
+
+/// Mission Control is one frame at a time (A1): opening it on another tab retargets the
+/// frame in place and truncates to it; the payload is the session-global
+/// `state.mission_control`, which outlives the frame (only its transient positions reset on
+/// close). The opening writes no base focus.
+pub fn open_mission_control(
+    state: &mut TuiState,
+    tab: crate::adapters::tui::mission_control::McTab,
+) -> Opened {
+    state.mission_control.switch_to(tab);
+    let title = tab.title();
+    let opened = open_frame(state, Surface::MissionControl, None, Some(title.clone()));
+    set_mission_title(state, title);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
+}
+
+/// Switch the tab of the open hub in place (`Left`/`Right`): the frame keeps its identity and
+/// its place in the stack, the title follows the tab.
+pub fn set_mission_tab(state: &mut TuiState, tab: crate::adapters::tui::mission_control::McTab) {
+    if !is_open(state, Surface::MissionControl) {
+        return;
+    }
+    state.mission_control.switch_to(tab);
+    set_mission_title(state, tab.title());
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+}
+
+fn set_mission_title(state: &mut TuiState, title: String) {
+    state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::MissionControl)
+        .expect("the hub frame is open")
+        .tool_title = Some(title);
 }
 
 /// Exact-target reopen retains the frame and cache; a new target owns a fresh key.
@@ -536,7 +575,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::Login
         | Surface::ToolInspector(_)
         | Surface::BlockViewer(_)
-        | Surface::ThreadInspector => {}
+        | Surface::ThreadInspector
+        | Surface::MissionControl => {}
     }
 }
 
@@ -726,6 +766,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::ThreadInspector => {
             state.thread_inspector = None;
+            None
+        }
+        Surface::MissionControl => {
+            state.mission_control.closed();
             None
         }
     };

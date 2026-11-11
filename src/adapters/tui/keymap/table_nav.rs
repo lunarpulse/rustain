@@ -146,7 +146,7 @@ pub const ROWS: &[Binding] = &[
     s(&[Key::Ctrl('p')], SidebarCmd::OpenPalette, "").local().does("Open the command palette"),
     s(&[Key::Ctrl('c')], SidebarCmd::CancelOrQuit, "").local().does("Stop active work; when idle, ask to quit"),
     s(&[Key::Alt('v')], SidebarCmd::PasteClipboard, "").local().alt("palette: paste image from clipboard").does("Paste an image or text from the system clipboard"),
-    s(&[Key::Enter], SidebarCmd::OpenConversation, "").local().does("Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts, the A2A log and Room have their own Enter"),
+    s(&[Key::Enter], SidebarCmd::OpenConversation, "").local().does("Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts and the A2A log have their own Enter"),
     // ── SidebarHistory ──
     h(&[Key::Char('d')], SidebarCmd::DeleteConversation, "").local().does("Delete the selected conversation"),
     h(&[Key::Char('/')], SidebarCmd::OpenCrossSearch, "").local().help(SB, "/ (in sidebar)", "Cross-conversation search"),

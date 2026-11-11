@@ -114,6 +114,7 @@ OVERLAYS = {
     "1869": ("Sign in", "┌ Sign in", None, None),
     "1875": ("Usage & Cost", "┌ Usage & Cost ", " Esc: close ", None),
     "183f": ("Keybindings", "┌ Help — Rustain Keybindings ", " j/k scroll  ? close ", None),
+    "1872": ("Mission Control · Room", "┌Mission Control · Room", None, "[Esc] Back"),
     "186e": ("Notifications", harness.NOTIFICATION_LOG_TITLE, None, "[Esc] Close"),
 }
 # panels: the narrow-terminal remedy toast; the value is the menu item painted `(n/a)` for the row.
@@ -121,7 +122,6 @@ PANELS = {
     "1861": "[A] Adapters (n/a)",
     "1873": "[S] Agents (n/a)",
     "186c": "[L] A2A log (n/a)",
-    "1872": "[R] Room (n/a)",
     "1865": "[E] Artifacts (n/a)",
     "1874": "[T] Tasks (n/a)",
     "1868": "[H] History (n/a)",
@@ -140,7 +140,7 @@ EXPECTED_WITNESS = {
 }
 MENU_PRESENT = (
     "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters (n/a)", "[S] Agents (n/a)",
-    "[L] A2A log (n/a)", "[R] Room (n/a)", "[E] Artifacts (n/a)", "[T] Tasks (n/a)", "[U] Usage",
+    "[L] A2A log (n/a)", "[R] Room", "[E] Artifacts (n/a)", "[T] Tasks (n/a)", "[U] Usage",
     "[H] History (n/a)", "[W] Monitor", "[?] Help", "[N] Notifications", "[X] Clear toasts",
     "[Q] Decisions", "[Enter] Send", "[Esc] Cancel",
 )

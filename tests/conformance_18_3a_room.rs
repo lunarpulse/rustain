@@ -503,15 +503,14 @@ fn slash_room_is_routed_as_an_execute_command_not_a_missing_custom_command() {
 
 /// Input-routing guard: the chord is real, not a `Noop`, and it is lower-case
 /// so `lookup_chord` (which lowercases) can actually find it. This stops at the
-/// action; `tests_tui/test_story_19_21e_panel_paths.py` drives actual Ctrl+X R
-/// and `/room` through the production root and paints durable rows in both
-/// Monitor/Sidebar and Dashboard configurations.
+/// action and the frame it opens; `tests_tui/test_story_19_21e_panel_paths.py` drives actual
+/// Ctrl+X R and `/room` through the production root and paints durable rows.
 #[test]
-fn ctrl_x_r_dispatches_the_durable_room_panel() {
+fn ctrl_x_r_opens_mission_control_on_the_room_tab() {
     use rustain::adapters::tui::app::{InputAction, handle_input};
+    use rustain::adapters::tui::mission_control::McTab;
     use rustain::adapters::tui::state::TuiState;
     use rustain::domain::events::{DomainInputEvent, DomainKey};
-    use rustain::domain::models::visual::PanelType;
 
     for key in ['r', 'R'] {
         let mut state = TuiState::new(160, 24);
@@ -519,8 +518,13 @@ fn ctrl_x_r_dispatches_the_durable_room_panel() {
         assert!(state.pending_leader.is_some());
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
-            InputAction::OpenPanel(PanelType::Room),
-            "Ctrl+X, {key} must open the real panel"
+            InputAction::OpenMissionControl(McTab::Room),
+            "Ctrl+X, {key} must open the real hub"
+        );
+        assert_eq!(
+            state.modal_stack.top().map(|frame| frame.title()),
+            Some("Mission Control · Room"),
+            "Ctrl+X, {key}: the frame is on the stack before the source read runs"
         );
         assert!(
             state.notifications.records().all(|record| record.source
@@ -588,7 +592,7 @@ async fn the_room_panel_renders_a_replayed_host_bound_row_from_a_real_journal() 
     use ratatui::prelude::{Buffer, Rect};
     use rustain::adapters::tui::state::RoomPanelState;
     use rustain::adapters::tui::theme::Theme;
-    use rustain::domain::models::{FocusState, NodeState, OrchestrationRoomId};
+    use rustain::domain::models::{NodeState, OrchestrationRoomId};
     use rustain::infrastructure::runtime::room_bridge::fold_room_read;
     use rustain::infrastructure::subagent::NodeJournal;
     use rustain::infrastructure::subagent::node_journal::WorkspaceJournalReader;
@@ -667,17 +671,16 @@ async fn the_room_panel_renders_a_replayed_host_bound_row_from_a_real_journal() 
         1_700_000_000_000,
         &mut selected,
     );
-    // A 120-column terminal allocates a 36-column sidebar with 34 inner
-    // columns. The keystone must exercise that production minimum, not a
-    // fictitious 120-column panel.
+    // The Room body at a width narrower than any Mission Control frame (a 60-column
+    // terminal leaves 58 inner columns): the keystone exercises the narrow floor of the
+    // truncation rules, not a fictitious wide panel.
     let area = Rect::new(0, 0, 36, 24);
     let mut buf = Buffer::empty(area);
-    rustain::adapters::tui::widgets::room_panel::render(
+    rustain::adapters::tui::widgets::room_panel::render_body(
         area,
         &mut buf,
-        &mut panel,
+        &panel,
         selected,
-        &FocusState::Chat,
         &Theme::dark(),
     );
     let painted = buf

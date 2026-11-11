@@ -50,7 +50,7 @@
 
 use ratatui::prelude::*;
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 
 use crate::adapters::tui::state::{RoomPanelState, RoomZeroState};
 use crate::adapters::tui::theme::Theme;
@@ -212,66 +212,55 @@ fn newer_entries_line(count: usize) -> String {
     )
 }
 
-pub fn render(
+/// What one paint of the Room body learned about the viewport. The paint is read-only (the
+/// compositor holds the state shared): the host applies these facts after the draw completed
+/// (`RoomPanelState::apply_paint`), so a draw that never completed leaves nothing acknowledged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoomPaint {
+    /// Rows the node list could show (the fit the scroll keys clamp against).
+    pub viewport_rows: usize,
+    /// Rows of the area the body occupied; `>= 1` means the Room was presented.
+    pub rows: u16,
+    /// The first painted node and the node the cursor sits on (identities, never indexes).
+    pub anchor: Option<crate::domain::models::AgentId>,
+    pub selected: Option<crate::domain::models::AgentId>,
+    /// The painted list reached the end of the folded rows: only then is the fold seen.
+    pub end_reached: bool,
+}
+
+/// The Room body inside the Mission Control frame (`Ctrl+X r` / `/room`): the "as of" header,
+/// the wave aggregate, the zero-states, the node rows scrolled from `state.scroll_offset`
+/// and the structural-replay footer. Read-only replay: no highlight, nothing live.
+pub fn render_body(
     area: Rect,
     buf: &mut Buffer,
-    state: &mut RoomPanelState,
+    state: &RoomPanelState,
     selected: usize,
-    focus: &crate::domain::models::FocusState,
     theme: &Theme,
-) {
-    Clear.render(area, buf);
-
-    let is_focused = matches!(
-        focus,
-        crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Room,
-            ..
-        }
-    );
-    let border_style = if is_focused {
-        Style::default().fg(theme.colors.accent)
-    } else {
-        Style::default().fg(theme.colors.fg_secondary)
-    };
-    // "as of", never "live".
-    let title = match state.read_at_ms {
-        Some(ms) => format!(" Durable Room · as of {} ", format_unix_millis(ms)),
-        None => " Durable Room ".to_owned(),
-    };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title_bottom(Span::styled(
-            format!(
-                " read-only replay · {}/{} move · {} close ",
-                crate::adapters::tui::keymap::render::key_text(
-                    crate::adapters::tui::keymap::table_nav::SidebarCmd::SelectNext
-                ),
-                crate::adapters::tui::keymap::render::key_text(
-                    crate::adapters::tui::keymap::table_nav::SidebarCmd::SelectPrev
-                ),
-                crate::adapters::tui::keymap::render::leader_follow_up_long(
-                    crate::adapters::tui::keymap::table::LeaderCmd::Room
-                )
-            ),
-            Style::default().fg(theme.colors.fg_muted),
-        ));
-    let inner = block.inner(area);
-    block.render(area, buf);
-    if inner.height == 0 || inner.width == 0 {
-        return;
+) -> RoomPaint {
+    let mut paint = RoomPaint::default();
+    if area.height == 0 || area.width == 0 {
+        return paint;
     }
-
+    paint.rows = area.height;
+    let width = area.width as usize;
     let muted = Style::default()
         .fg(theme.colors.fg_muted)
         .add_modifier(Modifier::ITALIC);
-    let mut rendered_selected = selected;
+    // "as of", never "live".
+    let title = match state.read_at_ms {
+        Some(ms) => format!("Durable Room · as of {}", format_unix_millis(ms)),
+        None => "Durable Room".to_owned(),
+    };
+    let header = Line::from(Span::styled(
+        truncate_to_width(&title, width),
+        Style::default().fg(theme.colors.fg_secondary),
+    ));
 
     if let Some(error) = state.error.clone() {
-        state.set_viewport_rows(inner.height as usize, &mut rendered_selected);
+        paint.viewport_rows = usize::from(area.height).max(1);
         Paragraph::new(vec![
+            header,
             Line::from(Span::styled(
                 "⚠ could not read the room journal",
                 Style::default().fg(theme.colors.error),
@@ -283,33 +272,34 @@ pub fn render(
             )),
         ])
         .wrap(Wrap { trim: true })
-        .render(inner, buf);
-        return;
+        .render(area, buf);
+        return paint;
     }
 
     // An unattached session has no durable source from which an unknown row
     // could have come. A readable no-node journal continues through the normal
     // chrome path so forward-unknown records remain visible.
     if state.zero_state() == Some(RoomZeroState::NotAttached) {
-        state.set_viewport_rows(inner.height as usize, &mut rendered_selected);
+        paint.viewport_rows = usize::from(area.height).max(1);
         let [headline, detail] = zero_state_lines(RoomZeroState::NotAttached);
         Paragraph::new(vec![
+            header,
             Line::from(Span::styled(headline, muted)),
             Line::from(Span::styled(detail, muted)),
         ])
-        .render(inner, buf);
-        return;
+        .render(area, buf);
+        return paint;
     }
 
-    let mut chrome: Vec<Line<'static>> = Vec::new();
+    let mut chrome: Vec<Line<'static>> = vec![header];
     if let Some(room) = state.room.as_ref() {
         chrome.push(Line::from(Span::styled(
-            truncate_to_width(&wave_aggregate(room), inner.width as usize),
+            truncate_to_width(&wave_aggregate(room), width),
             Style::default().fg(theme.colors.fg_primary),
         )));
     }
     chrome.push(Line::from(Span::styled(
-        truncate_to_width(&format!("here: {}", state.host_id), inner.width as usize),
+        truncate_to_width(&format!("here: {}", state.host_id), width),
         muted,
     )));
     match state.zero_state() {
@@ -334,85 +324,74 @@ pub fn render(
         chrome.push(Line::from(Span::styled(
             truncate_to_width(
                 &format!("? {} × {UNKNOWN_RECORD_LABEL}", state.unknown_records),
-                inner.width as usize,
+                width,
             ),
             Style::default().fg(theme.colors.warning),
         )));
     }
 
+    // The header row always survives: on a one-row body the footer yields to it.
     let footer_height =
-        wrapped_line_count(STRUCTURAL_REPLAY_CLAIM, inner.width as usize).min(inner.height);
-    let list_height = (inner.height as usize).saturating_sub(chrome.len() + footer_height as usize);
-    state.set_viewport_rows(list_height.max(1), &mut rendered_selected);
+        wrapped_line_count(STRUCTURAL_REPLAY_CLAIM, width).min(area.height.saturating_sub(1));
+    let list_height =
+        usize::from(area.height).saturating_sub(chrome.len() + footer_height as usize);
+    let viewport = list_height.max(1);
     let rows: Vec<(crate::domain::models::AgentId, String)> = state
         .room
         .as_ref()
         .map(|room| {
             room.nodes()
                 .values()
-                .map(|view| {
-                    (
-                        view.id.clone(),
-                        visible_node_row(view, inner.width as usize),
-                    )
-                })
+                .map(|view| (view.id.clone(), visible_node_row(view, width)))
                 .collect()
         })
         .unwrap_or_default();
-    let viewport = list_height.max(1);
-    let start = state.scroll_offset.min(rows.len().saturating_sub(viewport));
+    let (rendered_selected, scroll) =
+        RoomPanelState::synced(rows.len(), selected, state.scroll_offset, viewport);
+    let start = scroll.min(rows.len().saturating_sub(viewport));
     let end = (start + viewport).min(rows.len());
-    state.record_rendered_viewport(
-        rows.get(start).map(|(id, _)| id.clone()),
-        rows.get(rendered_selected).map(|(id, _)| id.clone()),
-    );
+    paint.viewport_rows = viewport;
+    paint.anchor = rows.get(start).map(|(id, _)| id.clone());
+    paint.selected = rows.get(rendered_selected).map(|(id, _)| id.clone());
     let items: Vec<ListItem<'static>> = rows[start..end]
         .iter()
-        .enumerate()
-        .map(|(offset, (_, row))| {
-            let style = if start + offset == rendered_selected {
-                Style::default()
-                    .fg(theme.colors.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.colors.fg_primary)
-            };
-            ListItem::new(Line::from(Span::styled(row.clone(), style)))
+        .map(|(_, row)| {
+            ListItem::new(Line::from(Span::styled(
+                row.clone(),
+                Style::default().fg(theme.colors.fg_primary),
+            )))
         })
         .collect();
 
     let chrome_height = chrome.len() as u16;
     let list_area = Rect {
-        y: inner.y + chrome_height,
-        height: inner.height.saturating_sub(chrome_height + footer_height),
-        ..inner
+        y: area.y + chrome_height.min(area.height),
+        height: area.height.saturating_sub(chrome_height + footer_height),
+        ..area
     };
     if list_area.height > 0 {
         ratatui::prelude::Widget::render(List::new(items), list_area, buf);
     }
     if chrome_height > 0 {
         let chrome_area = Rect {
-            height: chrome_height.min(inner.height),
-            ..inner
+            height: chrome_height.min(area.height),
+            ..area
         };
         Paragraph::new(chrome).render(chrome_area, buf);
     }
     let footer_area = Rect {
-        y: inner.y + inner.height.saturating_sub(footer_height),
+        y: area.y + area.height.saturating_sub(footer_height),
         height: footer_height,
-        ..inner
+        ..area
     };
     Paragraph::new(STRUCTURAL_REPLAY_CLAIM)
         .style(muted)
         .wrap(Wrap { trim: true })
         .render(footer_area, buf);
-
-    // Paint the pending marker for this frame before acknowledging anything.
-    // Only reaching the end of the folded row set advances the rendered
-    // boundary; an observed-but-unfolded durable head remains pending.
-    if list_area.height > 0 && end == rows.len() {
-        state.acknowledge_rendered_boundary();
-    }
+    // Only reaching the end of the folded row set can advance the rendered boundary; an
+    // observed-but-unfolded durable head remains pending.
+    paint.end_reached = list_area.height > 0 && end == rows.len();
+    paint
 }
 
 #[cfg(test)]
@@ -441,16 +420,13 @@ mod tests {
         )
     }
 
+    /// The host's sequence for one completed draw: paint the body read-only, then apply what
+    /// it painted (the viewport, the anchors and, for a body on top, the acknowledgement).
     fn painted(panel: &mut RoomPanelState, area: Rect) -> String {
         let mut buf = Buffer::empty(area);
-        render(
-            area,
-            &mut buf,
-            panel,
-            0,
-            &crate::domain::models::FocusState::Chat,
-            &Theme::dark(),
-        );
+        let mut cursor = 0;
+        let paint = render_body(area, &mut buf, panel, cursor, &Theme::dark());
+        panel.apply_paint(&paint, &mut cursor, true);
         buf.content()
             .chunks(area.width as usize)
             .map(|row| {

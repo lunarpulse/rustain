@@ -188,19 +188,14 @@ fn sidebar_family_children_take_the_sidebar_effect_for_inherited_keys() {
         (Key::Alt('v'), "RequestClipboardPaste | Sidebar"),
         (Key::Enter, "OpenSidebarConversation | Sidebar"),
     ];
-    // The A2A log, Room and Artifacts own `Enter`, so it is theirs, not the Sidebar's.
-    let own_enter = [
-        PanelType::TransparencyLog,
-        PanelType::Room,
-        PanelType::Artifacts,
-    ];
+    // The A2A log and Artifacts own `Enter`, so it is theirs, not the Sidebar's.
+    let own_enter = [PanelType::TransparencyLog, PanelType::Artifacts];
     for (key, expect) in keys {
         assert_eq!(effect(PanelType::Adapters, key), expect, "Sidebar {key:?}");
         for panel in [
             PanelType::Tasks,
             PanelType::Agents,
             PanelType::TransparencyLog,
-            PanelType::Room,
             PanelType::Artifacts,
         ] {
             if key == Key::Enter && own_enter.contains(&panel) {

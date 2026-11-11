@@ -317,6 +317,14 @@ const RULES: &[(&str, &str)] = &[
         "thread-21-8-c",
         r#"\b(?:show_team_thread|TEAM_THREAD_BLOCK_ID|view_block|TEAM_LOG_BLOCK_ID|MAX_INCHAT_ROWS|run_team_log)\b|\bViewKind\s*::\s*(?:TeamThread|PeerRetract|TeamLog)\b|"peer-retract"|\brender_team_send_rows\s*\("#,
     ),
+    // Story 21.7 slice 7-A (A25, clause a): the sidebar Room panel and its activation are
+    // gone; the Room is the Mission Control tab. Field/type/fn accesses, never module paths:
+    // `McTab::Room`, `room_bridge::` and `room_panel::` stay legal, as do the 21-17 class-V
+    // lifetime ids (`retire_on_submit`, `ROOM_BLOCK_ID`, `PEER_BLOCK_ID`, `PEER_ALARM_BLOCK_ID`).
+    (
+        "mission-21-7-a",
+        r"\bactivate_room_sidebar\b|\bPanelType\s*::\s*Room\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -583,6 +591,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "thread-21-8-a",
                     "thread-21-8-b",
                     "thread-21-8-c",
+                    "mission-21-7-a",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2553,4 +2562,70 @@ fn k6_story21_8_c_retired_symbols_are_unpinnable_and_cli_renderer_remains_legal(
         );
     }
     assert!(PINS.is_empty());
+}
+
+// Story 21.7 slice 7-A (A25, clause a): the clause is RED on a synthetic source through the
+// same scanner function, cannot be pinned (a hard rule), and leaves the legal neighbours alone.
+#[test]
+fn k12_story21_7_a_the_room_sidebar_is_unpinnable_and_the_hub_tab_stays_legal() {
+    for text in [
+        "activate_room_sidebar(s);",
+        "let p = PanelType::Room;",
+        "let p = visual::PanelType :: Room;",
+        "match p { PanelType::Room => {} _ => {} }",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("mission-21-7-a|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("mission-21-7-a|")),
+            "{text}: {errors:?}"
+        );
+    }
+    // Positive controls the clause must not touch: the hub's own Room tab, the bridge and widget
+    // module paths, the other sidebar panels and the 21-17 class-V lifetime ids.
+    let legal = "fn real() { let _ = McTab::Room; room_bridge::open_room_view(s); \
+        room_panel::render_body(a, b, c, d, e); let _ = PanelType::Artifacts; \
+        let _ = PanelType::TransparencyLog; views::retire_on_submit(s); \
+        let _ = ROOM_BLOCK_ID; let _ = PEER_BLOCK_ID; let _ = PEER_ALARM_BLOCK_ID; \
+        }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("mission-21-7-a|")),
+        "{errors:?}"
+    );
+    let masked = "// activate_room_sidebar PanelType::Room\n\
+        #[cfg(test)] mod tests { fn t() { let _ = PanelType::Room; } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("mission-21-7-a|"))
+    );
+    assert!(PINS.is_empty());
+    for rule in [
+        "decision-21-6-a",
+        "decision-21-6-e",
+        "thread-21-8-a",
+        "thread-21-8-c",
+    ] {
+        assert!(
+            RULES.iter().any(|(name, _)| *name == rule),
+            "the earlier rule sets stay untouched: {rule}"
+        );
+    }
 }

@@ -23,6 +23,10 @@ pub enum Surface {
     /// The A2A thread inspector (S-THREAD, Story 21.8): global, one at a time; its payload
     /// is `TuiState.thread_inspector` and its painted title is the frame's `tool_title`.
     ThreadInspector,
+    /// The Mission Control hub (S-MC, Story 21.7): global, one at a time; its payload is
+    /// `TuiState.mission_control` (the tab, the selection ids) and its painted title is the
+    /// frame's `tool_title` (`Mission Control · <Tab>`).
+    MissionControl,
 }
 
 impl Surface {
@@ -46,6 +50,7 @@ impl Surface {
             Self::ToolInspector(_) => "Tool",
             Self::BlockViewer(_) => "Block",
             Self::ThreadInspector => "Thread",
+            Self::MissionControl => "Mission Control",
         }
     }
 
@@ -69,6 +74,7 @@ impl Surface {
             Self::ToolInspector(_) => Context::ToolInspector,
             Self::BlockViewer(_) => Context::BlockViewer,
             Self::ThreadInspector => Context::ThreadInspector,
+            Self::MissionControl => Context::MissionControl,
         }
     }
 
@@ -87,6 +93,7 @@ impl Surface {
                 | Self::ToolInspector(_)
                 | Self::BlockViewer(_)
                 | Self::ThreadInspector
+                | Self::MissionControl
         )
     }
 }

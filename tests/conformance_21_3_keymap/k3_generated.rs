@@ -52,13 +52,17 @@ fn position(text: &str, needle: &str) -> usize {
 
 #[test]
 fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
-    // Local, 80 columns: every sidebar-panel chord is (n/a); the overlays are not.
+    // Local, 80 columns: every sidebar-panel chord is (n/a); the overlays are not. The Room
+    // chord (21-7, 7-A) opens the Mission Control Room tab at every width: available.
     let narrow = paint(80, 12, &AvailCtx::local(80, DensityMode::Focus));
+    assert!(
+        narrow.contains("[R] Room") && !narrow.contains("[R] Room (n/a)"),
+        "80 cols: the Room chord is available:\n{narrow}"
+    );
     for painted in [
         "[A] Adapters (n/a)",
         "[S] Agents (n/a)",
         "[L] A2A log (n/a)",
-        "[R] Room (n/a)",
         "[E] Artifacts (n/a)",
         "[T] Tasks (n/a)",
         "[H] History (n/a)",

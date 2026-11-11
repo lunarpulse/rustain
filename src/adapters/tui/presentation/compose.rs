@@ -111,6 +111,14 @@ pub fn compose(
                 modal.title(),
                 show_caret,
             ),
+            Surface::MissionControl => {
+                crate::adapters::tui::widgets::mission_control::render(
+                    frame,
+                    rect,
+                    state,
+                    modal.title(),
+                );
+            }
             Surface::Search => {
                 rect = Rect::new(
                     shell.chat_pane.x,
@@ -263,7 +271,8 @@ pub fn compose(
                 | Surface::Login
                 | Surface::ToolInspector(_)
                 | Surface::BlockViewer(_)
-                | Surface::ThreadInspector => theme.colors.accent,
+                | Surface::ThreadInspector
+                | Surface::MissionControl => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

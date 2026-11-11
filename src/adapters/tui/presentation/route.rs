@@ -179,6 +179,13 @@ pub fn route(
         crate::adapters::tui::thread_inspector::on_wheel(state, *delta);
         return Some(RouteEffect::Consumed);
     }
+    // The hub's wheel is state-only too.
+    if surface == Surface::MissionControl
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        crate::adapters::tui::mission_control::keys::on_wheel(state, *delta);
+        return Some(RouteEffect::Consumed);
+    }
     if surface == Surface::Login && Key::from_domain(event).is_none() {
         return Some(RouteEffect::Action(
             crate::adapters::tui::handlers::login::on_key(state, event),
@@ -255,6 +262,11 @@ pub fn route(
             },
         ),
         Surface::ThreadInspector => RouteEffect::Frame(context),
+        Surface::MissionControl if host == Host::Local => RouteEffect::Action(
+            crate::adapters::tui::mission_control::keys::on_key(state, key, host),
+        ),
+        // Mission Control opens only in the local host in this slice.
+        Surface::MissionControl => RouteEffect::Consumed,
         Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
             Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
                 RouteEffect::Decision(effect)

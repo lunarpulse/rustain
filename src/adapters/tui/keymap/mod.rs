@@ -16,6 +16,7 @@ pub mod table_card;
 pub mod table_chat;
 pub mod table_input;
 pub mod table_inspector;
+pub mod table_mission;
 pub mod table_nav;
 pub mod table_overlay;
 pub mod table_panels;

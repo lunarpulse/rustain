@@ -14,6 +14,7 @@ use super::table_card::CardCmd;
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
 use super::table_inspector::InspectorCmd;
+use super::table_mission::MissionCmd;
 use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use super::table_overlay::OverlayCmd;
 use super::table_panels::PanelCmd;
@@ -385,7 +386,9 @@ pub enum Context {
     /// Sidebar rows.
     SidebarAgentInspector,
     SidebarA2aLog,
-    SidebarRoom,
+    /// The Mission Control hub (S-MC): the tab row, the list/detail focus and the RU-25
+    /// scroll rows of `InspectorBody`; a frame of its own, never the composer.
+    MissionControl,
     SidebarArtifacts,
     WaveOverlay,
     Help,
@@ -471,7 +474,7 @@ impl Context {
         Context::SidebarAgents,
         Context::SidebarAgentInspector,
         Context::SidebarA2aLog,
-        Context::SidebarRoom,
+        Context::MissionControl,
         Context::SidebarArtifacts,
         Context::WaveOverlay,
         Context::Help,
@@ -540,7 +543,7 @@ impl Context {
             Context::SidebarAgents => "Agents",
             Context::SidebarAgentInspector => "Agent inspector",
             Context::SidebarA2aLog => "A2A log",
-            Context::SidebarRoom => "Room",
+            Context::MissionControl => "Mission Control",
             Context::SidebarArtifacts => "Artifacts",
             Context::WaveOverlay => "Wave overlay",
             Context::Help => "Help",
@@ -620,6 +623,7 @@ impl Context {
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector | Context::ThreadInspector => &[Context::MarkdownBody],
+            Context::MissionControl => &[Context::InspectorBody],
             // The block viewport's chain excludes the thread rows: `l` moves columns there.
             Context::BodyViewport => &[Context::MarkdownBody],
             // The reply field is a caret field of its own, never the composer.
@@ -639,7 +643,6 @@ impl Context {
             | Context::SidebarAgents
             | Context::SidebarAgentInspector
             | Context::SidebarA2aLog
-            | Context::SidebarRoom
             | Context::SidebarArtifacts
             | Context::SidebarTasks => &[Context::Sidebar],
             Context::TasksReorder => &[Context::SidebarTasks],
@@ -785,6 +788,7 @@ pub enum CommandId {
     Viewer(ViewerCmd),
     Tool(ToolCmd),
     Thread(ThreadCmd),
+    Mission(MissionCmd),
     Block(BlockCmd),
     Body(BodyCmd),
 }
@@ -815,6 +819,7 @@ command_from!(
     Viewer(ViewerCmd),
     Tool(ToolCmd),
     Thread(ThreadCmd),
+    Mission(MissionCmd),
     Block(BlockCmd),
     Body(BodyCmd),
 );

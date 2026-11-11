@@ -41,7 +41,6 @@ fn every_leader_follow_up_runs_its_command_by_value() {
         ('a', PanelType::Adapters),
         ('s', PanelType::Agents),
         ('l', PanelType::TransparencyLog),
-        ('r', PanelType::Room),
         ('e', PanelType::Artifacts),
         ('t', PanelType::Tasks),
         ('h', PanelType::History),
@@ -60,6 +59,29 @@ fn every_leader_follow_up_runs_its_command_by_value() {
             "{key}: origin restored first"
         );
         assert!(notices(&state).is_empty(), "{key}: no notice on a run");
+    }
+    // `r` (21-7, 7-A) opens the Mission Control Room tab at any width, not a sidebar panel.
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        assert_eq!(
+            leader(&mut state, Key::Char('r')),
+            InputAction::OpenMissionControl(rustain::adapters::tui::mission_control::McTab::Room),
+            "r at {width}x{height}"
+        );
+        assert_eq!(
+            state.modal_stack.top().map(|frame| frame.title()),
+            Some("Mission Control · Room")
+        );
+        assert!(state.pending_leader.is_none());
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "the frame writes no base focus"
+        );
+        assert!(
+            notices(&state).is_empty(),
+            "r at {width}x{height}: no notice on a run"
+        );
     }
     let mut state = wide();
     assert_eq!(
@@ -233,7 +255,7 @@ fn escape_and_ctrl_c_cancel_the_leader_silently() {
 fn width_unavailable_panel_answers_with_its_remedy() {
     // 80 columns: the sidebar column cannot fit, so the panel chord is `(n/a)`
     // and the key answers with the remedy instead of moving focus invisibly.
-    for key in ['a', 's', 'l', 'r', 'e', 't', 'h'] {
+    for key in ['a', 's', 'l', 'e', 't', 'h'] {
         let mut state = TuiState::new(80, 24);
         let action = leader(&mut state, Key::Char(key));
         assert!(is_inert(&action), "{key}: {action:?}");

@@ -176,6 +176,9 @@ pub enum InputAction {
     SetDensityMode(crate::domain::models::visual::DensityMode),
     /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
     OpenPanel(crate::domain::models::visual::PanelType),
+    /// Mission Control was opened on this tab by a chord (`Ctrl+X r`): the frame is already
+    /// on the stack; the event loop runs the tab's source read (the durable room fold).
+    OpenMissionControl(crate::adapters::tui::mission_control::McTab),
     /// Export the exact transparency report snapshot currently rendered by the
     /// sidebar panel.
     ExportTransparency,
@@ -524,6 +527,11 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
     {
         return crate::adapters::tui::thread_inspector::ignores_raw_key(state, key);
     }
+    if let Event::Key(key) = event
+        && crate::adapters::tui::mission_control::keys::ignores_raw_key(state, key)
+    {
+        return true;
+    }
     false
 }
 
@@ -752,7 +760,11 @@ pub(crate) fn handle_leader_key(
         LeaderCmd::Adapters => InputAction::OpenPanel(PanelType::Adapters),
         LeaderCmd::Agents => InputAction::OpenPanel(PanelType::Agents),
         LeaderCmd::A2aLog => InputAction::OpenPanel(PanelType::TransparencyLog),
-        LeaderCmd::Room => InputAction::OpenPanel(PanelType::Room),
+        LeaderCmd::Room => {
+            use crate::adapters::tui::mission_control::McTab;
+            presentation::reducer::open_mission_control(state, McTab::Room);
+            InputAction::OpenMissionControl(McTab::Room)
+        }
         LeaderCmd::Artifacts => InputAction::OpenPanel(PanelType::Artifacts),
         LeaderCmd::Tasks => InputAction::OpenPanel(PanelType::Tasks),
         LeaderCmd::History => InputAction::OpenPanel(PanelType::History),
@@ -975,7 +987,6 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
             }
             PanelType::Agents => Context::SidebarAgents,
             PanelType::TransparencyLog => Context::SidebarA2aLog,
-            PanelType::Room => Context::SidebarRoom,
             PanelType::Artifacts => Context::SidebarArtifacts,
             PanelType::History => Context::SidebarHistory,
             _ => Context::Sidebar,
@@ -1083,7 +1094,6 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
             | Context::SidebarAgents
             | Context::SidebarAgentInspector
             | Context::SidebarA2aLog
-            | Context::SidebarRoom
             | Context::SidebarArtifacts
     );
     let Key::Char(c) = key else {
@@ -1152,7 +1162,8 @@ fn execute(
         CommandId::Leader(_)
         | CommandId::Permission(_)
         | CommandId::Card(_)
-        | CommandId::Thread(_) => InputAction::Consumed,
+        | CommandId::Thread(_)
+        | CommandId::Mission(_) => InputAction::Consumed,
     })
 }
 
@@ -1894,8 +1905,6 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        // The durable Room is a read-only replay: `Enter` does nothing there.
-        PanelCmd::RoomEnter => InputAction::Consumed,
         // `Enter` drills into the selected artifact through the `/artifact show` arm.
         PanelCmd::ArtifactShow => match state
             .artifacts_panel
@@ -4473,11 +4482,6 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Sidebar Room",
-                setup: sidebar(PanelType::Room),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
                 label: "Sidebar Artifacts",
                 setup: sidebar(PanelType::Artifacts),
                 expect: CtrlQRowExpectation::Quit,
@@ -4609,6 +4613,16 @@ mod tests {
                 label: "UsagePanel frame",
                 setup: Box::new(|s| {
                     presentation::reducer::open(s, Surface::UsagePanel);
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Mission Control Room tab",
+                setup: Box::new(|s| {
+                    presentation::reducer::open_mission_control(
+                        s,
+                        crate::adapters::tui::mission_control::McTab::Room,
+                    );
                 }),
                 expect: CtrlQRowExpectation::Quit,
             },
@@ -6338,16 +6352,22 @@ mod tests {
         );
     }
     #[test]
-    fn enter_is_inert_in_the_read_only_room_panel() {
+    fn story21_7_enter_is_inert_in_the_read_only_room_tab() {
         let mut state = TuiState::new(160, 40);
-        state.focus = FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Room,
-            selected: 0,
-        };
+        presentation::reducer::open_mission_control(
+            &mut state,
+            crate::adapters::tui::mission_control::McTab::Room,
+        );
+        state.input_buffer = "draft".to_owned();
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
             InputAction::Consumed
         );
+        assert_eq!(
+            state.input_buffer, "draft",
+            "Enter never reaches the composer"
+        );
+        assert!(crate::adapters::tui::mission_control::is_top(&state));
     }
 
     #[test]

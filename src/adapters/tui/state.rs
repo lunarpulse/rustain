@@ -1780,32 +1780,62 @@ impl RoomPanelState {
             .then_some(RoomZeroState::AllTerminal)
     }
 
-    fn max_scroll_offset(&self) -> usize {
-        self.visible_len().saturating_sub(self.viewport_rows.max(1))
+    /// The clamped cursor and scroll offset of a list of `len` rows shown through a window of
+    /// `viewport_rows`: the cursor stays inside the list and the window follows it. One rule
+    /// for the shared state (`synchronize_selection`) and the read-only painter.
+    #[must_use]
+    pub fn synced(
+        len: usize,
+        selected: usize,
+        scroll_offset: usize,
+        viewport_rows: usize,
+    ) -> (usize, usize) {
+        if len == 0 {
+            return (0, 0);
+        }
+        let viewport_rows = viewport_rows.max(1);
+        let selected = selected.min(len - 1);
+        let mut scroll = scroll_offset.min(len.saturating_sub(viewport_rows));
+        if selected < scroll {
+            scroll = selected;
+        } else if selected >= scroll.saturating_add(viewport_rows) {
+            scroll = selected + 1 - viewport_rows;
+        }
+        (selected, scroll)
     }
 
-    /// Clamp the shared sidebar selection into the rendered viewport.
+    /// Clamp the cursor into the rendered viewport.
     pub fn synchronize_selection(&mut self, selected: &mut usize) {
-        let len = self.visible_len();
-        if len == 0 {
-            *selected = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        *selected = (*selected).min(len - 1);
-        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
-        let viewport_rows = self.viewport_rows.max(1);
-        if *selected < self.scroll_offset {
-            self.scroll_offset = *selected;
-        } else if *selected >= self.scroll_offset.saturating_add(viewport_rows) {
-            self.scroll_offset = *selected + 1 - viewport_rows;
-        }
+        let (cursor, scroll) = Self::synced(
+            self.visible_len(),
+            *selected,
+            self.scroll_offset,
+            self.viewport_rows,
+        );
+        *selected = cursor;
+        self.scroll_offset = scroll;
     }
 
     /// Record the renderer's actual row capacity and reconcile the viewport.
     pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
         self.viewport_rows = viewport_rows.max(1);
         self.synchronize_selection(selected);
+    }
+
+    /// Apply what a completed draw of the Room body painted: the real row capacity, the
+    /// identities of the first and the cursor row, and, only for a body that was on top and
+    /// reached the end of the fold, the acknowledgement of the folded rows.
+    pub fn apply_paint(
+        &mut self,
+        paint: &crate::adapters::tui::widgets::room_panel::RoomPaint,
+        selected: &mut usize,
+        acknowledge: bool,
+    ) {
+        self.set_viewport_rows(paint.viewport_rows, selected);
+        self.record_rendered_viewport(paint.anchor.clone(), paint.selected.clone());
+        if acknowledge && paint.end_reached {
+            self.acknowledge_rendered_boundary();
+        }
     }
 
     /// Store one freshly folded durable read without moving the reader's
@@ -2579,6 +2609,8 @@ pub struct TuiState {
     pub local_read_only: bool,
     /// Durable room viewer panel state (Ctrl+X, R / `/room`) (Story 18.3a AC1).
     pub room_panel: RoomPanelState,
+    /// The Mission Control hub's session-global payload (Story 21.7, A1).
+    pub mission_control: crate::adapters::tui::mission_control::MissionControlState,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
     /// 18.3a-c AC3).
     pub artifacts_panel: ArtifactsPanelState,
@@ -2754,6 +2786,7 @@ impl TuiState {
     /// presented, so a panel visit returns to pending (unless a newer read already replaced
     /// it) and the log frame's paint mark is cleared.
     pub fn restore_unflushed_log_visits(&mut self) {
+        self.mission_draw_started();
         if let Some(visit) = self.transparency_panel.painted_visit.take() {
             self.transparency_panel.pending_visit.get_or_insert(visit);
         }
@@ -2768,6 +2801,7 @@ impl TuiState {
     /// is on top of the stack and the widget painted its body with at least one row. Each
     /// visit is consumed once, so rerendering cannot acknowledge later rows.
     pub fn log_visits_presented(&mut self) {
+        self.mission_draw_completed();
         if let Some(visit) = self.transparency_panel.painted_visit.take() {
             self.log_awareness.presented.push(visit);
         }
@@ -3028,6 +3062,7 @@ impl TuiState {
             pending_log_visit: None,
             local_read_only: false,
             room_panel: RoomPanelState::default(),
+            mission_control: crate::adapters::tui::mission_control::MissionControlState::default(),
             artifacts_panel: ArtifactsPanelState::default(),
             daily_budget: None,
             budget_acknowledged: None,

@@ -12,7 +12,7 @@ pub mod event_bus;
 pub mod event_loop;
 pub mod launchpad_facts;
 pub(crate) mod notice_actions;
-pub(crate) mod panel_bridge;
+pub mod panel_bridge;
 pub mod peer_bridge;
 pub(crate) mod quit_guard;
 pub mod recipient_view;

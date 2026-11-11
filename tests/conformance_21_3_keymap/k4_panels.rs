@@ -314,14 +314,6 @@ fn sidebar_agents_p_toggles_the_selected_agent() {
     run(&Case { off: OFF, ..local(Context::SidebarAgents, || panel_state(PanelType::Agents), panel_salient, ROWS) });
 }
 
-/// Regression caught: `Enter` in the read-only Room falls through and opens a conversation.
-#[test]
-#[rustfmt::skip]
-fn sidebar_room_enter_does_nothing() {
-    const ROWS: &[W] = &[w(&[Key::Enter], "Consumed | Sidebar { panel: Room, selected: 0 } sel=0")];
-    run(&local(Context::SidebarRoom, || panel_state(PanelType::Room), panel_salient, ROWS));
-}
-
 /// One patch artifact (id `aaaaaa…`) folded into the Artifacts panel.
 fn with_artifact(state: &mut TuiState) {
     let hex = |c: &str| ContentHash::parse_hex(&c.repeat(64)).expect("hex");

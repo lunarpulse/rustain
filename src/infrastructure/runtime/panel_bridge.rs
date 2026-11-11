@@ -110,9 +110,12 @@ pub(crate) fn open_panel(
     }
 }
 
-/// Advance only poll state; the root loop owns the durable-head read.
-pub(crate) fn room_head_poll_due(state: &mut TuiState, tick_ms: u64) -> bool {
-    if state.sidebar_visible && state.sidebar_panel == Some(PanelType::Room) {
+/// Advance only poll state; the root loop owns the durable-head read. The Room is polled only
+/// while it is *presented* (A14, RU-28): the last completed draw painted its body on the
+/// Mission Control frame that is still on top. Held under another frame, on another tab, or
+/// after an interrupted draw it is not polled and the counter starts over.
+pub fn room_head_poll_due(state: &mut TuiState, tick_ms: u64) -> bool {
+    if crate::adapters::tui::mission_control::room_projection_presented(state) {
         state
             .room_panel
             .head_poll_due(tick_ms, room_bridge::ROOM_HEAD_POLL_INTERVAL_MS)
@@ -288,7 +291,6 @@ mod tests {
         for (key, panel) in [
             ('s', PanelType::Agents),
             ('a', PanelType::Adapters),
-            ('r', PanelType::Room),
             ('e', PanelType::Artifacts),
             ('l', PanelType::TransparencyLog),
         ] {

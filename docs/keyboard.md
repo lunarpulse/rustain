@@ -26,7 +26,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, A` | Adapter Status panel (sidebar) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, S` | Subagent panel | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, L` | Transparency Log panel | local, attached | portable | needs a terminal of 120+ columns |
-| `Ctrl+X, R` | Durable Room panel (read-only replay) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
+| `Ctrl+X, R` | Mission Control: Room tab (durable room replay, read-only) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, E` | Artifacts panel (Evidence, read-only replay) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, T` | Task panel | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, U` | Usage / cost | local, attached | portable | not available in an attached session |
@@ -153,7 +153,7 @@ Also inherits: Global.
 | `Ctrl+P` | Open the command palette | local | portable |  |
 | `Ctrl+C` | Stop active work; when idle, ask to quit | local | portable |  |
 | `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
-| `Enter` | Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts, the A2A log and Room have their own Enter | local | portable |  |
+| `Enter` | Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts and the A2A log have their own Enter | local | portable |  |
 
 ## History
 
@@ -439,13 +439,20 @@ Also inherits: Sidebar.
 | `j` | Select the next log row | local | portable |  |
 | `k` | Select the previous log row | local | portable |  |
 
-## Room
+## Mission Control
 
-Also inherits: Sidebar.
+Also inherits: Inspector body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Enter` | Nothing: the durable Room is a read-only replay | local | portable |  |
+| `Left` | Select the previous Mission Control tab (inert while only one tab exists) | local | portable |  |
+| `Right` | Select the next Mission Control tab (inert while only one tab exists) | local | portable |  |
+| `Tab` | Move between the list and its detail preview (only where the frame shows both) | local | portable |  |
+| `Esc` | Close Mission Control (back one frame) | local | portable |  |
+| `Ctrl+C` | Close Mission Control (back one frame) without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above Mission Control | local | portable |  |
+| `Ctrl+P` | Open the command palette above Mission Control | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing Mission Control | local | portable |  |
 
 ## Artifacts
 

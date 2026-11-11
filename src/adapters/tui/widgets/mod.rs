@@ -22,6 +22,7 @@ pub mod forget_card;
 pub mod fork_confirm;
 pub mod hyperlink;
 pub mod login_dialog;
+pub mod mission_control;
 pub(crate) mod modal;
 pub mod model_selector;
 pub(crate) use modal::{ModalPart, fit_modal, modal_area};

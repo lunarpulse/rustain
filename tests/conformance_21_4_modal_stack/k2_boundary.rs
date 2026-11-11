@@ -500,7 +500,6 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
         PanelType::Agents,
         PanelType::Adapters,
         PanelType::TransparencyLog,
-        PanelType::Room,
         PanelType::Artifacts,
     ] {
         targets.push((
@@ -508,15 +507,13 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
             InputAction::OpenPanel(panel),
         ));
     }
-    for name in ["room", "artifacts"] {
-        targets.push((
-            PaletteAction::ExecuteCommand(name.into(), None),
-            InputAction::ExecuteCommand {
-                name: name.into(),
-                args: None,
-            },
-        ));
-    }
+    targets.push((
+        PaletteAction::ExecuteCommand("artifacts".into(), None),
+        InputAction::ExecuteCommand {
+            name: "artifacts".into(),
+            args: None,
+        },
+    ));
     for (name, args) in [
         ("retract-auto", "peer-response-id"),
         ("team", "retract peer"),
@@ -587,6 +584,7 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
         PaletteAction::ShowVersion,
         PaletteAction::ExecuteCommand("notifications".into(), None),
         PaletteAction::ExecuteCommand("mode".into(), Some("plan".into())),
+        PaletteAction::ExecuteCommand("room".into(), None),
         PaletteAction::ExecuteCommand("room".into(), Some("list".into())),
         PaletteAction::ExecuteCommand("artifact".into(), Some("list".into())),
         PaletteAction::ExecuteCommand("team".into(), Some("status".into())),

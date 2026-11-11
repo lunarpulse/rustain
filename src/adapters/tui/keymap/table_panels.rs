@@ -25,9 +25,9 @@ pub enum PanelCmd {
     // Sidebar(Tasks), incl. reorder mode.
     TasksPrev, TasksNext, TasksCancelPlan, TasksPause, TasksSkip, TasksDrill,
     ReorderDown, ReorderUp, ReorderCommit,
-    // Sidebar(Agents), A2A log, Room, Artifacts.
+    // Sidebar(Agents), A2A log, Artifacts.
     AgentPauseToggle, LogSearch, LogBackspace, LogDrill, LogClear, LogTail, LogExport,
-    LogNext, LogPrev, RoomEnter, ArtifactShow,
+    LogNext, LogPrev, ArtifactShow,
     // Wave overlay.
     WaveNext, WavePrev, WaveDrill, WaveClose, WaveRerun, WaveDiverge, WaveDivergeClose,
 }
@@ -52,9 +52,6 @@ const fn a(keys: &'static [Key], cmd: PanelCmd) -> Binding {
 }
 const fn l(keys: &'static [Key], cmd: PanelCmd) -> Binding {
     bind(Context::SidebarA2aLog, keys, CommandId::Panel(cmd), "").local()
-}
-const fn o(keys: &'static [Key], cmd: PanelCmd) -> Binding {
-    bind(Context::SidebarRoom, keys, CommandId::Panel(cmd), "").local()
 }
 const fn e(keys: &'static [Key], cmd: PanelCmd) -> Binding {
     bind(Context::SidebarArtifacts, keys, CommandId::Panel(cmd), "").local()
@@ -110,8 +107,7 @@ pub const ROWS: &[Binding] = &[
     l(&[Key::Char('e')], PanelCmd::LogExport).does("Export the log"),
     l(&[Key::Char('j')], PanelCmd::LogNext).does("Select the next log row"),
     l(&[Key::Char('k')], PanelCmd::LogPrev).does("Select the previous log row"),
-    // ── Sidebar(Room), Sidebar(Artifacts) ──
-    o(&[Key::Enter], PanelCmd::RoomEnter).does("Nothing: the durable Room is a read-only replay"),
+    // ── Sidebar(Artifacts) ──
     e(&[Key::Enter], PanelCmd::ArtifactShow).does("Show the selected artifact (same as /artifact show)"),
     // ── Wave overlay ──
     w(&[Key::Char('j')], PanelCmd::WaveNext).does("Select the next spoke"),

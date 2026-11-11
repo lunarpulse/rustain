@@ -19,6 +19,7 @@
 //! and nothing reaches the bus or the cached projection.
 
 use crate::adapters::tui::handlers::room_command::{self as handler, RoomCommandArgs};
+use crate::adapters::tui::mission_control::McTab;
 use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{
@@ -60,7 +61,7 @@ fn acting_principal() -> AgentId {
 }
 
 /// One-call shell for the `/room` dispatch arm.
-pub(crate) async fn room_command(
+pub async fn room_command(
     state: &mut TuiState,
     conversation_id: &str,
     cmd_arg: Option<&str>,
@@ -71,10 +72,7 @@ pub(crate) async fn room_command(
         Err(message) => return warn(state, conversation_id, app_state, message),
     };
     match command {
-        RoomCommandArgs::View => match open_room_view(app_state, state).await {
-            Ok(()) => {}
-            Err(message) => warn(state, conversation_id, app_state, message),
-        },
+        RoomCommandArgs::View => open_room_view(app_state, state).await,
         RoomCommandArgs::RoleList => match role_list(app_state).await {
             Ok(message) | Err(message) => handler::show_room_message(state, message),
         },
@@ -93,26 +91,10 @@ pub(crate) async fn room_command(
     }
 }
 
-fn activate_room_sidebar(state: &mut TuiState) -> Result<(), String> {
-    if state.terminal_width < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH {
-        return Err(format!(
-            "Panel requires terminal width >= {} cols.",
-            crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH
-        ));
-    }
-    let panel = crate::domain::models::visual::PanelType::Room;
-    state.sidebar_visible = true;
-    state.sidebar_panel = Some(panel);
-    let selected = state.sidebar_selected;
-    reducer::set_base(
-        state,
-        crate::domain::models::FocusState::Sidebar { panel, selected },
-    );
-    state.needs_redraw = true;
-    Ok(())
-}
-
-async fn open_room_view(app_state: &AppState, state: &mut TuiState) -> Result<(), String> {
+/// Bare `/room`: the hub opens on the Room tab at once, then the one durable read folds the
+/// journal for this host (an unread journal is the honest zero state, never a stale one). No
+/// transcript row is written: the view is a frame, not a message.
+async fn open_room_view(app_state: &AppState, state: &mut TuiState) {
     open_room_view_with_source(
         journal_reader(app_state),
         &app_state.compose_snapshot.workspace_path,
@@ -121,7 +103,7 @@ async fn open_room_view(app_state: &AppState, state: &mut TuiState) -> Result<()
         ),
         state,
     )
-    .await
+    .await;
 }
 
 async fn open_room_view_with_source(
@@ -129,11 +111,10 @@ async fn open_room_view_with_source(
     workspace: &std::path::Path,
     host_id: String,
     state: &mut TuiState,
-) -> Result<(), String> {
-    activate_room_sidebar(state)?;
+) {
+    reducer::open_mission_control(state, McTab::Room);
     refresh_panel_from_source(reader, workspace, host_id, state).await;
     finalize_room_panel(state);
-    Ok(())
 }
 
 fn warn(state: &mut TuiState, conversation_id: &str, app_state: &AppState, message: String) {
@@ -147,28 +128,19 @@ fn warn(state: &mut TuiState, conversation_id: &str, app_state: &AppState, messa
         });
 }
 
-/// Open the durable-room panel: fold the journal for THIS host, park the
-/// cursor, and size the sidebar.
-pub(crate) async fn open_panel(app_state: &AppState, state: &mut TuiState) {
-    refresh_panel(app_state, state).await;
-    finalize_room_panel(state);
+/// A chord opened Mission Control on `tab` (the frame is on the stack already): run the
+/// tab's source read. Only the Room has one in this slice.
+pub async fn refresh_mission_tab(app_state: &AppState, state: &mut TuiState, tab: McTab) {
+    if tab == McTab::Room {
+        refresh_panel(app_state, state).await;
+        finalize_room_panel(state);
+    }
 }
 
 fn finalize_room_panel(state: &mut TuiState) {
-    state.sidebar_entry_count = state.room_panel.visible_len();
     state
         .room_panel
-        .synchronize_selection(&mut state.sidebar_selected);
-    if matches!(
-        state.focus,
-        crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Room,
-            ..
-        }
-    ) {
-        let selected = state.sidebar_selected;
-        reducer::update_sidebar_selection(state, selected);
-    }
+        .synchronize_selection(&mut state.mission_control.room_cursor);
 }
 
 /// Refresh the panel's fold from the durable journal.
@@ -213,13 +185,12 @@ async fn refresh_panel_from_source(
         max_seq,
         unknown_records,
         now,
-        &mut state.sidebar_selected,
+        &mut state.mission_control.room_cursor,
     );
-    state.sidebar_entry_count = state.room_panel.visible_len();
 }
 
 /// Observe a newer durable head without replacing the reader's anchored fold.
-pub(crate) async fn refresh_head(app_state: &AppState, state: &mut TuiState) {
+pub async fn refresh_head(app_state: &AppState, state: &mut TuiState) {
     let Some(reader) = journal_reader(app_state) else {
         return;
     };
@@ -512,23 +483,27 @@ mod tests {
         )
     }
 
-    #[test]
-    fn slash_room_activates_the_room_sidebar() {
-        let mut state = TuiState::new(crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH, 24);
+    #[tokio::test]
+    async fn story21_7_slash_room_opens_the_hub_on_the_room_tab_at_the_smallest_terminal() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let mut state = TuiState::new(60, 16);
         state.needs_redraw = false;
+        let focus = state.focus.clone();
 
-        activate_room_sidebar(&mut state).expect("wide terminal opens the room panel");
+        open_room_view_with_source(None, workspace.path(), "host-A".to_owned(), &mut state).await;
 
-        let panel = crate::domain::models::visual::PanelType::Room;
-        assert!(state.sidebar_visible);
-        assert_eq!(state.sidebar_panel, Some(panel));
-        assert!(matches!(
-            state.focus,
-            crate::domain::models::FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::Room,
-                ..
-            }
-        ));
+        let top = state.modal_stack.top().expect("the hub is on the stack");
+        assert_eq!(
+            top.surface,
+            crate::adapters::tui::presentation::Surface::MissionControl
+        );
+        assert_eq!(top.title(), "Mission Control · Room");
+        assert_eq!(state.mission_control.tab, McTab::Room);
+        assert!(
+            state.room_panel.not_attached,
+            "an unattached session says so (the first zero state)"
+        );
+        assert_eq!(state.focus, focus, "the opening writes no base focus");
         assert!(state.needs_redraw);
     }
 
@@ -564,7 +539,7 @@ mod tests {
                 10,
             )],
         };
-        let mut state = TuiState::new(crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH, 24);
+        let mut state = TuiState::new(80, 24);
 
         open_room_view_with_source(
             Some(std::sync::Arc::new(reader)),
@@ -572,13 +547,13 @@ mod tests {
             "host-A".to_owned(),
             &mut state,
         )
-        .await
-        .expect("the production View bridge opens");
+        .await;
 
-        let panel = crate::domain::models::visual::PanelType::Room;
-        assert!(state.sidebar_visible);
-        assert_eq!(state.sidebar_panel, Some(panel));
-        assert_eq!(state.sidebar_entry_count, 1);
+        assert_eq!(
+            state.modal_stack.top().unwrap().title(),
+            "Mission Control · Room"
+        );
+        assert_eq!(state.room_panel.visible_len(), 1);
         assert_eq!(
             state
                 .room_panel
@@ -588,13 +563,7 @@ mod tests {
                 .map(|view| view.id.clone()),
             Some(node)
         );
-        assert!(matches!(
-            state.focus,
-            crate::domain::models::FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::Room,
-                ..
-            }
-        ));
+        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
     }
 
     #[tokio::test]

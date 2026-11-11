@@ -129,7 +129,7 @@ pub fn consistent(state: &TuiState) -> bool {
                                     == Some(block.target.conversation_id.as_str())
                             })
                     }
-                    Surface::ThreadInspector => frame.tool_title.is_some(),
+                    Surface::ThreadInspector | Surface::MissionControl => frame.tool_title.is_some(),
                     _ => frame.tool_title.is_none(),
                 }
         })

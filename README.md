@@ -333,6 +333,13 @@ an automatically raised decision never steals the keyboard while you type.
 `Ctrl+X q` opens the list (`Needs you (N)` in the status row), where you can
 select a decision and open its frame. `Esc` defers it without deciding.
 
+**Mission Control** (`Ctrl+X` then a tab key) is one window with a tab row. `Ctrl+X r`
+(or `/room`) opens its Room tab at every terminal size from 60×16: the durable
+orchestration room as a read-only replay ("as of" the last read, never live), with
+`j`/`k`, `Ctrl+D`/`Ctrl+U`, `PgUp`/`PgDn`, `g`/`G` to scroll, `Left`/`Right` to switch
+tabs once more than one exists, and `Esc` back to exactly where you were. The room is
+re-checked once a second only while the Room tab is the window you are looking at.
+
 Local sessions and `rustain daemon attach` share the composer, caret editing
 (`Ctrl+A/E/K`, arrows and paste), transcript view state and window compositor.
 Read-only attachments start in Input for local slash commands; ordinary text

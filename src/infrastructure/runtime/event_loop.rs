@@ -2997,12 +2997,12 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
+                                InputAction::OpenMissionControl(tab) => room_bridge::refresh_mission_tab(&app_state, &mut state, tab).await,
                                 InputAction::OpenPanel(panel_type) => {
                                     match panel_bridge::open_panel(&mut state, &conversation, panel_type) {
                                         PanelOpenOutcome::Opened => {
                                             match panel_type {
                                                 PanelType::TransparencyLog => transparency_bridge::open_panel(&app_state, &mut state).await,
-                                                PanelType::Room => room_bridge::open_panel(&app_state, &mut state).await,
                                                 PanelType::Artifacts => artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await,
                                                 _ => {}
                                             }
@@ -7635,16 +7635,6 @@ pub fn render(
                                 theme,
                             );
                         }
-                        Some(crate::domain::models::visual::PanelType::Room) => {
-                            crate::adapters::tui::widgets::room_panel::render(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                &mut state.room_panel,
-                                state.sidebar_selected,
-                                &state.focus,
-                                theme,
-                            );
-                        }
                         Some(crate::domain::models::visual::PanelType::Artifacts) => {
                             crate::adapters::tui::widgets::artifacts_panel::render(
                                 sidebar_area,
@@ -7729,26 +7719,11 @@ pub fn render(
                                 theme,
                             );
                         }
-                        // Hand-written, NOT compiler-surfaced: the `_` arm below
-                        // makes this match non-exhaustive, so a missing `Room`
-                        // arm would compile clean and render nothing in
-                        // Dashboard density (Story 18.3a AC1).
-                        Some(crate::domain::models::visual::PanelType::Room) => {
-                            crate::adapters::tui::widgets::room_panel::render(
-                                panel_area,
-                                frame.buffer_mut(),
-                                &mut state.room_panel,
-                                state.sidebar_selected,
-                                &state.focus,
-                                theme,
-                            );
-                        }
-                        // Hand-written, NOT compiler-surfaced, for the same
-                        // reason as `Room` above: a missing `Artifacts` arm
-                        // compiles clean, renders nothing in Dashboard density,
-                        // and then falls through the `_` arm's `Agents`
-                        // re-check so the WRONG panel may paint (Story 18.3a-c
-                        // AC3, headline mutant).
+                        // Hand-written, NOT compiler-surfaced: the `_` arm below makes this
+                        // match non-exhaustive, so a missing `Artifacts` arm compiles clean,
+                        // renders nothing in Dashboard density, and then falls through the
+                        // `_` arm's `Agents` re-check so the WRONG panel may paint (Story
+                        // 18.3a-c AC3, headline mutant).
                         Some(crate::domain::models::visual::PanelType::Artifacts) => {
                             crate::adapters::tui::widgets::artifacts_panel::render(
                                 panel_area,
