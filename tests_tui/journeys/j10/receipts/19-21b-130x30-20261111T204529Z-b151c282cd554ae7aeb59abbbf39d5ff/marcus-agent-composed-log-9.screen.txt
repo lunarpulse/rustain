@@ -1,0 +1,30 @@
+[terminal] You:                                                                                                                   
+Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.                
+      ┌Mission Control · Messages─────────────────────────────────────────────────────────────────────────────────────────┐       
+      │▸Messages                                                                                                          │       
+      │2026-11-11 20:45:31Z ← inbound ⏸ awaiting-approval · peer                                                          │       
+[termi│12204279c7c2efcf816d547a64da6efe4b0b2d488def06fd1d4a932c1f25610c9d4f · task                                        │       
+The ar│rustain-1794429931222784401-0221d9ba1fe10cda · task parked awaiting operator approval                              │       
+      │2026-11-11 20:45:32Z ← inbound ↓ item-received · peer                                                              │       
+      │12204279c7c2efcf816d547a64da6efe4b0b2d488def06fd1d4a932c1f25610c9d4f · task ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR ·  │       
+      │recipient item received from lena-po                                                                               │       
+│ ⚠ ← │2026-11-11 20:45:32Z ← inbound ✓ accepted via A2A · peer                                                           │       
+│   ru│12204279c7c2efcf816d547a64da6efe4b0b2d488def06fd1d4a932c1f25610c9d4f · task                                        │       
+│ ℹ Se│rustain-1794429931222784401-0221d9ba1fe10cda · task accepted and executing                                         │       
+│ ℹ Te│2026-11-11 20:45:32Z ← inbound ! surfaced · peer                                                                   │       
+│   Re│12204279c7c2efcf816d547a64da6efe4b0b2d488def06fd1d4a932c1f25610c9d4f · task                                        │       
+│   No│a2a-in/p-cGVlcjoxMjIwNDI3OWM3YzJlZmNmODE2ZDU0N2E2NGRhNmVmZTRiMGIyZDQ4OGRlZjA2ZmQxZDRhOTMyYzFmMjU2MTBjOWQ0Zg/t-cnVzd│       
+│   Pe│GFpbi0xNzk0NDI5OTMxMjIyNzg0NDAxLTAyMjFkOWJhMWZlMTBjZGE · peer interaction recorded · notification immediate        │       
+│   - │  response: notify-and-wait · via individual — a2a-interaction.toml                                                │       
+│   - │  notification: immediate · via individual — a2a-interaction.toml                                                  │       
+│ ℹ Di│2026-11-11 20:45:36Z ? unknown ✓ item-acknowledged · peer                                                          │       
+│   at│12204279c7c2efcf816d547a64da6efe4b0b2d488def06fd1d4a932c1f25610c9d4f · task ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR ·  │       
+│     │[j/k] Scroll  [/] Search  [Esc] Back                                                                               │       
+│     └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│      
+│     ● jun-dev  delivered│                                                                                                       
+│       item ri_Ghk3GFYfuwD3-c4RrmTt1dxEkCB6zXyI · arrival 1 · task rustain-1794429944008446790-242aa757c102b706 · received│      
+Decisions 1                                                                                                                       
+ (daemon) │ attached │ Normal │ ↑109 ↓19 │ Ready                                                                Needs you (1) ^X q
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

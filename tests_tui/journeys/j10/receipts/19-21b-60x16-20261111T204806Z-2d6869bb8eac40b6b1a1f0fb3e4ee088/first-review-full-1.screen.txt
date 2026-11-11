@@ -1,0 +1,16 @@
+┌ Decision: Team proposal ─────────────────────────────────┐
+│Needs you › Team proposal lena-po, jun-dev | 2 pending    │
+││ A crash between those steps loses the item.             │
+││ Lena: amend the story acceptance order.                 │
+││ Jun: keep the owner lock through publication.           │
+││ Do not acknowledge on arrival or passive View.          │
+││ Retain the peer-tainted context boundary.               │
+││ Review is local; only an operator may Send.             │
+││ Preserve ordered recipients and exact UTF-8 bytes.      │
+│[Esc] Back                                                │
+└──────────────────────────────────────────────────────────┘
+Decisions 2                                                 
+ │ attached │ Normal │ ↑109 ↓19 │  Needs you (2) ^X q log: 5
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

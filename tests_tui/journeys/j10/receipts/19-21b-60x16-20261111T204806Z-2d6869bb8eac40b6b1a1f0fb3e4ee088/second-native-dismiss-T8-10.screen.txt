@@ -1,0 +1,16 @@
+┆  Jun owns implementation; Marcus checks the architecture. 
+┆  Acceptance: an arriving item is visible before its       
+┆  durable append.                                          
+┆  Please identify conflicts with ADR-047; do not send      
+┆  automatically.                                           
+┆  response: notify-and-wait · via individual —             
+┆  a2a-interaction.toml                                     
+┆  notification: immediate · via individual —               
+┆  a2a-interaction.toml                                     
+                                                            
+                                                            
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑173 ↓18 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

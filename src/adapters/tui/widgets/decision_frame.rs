@@ -33,13 +33,13 @@ use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
 use crate::adapters::tui::widgets::exceptional_spawn_gate::{SpawnGateSnapshot, gate_lines};
-use crate::adapters::tui::widgets::modal::wrapped;
+use crate::adapters::tui::widgets::modal::{fit_modal_indexed, wrapped};
 use crate::adapters::tui::widgets::permission_prompt::{
     ExactInput, FrameRows, PermissionCard, card_rows, review_rows,
 };
 use crate::adapters::tui::widgets::{
     ModalPart, apply_card, ask_user_question, cancel_plan_confirm_card, consolidation_card,
-    delegation_card, fit_modal, forget_card, fork_confirm, peer_add_prompt, plan_approval,
+    delegation_card, forget_card, fork_confirm, peer_add_prompt, plan_approval,
     plan_deviation_card, rewind_confirm, skill_trust_prompt, task_skip_cascade_card,
     team_proposal_card, team_retract_prompt,
 };
@@ -955,7 +955,7 @@ pub(crate) fn ticket_body_visible(state: &TuiState, item: &DecisionItem) -> bool
     let Some(area) = crate::adapters::tui::tool_inspector::frame_rect(state, 1) else {
         return false;
     };
-    if area.width < 12 || area.height < 5 {
+    if area.width < 12 || area.height < crate::adapters::tui::layout::MIN_FRAME_ROWS {
         return false;
     }
     let parts = parts(
@@ -1053,7 +1053,7 @@ pub fn render(
     let Some(item) = decision_queue::current(state, facts) else {
         return false;
     };
-    if area.width < 12 || area.height < 5 {
+    if area.width < 12 || area.height < crate::adapters::tui::layout::MIN_FRAME_ROWS {
         return false;
     }
     let inner_width = usize::from(area.width.saturating_sub(2));
@@ -1114,6 +1114,15 @@ pub fn render(
     } else {
         (0, 0)
     };
+    let rows_part = layout.len();
+    // The page the frame can hold at this size, whatever the scroll: the same layout with a body
+    // taller than the frame (a short tail page must not shrink the step, a resize must).
+    let mut probe = layout.clone();
+    probe.push(ModalPart::Rows {
+        lines: vec![Line::default(); usize::from(area.height)],
+        selected: (0, 0),
+    });
+    probe.push(ModalPart::Footer(rail.clone()));
     layout.push(ModalPart::Rows {
         lines: body,
         selected,
@@ -1128,7 +1137,14 @@ pub fn render(
         .style(Style::default().bg(theme.colors.bg_surface));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let lines = fit_modal(layout, usize::from(inner.height), usize::from(inner.width));
+    let page = fit_modal_indexed(probe, usize::from(inner.height), usize::from(inner.width))
+        .iter()
+        .filter(|(part, _, _)| *part == rows_part)
+        .count();
+    let fitted = fit_modal_indexed(layout, usize::from(inner.height), usize::from(inner.width));
+    // PgUp/PgDn move by what the frame shows per page, never further (no body row is skipped).
+    queue.note_page(page);
+    let lines: Vec<Line<'static>> = fitted.into_iter().map(|(_, _, line)| line).collect();
     frame.render_widget(
         Paragraph::new(lines).style(
             Style::default()

@@ -1,0 +1,30 @@
+[terminal] ⤷ System:                                                                                                              
+— session start — · Earlier sessions not loaded                                                                                   
+      ┌Thread · story_assignment──────────────────────────────────────────────────────────────────────────────────────────┐       
+      │  item actions · ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR                                                               │       
+      │  story_assignment · peer-tainted                                                                                  │       
+[termi│  story_assignment · lena-po                                                                                       │       
+┆  sto│  received thread · lena-po · ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR                                                  │       
+┆  STO│  Context received: 1 text body · 254 bytes                                                                        │       
+┆  Jun│      STORY-047: publish the received card before persisting its row. Jun owns implementation; Marcus checks the   │       
+┆  Acc│      architecture. Acceptance: an arriving item is visible before its durable append. Please identify conflicts   │       
+┆  Ple│      with ADR-047; do not send automatically.                                                                     │       
+┆  res│                                                                                                                   │       
+┆  not│  ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR · acknowledged                                                               │       
+      │acknowledgement recorded for ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR — receipt only; does not answer or select context │       
+      │item ri_paqcQbEXg7AkZHk5ZbijYDD_DNgGq8GR selected as peer context for this daemon conversation — clears on /clear o│       
+[termi│r daemon restart; view and acknowledgement do not select it                                                        │       
+[await│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+│ ⚠ ← │  [r] Respond  [u] Stop using as context                                                                           │       
+│   ru│  [Tab] Response  [c] Copy  [/] Search  [v] Source  [PgUp/PgDn] Scroll  [Esc] Close                                │       
+      └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘       
+                                                                                                                                  
+                                                                                                                                  
+Decisions 1                                                                                                                       
+ (daemon) │ attached │ Normal │ Ready                                                                    Needs you (1) ^X q log: 4
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

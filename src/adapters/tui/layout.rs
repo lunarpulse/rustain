@@ -9,9 +9,16 @@ use super::widgets::input_box;
 #[allow(dead_code)] // used from tests/e2e_harness.rs; not referenced in the binary
 pub const MIN_INPUT_HEIGHT: u16 = 3;
 
+/// Rows a decision frame, sheet or toast needs from the Stage to paint (the 21-4 / 21-6
+/// five-row frame floor: header, one body row, rail, two borders).
+pub const MIN_FRAME_ROWS: u16 = 5;
+
 /// Layout regions for the TUI frame.
 pub struct AppLayout {
     pub chat_pane: Rect,
+    /// The mission strip row directly above the status row (Story 21.7 A22): `None` when
+    /// reserving it would leave the Stage fewer than [`MIN_FRAME_ROWS`] rows.
+    pub mission_strip: Option<Rect>,
     pub status_bar: Rect,
     pub input_area: Rect,
     /// Tab bar row (shown when tab_count > 1 AND width >= 80).
@@ -47,6 +54,10 @@ pub fn composer_width(area_width: u16, monitor: bool) -> u16 {
 /// - >=80x24: full layout (with optional tab bar when tab_count > 1)
 /// - 60x16 to 80x24: compact layout (same regions, minimal status, no tab bar)
 /// - <60x16: returns None (terminal too small)
+///
+/// The main column is, top to bottom: the tab bar (when shown), the Stage, the mission strip
+/// (one row, whenever the Stage keeps at least [`MIN_FRAME_ROWS`] rows after giving it up), the
+/// status row and the composer.
 // Covers: FR16, UX-DR76, UX-DR41
 pub fn compute_layout(
     area: Rect,
@@ -66,89 +77,42 @@ pub fn compute_layout(
 
     // The column is painted iff the monitor is on and the terminal is wide enough; below the
     // minimum width the preference is kept but nothing is painted (A16).
-    let show_sidebar = monitor && area.width >= SIDEBAR_MIN_WIDTH;
-    let sidebar_width = if show_sidebar {
+    let sidebar_width = if monitor && area.width >= SIDEBAR_MIN_WIDTH {
         sidebar_column_width(area.width)
     } else {
         0
     };
-
-    if sidebar_width > 0 {
-        // Split horizontally: main content | monitor column
-        let main_chunks = Layout::horizontal([
+    let (main_area, sidebar) = if sidebar_width > 0 {
+        let columns = Layout::horizontal([
             Constraint::Min(1),                // main content area
             Constraint::Length(sidebar_width), // monitor column
         ])
         .split(area);
-
-        let main_area = main_chunks[0];
-        let sidebar_rect = main_chunks[1];
-
-        // Now split the main area vertically
-        if show_tab_bar {
-            let vertical_chunks = Layout::vertical([
-                Constraint::Length(1),            // tab bar
-                Constraint::Min(1),               // chat pane
-                Constraint::Length(1),            // status bar
-                Constraint::Length(input_height), // input area
-            ])
-            .split(main_area);
-
-            Some(AppLayout {
-                tab_bar: Some(vertical_chunks[0]),
-                chat_pane: vertical_chunks[1],
-                status_bar: vertical_chunks[2],
-                input_area: vertical_chunks[3],
-                sidebar: Some(sidebar_rect),
-            })
-        } else {
-            let vertical_chunks = Layout::vertical([
-                Constraint::Min(1),               // chat pane
-                Constraint::Length(1),            // status bar
-                Constraint::Length(input_height), // input area
-            ])
-            .split(main_area);
-
-            Some(AppLayout {
-                tab_bar: None,
-                chat_pane: vertical_chunks[0],
-                status_bar: vertical_chunks[1],
-                input_area: vertical_chunks[2],
-                sidebar: Some(sidebar_rect),
-            })
-        }
-    } else if show_tab_bar {
-        let chunks = Layout::vertical([
-            Constraint::Length(1),            // tab bar
-            Constraint::Min(1),               // chat pane (fills remaining)
-            Constraint::Length(1),            // status bar
-            Constraint::Length(input_height), // input area (dynamic)
-        ])
-        .split(area);
-
-        Some(AppLayout {
-            tab_bar: Some(chunks[0]),
-            chat_pane: chunks[1],
-            status_bar: chunks[2],
-            input_area: chunks[3],
-            sidebar: None,
-        })
+        (columns[0], Some(columns[1]))
     } else {
-        let chunks = Layout::vertical([
-            Constraint::Min(1),               // chat pane (fills remaining)
-            Constraint::Length(1),            // status bar
-            Constraint::Length(input_height), // input area (dynamic)
-        ])
-        .split(area);
+        (area, None)
+    };
 
-        Some(AppLayout {
-            tab_bar: None,
-            chat_pane: chunks[0],
-            status_bar: chunks[1],
-            input_area: chunks[2],
-            sidebar: None,
-        })
-    }
+    let tab_rows = u16::from(show_tab_bar);
+    let stage_rows = main_area.height.saturating_sub(tab_rows + 1 + input_height);
+    let strip_rows = u16::from(stage_rows > MIN_FRAME_ROWS);
+    let rows = Layout::vertical([
+        Constraint::Length(tab_rows),     // tab bar
+        Constraint::Min(1),               // chat pane (fills remaining)
+        Constraint::Length(strip_rows),   // mission strip
+        Constraint::Length(1),            // status bar
+        Constraint::Length(input_height), // input area (dynamic)
+    ])
+    .split(main_area);
+
+    Some(AppLayout {
+        tab_bar: show_tab_bar.then_some(rows[0]),
+        chat_pane: rows[1],
+        mission_strip: (strip_rows > 0).then_some(rows[2]),
+        status_bar: rows[3],
+        input_area: rows[4],
+        sidebar,
+    })
 }
 
 #[cfg(test)]

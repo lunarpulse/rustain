@@ -475,7 +475,9 @@ impl Fixture {
         .body
         .len();
         let mut pages = vec![self.paint(width, height)];
-        for _ in 0..=(rows / 5 + 1) {
+        // One `PgDn` moves by the rows the frame painted (at least one), so `rows` presses
+        // always reach the end (21-7: the mission strip leaves 60x16 pages smaller than five).
+        for _ in 0..=rows {
             self.key(KeyCode::PageDown).await;
             pages.push(self.paint(width, height));
         }

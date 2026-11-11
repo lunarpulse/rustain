@@ -1,0 +1,16 @@
+┌Mission Control · Messages────────────────────────────────┐
+│▸Messages                                                 │
+│12204817385a8140bfd972ecf7a6bed410a8de2b9604fe3add929fa8f5│
+│b07383cfde · task                                         │
+│rustain-1794430102830866378-f21a56bdcd0db8a8 · task       │
+│dispatched to peer (542 bytes) [agent-composed]           │
+│— append-only, crash-safe, structurally replayable (not   │
+│payload- or provenance-authenticated); peer attribution is│
+│only as strong as the credential scheme that produced it  │
+│[j/k] Scroll  [/] Search  [Esc] Back                      │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑109 ↓19 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+┌Mission Control · Messages────────────────────────────────┐
+│▸Messages                                                 │
+│2026-11-11 20:48:08Z ← inbound ⏸ awaiting-approval · peer │
+│1220bc552eee55c7ca2c781c15bbc2e83b929f2e6eabda3ca92b4df55f│
+│a76ea55443 · task                                         │
+│rustain-1794430088122839258-5cd2eef0f0da7bf9 · task parked│
+│awaiting operator approval                                │
+│2026-11-11 20:48:09Z ← inbound ↓ item-received · peer     │
+│1220bc552eee55c7ca2c781c15bbc2e83b929f2e6eabda3ca92b4df55f│
+│[j/k] Scroll  [/] Search  [Esc] Back                      │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑109 ↓19 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,30 @@
+[terminal] ⤷ System:                                                                                                              
+— session start — · Earlier sessions not loaded                                                                                   
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+┆  story_assignment · 12204279c7c2efcf816d547a64da6efe4b0b2d488def06fd1d4a932c1f25610c9d4f                                        
+┆  STORY-047: publish the received card before persisting its row.                                                                
+┆  Jun owns implementation; Marcus checks the architecture.                                                                       
+┆  Acceptance: an arriving item is visible before its durable append.                                                             
+┆  Please identify conflicts with ADR-047; do not send automatically.                                                             
+┆  response: notify-and-wait · via individual — a2a-interaction.toml                                                              
+┆  notification: immediate · via individual — a2a-interaction.toml                                                                
+                                                                                                                                  
+                                                                                                                                  
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+Decisions 1                                                                                                                       
+ (daemon) │ attached │ Normal │ ↑173 ↓18 │ Ready                                            ^X d detach Needs you (1) ^X q ^X menu
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

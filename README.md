@@ -333,12 +333,28 @@ an automatically raised decision never steals the keyboard while you type.
 `Ctrl+X q` opens the list (`Needs you (N)` in the status row), where you can
 select a decision and open its frame. `Esc` defers it without deciding.
 
-**Mission Control** (`Ctrl+X` then a tab key) is one window with a tab row. `Ctrl+X r`
-(or `/room`) opens its Room tab at every terminal size from 60×16: the durable
-orchestration room as a read-only replay ("as of" the last read, never live), with
-`j`/`k`, `Ctrl+D`/`Ctrl+U`, `PgUp`/`PgDn`, `g`/`G` to scroll, `Left`/`Right` to switch
-tabs once more than one exists, and `Esc` back to exactly where you were. The room is
-re-checked once a second only while the Room tab is the window you are looking at.
+**Mission Control** (`Ctrl+X` then a tab key) is one window with a tab row over every
+terminal size from 60×16: `Ctrl+X s` Agents, `t` Tasks, `l` Messages (the A2A log, both
+local and attached sessions), `r` Room (also `/room`), `e` Artifacts; `Left`/`Right` switch
+tabs, `j`/`k`, `Ctrl+D`/`Ctrl+U`, `PgUp`/`PgDn`, `g`/`G` scroll, `/` filters a list tab and
+`Esc` goes back to exactly where you were. `Enter` on an agent, task or artifact row opens
+its own window (transcript, task detail, artifact body; `c` copies the original). Attached
+sessions show Messages only and answer the other keys with one remedy. The Room is read-only
+replay ("as of" the last read, never live) and is re-checked once a second only while it is
+the window you are looking at. History (`Ctrl+X h`), Adapters (`Ctrl+X a`) and Usage
+(`Ctrl+X u`) are windows of the same kind; there is no sidebar and no density setting. On
+terminals at least 120 columns wide `Ctrl+X w` toggles a read-only monitor column that paints
+the current Mission Control tab beside the Stage (never a focus or key target). The generated
+key tables are in `docs/keyboard.md`.
+
+One muted **mission strip** row sits directly above the status row at every terminal size, in
+local and attached sessions: `Agents 1/3 · Tasks 4/7 · Decisions 2` (running of total subagents,
+finished of total tasks in the active conversation's plan, decisions waiting; `A 1/3 · T 4/7 · D 2`
+on narrow terminals, a read-only mirror shows `Writer decisions N`, and an attached session shows
+decisions only). Parts that do not apply are left out; when nothing applies it shows the key hint
+that opens Mission Control (`^X s`, attached `^X l`). It has no focus and no keys, never sits
+under a window or toast, and gives its row back to the Stage when keeping it would leave the
+Stage under five rows (a long draft at 60×16).
 
 Local sessions and `rustain daemon attach` share the composer, caret editing
 (`Ctrl+A/E/K`, arrows and paste), transcript view state and window compositor.

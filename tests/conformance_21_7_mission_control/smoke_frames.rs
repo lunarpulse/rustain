@@ -274,4 +274,56 @@ async fn story21_7_smoke_frames_export() {
             .expect("write");
         }
     }
+    // Leg G (7-G): the mission strip. Idle (the generated hint), over the seeded plan
+    // (`Tasks 2/3`: two of three tasks done), with the monitor-width remedy toast above it
+    // (below 120 columns), and the yielded strip at 60x16 with an eight-line draft over an open
+    // History frame (the five-row frame still paints).
+    for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+        let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("strip-idle-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+        rig.f
+            .tabs
+            .active_tab_mut()
+            .conversation
+            .plans
+            .insert("p1".to_owned(), seeded_plan());
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("strip-plan-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+        if width < 120 {
+            rig.key(Key::Ctrl('x'));
+            rig.key(Key::Char('w'));
+            rig.f.paint();
+            std::fs::write(
+                dir.join(format!("strip-toast-{width}x{height}.txt")),
+                lines(&rig).join("\n"),
+            )
+            .expect("write");
+        }
+    }
+    {
+        use rustain::domain::models::ConversationSummary;
+        use rustain::domain::services::session_index::SessionIndex;
+        let mut rig = Rig::plain(room_workspace(&NODES).await, 60, 16).await;
+        rig.f.sessions = SessionIndex::build(vec![ConversationSummary {
+            id: "alpha".to_owned(),
+            title: "Alpha history session".to_owned(),
+            created_at: 1_700_000,
+            updated_at: 1_700_000,
+            message_count: 2,
+            has_fork_source: false,
+        }]);
+        rig.f.h.state.input_buffer = ["draft line"; 8].join("\n");
+        rustain::infrastructure::runtime::history_bridge::open(&mut rig.f.h.state, &rig.f.sessions);
+        rig.f.paint();
+        std::fs::write(dir.join("strip-yield-60x16.txt"), lines(&rig).join("\n")).expect("write");
+    }
 }

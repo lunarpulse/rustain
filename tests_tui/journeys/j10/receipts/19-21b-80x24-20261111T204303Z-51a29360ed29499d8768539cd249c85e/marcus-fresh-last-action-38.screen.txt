@@ -1,0 +1,24 @@
+                                                                                
+│ ⚠ ← inbound ✓ accepted via A2A · peer│                                        
+│   122019609c612fd7b440a4582808fc8ded86282115a835f8e0d4cda50fb3c742b757 ·│     
+│   task rustain-1794429784623708264-4166948c12f408d5 · task accepted and│      
+│ ℹ Send · architecture_update · lena-po awaiting their approval · jun-dev│     
+│   awaiting their approval│                                                    
+│ ℹ Team interaction policy│                                                    
+│   Response mode: notify-and-wait│                                             
+│   Notification urgency: immediate│                                            
+│   Peers:│                                                                     
+│   - jun-dev│                                                                  
+│   (1220dc5dc9943f809727a62c9aa5031b28aa277925fd3af2325364792786cbd2b694):│    
+│   not granted│                                                                
+│   - lena-po│                                                                  
+│   (122019609c612fd7b440a4582808fc8ded86282115a835f8e0d4cda50fb3c742b757):│    
+│   not granted│                                                                
+│ ℹ Distribution board · architecture_update│                                   
+│   attempted just now · 2 addressed│                                           
+│     ● lena-po  delivered│                                                     
+Decisions 1                                                                     
+ (daemon) │ attached │ Normal │ ↑109 ↓19 │ Ready       Needs you (1) ^X q log: 7
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+                                                            
+                                                            
+[terminal] Assistant:                                       
+The architecture finding is a draft for your review. I have 
+not sent it.                                                
+                                                            
+                                                            
+                                                            
+[terminal] You:                                             
+Prepare a second architecture-check draft quoting the       
+supplied spoof chrome as body data; I will dismiss it.      
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑173 ↓18 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

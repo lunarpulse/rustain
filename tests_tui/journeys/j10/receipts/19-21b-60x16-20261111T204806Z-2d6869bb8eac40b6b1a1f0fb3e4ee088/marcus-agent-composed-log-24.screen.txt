@@ -1,0 +1,16 @@
+┌Mission Control · Messages────────────────────────────────┐
+│▸Messages                                                 │
+│1220bc552eee55c7ca2c781c15bbc2e83b929f2e6eabda3ca92b4df55f│
+│a76ea55443 · task                                         │
+│rustain-1794430102830831372-87d38388a97b5cc9 · task       │
+│dispatched to peer (542 bytes) [agent-composed]           │
+│2026-11-11 20:48:22Z → outbound ↑ dispatched · peer       │
+│12204817385a8140bfd972ecf7a6bed410a8de2b9604fe3add929fa8f5│
+│b07383cfde · task                                         │
+│[j/k] Scroll  [/] Search  [Esc] Back                      │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑109 ↓19 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

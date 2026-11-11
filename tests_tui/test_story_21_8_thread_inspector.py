@@ -71,11 +71,12 @@ def screen_rows(screen: str) -> list[str]:
 
 
 def stage_rows(screen: str) -> list[str]:
-    """Rows above the toast row, which sits above the status row above the composer."""
+    """Rows above the toast row, which sits above the mission strip row, above the status row
+    above the composer."""
     rows = screen_rows(screen)
     top = composer_top(rows)
-    assert top is not None and top >= 3, f"no composer on screen:\n{screen}"
-    return rows[: top - 2]
+    assert top is not None and top >= 4, f"no composer on screen:\n{screen}"
+    return rows[: top - 3]
 
 
 def composer_row(screen: str) -> str:
@@ -196,7 +197,7 @@ def synth_screen(cols: int, rows: int, *, mode: str = "local", frame: bool = Tru
     off = 0 if cols < 100 else 8
     width = cols - 2 * off
     inner_w = width - 2
-    stage_h = rows - 5
+    stage_h = rows - 5  # the strip row, the status row and the three composer rows follow
     pad = " " * off
 
     def boxed(text: str) -> str:
@@ -223,8 +224,11 @@ def synth_screen(cols: int, rows: int, *, mode: str = "local", frame: bool = Tru
         stage += [boxed(row) for row in footer_rows + rail_rows]
         stage.append(pad + "└" + "─" * inner_w + "┘")
         stage = [row.ljust(cols) for row in stage]
+    if toast:
+        # a toast is painted over the last Stage row (the one `stage_rows` leaves out)
+        stage[-1] = toast.ljust(cols)
     bottom = [
-        toast.ljust(cols),
+        "^X s Mission Control".ljust(cols),
         "Ready │ model-x".ljust(cols),
         "┌" + "─" * (cols - 2) + "┐",
         "│" + " " * (cols - 2) + "│",
@@ -310,6 +314,11 @@ def test_leg_a_desk_scroll_stage_and_composer_predicates(cols, rows):
     # ... but a Stage row change does, and a typed composer is not the capture's.
     stale = closed.replace("stage row 0", "stage row X")
     assert stage_rows(stale) != stage_rows(closed)
+    # the last Stage row (the frame's bottom border while open) is part of the capture
+    for screen in (closed, open_):
+        cut = screen.split("\n")
+        cut[len(stage_rows(screen)) - 1] = "changed".ljust(cols)
+        assert stage_rows("\n".join(cut)) != stage_rows(screen)
     typed = closed.replace("│" + " " * (cols - 2) + "│", "│" + "/team view".ljust(cols - 2) + "│")
     assert composer_row(typed) != composer_row(closed)
     assert thread_closed(closed) and not thread_closed(open_)

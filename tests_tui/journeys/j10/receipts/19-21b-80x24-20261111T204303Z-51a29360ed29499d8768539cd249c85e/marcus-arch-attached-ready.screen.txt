@@ -1,0 +1,24 @@
+[terminal] ⤷ System:                                                            
+— session start — · Earlier sessions not loaded                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+^X l Messages                                                                   
+ (daemon) │ attached │ Normal │ Ready                        ^X d detach ^X menu
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+                                                            
+[terminal] ⤷ Assistant:                                     
+[awaiting your response]                                    
+                                                            
+                                                            
+                                                            
+[terminal] You:                                             
+Check this selected story assignment against ADR-047 and    
+propose the exact finding to Lena and Jun; never send it.   
+                                                            
+                                                            
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑173 ↓18 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

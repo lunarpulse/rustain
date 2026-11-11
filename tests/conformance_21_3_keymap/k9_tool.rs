@@ -28,7 +28,7 @@ impl Runtime for ToolRuntime {
 fn setup() -> ToolRuntime {
     let (mut f, _) = Fixture::single(
         80,
-        22,
+        23,
         "Bash",
         json!({"command":"seq 1 99"}),
         InvocationStatus::Success,
@@ -329,7 +329,7 @@ fn every_body_row_clamps_at_both_ends_in_real_cells() {
     }
     let (mut f, _) = Fixture::single(
         80,
-        22,
+        23,
         "Bash",
         json!({"command":"short"}),
         InvocationStatus::Success,
@@ -349,7 +349,7 @@ fn every_body_row_clamps_at_both_ends_in_real_cells() {
 fn tabs_paint_sources_stop_at_ends_and_back_releases_the_frame() {
     let (mut f, _) = Fixture::single(
         80,
-        22,
+        23,
         "Write",
         json!({"file_path":"witness.txt", "content":"witness-input"}),
         InvocationStatus::Success,

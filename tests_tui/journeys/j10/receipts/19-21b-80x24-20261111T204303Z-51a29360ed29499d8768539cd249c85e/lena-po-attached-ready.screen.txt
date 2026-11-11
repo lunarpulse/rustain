@@ -1,0 +1,24 @@
+[terminal] ⤷ System:                                                            
+— session start — · Earlier sessions not loaded                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                 Info Nothing to consolidate yet
+^X l Messages                                                                   
+ (daemon) │ attached │ Normal │ Ready                        ^X d detach ^X menu
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

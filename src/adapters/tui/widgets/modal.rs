@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::adapters::tui::text_geometry as geom;
 
 /// One part of a modal body, in display order.
+#[derive(Clone)]
 pub(crate) enum ModalPart {
     /// Kept whole while anything fits; at worst only the first header line.
     Header(Vec<Line<'static>>),

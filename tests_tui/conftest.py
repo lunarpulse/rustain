@@ -14,7 +14,7 @@ import pytest
 # Ensure tests_tui/ is on the import path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from harness import RustainTUI, PROJECT_ROOT, BINARY
+from harness import RustainTUI, PROJECT_ROOT, BINARY, CTRL_X
 
 
 # ── Guards ───────────────────────────────────────────────────────────────────
@@ -133,12 +133,12 @@ def tui(build_binary):
 
 @pytest.fixture
 def tui_monitor(build_binary):
-    """Provide a fresh RustainTUI with ``density_mode = "monitor"``.
+    """Provide a fresh RustainTUI with the read-only monitor column showing.
 
-    The default ``tui`` fixture leaves density at the layout default, which
-    hides sidebars regardless of ``state.sidebar_visible`` (same reason
-    ``tui_with_mcp`` sets monitor density). Sidebar-panel tests — History,
-    Tasks, Agents — need the sidebar to actually render, so use this fixture.
+    Story 21.7: the column is a plain toggle (``Ctrl+X w``, wide terminals only;
+    the harness default is 130 columns), never a config setting, so the fixture
+    starts a default session and toggles it on once the screen is up, waiting
+    structurally for the column's own box title (``┌Monitor · <tab>``).
     """
     tmp = tempfile.TemporaryDirectory(prefix="rustain_monitor_test_")
     ws = Path(tmp.name)
@@ -148,13 +148,16 @@ def tui_monitor(build_binary):
     (config_dir / "config.toml").write_text(
         "[permissions]\n"
         f"always_tools = {json.dumps(allow_list)}\n"
-        "\n"
-        "[layout]\n"
-        'density_mode = "monitor"\n'
     )
     harness = RustainTUI(fresh=True, build=False, workspace=ws, allowed_tools=allow_list)
     harness.start()
     try:
+        harness.send(CTRL_X)
+        harness.wait_for_screen("[Esc] Cancel", timeout=3.0)
+        harness.send("w")
+        assert harness.wait_for_screen("┌Monitor · ", timeout=5.0), (
+            f"the monitor column did not open after Ctrl+X w. Screen:\n{harness.get_screen_text()}"
+        )
         yield harness
     finally:
         harness.stop()
@@ -325,11 +328,9 @@ def tui_with_mcp(build_binary, request):
     config_dir = ws / ".rustain"
     config_dir.mkdir(parents=True, exist_ok=True)
     _write_test_mcp_profile(config_dir, profile_name="tests-mcp")
-    # Pre-create config.toml so sidebar/panel TUI tests can render. Default
-    # Focus density hides sidebars at the layout level regardless of
-    # `state.sidebar_visible`. We pre-write the config because RustainTUI.start
-    # only auto-creates it when missing; pre-creating lets us layer [layout]
-    # on top of the permissions block.
+    # Pre-create config.toml (RustainTUI.start only auto-creates it when missing) so the
+    # permissions block and the provider blocks below are ours. Story 21.7: no layout or
+    # density setting exists any more; panel tests open the hub's frames by chord.
     #
     # Also registers an `anthropic` provider from env-var auth so live-LLM
     # tests can actually talk to a model. The user's ~/.config/rustain
@@ -348,9 +349,6 @@ def tui_with_mcp(build_binary, request):
     config_toml.write_text(
         "[permissions]\n"
         f"always_tools = {json.dumps(allowed_tools)}\n"
-        "\n"
-        "[layout]\n"
-        'density_mode = "monitor"\n'
         "\n"
         "# Disable any user-inherited openrouter provider — the default test\n"
         "# build is missing the openai feature so it can't construct.\n"
@@ -401,9 +399,6 @@ def _write_subagent_provider_config(config_dir: Path, allowed_tools: list[str]) 
     (config_dir / "config.toml").write_text(
         "[permissions]\n"
         f"always_tools = {json.dumps(allowed_tools)}\n"
-        "\n"
-        "[layout]\n"
-        'density_mode = "monitor"\n'
         "\n"
         "[provider.openrouter]\n"
         "enabled = false\n"

@@ -1,0 +1,16 @@
+┌Mission Control · Messages────────────────────────────────┐
+│▸Messages                                                 │
+│a2a-interaction.toml                                      │
+│2026-11-11 20:48:14Z ? unknown ✓ item-acknowledged · peer │
+│1220bc552eee55c7ca2c781c15bbc2e83b929f2e6eabda3ca92b4df55f│
+│a76ea55443 · task ri_SceqPQx-PyzmuUDLYtgXYzYikAXMMKVE ·   │
+│recipient item from lena-po acknowledged                  │
+│2026-11-11 20:48:22Z → outbound ↑ dispatched · peer       │
+│1220bc552eee55c7ca2c781c15bbc2e83b929f2e6eabda3ca92b4df55f│
+│[j/k] Scroll  [/] Search  [Esc] Back                      │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑109 ↓19 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

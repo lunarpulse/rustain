@@ -102,20 +102,22 @@ def _legacy_status_row(rows):
 
 
 def _modal_complete(screen, title="Select Model"):
-    """The complete caller-supplied A8 sheet (0, 0, 80, 20), above chat chrome."""
+    """The complete caller-supplied A8 sheet (0, 0, 80, 19), above the idle mission strip row
+    (Story 21.7: the strip is directly above the status row) and the chat chrome."""
     rows = screen.split("\n")
     prefix = f"┌ {title} "
     if (len(rows) != 24 or any(len(row) != 80 for row in rows)
             or _legacy_status_row(rows) != 20
             or rows[0] != prefix + "─" * (79 - len(prefix)) + "┐"
-            or rows[19] != "└" + "─" * 78 + "┘"
+            or rows[18] != "└" + "─" * 78 + "┘"
+            or rows[19].rstrip() != "^X s Mission Control"
             or not rows[21].startswith("┌ Message")
             or rows[22][0] != "│" or rows[22][-1] != "│"
             or rows[23] != "└" + "─" * 78 + "┘"):
         return False
-    if any(row[0] != "│" or row[-1] != "│" for row in rows[1:19]):
+    if any(row[0] != "│" or row[-1] != "│" for row in rows[1:18]):
         return False
-    content = [row[1:-1].strip() for row in rows[1:19] if row[1:-1].strip()]
+    content = [row[1:-1].strip() for row in rows[1:18] if row[1:-1].strip()]
     footers = {
         "Select Model": r"(?:Enter sign in · ←→ provider|←→ provider|↑↓ navigate · Enter select) · Esc close(?: · / search)?",
         "Log out": r"↑↓ navigate · Enter choose · Esc close",

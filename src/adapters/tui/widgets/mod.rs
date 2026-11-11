@@ -26,6 +26,7 @@ pub mod history_inspector;
 pub mod hyperlink;
 pub mod login_dialog;
 pub mod mission_control;
+pub mod mission_strip;
 pub(crate) mod modal;
 pub mod model_selector;
 pub mod monitor;

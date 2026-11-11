@@ -12,8 +12,8 @@ use crate::adapters::tui::{
     state::TuiState,
     widgets::{
         autocomplete_popup, bookmark_list, command_palette, help_overlay, login_dialog,
-        model_selector, profile_switcher, reverse_search, toast_layer, usage_panel, wave_overlay,
-        which_key_bar,
+        mission_strip, model_selector, profile_switcher, reverse_search, toast_layer, usage_panel,
+        wave_overlay, which_key_bar,
     },
 };
 
@@ -25,6 +25,7 @@ pub struct Shell<'a> {
     pub chat_pane: Rect,
     pub input_area: Rect,
     pub status_bar: Rect,
+    pub mission_strip: Option<Rect>,
     pub supports_osc8: bool,
     sidebar: Option<Rect>,
     /// Live active conversation proxy and its owning tab's durable bookmarks.
@@ -40,6 +41,7 @@ impl<'a> Shell<'a> {
             chat_pane: layout.chat_pane,
             input_area: layout.input_area,
             status_bar: layout.status_bar,
+            mission_strip: layout.mission_strip,
             supports_osc8: crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8(),
             sidebar: layout.sidebar,
             stage: None,
@@ -59,6 +61,13 @@ pub fn compose(
     paint_status: impl FnOnce(&mut Frame),
 ) -> bool {
     let theme = &state.theme;
+    // The strip sits outside every frame region (frames end at the Stage bottom), so nothing
+    // painted below can cover it.
+    if let Some(strip) = shell.mission_strip {
+        let stage = shell.stage.map(|(conversation, _)| conversation);
+        let facts = mission_strip::facts(state, host, stage);
+        frame.render_widget(mission_strip::line(&facts, host, strip.width, theme), strip);
+    }
     toast_layer::render(frame, shell.chat_pane, &state.notifications, theme, facts);
 
     let standard_rect = geometry::frame_rect(shell.region);

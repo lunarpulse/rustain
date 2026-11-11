@@ -2,7 +2,7 @@
 
 use ratatui::layout::Rect;
 
-use super::super::layout::AppLayout;
+use super::super::layout::{AppLayout, MIN_FRAME_ROWS};
 
 /// Everything above the Stage bottom edge; the status row and composer stay out.
 #[must_use]
@@ -24,7 +24,7 @@ pub fn frame_rect(region: Rect) -> Rect {
     let width = (u32::from(region.width) * 9 / 10) as u16;
     // Keep the header, one body row and footer even with a full composer.
     let height = ((u32::from(region.height) * 85 / 100) as u16)
-        .max(5)
+        .max(MIN_FRAME_ROWS)
         .min(region.height);
     Rect::new(
         region.x + (region.width - width) / 2,

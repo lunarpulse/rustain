@@ -360,6 +360,9 @@ pub struct DecisionQueue {
     feedback: Option<&'static str>,
     /// First visible body row of the focused frame (`PgUp`/`PgDn`).
     scroll: usize,
+    /// Body rows the focused frame painted last (0 = not painted yet): one `PgUp`/`PgDn` never
+    /// moves further than this, so no row is ever skipped between two pages.
+    painted_page: std::cell::Cell<usize>,
     pub(crate) permission_layout: std::cell::RefCell<
         Option<std::sync::Arc<crate::adapters::tui::widgets::decision_frame::PreparedPermission>>,
     >,
@@ -483,6 +486,21 @@ impl DecisionQueue {
     pub(crate) fn clear_paint(&mut self) {
         self.painted_at = None;
         self.inert_released = false;
+        self.painted_page.set(0);
+    }
+
+    /// The frame can hold `rows` body rows per page at its current size (set by every paint of
+    /// the focused frame, so a resize or a re-layout is followed at once).
+    pub(crate) fn note_page(&self, rows: usize) {
+        self.painted_page.set(rows);
+    }
+
+    /// Rows one `PgUp`/`PgDn` moves: `limit`, or fewer when the frame painted fewer body rows.
+    pub(crate) fn page(&self, limit: usize) -> usize {
+        match self.painted_page.get() {
+            0 => limit,
+            rows => rows.min(limit),
+        }
     }
 
     pub(crate) fn last_defer_at(&self) -> Option<Instant> {

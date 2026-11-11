@@ -9,7 +9,8 @@
 //! (`Ctrl+X w`, default off, 120 columns, the preference kept when narrowing) and the final K12
 //! (`k12_cutover`: every RU-4 chord is truthful in both hosts). K12 clauses (a)-(f) are
 //! `mission-21-7-a`..`-f` in the one cutover scanner
-//! (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add their keystones here.
+//! (`conformance_21_4_modal_stack/k6_gate.rs`). Slice 7-G adds K13 (`k13_strip`: the mission
+//! strip row, its yield rule, grammar and facts in both hosts).
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
 //! through a production door: the room journal is written by the production `NodeJournal`
@@ -57,3 +58,6 @@ mod k11_monitor;
 
 #[path = "conformance_21_7_mission_control/k12_cutover.rs"]
 mod k12_cutover;
+
+#[path = "conformance_21_7_mission_control/k13_strip.rs"]
+mod k13_strip;

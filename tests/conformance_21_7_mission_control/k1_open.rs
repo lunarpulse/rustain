@@ -35,10 +35,12 @@ async fn the_chord_opens_the_room_tab_at_every_size_and_leaves_status_and_compos
         let status_before = status_row(&rig);
         let stage_cache = rig.f.cache();
         let draft = rig.f.h.state.input_buffer.clone();
+        // The control is the frame's own title (`Mission Control · <Tab>`); the idle mission strip
+        // says `^X s Mission Control` on its row and is not a frame.
         assert!(
             !lines(&rig)
                 .iter()
-                .any(|row| row.contains("Mission Control")),
+                .any(|row| row.contains("Mission Control ·")),
             "{label}: control"
         );
 

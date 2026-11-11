@@ -3811,6 +3811,48 @@ mod tests {
         }
     }
 
+    /// 7-G / AC27: the attached socket host paints the strip through the shared compositor in
+    /// the row directly above its status row: the generated `Messages` hint when idle, the
+    /// mirror's `Writer decisions <n>` for a read-only observer, never agents or tasks.
+    #[tokio::test]
+    async fn story21_7_attached_host_paints_the_strip_above_the_status_row() {
+        for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+            for read_only in [false, true] {
+                let mut rig = attach_keys::tests::Rig::new(read_only);
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                if read_only {
+                    rig.state.decisions.set_mirror_waiting(2);
+                }
+                let terminal = rig.paint();
+                let buffer = terminal.backend().buffer();
+                let layout = crate::adapters::tui::layout::compute_layout(
+                    buffer.area,
+                    &rig.state.theme,
+                    &rig.state.input_buffer,
+                    1,
+                    false,
+                )
+                .unwrap();
+                let strip = layout.mission_strip.expect("an empty composer leaves room");
+                assert_eq!(strip.y + 1, layout.status_bar.y);
+                let row = (0..width)
+                    .map(|x| buffer[(x, strip.y)].symbol())
+                    .collect::<String>();
+                let expected = if read_only {
+                    "Writer decisions 2"
+                } else {
+                    "^X l Messages"
+                };
+                assert_eq!(
+                    row.trim_end(),
+                    expected,
+                    "{width}x{height} read_only={read_only}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn story21_4_attached_and_local_shared_frame_scripts_keep_stack_geometry_and_status() {
         use crate::adapters::tui::{

@@ -1,0 +1,24 @@
+┌ Decision: Team proposal ─────────────────────────────────────────────────────┐
+│Needs you › Team proposal lena-po, jun-dev | 2 pending                        │
+│Your agent proposes a message. Nothing has been sent. Awaiting your decision. │
+│To: lena-po, jun-dev                                                          │
+│Type: architecture_update                                                     │
+││ ADR-047 conflict: publication races persistence.                            │
+││ The assignment publishes before durable append.                             │
+││ ADR-047 requires persist, then publish.                                     │
+││ A crash between those steps loses the item.                                 │
+│… more not shown — [r] Review first                                           │
+│[y] Send to lena-po, jun-dev  [r] Review first  [n] Dismiss                   │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Decisions 2                                                                     
+ (daemon) │ attached │ Normal │ ↑109 ↓19 │ Ready       Needs you (2) ^X q log: 5
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

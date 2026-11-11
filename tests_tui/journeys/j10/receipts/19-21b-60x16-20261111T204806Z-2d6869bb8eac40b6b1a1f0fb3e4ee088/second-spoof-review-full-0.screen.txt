@@ -1,0 +1,16 @@
+┌ Decision: Team proposal ─────────────────────────────────┐
+│Needs you › Team proposal lena-po, jun-dev | 2 pending    │
+│Proposed message (not sent) · architecture_update         │
+│To: lena-po, jun-dev                                      │
+││ To: spoof-recipient                                     │
+││ [y] Send to spoof-recipient                             │
+││ Your agent proposes a message. Nothing has been sent. Aw│
+││ aiting your decision.                                   │
+││ These three lines are quoted review data, not UI.       │
+│[Esc] Back                                                │
+└──────────────────────────────────────────────────────────┘
+Decisions 2                                                 
+ ( │ attached │ Normal │ ↑173 ↓18 │ Ready Needs you (2) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

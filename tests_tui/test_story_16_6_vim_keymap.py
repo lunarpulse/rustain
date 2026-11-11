@@ -29,7 +29,7 @@ class TestVimHelpOverlay:
         """Help overlay contains 'VIM FOLD & MOTION' with expected bindings."""
         tui.chat_mode()
         tui.open_help()
-        for _ in range(15):
+        for _ in range(16):  # one more than before: the mission strip row shortens the window
             tui.send(Chat.SCROLL_DOWN)
             tui.wait(0.05)
         tui.wait(0.3)

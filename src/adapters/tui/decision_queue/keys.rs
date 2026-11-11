@@ -371,11 +371,13 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
             return PaneOutcome::Consumed;
         }
         Some(Cmd::ScrollUp) => {
-            scroll(state, &item_key, false, SCROLL_PAGE);
+            let page = state.decisions.page(SCROLL_PAGE);
+            scroll(state, &item_key, false, page);
             return PaneOutcome::Consumed;
         }
         Some(Cmd::ScrollDown) => {
-            scroll(state, &item_key, true, SCROLL_PAGE);
+            let page = state.decisions.page(SCROLL_PAGE);
+            scroll(state, &item_key, true, page);
             return PaneOutcome::Consumed;
         }
         Some(Cmd::Card(CardCmd::Up)) if inspecting => {

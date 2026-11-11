@@ -1,0 +1,30 @@
+┆  architecture_update · 1220b43cd73ce0a6298675dd2229b27fe38949518f5cb091875558e22d75676c2e64                                     
+┆  ADR-047 conflict: publication races persistence.                                                                               
+┆  The┌ Decision: Recipient draft ────────────────────────────────────────────────────────────────────────────────────────┐       
+┆  ADR│Needs you › Recipient draft marcus-arch | 1 pending                                                                │       
+┆  A c│architecture_update · marcus-arch                                                                                  │       
+┆  Len│Principal: 1220b43cd73ce0a6298675dd2229b27fe38949518f5cb091875558e22d75676c2e64                                    │       
+┆  Jun│Peer is waiting for your response.                                                                                 │       
+┆  Do │[w] My own  [n] Decline  [v] View item                                                                             │       
+┆  Ret│                                                                                                                   │       
+┆  Rev│                                                                                                                   │       
+┆  Pre│                                                                                                                   │       
+┆  Rés│                                                                                                                   │       
+┆  Dec│                                                                                                                   │       
+┆  res│                                                                                                                   │       
+┆  not│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+[termi│                                                                                                                   │       
+[await│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+│ ℹ Se└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘──────┐
+│ ⚠ ← inbound ✓ accepted via A2A · peer 1220b43cd73ce0a6298675dd2229b27fe38949518f5cb091875558e2│Info Decision waiting — Ctrl+X q│
+│   rustain-1794429944008410773-76a897030422fac5 · task accepted and executing│                 └────────────────────────────────┘
+Decisions 1                                                                                                                       
+ (daemon) │ attached │ Normal │ Ready                                                                    Needs you (1) ^X q log: 2
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

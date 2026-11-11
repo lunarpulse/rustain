@@ -11,7 +11,7 @@ fn long() -> Fixture {
     // Shared Literal deliberately appends one paragraph separator: 99 + 1 = 100.
     let (mut f, _) = Fixture::single(
         80,
-        22,
+        23,
         "Bash",
         json!({"command":"seq 1 99","input_lines":(0..30).collect::<Vec<_>>()}),
         S::Success,
@@ -88,7 +88,7 @@ fn half_page_page_and_clamp_by_value() {
 fn short_body_never_scrolls_and_each_tab_remembers_its_own_top() {
     let (mut short, _) = Fixture::single(
         80,
-        22,
+        23,
         "Bash",
         json!({"command":"short"}),
         S::Success,
@@ -145,7 +145,7 @@ fn short_body_never_scrolls_and_each_tab_remembers_its_own_top() {
 fn body_renders_once_per_tab_key_across_five_paints_and_return() {
     let (mut f, _) = Fixture::single(
         80,
-        22,
+        23,
         "Bash",
         json!({"command":"seq 1 99"}),
         S::Success,
@@ -247,7 +247,7 @@ fn inspector_never_touches_the_stage_cache() {
 fn unpainted() -> Fixture {
     let (mut f, _) = Fixture::single(
         80,
-        22,
+        23,
         "Bash",
         json!({"input_lines": (0..99).collect::<Vec<_>>()}),
         S::Success,

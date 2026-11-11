@@ -11,11 +11,15 @@ use super::support::{clocked, differing_cells, draw, layout_of, notify, row_text
 const SIZES: [(u16, u16); 3] = [(60, 16), (80, 24), (130, 30)];
 
 #[test]
-fn k3_a_toast_sits_on_the_chat_pane_bottom_row_directly_above_the_status_row() {
+fn k3_a_toast_sits_on_the_chat_pane_bottom_row_directly_above_the_mission_strip() {
     for (w, h) in SIZES {
         let (mut state, _c) = clocked(w, h);
         let layout = layout_of(&state, w, h);
-        assert_eq!(layout.chat_pane.bottom(), layout.status_bar.y, "{w}x{h}");
+        // The Stage ends where the mission strip begins (21-7 A22); the strip is directly above
+        // the status row at all three supported sizes.
+        let strip = layout.mission_strip.expect("an empty composer leaves room");
+        assert_eq!(layout.chat_pane.bottom(), strip.y, "{w}x{h}");
+        assert_eq!(strip.bottom(), layout.status_bar.y, "{w}x{h}");
         notify(&mut state, NoticeSeverity::Success, "Bookmark added");
         let buffer = draw(&mut state, w, h, true);
         let pane = layout.chat_pane;
@@ -132,13 +136,14 @@ fn k3_long_messages_and_wide_glyphs_are_clipped_to_the_pane_on_whole_graphemes()
 
 /// Literal `(width, height, cap)` table; the expected caps are not computed
 /// from the formula under test. The chat pane is the terminal height minus the
-/// status row and the composer (4 rows here): 60x16 -> 12 rows, 80x24 -> 20,
-/// 130x30 -> 26 — every supported size holds the full three. The lower steps
-/// of the formula (pane heights 0..11) are pinned by the in-file `capacity_for`
-/// test, because layout is only defined from the 60x16 floor up.
+/// mission strip row, the status row and the composer (5 rows here): 60x16 ->
+/// 11 rows (cap 2, the strip row cost one toast), 80x24 -> 19, 130x30 -> 25 —
+/// the larger sizes hold the full three. The lower steps of the formula (pane
+/// heights 0..11) are pinned by the in-file `capacity_for` test, because layout
+/// is only defined from the 60x16 floor up.
 #[test]
 fn k3_the_visible_cap_follows_the_pane_height() {
-    for (w, h, cap) in [(60u16, 16u16, 3usize), (80, 24, 3), (130, 30, 3)] {
+    for (w, h, cap) in [(60u16, 16u16, 2usize), (80, 24, 3), (130, 30, 3)] {
         let (mut state, _c) = clocked(w, h);
         for i in 0..6 {
             notify(

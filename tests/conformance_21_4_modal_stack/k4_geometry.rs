@@ -52,18 +52,36 @@ fn region_ends_above_the_status_row() {
                 ),
                 "{name}, full={full}"
             );
+            // The region ends above the mission strip (21-7 A22), which sits directly above
+            // the status row; with the strip yielded it ends above the status row itself.
+            let below = layout.mission_strip.unwrap_or(layout.status_bar);
             assert_eq!(
                 region.bottom(),
-                layout.status_bar.y,
-                "M5: status must be excluded"
+                below.y,
+                "M5: status and the mission strip must be excluded"
             );
             assert_eq!(region.intersection(layout.status_bar).height, 0);
+            assert_eq!(
+                layout.mission_strip.map(|strip| strip.bottom()),
+                Some(layout.status_bar.y),
+                "{name}, full={full}: the strip is directly above the status row"
+            );
             // Assert the public caller's geometry too: an unused correct helper is not enough.
             let shell = Shell::new(area, &layout);
             assert_eq!(shell.region, region, "{name}: Shell must use modal_region");
             assert_eq!(
-                (shell.chat_pane, shell.input_area, shell.status_bar),
-                (layout.chat_pane, layout.input_area, layout.status_bar)
+                (
+                    shell.chat_pane,
+                    shell.input_area,
+                    shell.status_bar,
+                    shell.mission_strip
+                ),
+                (
+                    layout.chat_pane,
+                    layout.input_area,
+                    layout.status_bar,
+                    layout.mission_strip
+                )
             );
         }
     }

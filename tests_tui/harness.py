@@ -49,7 +49,7 @@ LOG_DIR = Path.home() / ".rustain"
 
 # Terminal dimensions for the spawned PTY.
 # TERM_COLS must be >= SIDEBAR_MIN_WIDTH (120, see src/adapters/tui/layout.rs)
-# so sidebar-focused tests can actually show the History panel.
+# so the read-only monitor column (Ctrl+X w) can actually show.
 TERM_ROWS = 30
 TERM_COLS = 130
 
@@ -140,13 +140,15 @@ class TerminalScreen(pyte.Screen):
                     line[end] = line[end]._replace(data=" ")
 
 
-# ── Notification screen helpers (Story 21.1) ─────────────────────────────────
+# ── Notification screen helpers (Story 21.1; strip-aware since Story 21.7) ───
 #
 # Positional predicates over a rendered screen (``"\n".join(pyte.display)``):
 # the composer is the bottom-most bordered box, the status row sits directly
-# above it, and the chat pane's bottom edge — where toasts are painted,
-# right-aligned, newest at the bottom — is the row(s) directly above the
-# status row. Nothing here is an unanchored substring search.
+# above it, the mission strip (one muted row, Story 21.7 A22) sits directly
+# above the status row whenever the chat pane can spare it, and the chat pane's
+# bottom edge — where toasts are painted, right-aligned, newest at the bottom —
+# is the row(s) directly above that. Nothing here is an unanchored substring
+# search.
 
 NOTIFICATION_LOG_TITLE = "┌ System · Notifications "
 _SEVERITY_WORDS = ("Info", "Success", "Warning", "Error")
@@ -162,23 +164,51 @@ def composer_top(lines: list[str]) -> int | None:
     return max((i for i in range(bottom) if lines[i].strip().startswith("┌")), default=None)
 
 
+_STRIP_SEGMENT = (
+    r"(?:(?:Agents|A) \d+/\d+|(?:Tasks|T) \d+/\d+|(?:Decisions|D|Writer decisions|W) \d+)"
+)
+_STRIP_HINT = r"\^X \S+ (?:Mission Control|Messages)"
+# The A22 grammar, anchored to the row start; a monitor column painted to the
+# right of the main column may follow after at least two blanks.
+_STRIP_ROW = re.compile(
+    rf"^(?:{_STRIP_SEGMENT}(?: · {_STRIP_SEGMENT})*|{_STRIP_HINT})(?:\s{{2,}}\S.*)?$"
+)
+
+
 def status_row(screen: str) -> str:
-    """The status bar row: the one directly above the composer box ('' if none)."""
+    """The status bar row: the one directly above the composer box ('' if none).
+
+    The mission strip is above this row, never between it and the composer."""
     lines = screen.split("\n")
     top = composer_top(lines)
     return lines[top - 1] if top else ""
 
 
+def strip_row(screen: str) -> str:
+    """The mission strip row: the row directly above the status row when it
+    matches the A22 grammar (``Agents r/n · Tasks d/n · Decisions n``, the
+    abbreviated ``A/T/D`` form, ``Writer decisions n``, or the idle key hint);
+    '' when the strip yielded its row to the Stage or is absent."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    if not top or top < 2:
+        return ""
+    row = lines[top - 2].rstrip()
+    return row if _STRIP_ROW.match(row) else ""
+
+
 def toast_rows(screen: str, rows: int = 1) -> list[str]:
-    """The chat-pane bottom rows directly above the status row, newest first.
+    """The chat-pane bottom rows directly above the status row (and above the
+    mission strip when one is painted), newest first.
 
     One borderless row per visible toast below 100 columns (the newest toast is
-    the row adjacent to the status row)."""
+    the row adjacent to the strip, or to the status row when the strip yielded)."""
     lines = screen.split("\n")
     top = composer_top(lines)
     if not top:
         return []
-    return [lines[top - 2 - k] for k in range(rows) if top - 2 - k >= 0]
+    first = top - 2 - (1 if strip_row(screen) else 0)
+    return [lines[first - k] for k in range(rows) if first - k >= 0]
 
 
 def toast_present(screen: str, text: str, severity: str | None = None, rows: int = 1) -> bool:
@@ -827,35 +857,31 @@ class RustainTUI:
         time.sleep(0.5)
 
     def open_history(self) -> None:
-        """Open the History sidebar panel with the leader chord ``Ctrl+X h``.
+        """Open the History window with the leader chord ``Ctrl+X h``.
 
         Story 21.3: the chord is the portable route (``Ctrl+X`` = ``0x18``, then
         ``h``). Raw ``0x08`` is **Ctrl+H** in crossterm 0.29 (Backspace is
         ``0x7F``), and Ctrl+H is unbound outside text fields now, so it never
-        opens a panel. The panel needs >= 120 columns (the harness default is
-        ``TERM_COLS`` = 130); the default density hides the sidebar column, so
-        the open moves to Monitor density (the ``tui_monitor`` fixture starts
-        there).
+        opens anything. Story 21.7: History is a frame over the Stage at every
+        width (no sidebar column, no density), so nothing but the chord is needed.
 
         Both waits are structural: the leader menu's ``[Esc] Cancel`` item, then
-        the panel's own box title ``┌History`` (the menu paints a ``[H] History``
-        item with no ``┌`` before it, so the menu alone never satisfies it). The
-        same chord toggles a showing History panel closed (``close_history``).
+        the frame's own box title ``┌History`` (the menu paints a ``[H] History``
+        item with no ``┌`` before it, so the menu alone never satisfies it).
         """
         self.send(CTRL_X)
         self.wait_for_screen("[Esc] Cancel", timeout=3.0)
         self.send("h")
         assert self.wait_for_screen("┌History", timeout=5.0), (
-            f"History panel did not open after Ctrl+X h. Screen:\n{self.get_screen_text()}"
+            f"History frame did not open after Ctrl+X h. Screen:\n{self.get_screen_text()}"
         )
 
     def close_history(self) -> None:
-        """Close the History sidebar panel: ``Ctrl+X h`` toggles it off."""
-        self.send(CTRL_X)
-        self.wait_for_screen("[Esc] Cancel", timeout=3.0)
-        self.send("h")
+        """Close the History window: ``Esc`` goes back one frame (the chord is
+        an opener only), then wait for its box title to leave the screen."""
+        self.send(ESC)
         assert self.wait_for_screen_not_contains("┌History", timeout=5.0), (
-            f"History panel did not close after Ctrl+X h. Screen:\n{self.get_screen_text()}"
+            f"History frame did not close after Esc. Screen:\n{self.get_screen_text()}"
         )
 
     def new_tab(self) -> None:

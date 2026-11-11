@@ -1,0 +1,16 @@
+┌Thread · story_assignment─────────────────────────────────┐
+│  item actions · ri_SceqPQx-PyzmuUDLYtgXYzYikAXMMKVE      │
+│  story_assignment · peer-tainted                         │
+│XMMKVE — receipt only; does not answer or select context  │
+│item ri_SceqPQx-PyzmuUDLYtgXYzYikAXMMKVE selected as peer │
+│context for this daemon conversation — clears on /clear or│
+│ daemon restart; view and acknowledgement do not select it│
+│  [r] Respond  [u] Stop using as context                  │
+│  [Tab] Response  [c] Copy  [/] Search  [v] Source  [PgUp/│
+│  PgDn] Scroll  [Esc] Close                               │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ (daem │ attached │ Normal │ Ready Needs you (1) ^X q log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+┌Thread · story_assignment─────────────────────────────────┐
+│  item actions · ri_SceqPQx-PyzmuUDLYtgXYzYikAXMMKVE      │
+│  story_assignment                                        │
+│      identify conflicts with ADR-047; do not send        │
+│      automatically.                                      │
+│                                                          │
+│  ri_SceqPQx-PyzmuUDLYtgXYzYikAXMMKVE · received          │
+│  [r] Respond  [a] Acknowledge  [u] Use as context        │
+│  [Tab] Response  [c] Copy  [/] Search  [v] Source  [PgUp/│
+│  PgDn] Scroll  [Esc] Close                               │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ (daem │ attached │ Normal │ Ready Needs you (1) ^X q log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

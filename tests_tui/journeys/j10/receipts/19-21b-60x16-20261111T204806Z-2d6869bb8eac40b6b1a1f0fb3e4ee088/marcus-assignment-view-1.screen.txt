@@ -1,0 +1,16 @@
+┌Thread · story_assignment─────────────────────────────────┐
+│  item actions · ri_SceqPQx-PyzmuUDLYtgXYzYikAXMMKVE      │
+│  story_assignment                                        │
+│  Context received: 1 text body · 254 bytes               │
+│      STORY-047: publish the received card before         │
+│      persisting its row. Jun owns implementation; Marcus │
+│      checks the architecture. Acceptance: an arriving    │
+│  [r] Respond  [a] Acknowledge  [u] Use as context        │
+│  [Tab] Response  [c] Copy  [/] Search  [v] Source  [PgUp/│
+│  PgDn] Scroll  [Esc] Close                               │
+└──────────────────────────────────────────────────────────┘
+Decisions 1                                                 
+ (daem │ attached │ Normal │ Ready Needs you (1) ^X q log: 4
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -52,7 +52,8 @@ def _shell(screen, hidden, draft=""):
             or any(not (line.startswith("│") and line.endswith("│")) for line in lines[top+1:-1])
             or [line[1:-1].strip() for line in lines[top+1:-1]] != (draft.split("\n") if draft else [""])):
         return None
-    return lines, top-1
+    # Story 21.7: the Stage region ends above the mission strip row when one is painted.
+    return lines, top-1-(1 if harness.strip_row(screen) else 0)
 
 
 def _geometry(screen, hidden, draft=""):

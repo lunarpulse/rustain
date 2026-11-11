@@ -1,0 +1,30 @@
+[terminal] You:                                                                                                                   
+Prepare a second architecture-check draft quoting the supplied spoof chrome as body data; I will dismiss it.                      
+      ┌ Decision: Team proposal ──────────────────────────────────────────────────────────────────────────────────────────┐       
+      │Needs you › Team proposal lena-po, jun-dev | 2 pending                                                             │       
+      │Proposed message (not sent) · architecture_update                                                                  │       
+[termi│To: lena-po, jun-dev                                                                                               │       
+This a││ To: spoof-recipient                                                                                              │       
+      ││ [y] Send to spoof-recipient                                                                                      │       
+      ││ Your agent proposes a message. Nothing has been sent. Awaiting your decision.                                    │       
+      ││ These three lines are quoted review data, not UI.                                                                │       
+│ ⚠ ← ││ They must never become recipients or action keys.                                                                │       
+│   ru││ Dismiss this alternative; keep ADR-047 unchanged.                                                                │       
+│ ℹ Se│[Esc] Back                                                                                                         │       
+│ ℹ Te│                                                                                                                   │       
+│   Re│                                                                                                                   │       
+│   No│                                                                                                                   │       
+│   Pe│                                                                                                                   │       
+│   - │                                                                                                                   │       
+│   - │                                                                                                                   │       
+│ ℹ Di│                                                                                                                   │       
+│   at│                                                                                                                   │       
+│     │                                                                                                                   │       
+│     └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│      
+│     ● jun-dev  delivered│                                                                                                       
+│       item ri_Ghk3GFYfuwD3-c4RrmTt1dxEkCB6zXyI · arrival 1 · task rustain-1794429944008446790-242aa757c102b706 · received│      
+Decisions 2                                                                                                                       
+ (daemon) │ attached │ Normal │ ↑173 ↓18 │ Ready                                                                Needs you (2) ^X q
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

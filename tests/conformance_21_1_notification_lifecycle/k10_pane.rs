@@ -1009,6 +1009,14 @@ fn k10_the_frame_paints_in_frame_rect_and_changes_no_other_cell() {
                 if sheet.contains((x, y).into()) {
                     continue;
                 }
+                // The mission strip (21-7 A22) is painted by the shared compositor itself; the
+                // `without` draw skips `compose`, so the strip is pinned separately below.
+                if layout
+                    .mission_strip
+                    .is_some_and(|strip| strip.contains((x, y).into()))
+                {
+                    continue;
+                }
                 assert_eq!(
                     without.cell((x, y)).map(|c| c.symbol().to_owned()),
                     with.cell((x, y)).map(|c| c.symbol().to_owned()),
@@ -1024,6 +1032,13 @@ fn k10_the_frame_paints_in_frame_rect_and_changes_no_other_cell() {
                     assert_eq!(without[(x, y)], with[(x, y)], "status is unchanged");
                 }
             }
+        }
+        if let Some(strip) = layout.mission_strip {
+            assert_eq!(
+                row_text(&with, strip.y).trim_end(),
+                "Decisions 1",
+                "{width}x{height}: the strip counts the waiting decision, uncovered by the frame"
+            );
         }
         let text = screen(&with);
         let top = row_text(&with, sheet.y);

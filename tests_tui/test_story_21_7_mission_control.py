@@ -20,6 +20,13 @@ a plan; `Ctrl+X w` paints the right column titled `Monitor · Tasks` with the ta
 intact main column; a second `Ctrl+X w` takes it away. A second process at 80x24: `Ctrl+X w`
 answers the width remedy toast and paints no column.
 
+Leg G (slice 7-G, 80x24 with a 60x16 part): a saved session with a plan; the strip row directly
+above the status row reads `Tasks 2/3` (two of the seeded three tasks are done; the A22 grammar
+anchored by `harness.strip_row`); `Ctrl+X w` (the width remedy toast) paints the toast on the row
+directly above the strip, found by the strip-aware `harness.toast_rows`. A second process at
+60x16 with an eight-line draft: the strip yields its row (none painted) and `Ctrl+X h` still paints
+the five-row History frame with the status row directly below it.
+
 Offline first: RUSTAIN_MISSION_DESKCHECK=1 with RUSTAIN_MISSION_FRAMES=<dir> consumes only the
 frames written by the ignored Rust test `story21_7_smoke_frames_export` (60x16, 80x24, 130x30);
 no binary or subprocess is started. Every predicate passes on the intended frame and fails on
@@ -37,7 +44,7 @@ import pytest
 
 import harness
 from harness import RustainTUI
-from keys import CTRL_X
+from keys import ALT_ENTER, CTRL_X
 
 DESKCHECK = os.environ.get("RUSTAIN_MISSION_DESKCHECK") == "1"
 SIZES = ((60, 16), (80, 24), (130, 30))
@@ -383,6 +390,76 @@ def torn_remedy(screen):
     }
 
 
+STRIP_TASKS = "Tasks 2/3"
+STRIP_IDLE = "^X s Mission Control"
+
+
+def strip_row_ok(screen, text):
+    """The strip row reads exactly `text` (the A22 grammar, found by the harness helper) directly
+    above the status row, which is directly above the composer."""
+    rows = _rows(screen)
+    top = harness.composer_top(rows)
+    return (bool(top) and top >= 2 and rows[top - 2] == text and STATUS in rows[top - 1]
+            and harness.strip_row(screen) == text)
+
+
+def strip_toast_ok(screen):
+    """The strip with the width remedy toast on the row directly above it (the strip-aware
+    `harness.toast_rows`), the status row intact."""
+    toasts = harness.toast_rows(screen)
+    return (strip_row_ok(screen, STRIP_TASKS) and len(toasts) == 1
+            and re.fullmatch(r"\s*" + re.escape(MONITOR_REMEDY_HEAD) + r".*", toasts[0]) is not None)
+
+
+def strip_yield_ok(screen):
+    """No strip row; the five-row `History` frame whose bottom border is directly above the status
+    row, with the rail row (`[Esc] Back`) inside it."""
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, HISTORY_TITLE)
+    if top is None or bottom is None or bottom - top != 4 or harness.strip_row(screen) != "":
+        return False
+    rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
+    body = re.fullmatch(r"│.*\S.*│", rows[top + 1]) is not None
+    return rail and body and STATUS in rows[bottom + 1]
+
+
+def torn_strip(screen, text):
+    rows = _rows(screen)
+    top = harness.composer_top(rows)
+    strip, status = top - 2, top - 1
+    return {
+        "strip cut mid-row": "\n".join(rows[:strip] + [text[: len(text) // 2]] + rows[strip + 1:]),
+        "strip missing": "\n".join(rows[:strip] + [""] + rows[strip + 1:]),
+        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
+        "strip and status swapped": "\n".join(rows[:strip] + [rows[status], rows[strip]] + rows[status + 1:]),
+        "strip text changed": "\n".join(rows[:strip] + [text.replace("2/3", "9/9").replace("Mission", "Mess")] + rows[strip + 1:]),
+    }
+
+
+def torn_strip_toast(screen):
+    rows = _rows(screen)
+    top = harness.composer_top(rows)
+    strip, toast = top - 2, top - 3
+    return {
+        "toast over the strip": "\n".join(rows[:strip] + [rows[toast]] + rows[strip + 1:]),
+        "toast under the strip": "\n".join(rows[:toast] + [rows[strip], rows[toast]] + rows[strip + 1:]),
+        "toast missing": "\n".join(rows[:toast] + [""] + rows[toast + 1:]),
+        "toast cut mid-row": "\n".join(rows[:toast] + [rows[toast][: rows[toast].index("The monitor") + 11]] + rows[toast + 1:]),
+    }
+
+
+def torn_strip_yield(screen):
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, HISTORY_TITLE)
+    status = bottom + 1
+    return {
+        "a strip row painted over the frame bottom": "\n".join(rows[:bottom] + [STRIP_TASKS] + rows[bottom + 1:]),
+        "frame cut mid-row": "\n".join(rows[:top + 1] + [rows[top + 1][: len(rows[top + 1]) // 2]] + rows[top + 2:]),
+        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
+        "rail half painted": "\n".join(row.replace("[Esc] Back", "[Esc") for row in rows),
+    }
+
+
 def _deskcheck():
     frames = Path(os.environ["RUSTAIN_MISSION_FRAMES"])
     for width, height in SIZES:
@@ -477,6 +554,27 @@ def _deskcheck():
             for label, torn in torn_remedy(on).items():
                 assert not monitor_remedy_ok(torn), f"{name}: torn remedy control `{label}` must fail:\n{torn}"
         assert not monitor_column_ok(history) and not monitor_remedy_ok(history), name
+    for width, height in SIZES:
+        name = f"{width}x{height}"
+        idle = (frames / f"strip-idle-{name}.txt").read_text(encoding="utf-8")
+        plan = (frames / f"strip-plan-{name}.txt").read_text(encoding="utf-8")
+        assert strip_row_ok(idle, STRIP_IDLE), f"{name}: the idle hint must pass\n{idle}"
+        assert strip_row_ok(plan, STRIP_TASKS), f"{name}: the plan strip must pass\n{plan}"
+        assert not strip_row_ok(idle, STRIP_TASKS) and not strip_row_ok(plan, STRIP_IDLE), name
+        for text, frame in ((STRIP_IDLE, idle), (STRIP_TASKS, plan)):
+            for label, torn in torn_strip(frame, text).items():
+                assert not strip_row_ok(torn, text), f"{name}: torn strip control `{label}` must fail:\n{torn}"
+        if width < 120:
+            toast = (frames / f"strip-toast-{name}.txt").read_text(encoding="utf-8")
+            assert strip_toast_ok(toast), f"{name}: the toast above the strip must pass\n{toast}"
+            assert not strip_toast_ok(plan), f"{name}: no toast on the plain frame"
+            for label, torn in torn_strip_toast(toast).items():
+                assert not strip_toast_ok(torn), f"{name}: torn toast control `{label}` must fail:\n{torn}"
+    yielded = (frames / "strip-yield-60x16.txt").read_text(encoding="utf-8")
+    assert strip_yield_ok(yielded), f"60x16: the yielded strip with the five-row frame must pass\n{yielded}"
+    assert not strip_yield_ok((frames / "strip-plan-60x16.txt").read_text(encoding="utf-8"))
+    for label, torn in torn_strip_yield(yielded).items():
+        assert not strip_yield_ok(torn), f"60x16: torn yield control `{label}` must fail:\n{torn}"
     print("desk-check ok", [f"{w}x{h}" for w, h in SIZES])
 
 
@@ -914,3 +1012,56 @@ def test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24(monkeypatch):
             (evidence / "monitor-remedy-80x24.txt").write_text(remedy, encoding="utf-8")
         (evidence / "run.json").write_text(json.dumps(
             {"viewports": [[130, 30], [80, 24]], "binary": binary, "result": "PASS"}) + "\n")
+
+
+@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_g_mission_strip_at_80x24_and_the_yield_at_60x16(monkeypatch):
+    """Leg G (7-G): a saved session with a plan; the strip row above the status row reads
+    `Tasks 2/3`; `Ctrl+X w` raises the width remedy toast on the row directly above the strip.
+    A second process at 60x16: an eight-line draft makes the strip yield and `Ctrl+X h` still
+    paints the five-row History frame. Hermetic."""
+    session_id = "story21-7-plan"
+    with tempfile.TemporaryDirectory(prefix="21-7-g-") as root:
+        root = Path(root)
+        workspace = root / "workspace"
+        sessions = workspace / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / f"{session_id}.meta.json").write_text(json.dumps(_plan_session(session_id)))
+        (workspace / ".env").write_text("")
+        home = root / "home"
+        home.mkdir()
+        data = root / "data"
+        data.mkdir()
+        env = {"HOME": str(home), "RUSTAIN_PROFILE": "", "RUSTAIN_CLIPBOARD": "file",
+               "RUSTAIN_DATA_DIR": str(data)}
+        evidence_parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir()))
+        evidence = evidence_parent / "21-7-leg-g"
+        evidence.mkdir(parents=True, exist_ok=True)
+        binary = str(harness._resolve_binary()[0])
+        with _start_leg_f(monkeypatch, workspace, env, 80, 24, session_id) as tui, \
+                (evidence / "raw-80x24.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            strip = tui.wait_until(lambda s: strip_row_ok(s, STRIP_TASKS), "the Tasks strip above the status row", timeout=15)
+            tui.send(CTRL_X + "w")
+            toast = tui.wait_until(strip_toast_ok, "the remedy toast directly above the strip", timeout=15)
+            for name, frame in (("strip", strip), ("strip-toast", toast)):
+                (evidence / f"{name}-80x24.txt").write_text(frame, encoding="utf-8")
+        with _start_leg_f(monkeypatch, workspace, env, 60, 16, session_id) as tui, \
+                (evidence / "raw-60x16.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            tui.wait_until(lambda s: strip_row_ok(s, STRIP_TASKS), "the strip with an empty composer", timeout=15)
+            for number in range(8):
+                if number:
+                    tui.send(ALT_ENTER)
+                tui.send(f"draft {number}")
+            tui.wait_until(lambda s: harness.strip_row(s) == "" and "draft 7" in s,
+                           "the strip yielded to the eight-line draft", timeout=15)
+            tui.send(CTRL_X + "h")
+            yielded = tui.wait_until(strip_yield_ok, "the five-row History frame without a strip", timeout=15)
+            (evidence / "strip-yield-60x16.txt").write_text(yielded, encoding="utf-8")
+        (evidence / "run.json").write_text(json.dumps(
+            {"viewports": [[80, 24], [60, 16]], "binary": binary, "result": "PASS"}) + "\n")

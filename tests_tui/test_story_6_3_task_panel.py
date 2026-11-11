@@ -252,7 +252,7 @@ def test_toggle_closes_panel(tui_monitor: RustainTUI):
     tui.send(ESC)
     tui.wait(1.0)
     tui.assert_screen_not_contains(
-        "Mission Control", msg="Tab should close on Esc"
+        "Mission Control ·", msg="Tab should close on Esc"
     )
 
 

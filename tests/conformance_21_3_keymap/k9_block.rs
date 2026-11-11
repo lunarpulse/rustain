@@ -26,7 +26,8 @@ impl Runtime for BlockRuntime {
 }
 
 fn setup() -> BlockRuntime {
-    let (mut f, id) = single(80, 24, &code(60));
+    // 25 rows: the Stage keeps the 20 rows (80x24 before the mission strip) the witnesses pin.
+    let (mut f, id) = single(80, 25, &code(60));
     f.h.state.input_buffer = "retained draft".into();
     f.h.state.cursor_position = 4;
     open(&mut f, &id);

@@ -607,7 +607,7 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
         _wait_for_marker(marcus, "[agent-composed]", marcus.get_screen_text)
         product_log_screen = _chat_pages(marcus, "marcus-agent-composed-log", snapshots)
         marcus.send("\x1b")
-        _wait(lambda: "A2A log" not in marcus.get_screen_text(), marcus.get_screen_text)
+        _wait(lambda: "Mission Control · Messages" not in marcus.get_screen_text(), marcus.get_screen_text)
         assert "[agent-composed]" in product_log_screen and "[auto-sent]" not in product_log_screen, product_log_screen
         after_reads = checkpoint("legitimate-board-and-log-traffic-complete")
         for alias in RECIPIENTS:

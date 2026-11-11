@@ -98,7 +98,7 @@ def _box(screen, title, rail, closing=None):
     rows = screen.split("\n")
     if len(rows) not in (16, 24, 30) or any(len(row) != len(rows[0]) for row in rows):
         return None
-    width, region_height = len(rows[0]), len(rows)-4
+    width, region_height = len(rows[0]), len(rows)-4-_strip_rows(screen)
     if width < 60:
         return None
     box_width, box_height = ((width, region_height) if width < 100 else
@@ -145,7 +145,13 @@ def _bb1a_shell(screen, draft):
             or any(not (r.startswith("│") and r.endswith("│")) for r in rows[top+1:-1])
             or [r[1:-1].strip() for r in rows[top+1:-1]] != ([line.strip() for line in draft.split("\n")] if draft else [""])):
         return None
-    return rows, top-1
+    return rows, top-1-_strip_rows(screen)
+
+
+def _strip_rows(screen):
+    """Story 21.7: 1 when the mission strip row sits above the status row (the Stage region
+    every frame and menu is laid out in ends above it), 0 when it yielded to the Stage."""
+    return 1 if harness.strip_row(screen) else 0
 
 
 def _bb1a_search(screen, query, count, hidden, draft=""):
@@ -285,7 +291,8 @@ def _help_scrolled(screen):
     if width == 60:
         return first.startswith("Ctrl+X chords.") and last == ""
     if width == 80:
-        return first == "close." and last.startswith("Hold Shift    Select text for copy")
+        # 21.7: the mission strip row shortens the Stage by one, so the final row is the previous one.
+        return first == "close." and last.startswith("Shift+Wheel   Scroll half page per tick")
     if width == 130:
         return first == "" and last.startswith("G             Jump to newest message")
     return False
@@ -362,7 +369,7 @@ def _popup_box(screen):
 
 def _leader_box(screen, feedback=None):
     rows = screen.split("\n")
-    box = _bottom_box(screen, "Ctrl+X", len(rows[0]), len(rows)-4, feedback)
+    box = _bottom_box(screen, "Ctrl+X", len(rows[0]), len(rows)-4-_strip_rows(screen), feedback)
     return box if box and "[Esc] Cancel" in box[-2] else None
 
 
@@ -1387,7 +1394,7 @@ def _bbii_shell(screen, draft):
     if (any(not (r.startswith("│") and r.endswith("│")) for r in body)
             or [r[1:-1].strip() for r in body] != draft.split("\n")):
         return None
-    return rows, top-1
+    return rows, top-1-_strip_rows(screen)
 
 
 def _bbii_frame(screen, hidden, draft, title, closing=None, spaced=True):

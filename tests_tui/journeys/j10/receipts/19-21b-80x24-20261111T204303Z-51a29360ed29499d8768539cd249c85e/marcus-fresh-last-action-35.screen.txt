@@ -1,0 +1,24 @@
+[terminal] ⤷ Assistant:                                                         
+[awaiting your response]                                                        
+                                                                                
+                                                                                
+                                                                                
+[terminal] You:                                                                 
+Check this selected story assignment against ADR-047 and propose the exact      
+finding to Lena and Jun; never send it.                                         
+                                                                                
+                                                                                
+                                                                                
+[terminal] Assistant:                                                           
+The architecture finding is a draft for your review. I have not sent it.        
+                                                                                
+                                                                                
+                                                                                
+│ ⚠ ← inbound ✓ accepted via A2A · peer│                                        
+│   122019609c612fd7b440a4582808fc8ded86282115a835f8e0d4cda50fb3c742b757 ·│     
+│   task rustain-1794429784623708264-4166948c12f408d5 · task accepted and│      
+Decisions 1                                                                     
+ (daemon) │ attached │ Normal │ ↑109 ↓19 │ Ready       Needs you (1) ^X q log: 7
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

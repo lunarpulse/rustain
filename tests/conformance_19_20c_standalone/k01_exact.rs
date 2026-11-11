@@ -81,7 +81,7 @@ async fn k01_late_tool_fields_review_paint_and_exact_execution() {
                 ["界", "e\u{301}", "🦀"]
                     .iter()
                     .all(|grapheme| painted.contains(grapheme)),
-                "Unicode survives presentation"
+                "Unicode survives presentation: {tool} {width}×{height}: {painted}"
             );
             assert!(
                 painted.contains("  whitespace stays  "),

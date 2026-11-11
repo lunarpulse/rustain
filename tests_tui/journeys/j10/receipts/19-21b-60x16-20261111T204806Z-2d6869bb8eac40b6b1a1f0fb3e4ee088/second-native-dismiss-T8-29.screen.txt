@@ -1,0 +1,16 @@
+┆  response: notify-and-wait · via individual —             
+┆  a2a-interaction.toml                                     
+┆  notification: immediate · via individual —               
+┆  a2a-interaction.toml                                     
+                                                            
+                                                            
+[terminal] ⤷ Assistant:                                     
+[awaiting your response]                                    
+                                                            
+                                                            
+                                                            
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑173 ↓18 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

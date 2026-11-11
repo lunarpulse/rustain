@@ -69,7 +69,13 @@ def decision_frame(screen, title, rail, width=WIDTH, height=HEIGHT, crumb_title=
     rows = screen.split("\n")
     if len(rows) != height or any(len(row) != width for row in rows):
         return None
-    region = height - 4
+    # Story 21.7: a mission strip row ("Decisions n", "Tasks d/n", the idle hint) sits between
+    # the sheet and the status row whenever the Stage can spare it; the sheet ends above it.
+    strip = re.fullmatch(
+        r"(?:(?:Agents|A|Tasks|T|Decisions|D|Writer decisions|W) .*|\^X \S+ (?:Mission Control|Messages))",
+        rows[height - 5].rstrip(),
+    )
+    region = height - 4 - (1 if strip else 0)
     top, bottom = rows[0], rows[region - 1]
     if not (top.startswith(f"┌ Decision: {title} ") and top.endswith("┐")):
         return None

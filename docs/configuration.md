@@ -320,6 +320,8 @@ them, and `-c layout.density_mode=…` is accepted without a warning and ignored
 There is no startup key for the read-only monitor either: it is an explicit
 toggle, `Ctrl+X w`, on terminals at least 120 columns wide (the preference is
 kept when the terminal narrows, and the column paints again when it widens).
+The mission strip (the muted row above the status row) has no setting either: it
+is always laid out and yields its row only when the Stage would drop below five rows.
 
 ### Code blocks (`[markdown]`)
 

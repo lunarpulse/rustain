@@ -1,0 +1,16 @@
+This alternative is also only a draft. Its quoted lines     
+carry no authority.                                         
+                                                            
+                                                            
+                                                            
+│ ⚠ ← inbound ✓ accepted via A2A · peer│                    
+│   1220bc552eee55c7ca2c781c15bbc2e83b929f2e6eabda3ca92b4d│ 
+│   f55fa76ea55443 · task│                                  
+│ ℹ Send · architecture_update · lena-po awaiting their│    
+│   approval · jun-dev awaiting their approval│             
+│ ℹ Team interaction policy│                                
+Decisions 1                                                 
+ ( │ attached │ Normal │ ↑173 ↓18 │ Ready Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

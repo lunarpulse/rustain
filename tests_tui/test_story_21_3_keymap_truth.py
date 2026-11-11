@@ -846,8 +846,10 @@ def test_keymap_truth_attached_permission_card_takes_chat_focus_80x24(tmp_path, 
         def permission_frame(s):
             rows = s.splitlines()
             return (len(rows) == 24 and rows[0].startswith("┌ Decision: Permission ")
-                    and rows[19].startswith("└") and rows[19].endswith("┘")
-                    and all(row.startswith("│") and row.endswith("│") for row in rows[1:19])
+                    and rows[18].startswith("└") and rows[18].endswith("┘")
+                    and rows[19].rstrip().startswith("Decisions ")
+                    and harness.strip_row(s) == rows[19].rstrip()
+                    and all(row.startswith("│") and row.endswith("│") for row in rows[1:18])
                     and all(rail in s for rail in ("[y] Allow", "[s] Session", "[a] Always",
                                                    "[n] Deny", "[f] Deny + feedback", "[r] Review")))
 
@@ -864,8 +866,10 @@ def test_keymap_truth_attached_permission_card_takes_chat_focus_80x24(tmp_path, 
             def listed(s):
                 rows = s.splitlines()
                 return (len(rows) == 24 and rows[0].startswith("┌ Needs you ")
-                        and rows[19].startswith("└") and rows[19].endswith("┘")
-                        and all(row.startswith("│") and row.endswith("│") for row in rows[1:19])
+                        and rows[18].startswith("└") and rows[18].endswith("┘")
+                        and rows[19].rstrip().startswith("Decisions ")
+                        and harness.strip_row(s) == rows[19].rstrip()
+                        and all(row.startswith("│") and row.endswith("│") for row in rows[1:18])
                         and any("▸ Permission · Bash" in row for row in rows)
                         and "[Enter] Open  [Esc] Back  [Up/Down] Select" in s)
             settle(listed, "complete Needs-you list")
