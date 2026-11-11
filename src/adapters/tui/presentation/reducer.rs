@@ -14,7 +14,7 @@ pub fn initial_base() -> FocusState {
 }
 
 /// Runtime effects may change an empty stack's base, never a retained caller.
-/// Sidebar focus remains a base slot.
+/// The base focus is the composer or the Stage; every other surface is a stack frame.
 pub fn set_base(state: &mut TuiState, focus: FocusState) {
     if may_set_base(state, &focus) && state.focus != focus {
         state.focus = focus;
@@ -30,16 +30,6 @@ pub fn replace_base(state: &mut TuiState, focus: FocusState) -> FocusState {
         previous
     } else {
         state.focus.clone()
-    }
-}
-
-pub fn update_sidebar_selection(state: &mut TuiState, selected: usize) {
-    if state.modal_stack.is_empty()
-        && let FocusState::Sidebar {
-            selected: current, ..
-        } = &mut state.focus
-    {
-        *current = selected;
     }
 }
 
@@ -61,6 +51,7 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 | Surface::AgentWindow
                 | Surface::TaskWindow
                 | Surface::Adapters
+                | Surface::History
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
@@ -205,6 +196,20 @@ pub fn open_adapters(
 ) -> Opened {
     state.adapters_window = Some(payload);
     let opened = open_frame(state, Surface::Adapters, None, None);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
+}
+
+/// The History window (A21): one frame at a time. The caller keeps the selection of a window
+/// that is already open (it hands the same payload back, refreshed); the opening writes no
+/// base focus.
+pub fn open_history(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::history_window::HistoryWindowState,
+) -> Opened {
+    state.history_window = Some(payload);
+    let opened = open_frame(state, Surface::History, None, None);
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
     opened
@@ -672,7 +677,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::ArtifactWindow
         | Surface::AgentWindow
         | Surface::TaskWindow
-        | Surface::Adapters => {}
+        | Surface::Adapters
+        | Surface::History => {}
     }
 }
 
@@ -882,6 +888,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::Adapters => {
             state.adapters_window = None;
+            None
+        }
+        Surface::History => {
+            state.history_window = None;
             None
         }
     };

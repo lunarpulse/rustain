@@ -104,15 +104,6 @@ mod tests {
     }
 }
 
-/// Panel types for the sidebar focus target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PanelType {
-    History,
-    // The durable Room, the A2A log (Messages), the artifact list and the subagent roster are
-    // Mission Control tabs, and the Adapters health is a window, since Story 21.7: none of
-    // them is a sidebar panel.
-}
-
 /// Target of a delete confirmation dialog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteConfirmTarget {

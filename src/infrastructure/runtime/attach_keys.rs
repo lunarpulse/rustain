@@ -1074,7 +1074,6 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             match ctx.state.focus {
                 FocusState::Input => presentation::reducer::set_base(ctx.state, FocusState::Chat),
                 FocusState::Chat => presentation::reducer::set_base(ctx.state, FocusState::Input),
-                _ => {}
             }
             ctx.state.needs_redraw = true;
         }
@@ -6804,6 +6803,7 @@ pub(crate) mod tests {
                     | Surface::AgentWindow
                     | Surface::TaskWindow
                     | Surface::Adapters
+                    | Surface::History
                     | Surface::Login => unreachable!("surface not offered attached"),
                     Surface::ThreadInspector => unreachable!(
                         "the thread frame owns its keys by value: story21_8_attached_thread_frame_keys_act_by_value"

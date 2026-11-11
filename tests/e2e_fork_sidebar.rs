@@ -3,7 +3,7 @@
 //! - AC7.a: SessionMeta fork_source round-trip in both flat and directory layouts
 //! - AC7.b: DF-088 regression — unknown SessionMeta fields preserved on re-save
 //! - AC7.c: SessionSummary.has_fork_source flag populated from SessionMeta
-//! - AC7.d: Sidebar widget renders 🔀 marker for forked conversations
+//! - AC7.d: History window renders 🔀 marker for forked conversations
 //! - AC7.e: Legacy backfill — sessions with fork_source in main JSON but not
 //!   in sidecar get their sidecars repaired on list_conversations()
 
@@ -11,17 +11,25 @@ use tempfile::TempDir;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 
 use rustain::adapters::filesystem::FileSystemStorage;
-use rustain::adapters::tui::widgets::sidebar;
-use rustain::domain::models::MessageRole;
+use rustain::adapters::tui::history_window;
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::layout::compute_layout;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::presentation::occlusion::OpaqueRects;
+use rustain::adapters::tui::presentation::{Shell, compose};
+use rustain::adapters::tui::state::TuiState;
+use rustain::adapters::tui::widgets::history_inspector::row_text;
 use rustain::domain::models::checkpoint::CheckpointId;
 use rustain::domain::models::conversation::{
     ChatMessage, Conversation, ForkSource, generate_conversation_id,
 };
 use rustain::domain::models::session_meta::SessionMeta;
+use rustain::domain::models::{ConversationSummary, DensityMode, MessageRole};
 use rustain::domain::ports::StoragePort;
-use rustain::domain::services::session_index::{SessionIndex, SessionSummary};
+use rustain::domain::services::session_index::SessionIndex;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -224,83 +232,121 @@ async fn test_e2e_session_summary_has_fork_flag() {
     );
 }
 
-// ── AC7.d: Sidebar widget renders 🔀 marker ──────────────────────────────────
+// ── AC7.d: the History window renders the 🔀 marker ──────────────────────────
 
-#[test]
-fn test_e2e_sidebar_renders_fork_marker() {
-    let theme = rustain::adapters::tui::theme::Theme::dark();
-    let backend = TestBackend::new(60, 10);
-    let mut terminal = Terminal::new(backend).unwrap();
+const NOW: i64 = 1_700_000_200;
 
-    // Build two in-memory SessionSummary entries: one forked, one not.
-    let mut forked = SessionSummary::new(
-        "forked-a".to_string(),
-        "Forked Chat".to_string(),
-        1_700_000_100,
-        1_699_999_000,
-        3,
-    );
-    forked.has_fork_source = true;
+fn summary(
+    id: &str,
+    title: &str,
+    updated_at: i64,
+    count: usize,
+    fork: bool,
+) -> ConversationSummary {
+    ConversationSummary {
+        id: id.to_string(),
+        title: title.to_string(),
+        created_at: 1_699_999_000,
+        updated_at,
+        message_count: count,
+        has_fork_source: fork,
+    }
+}
 
-    let plain = SessionSummary::new(
-        "plain-b".to_string(),
-        "Plain Chat".to_string(),
-        1_700_000_000,
-        1_699_999_000,
-        5,
-    );
-
-    let entries = vec![forked, plain];
-
+/// Open the History window on `index`, paint it through the production compositor and return
+/// the screen rows.
+fn painted_history(index: &SessionIndex) -> Vec<String> {
+    let (width, height) = (60, 16);
+    let mut state = TuiState::new(width, height);
+    history_window::open(&mut state, index, NOW);
+    let layout = compute_layout(
+        Rect::new(0, 0, width, height),
+        &state.theme,
+        &state.input_buffer,
+        1,
+        false,
+        DensityMode::Focus,
+    )
+    .expect("a real chat viewport");
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| {
-            let area = frame.area();
-            sidebar::render_history_panel(area, frame.buffer_mut(), &entries, 0, None, &theme);
+            let shell = Shell::new(frame.area(), &layout);
+            compose(
+                frame,
+                &state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
         })
         .unwrap();
-
-    let buf = terminal.backend().buffer().clone();
-    let content: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
-
-    assert!(
-        content.contains('🔀'),
-        "sidebar must render 🔀 marker for forked session. Rendered:\n{}",
-        content
-    );
-    assert!(content.contains("Forked Chat"));
-    assert!(content.contains("Plain Chat"));
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect()
 }
 
 #[test]
-fn test_e2e_sidebar_no_fork_marker_for_plain_session() {
-    // Sanity check: rendering only plain sessions must not emit 🔀 (guards
-    // against an accidental unconditional marker).
-    let theme = rustain::adapters::tui::theme::Theme::dark();
-    let backend = TestBackend::new(60, 10);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    let entries = vec![SessionSummary::new(
-        "plain-only".to_string(),
-        "Only Plain".to_string(),
-        1_700_000_000,
-        1_699_999_000,
-        2,
-    )];
-
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            sidebar::render_history_panel(area, frame.buffer_mut(), &entries, 0, None, &theme);
-        })
-        .unwrap();
-
-    let buf = terminal.backend().buffer().clone();
-    let content: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
+fn test_e2e_history_window_renders_fork_marker() {
+    // Two in-memory entries: one forked, one not.
+    let index = SessionIndex::build(vec![
+        summary("forked-a", "Forked Chat", 1_700_000_100, 3, true),
+        summary("plain-b", "Plain Chat", 1_700_000_000, 5, false),
+    ]);
+    let content = painted_history(&index).join("\n");
 
     assert!(
+        content.contains('🔀'),
+        "the History window must render the 🔀 marker for a forked session. Rendered:\n{content}"
+    );
+    assert!(content.contains("Forked Chat"));
+    assert!(content.contains("Plain Chat"));
+
+    // The marker belongs to the forked row only, and the row is the shared row builder's text.
+    let forked = index.get("forked-a").expect("forked entry");
+    let plain = index.get("plain-b").expect("plain entry");
+    let forked_row = row_text(forked, NOW, 40);
+    assert!(forked_row.contains("🔀 Forked Chat"), "{forked_row}");
+    assert!(!row_text(plain, NOW, 40).contains('🔀'));
+    let rows = painted_history(&index);
+    let painted_forked = rows
+        .iter()
+        .find(|row| row.contains("Forked Chat"))
+        .expect("the forked row is painted");
+    let painted_plain = rows
+        .iter()
+        .find(|row| row.contains("Plain Chat"))
+        .expect("the plain row is painted");
+    assert!(painted_forked.contains('🔀'), "{painted_forked}");
+    assert!(!painted_plain.contains('🔀'), "{painted_plain}");
+}
+
+#[test]
+fn test_e2e_history_window_no_fork_marker_for_plain_session() {
+    // Sanity check: rendering only plain sessions must not emit 🔀 (guards
+    // against an accidental unconditional marker).
+    let index = SessionIndex::build(vec![summary(
+        "plain-only",
+        "Only Plain",
+        1_700_000_000,
+        2,
+        false,
+    )]);
+    let content = painted_history(&index).join("\n");
+
+    assert!(
+        content.contains("Only Plain"),
+        "the plain row is painted. Rendered:\n{content}"
+    );
+    assert!(
         !content.contains('🔀'),
-        "sidebar must NOT render 🔀 when no session is forked. Rendered:\n{}",
-        content
+        "the History window must NOT render 🔀 when no session is forked. Rendered:\n{content}"
     );
 }
 

@@ -74,6 +74,9 @@ pub struct SessionIndex {
     entries: Vec<SessionSummary>,
     /// Map from conversation_id to index in entries.
     id_index: HashMap<String, usize>,
+    /// Bumped by every change of an entry or of the order: a surface that shows a snapshot of
+    /// the index (the History window) re-reads it only when this moved.
+    revision: u64,
 }
 
 impl SessionIndex {
@@ -82,6 +85,7 @@ impl SessionIndex {
         Self {
             entries: Vec::new(),
             id_index: HashMap::new(),
+            revision: 0,
         }
     }
 
@@ -101,7 +105,16 @@ impl SessionIndex {
             id_index.insert(entry.conversation_id.clone(), idx);
         }
 
-        Self { entries, id_index }
+        Self {
+            entries,
+            id_index,
+            revision: 0,
+        }
+    }
+
+    /// The change counter (see the field).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Get all entries (sorted by updated_at desc).
@@ -122,6 +135,7 @@ impl SessionIndex {
 
     /// Get a mutable reference to a specific entry.
     pub fn get_mut(&mut self, conversation_id: &str) -> Option<&mut SessionSummary> {
+        self.revision += 1;
         self.id_index
             .get(conversation_id)
             .copied()
@@ -186,6 +200,7 @@ impl SessionIndex {
     /// Set the `is_active` flag for a conversation.
     /// Also clears the active flag from all other entries.
     pub fn set_active(&mut self, conversation_id: Option<&str>) {
+        self.revision += 1;
         // Clear all active flags
         for entry in &mut self.entries {
             entry.is_active = false;
@@ -223,6 +238,7 @@ impl SessionIndex {
 
     /// Rebuild the id_index from entries.
     fn rebuild_id_index(&mut self) {
+        self.revision += 1;
         self.id_index.clear();
         self.id_index.reserve(self.entries.len());
         for (idx, entry) in self.entries.iter().enumerate() {
@@ -232,6 +248,7 @@ impl SessionIndex {
 
     /// Clear all entries and the index.
     pub fn clear(&mut self) {
+        self.revision += 1;
         self.entries.clear();
         self.id_index.clear();
     }

@@ -53,6 +53,9 @@ pub struct LogPage {
     painted: Cell<bool>,
     layout: RefCell<LogLayout>,
     layouts_built: Cell<usize>,
+    /// The monitor column's own layout (it is a different width than the frame's body, and the
+    /// two paint in one draw: a shared single-entry cache would thrash).
+    monitor_layout: RefCell<LogLayout>,
 }
 
 impl std::fmt::Debug for LogPage {
@@ -87,6 +90,7 @@ impl LogPage {
             painted: Cell::new(false),
             layout: RefCell::new(LogLayout::default()),
             layouts_built: Cell::new(0),
+            monitor_layout: RefCell::new(LogLayout::default()),
         }
     }
 
@@ -120,16 +124,30 @@ impl LogPage {
     /// The body rows for `width`: laid out once per (width, generation) and reused by every
     /// repaint (bounded per-repaint work).
     pub fn body(&self, theme: &Theme, width: u16) -> Ref<'_, [Line<'static>]> {
+        self.laid_out(&self.layout, theme, width)
+    }
+
+    /// The same rows for the monitor column's width, cached apart from the frame's.
+    pub fn monitor_body(&self, theme: &Theme, width: u16) -> Ref<'_, [Line<'static>]> {
+        self.laid_out(&self.monitor_layout, theme, width)
+    }
+
+    fn laid_out<'a>(
+        &'a self,
+        cache: &'a RefCell<LogLayout>,
+        theme: &Theme,
+        width: u16,
+    ) -> Ref<'a, [Line<'static>]> {
         let key = (width, self.generation);
-        if self.layout.borrow().key != Some(key) {
+        if cache.borrow().key != Some(key) {
             let laid = thread_body::build(self.page(), theme, usize::from(width));
-            *self.layout.borrow_mut() = LogLayout {
+            *cache.borrow_mut() = LogLayout {
                 key: Some(key),
                 lines: laid.lines,
             };
             self.layouts_built.set(self.layouts_built.get() + 1);
         }
-        Ref::map(self.layout.borrow(), |layout| layout.lines.as_slice())
+        Ref::map(cache.borrow(), |layout| layout.lines.as_slice())
     }
 
     /// How many body layouts were computed (a repaint at the same key adds none).

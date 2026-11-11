@@ -163,6 +163,12 @@ impl McList {
         self.visible.as_deref().unwrap_or(&self.all)
     }
 
+    /// Every row the last read produced, before any filter (the monitor shows these).
+    #[must_use]
+    pub fn all(&self) -> &[McRow] {
+        &self.all
+    }
+
     /// The list has rows before any filter (a filter that matches nothing leaves it empty).
     #[must_use]
     pub fn has_rows(&self) -> bool {
@@ -197,6 +203,12 @@ pub struct MissionControlState {
     fit: Cell<Fit>,
     room_paint: RefCell<Option<RoomPaint>>,
     room_presented: bool,
+    /// The Room body was painted by the monitor column in the last completed draw (A14).
+    monitor_room_paint: RefCell<Option<RoomPaint>>,
+    monitor_room_presented: bool,
+    /// The hub was opened at least once: the monitor follows its tab only after that (before
+    /// it, the monitor shows Tasks).
+    visited: bool,
     detail_cache: RefCell<Option<DetailCache>>,
     detail_builds: Cell<u32>,
     next_rev: u64,
@@ -311,6 +323,19 @@ impl MissionControlState {
         self.list().map_or(&[], McList::rows)
     }
 
+    /// The list a tab holds (none before its first read), whatever the current tab is.
+    #[must_use]
+    pub fn list_for(&self, tab: McTab) -> Option<&McList> {
+        self.lists.get(&tab)
+    }
+
+    /// The tab the monitor column shows (A16): the last tab the hub was on, Tasks while the
+    /// hub was never opened.
+    #[must_use]
+    pub fn monitor_tab(&self) -> McTab {
+        if self.visited { self.tab } else { McTab::Tasks }
+    }
+
     /// The current tab's selection (empty until the operator or a refresh set one).
     #[must_use]
     pub fn selection(&self) -> &Selection {
@@ -359,6 +384,7 @@ impl MissionControlState {
     /// Retarget in place: the tab changes, the pane positions start over and a list filter
     /// never follows the operator to another tab.
     pub(crate) fn switch_to(&mut self, tab: McTab) {
+        self.visited = true;
         if self.tab != tab {
             self.list_search.back();
             self.refilter();
@@ -388,6 +414,11 @@ impl MissionControlState {
     /// The paint of the Room body records what it learned; the host applies it after the draw.
     pub fn record_room_paint(&self, paint: RoomPaint) {
         *self.room_paint.borrow_mut() = Some(paint);
+    }
+
+    /// The monitor column's paint of the Room body records what it learned like the hub's.
+    pub fn record_monitor_room_paint(&self, paint: RoomPaint) {
+        *self.monitor_room_paint.borrow_mut() = Some(paint);
     }
 
     /// Consume the Messages paint mark (see [`LogPage::take_painted`]).
@@ -596,8 +627,9 @@ pub fn reordering(state: &TuiState) -> bool {
             })
 }
 
-/// A surface that shows a plan's tasks is open (the hub on the Tasks tab, or the task
-/// window): a task event repaints, and the running-task tick keeps the elapsed times moving.
+/// A surface that shows a plan's tasks is open (the hub on the Tasks tab, the task window, or
+/// the monitor column on Tasks): a task event repaints, the running-task tick keeps the
+/// elapsed times moving, and the host's draw rebuilds the rows from the active conversation.
 #[must_use]
 pub fn tasks_surface_open(state: &TuiState) -> bool {
     state.task_window.is_some()
@@ -606,6 +638,25 @@ pub fn tasks_surface_open(state: &TuiState) -> bool {
                 .modal_stack
                 .all_frames()
                 .any(|frame| frame.surface == Surface::MissionControl))
+        || (monitor_shown(state) && state.mission_control.monitor_tab() == McTab::Tasks)
+}
+
+/// The monitor body is on screen (7E-02): the retained layout paints it where the layout
+/// gives it a rectangle — the sidebar column (Monitor density, a visible column, at least
+/// 120 columns) or Dashboard's panel (any width a frame fits) — until 7-F deletes both.
+#[must_use]
+pub fn monitor_shown(state: &TuiState) -> bool {
+    !crate::adapters::tui::presentation::too_small(state)
+        && (state.density_mode == crate::domain::models::visual::DensityMode::Dashboard
+            || (state.sidebar_visible
+                && state.terminal_width >= crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH))
+}
+
+/// Nothing paints over the monitor: no frame on the stack (frames span the terminal's full
+/// width and paint after the column) and no leader menu (7E-01). A covered monitor is not a
+/// presentation, so the Room under it is not polled.
+fn monitor_unobscured(state: &TuiState) -> bool {
+    state.modal_stack.is_empty() && state.pending_leader.is_none()
 }
 
 /// The Room is presented: the LAST COMPLETED DRAW painted its body with at least one row while
@@ -613,14 +664,21 @@ pub fn tasks_surface_open(state: &TuiState) -> bool {
 /// changed what is on top since (`now` still has the hub on top, on the Room tab, no menu, in a
 /// terminal big enough to paint frames). A Room held under another frame or a menu, on another
 /// tab, below the floor, after an interrupted draw or after a drawn cover closed is not
-/// presented and must not be polled (A14).
+/// presented and must not be polled (A14). The monitor counts when it is painted and nothing
+/// covers it: the last completed draw painted the Room body in it, no frame is open and no
+/// leader menu is pending, and the column is still shown on the Room tab.
 #[must_use]
 pub fn room_projection_presented(state: &TuiState) -> bool {
-    state.mission_control.room_presented
+    let hub = state.mission_control.room_presented
         && is_top(state)
         && state.pending_leader.is_none()
         && state.mission_control.tab == McTab::Room
-        && !crate::adapters::tui::presentation::too_small(state)
+        && !crate::adapters::tui::presentation::too_small(state);
+    let monitor = state.mission_control.monitor_room_presented
+        && monitor_unobscured(state)
+        && monitor_shown(state)
+        && state.mission_control.monitor_tab() == McTab::Room;
+    hub || monitor
 }
 
 impl TuiState {
@@ -630,6 +688,8 @@ impl TuiState {
     pub(crate) fn mission_draw_started(&mut self) {
         self.mission_control.room_paint.borrow_mut().take();
         self.mission_control.room_presented = false;
+        self.mission_control.monitor_room_paint.borrow_mut().take();
+        self.mission_control.monitor_room_presented = false;
         if let Some(page) = &self.mission_control.messages {
             page.clear_painted();
         }
@@ -639,7 +699,18 @@ impl TuiState {
     /// anchors always follow the paint; the acknowledgement of the folded rows only counts for
     /// a body on top of the stack (a covered Room has not been seen).
     pub fn mission_draw_completed(&mut self) {
-        let Some(paint) = self.mission_control.room_paint.borrow_mut().take() else {
+        let hub = self.mission_control.room_paint.borrow_mut().take();
+        let monitor = self.mission_control.monitor_room_paint.borrow_mut().take();
+        self.mission_control.monitor_room_presented =
+            monitor.as_ref().is_some_and(|paint| paint.rows >= 1) && monitor_unobscured(self);
+        let Some(paint) = hub else {
+            // Only the monitor painted the Room: its viewport and anchors follow, nothing is
+            // acknowledged (a column glanced at is not the folded rows read).
+            if let Some(paint) = monitor {
+                let mut cursor = self.mission_control.room_cursor;
+                self.room_panel.apply_paint(&paint, &mut cursor, false);
+                self.mission_control.room_cursor = cursor;
+            }
             return;
         };
         let visible = is_top(self)

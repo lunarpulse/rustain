@@ -9,7 +9,7 @@
 //! only (A20), where `Left`/`Right` are inert and unpainted. The export and the open-a-window
 //! rows exist only in the local host.
 
-use super::model::{Binding, CommandId, Context, Key, bind};
+use super::model::{Binding, CommandId, Context, HelpCat, Key, bind};
 use super::table::GlobalCmd;
 use super::table_input::InputCmd;
 use super::table_overlay::OverlayCmd;
@@ -51,6 +51,12 @@ pub enum MissionCmd {
     ReorderUp,
     ReorderCommit,
     ReorderCancel,
+    /// `Enter` (History, local): open the selected conversation and close the window.
+    HistoryOpen,
+    /// `d` (History, local): ask to delete the selected conversation (a decision).
+    HistoryDelete,
+    /// `/` (History, local): search across the saved conversations.
+    HistorySearch,
 }
 
 const fn m(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
@@ -84,6 +90,10 @@ const fn g(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Bi
 
 const fn ad(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
     bind(Context::Adapters, keys, CommandId::Mission(command), label).local()
+}
+
+const fn hi(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
+    bind(Context::History, keys, CommandId::Mission(command), label).local()
 }
 
 const fn t(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
@@ -168,4 +178,13 @@ pub const ROWS: &[Binding] = &[
     bind(Context::Adapters, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").local().does("Open the Ctrl+X menu above the Adapters window"),
     bind(Context::Adapters, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").local().does("Open the command palette above the Adapters window"),
     bind(Context::Adapters, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").local().does("Ask to quit without closing the Adapters window"),
+    // ── the History window (local) ──
+    hi(&[Key::Enter], MissionCmd::HistoryOpen, "Open").does("Open the selected conversation (a new tab, or switch to its tab) and close History"),
+    hi(&[Key::Char('d')], MissionCmd::HistoryDelete, "Delete").does("Delete the selected conversation; a decision confirms it"),
+    hi(&[Key::Char('/')], MissionCmd::HistorySearch, "Search").help(HelpCat::Search, "/ (in History)", "Cross-conversation search"),
+    hi(&[Key::Esc], MissionCmd::Back, "Back").does("Back to the frame beneath"),
+    hi(&[Key::Ctrl('c')], MissionCmd::Back, "").does("Back to the frame beneath without cancelling work"),
+    bind(Context::History, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").local().does("Open the Ctrl+X menu above History"),
+    bind(Context::History, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").local().does("Open the command palette above History"),
+    bind(Context::History, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").local().does("Ask to quit without closing History"),
 ];

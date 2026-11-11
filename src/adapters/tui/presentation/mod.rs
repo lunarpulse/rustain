@@ -190,6 +190,7 @@ pub fn consistent(state: &TuiState) -> bool {
         && is_open(state, Surface::AgentWindow) == state.agent_window.is_some()
         && is_open(state, Surface::TaskWindow) == state.task_window.is_some()
         && is_open(state, Surface::Adapters) == state.adapters_window.is_some()
+        && is_open(state, Surface::History) == state.history_window.is_some()
         // In-place stepping may coincide targets; each frame still owns one payload.
         && state.tool_inspectors.keys().all(|id| {
             stack
@@ -227,10 +228,7 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
             .is_some_and(|at| now.saturating_duration_since(at) < decision_queue::TYPING_GRACE)
         || state.pending_leader.is_some()
         || state.reverse_search.is_open()
-        || !matches!(
-            state.focus,
-            FocusState::Input | FocusState::Chat | FocusState::Sidebar { .. }
-        )
+        || !matches!(state.focus, FocusState::Input | FocusState::Chat)
     {
         return false;
     }

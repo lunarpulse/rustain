@@ -2,7 +2,7 @@ use crate::adapters::tui::handlers::{login::LoginAction, profile_switch};
 use crate::adapters::tui::keymap::table::GlobalCmd;
 use crate::adapters::tui::keymap::table_chat::ChatCmd;
 use crate::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
-use crate::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
+use crate::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd};
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_panels::PanelCmd;
 use crate::adapters::tui::keymap::text_edit;
@@ -173,8 +173,14 @@ pub enum InputAction {
     },
     /// Toggle Monitor density from the leader (Ctrl+X, W): Story 21.3 A6.
     SetDensityMode(crate::domain::models::visual::DensityMode),
-    /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
-    OpenPanel(crate::domain::models::visual::PanelType),
+    /// `Ctrl+X h` / the palette: open the History window on the session index.
+    OpenHistory,
+    /// `Enter` in the History window: open the conversation with this id (the host loads it
+    /// into a tab, or switches to its tab, and closes the window).
+    OpenHistoryEntry(String),
+    /// `d` in the History window: ask to delete the conversation with this id (a decision;
+    /// never a direct delete). The id is the one that was selected, not a row index.
+    DeleteHistoryEntry(String),
     /// Mission Control was opened on this tab by a chord (`Ctrl+X r`): the frame is already
     /// on the stack; the event loop runs the tab's source read (the durable room fold).
     OpenMissionControl(crate::adapters::tui::mission_control::McTab),
@@ -214,9 +220,6 @@ pub enum InputAction {
     TaskReorderCommit,
     /// Story 6.4: Cancel reorder (Esc).
     TaskReorderCancel,
-    /// Open the selected conversation from sidebar.
-    // Covers: FR107, AC4
-    OpenSidebarConversation,
     /// `Enter` on an Agents row: open the agent's window (the host refreshes its transcript).
     OpenAgentWindow(crate::domain::models::AgentId),
     /// `p` on an agent: pause it when running, resume it when suspended (one `Op`).
@@ -225,9 +228,6 @@ pub enum InputAction {
     AgentKill(crate::domain::models::AgentId),
     /// `Ctrl+X a` / the palette: open the Adapters window with a fresh health snapshot.
     OpenAdapters,
-    /// Delete the selected conversation from sidebar (shows confirmation overlay).
-    // Covers: FR113, AC5
-    DeleteSidebarConversation,
     /// Delete all conversations (via command palette).
     // Covers: AC5 (bulk), P9
     DeleteAllConversations,
@@ -545,7 +545,8 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
             || crate::adapters::tui::artifact_window::ignores_raw_key(state, key)
             || crate::adapters::tui::agent_window::ignores_raw_key(state, key)
             || crate::adapters::tui::task_window::ignores_raw_key(state, key)
-            || crate::adapters::tui::adapters_window::ignores_raw_key(state, key))
+            || crate::adapters::tui::adapters_window::ignores_raw_key(state, key)
+            || crate::adapters::tui::history_window::ignores_raw_key(state, key))
     {
         return true;
     }
@@ -766,7 +767,7 @@ pub(crate) fn handle_leader_key(
     let CommandId::Leader(command) = row.command else {
         return InputAction::Consumed;
     };
-    use crate::domain::models::visual::{DensityMode, PanelType};
+    use crate::domain::models::visual::DensityMode;
     match command {
         LeaderCmd::Profile => InputAction::OpenProfileSwitcher,
         LeaderCmd::Model => InputAction::OpenModelSelector,
@@ -789,7 +790,7 @@ pub(crate) fn handle_leader_key(
             InputAction::OpenMissionControl(McTab::Artifacts)
         }
         LeaderCmd::Tasks => open_tasks(state),
-        LeaderCmd::History => InputAction::OpenPanel(PanelType::History),
+        LeaderCmd::History => InputAction::OpenHistory,
         LeaderCmd::Usage => InputAction::OpenUsagePanel,
         // A6: Monitor toggles (Focus/Dashboard -> Monitor, Monitor -> Focus).
         LeaderCmd::Monitor => {
@@ -861,6 +862,7 @@ fn open_surface(
         SurfaceTarget::Agents => open_agents(state),
         SurfaceTarget::Tasks => open_tasks(state),
         SurfaceTarget::Adapters => InputAction::OpenAdapters,
+        SurfaceTarget::History => InputAction::OpenHistory,
     }
 }
 
@@ -927,13 +929,10 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
                 .height_cache
                 .invalidate_all();
             state.tab_render_state(state.active_tab_id).cached_width = Some(*w);
-            // P11: Reset sidebar if terminal shrinks below minimum width
+            // P11: Reset the column if the terminal shrinks below its minimum width
+            // (7-F: the preference is kept instead).
             if *w < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
                 state.sidebar_visible = false;
-                state.sidebar_panel = None;
-                if matches!(state.focus, FocusState::Sidebar { .. }) {
-                    reducer::set_base(state, FocusState::Chat);
-                }
             }
             state.needs_redraw = true;
             InputAction::Consumed
@@ -1026,7 +1025,6 @@ fn char_overlay_context(state: &TuiState) -> Option<Context> {
 
 /// The context of the key target once no card owns it, top surface first.
 pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
-    use crate::domain::models::visual::PanelType;
     if state.pending_leader.is_some() {
         return Some(Context::Leader);
     }
@@ -1043,9 +1041,6 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
         FocusState::Input => Context::Input,
         FocusState::Chat if state.wave_run.is_some() => Context::ChatWave,
         FocusState::Chat => Context::Chat,
-        FocusState::Sidebar { panel, .. } => match panel {
-            PanelType::History => Context::SidebarHistory,
-        },
     })
 }
 
@@ -1119,12 +1114,7 @@ fn chat_sequence(
 fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
     let ignores = matches!(
         context,
-        Context::Global
-            | Context::Input
-            | Context::Chat
-            | Context::ChatWave
-            | Context::Sidebar
-            | Context::SidebarHistory
+        Context::Global | Context::Input | Context::Chat | Context::ChatWave
     );
     let Key::Char(c) = key else {
         if context == Context::Autocomplete {
@@ -1171,7 +1161,6 @@ fn execute(
         CommandId::Input(cmd) => exec_input(state, cmd, key),
         CommandId::Field(cmd) => exec_field(state, context, cmd),
         CommandId::Chat(cmd) => exec_chat(state, cmd, keys),
-        CommandId::Sidebar(cmd) => exec_sidebar(state, cmd),
         CommandId::Search(cmd) => exec_search(cmd),
         CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
         CommandId::Panel(cmd) => crate::adapters::tui::handlers::wave_overlay::command(state, cmd),
@@ -1208,7 +1197,6 @@ pub(crate) fn open_leader(state: &mut TuiState) -> InputAction {
         .map(|frame| presentation::frame_context(state, frame.surface))
         .unwrap_or(match state.focus {
             FocusState::Input => Context::Input,
-            FocusState::Sidebar { .. } => Context::Sidebar,
             _ => Context::Chat,
         });
     if state.autocomplete.is_open() {
@@ -1566,65 +1554,6 @@ fn block_jump(state: &mut TuiState, user_messages: bool, dir: Direction) -> Inpu
         }
         None => InputAction::Consumed,
     }
-}
-
-fn exec_sidebar(state: &mut TuiState, cmd: SidebarCmd) -> InputAction {
-    match cmd {
-        SidebarCmd::SelectNext => sidebar_move(state, true),
-        SidebarCmd::SelectPrev => sidebar_move(state, false),
-        SidebarCmd::Quit => InputAction::Quit,
-        SidebarCmd::FocusChat => {
-            reducer::set_base(state, FocusState::Chat);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        SidebarCmd::FocusInput => {
-            reducer::set_base(state, FocusState::Input);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        SidebarCmd::PrevTab => InputAction::SwitchToPrevTab,
-        SidebarCmd::NewTab => InputAction::NewTab,
-        SidebarCmd::OpenPalette => open_palette(state),
-        SidebarCmd::CancelOrQuit => InputAction::CancelOrQuit,
-        SidebarCmd::PasteClipboard => InputAction::RequestClipboardPaste,
-        // Open selected conversation: the event loop resolves the id from the session index.
-        SidebarCmd::OpenConversation => InputAction::OpenSidebarConversation,
-        SidebarCmd::DeleteConversation => InputAction::DeleteSidebarConversation,
-        SidebarCmd::OpenCrossSearch => {
-            presentation::reducer::open(state, Surface::CrossSearch);
-            InputAction::OpenCrossSearch
-        }
-    }
-}
-
-/// Move the selection of the focused sidebar panel one entry (`j` / `k`, `Down` / `Up`).
-fn sidebar_move(state: &mut TuiState, down: bool) -> InputAction {
-    use crate::domain::models::visual::PanelType;
-    let FocusState::Sidebar { panel, .. } = state.focus else {
-        return InputAction::Ignored;
-    };
-    // History is the only sidebar panel left (the Tasks panel became a Mission Control tab).
-    let PanelType::History = panel;
-    let current = state.sidebar_selected;
-    let limit = state.sidebar_entry_count.saturating_sub(1);
-    let target = if down {
-        (current < limit).then_some(current + 1)
-    } else {
-        current.checked_sub(1)
-    };
-    if let Some(index) = target {
-        state.sidebar_selected = index;
-        reducer::set_base(
-            state,
-            FocusState::Sidebar {
-                panel,
-                selected: index,
-            },
-        );
-        state.needs_redraw = true;
-    }
-    InputAction::Consumed
 }
 
 fn exec_search(cmd: SearchCmd) -> InputAction {
@@ -2833,7 +2762,6 @@ pub(crate) fn dispatch_palette_action(
             model_id,
         },
         PaletteAction::SwitchProfile(name) => InputAction::ProfileSwitchRequested(name),
-        PaletteAction::OpenPanel(panel) => InputAction::OpenPanel(panel),
         PaletteAction::OpenSurface(target) => open_surface(state, target),
         PaletteAction::ShowVersion => {
             // Display version info as an Info notice (toast + Notification Log)
@@ -4278,11 +4206,6 @@ mod tests {
             setup: Box<dyn Fn(&mut TuiState)>,
             expect: CtrlQRowExpectation,
         }
-        fn sidebar(panel: crate::domain::models::visual::PanelType) -> Box<dyn Fn(&mut TuiState)> {
-            Box::new(move |s| {
-                s.focus = FocusState::Sidebar { panel, selected: 0 };
-            })
-        }
         fn confirmation(
             kind: crate::adapters::tui::decision_queue::DecisionKind,
         ) -> Box<dyn Fn(&mut TuiState)> {
@@ -4291,8 +4214,6 @@ mod tests {
                 decision_queue::raise(s, DecisionDraft::new(kind, "ctrl-q"), Arrival::Requested);
             })
         }
-
-        use crate::domain::models::visual::PanelType;
 
         let rows = vec![
             // ── Non-modal surfaces: the Journey 0 named surfaces quit ──
@@ -4316,8 +4237,14 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Sidebar History",
-                setup: sidebar(PanelType::History),
+                label: "History window",
+                setup: Box::new(|s| {
+                    crate::adapters::tui::history_window::open(
+                        s,
+                        &crate::domain::services::session_index::SessionIndex::new(),
+                        0,
+                    );
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
@@ -4417,14 +4344,13 @@ mod tests {
             Row {
                 label: "CrossSearch frame",
                 setup: Box::new(|s| {
-                    s.focus = FocusState::Sidebar {
-                        panel: PanelType::History,
-                        selected: 0,
-                    };
-                    assert_eq!(
-                        handle_input(s, &DomainInputEvent::KeyPress('/')),
-                        InputAction::OpenCrossSearch
+                    // CrossSearch opens above the History window it is searched from.
+                    crate::adapters::tui::history_window::open(
+                        s,
+                        &crate::domain::services::session_index::SessionIndex::new(),
+                        0,
                     );
+                    presentation::reducer::open(s, Surface::CrossSearch);
                     assert_eq!(s.modal_stack.top().unwrap().surface, Surface::CrossSearch);
                 }),
                 expect: CtrlQRowExpectation::Quit,
@@ -5355,14 +5281,7 @@ mod tests {
     fn story21_1_ctrl_k_chord_is_gone_in_every_focus() {
         // Old: `Ctrl+K c` dispatched FeedbackCompact in any focus. New (AC12):
         // the chord is deleted — the next `c` is whatever it is without Ctrl+K.
-        for focus in [
-            FocusState::Input,
-            FocusState::Chat,
-            FocusState::Sidebar {
-                panel: crate::domain::models::PanelType::History,
-                selected: 0,
-            },
-        ] {
+        for focus in [FocusState::Input, FocusState::Chat] {
             let mut state = make_state();
             state.focus = focus.clone();
             let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);

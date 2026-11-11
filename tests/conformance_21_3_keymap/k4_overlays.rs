@@ -31,30 +31,38 @@ use rustain::domain::events::LoginTargetRow;
 use rustain::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use rustain::domain::models::provider::ModelDescriptor;
-use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{
     AdapterRef, FocusState, ItemAddress, ItemId, NotificationsConfig, PeerId, PortDimension,
     ProfileDescriptor, ProfileIdentityColor, ProfileSelection, ProfileSource, SemanticMessageType,
 };
 use rustain::domain::services::cross_search::CrossSearchResult;
+use rustain::domain::services::session_index::SessionIndex;
 use tokio_util::sync::CancellationToken;
 
 use super::support::{decode, fresh, is_inert, press};
 use super::witness::{Case, W, local, local_door, printable, run, w, wp};
 
+/// CrossSearch opened through its real front door: `/` in the History window (21-7 7-E; the
+/// window is open with its search hint painted), so CrossSearch is the frame above History.
 pub(super) fn cross_search_state() -> TuiState {
+    use rustain::adapters::tui::history_window::{self, Fit};
     let mut s = TuiState::new(130, 24);
-    s.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    history_window::open(&mut s, &SessionIndex::new(), 0);
+    s.history_window
+        .as_ref()
+        .expect("the History window is open")
+        .set_fit(Fit {
+            search: true,
+            ..Fit::default()
+        });
     let base = s.focus.clone();
     assert_eq!(press(&mut s, Key::Char('/')), InputAction::OpenCrossSearch);
     assert_eq!(s.focus, base);
-    assert_eq!(s.modal_stack.len(), 1);
+    assert_eq!(s.modal_stack.len(), 2, "CrossSearch opens above History");
     let frame = s.modal_stack.top().expect("CrossSearch owns a frame");
     assert_eq!(frame.surface, Surface::CrossSearch);
     assert_eq!(frame.conversation_id, None);
+    assert!(is_open(&s, Surface::History));
     s
 }
 
@@ -439,17 +447,17 @@ fn usage_panel_rows_by_value_and_every_other_key_is_inert() {
 
 #[rustfmt::skip]
 const CROSS: &[W] = &[
-    w(&[Key::Esc], "CloseCrossSearch | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Ctrl('c')], "CloseCrossSearch | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Enter], "OpenCrossSearchResult | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Backspace], "CrossSearchQueryChanged | q=a sel=1 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Up], "Consumed | q=ab sel=0 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Char('k')], "Consumed | q=ab sel=0 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Down], "Consumed | q=ab sel=2 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Char('j')], "Consumed | q=ab sel=2 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Ctrl('q')], "Quit | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Ctrl('x')], "Consumed | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
-    w(&[Key::Ctrl('p')], "Consumed | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Esc], "CloseCrossSearch | q=ab sel=1 focus=Input"),
+    w(&[Key::Ctrl('c')], "CloseCrossSearch | q=ab sel=1 focus=Input"),
+    w(&[Key::Enter], "OpenCrossSearchResult | q=ab sel=1 focus=Input"),
+    w(&[Key::Backspace], "CrossSearchQueryChanged | q=a sel=1 focus=Input"),
+    w(&[Key::Up], "Consumed | q=ab sel=0 focus=Input"),
+    w(&[Key::Char('k')], "Consumed | q=ab sel=0 focus=Input"),
+    w(&[Key::Down], "Consumed | q=ab sel=2 focus=Input"),
+    w(&[Key::Char('j')], "Consumed | q=ab sel=2 focus=Input"),
+    w(&[Key::Ctrl('q')], "Quit | q=ab sel=1 focus=Input"),
+    w(&[Key::Ctrl('x')], "Consumed | q=ab sel=1 focus=Input"),
+    w(&[Key::Ctrl('p')], "Consumed | q=ab sel=1 focus=Input"),
 ];
 
 /// Catches j/k typed into the query, a swapped selection direction, or a close that is not requested.

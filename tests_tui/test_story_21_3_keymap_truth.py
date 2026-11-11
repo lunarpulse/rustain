@@ -122,11 +122,10 @@ OVERLAYS = {
     "1861": ("Adapters", "┌Adapters", None, "[Esc] Back"),
     "1873": ("Mission Control · Agents", "┌Mission Control · Agents", None, "[Esc] Back"),
     "1874": ("Mission Control · Tasks", "┌Mission Control · Tasks", None, "[Esc] Back"),
+    "1868": ("History", "┌History", None, "[Esc] Back"),
 }
-# panels: the narrow-terminal remedy toast; the value is the menu item painted `(n/a)` for the row.
-PANELS = {
-    "1868": "[H] History (n/a)",
-}
+# panels: none left (21-7 7-E: History is a frame at every width, a row of OVERLAYS above).
+PANELS = {}
 DECISIONS = "1871"   # `Ctrl+X q`: Info toast, left visible for the `x` row to clear
 CLEAR = "1878"       # `Ctrl+X x`
 MONITOR = "1877"     # `Ctrl+X w`: density toggle, run LAST (it moves focus off the composer)
@@ -142,7 +141,7 @@ EXPECTED_WITNESS = {
 MENU_PRESENT = (
     "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters", "[S] Agents",
     "[L] A2A log", "[R] Room", "[E] Artifacts", "[T] Tasks", "[U] Usage",
-    "[H] History (n/a)", "[W] Monitor", "[?] Help", "[N] Notifications", "[X] Clear toasts",
+    "[H] History", "[W] Monitor", "[?] Help", "[N] Notifications", "[X] Clear toasts",
     "[Q] Decisions", "[Enter] Send", "[Esc] Cancel",
 )
 MENU_ABSENT = ("[F]", "[D]", "Dashboard", "Evidence", "Watch", "[L] Log", "Detach",
@@ -571,7 +570,7 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
                        RUSTAIN_MODELS_DEV_URL=origin, NO_PROXY="*", no_proxy="*", TERM="xterm-256color")
             return env
 
-        envs = {"main": environment("main", ws_main), "panels": environment("panels", ws_panels),
+        envs = {"main": environment("main", ws_main),
                 "edit": environment("edit", ws_edit), "plan": environment("plan", ws_plan)}
         terminals = {tag: stack.enter_context((evidence / f"{tag}.terminal.txt").open("w")) for tag in envs}
         screens = {tag: stack.enter_context((evidence / f"{tag}.screens.jsonl").open("w")) for tag in envs}

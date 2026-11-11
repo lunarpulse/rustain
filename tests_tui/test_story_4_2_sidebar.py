@@ -7,7 +7,15 @@ Coverage gap tests for Epic 4 — part of Story 5-0 contract test upgrade.
 import pytest
 
 from harness import RustainTUI
-from keys import Sidebar, ENTER
+from keys import Sidebar, ENTER, ESC
+
+
+def _close_history(tui: RustainTUI) -> None:
+    """History is a frame since Story 21.7 (7-E): Esc closes it (no toggle chord)."""
+    tui.send(ESC)
+    assert tui.wait_for_screen_not_contains("┌History", timeout=5.0), (
+        f"History did not close after Esc. Screen:\n{tui.get_screen_text()}"
+    )
 
 
 @pytest.mark.requires_api
@@ -26,7 +34,7 @@ class TestSidebarToggle:
         tui.wait_for_screen("History")
         tui.assert_screen_contains("History", "Sidebar should show 'History' panel title")
 
-        tui.close_history()
+        _close_history(tui)
         tui.wait_for_screen_not_contains("History", timeout=2.0)
         tui.assert_screen_not_contains(
             "History", "History panel should be hidden after second toggle"
@@ -52,7 +60,7 @@ class TestSidebarToggle:
             "History", "Sidebar should remain visible after j/k navigation"
         )
 
-        tui.close_history()
+        _close_history(tui)
 
     def test_sidebar_open_conversation_with_enter(self, tui_in_project: RustainTUI):
         """Enter on a sidebar entry opens that conversation — sidebar closes on open."""

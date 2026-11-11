@@ -402,4 +402,4 @@ pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,
 };
 #[allow(unused_imports)]
-pub use visual::{BlockBorder, DensityMode, PanelType, symbols};
+pub use visual::{BlockBorder, DensityMode, symbols};

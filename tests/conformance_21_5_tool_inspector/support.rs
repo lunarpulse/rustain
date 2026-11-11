@@ -74,6 +74,8 @@ pub struct Fixture {
     pub h: TestHarness,
     pub tabs: TabManager,
     pub clock: Arc<MockClock>,
+    /// The in-memory session index the production draw reads (the History window's source).
+    pub sessions: rustain::domain::services::session_index::SessionIndex,
 }
 
 impl Fixture {
@@ -92,7 +94,12 @@ impl Fixture {
         tabs.active_tab_mut().view_state.mode = AnchorMode::Reading;
         h.state.active_tab_id = tabs.active_tab_id();
         h.state.focus = FocusState::Chat;
-        let mut fixture = Self { h, tabs, clock };
+        let mut fixture = Self {
+            h,
+            tabs,
+            clock,
+            sessions: rustain::domain::services::session_index::SessionIndex::new(),
+        };
         fixture.load();
         fixture.h.state.focus = FocusState::Chat;
         fixture.paint();
@@ -179,7 +186,7 @@ impl Fixture {
             count,
             0,
             Some(&mut self.tabs),
-            &rustain::domain::services::session_index::SessionIndex::new(),
+            &self.sessions,
             128_000,
         )
         .unwrap();
@@ -291,8 +298,8 @@ impl Fixture {
             &self.h.state.theme,
             &self.h.state.input_buffer,
             self.tabs.tabs().len(),
-            false,
-            rustain::domain::models::visual::DensityMode::Focus,
+            self.h.state.sidebar_visible,
+            self.h.state.density_mode,
         )
         .unwrap()
     }

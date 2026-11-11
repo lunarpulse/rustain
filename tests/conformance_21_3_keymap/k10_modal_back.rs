@@ -171,7 +171,7 @@ fn ctrl_c_in_every_overlay_goes_back_one_frame() {
         }
         if *name == "CrossSearch" {
             assert!(is_open(&by_ctrl_c, Surface::CrossSearch));
-            assert_eq!(by_ctrl_c.modal_stack.len(), 1);
+            assert_eq!(by_ctrl_c.modal_stack.len(), 2, "above the History window");
             assert_eq!(
                 by_ctrl_c.modal_stack.top().unwrap().surface,
                 Surface::CrossSearch,
@@ -180,8 +180,13 @@ fn ctrl_c_in_every_overlay_goes_back_one_frame() {
             let base = by_ctrl_c.focus.clone();
             rustain::adapters::tui::handlers::export::close_cross_search(&mut by_ctrl_c);
             assert!(!is_open(&by_ctrl_c, Surface::CrossSearch));
-            assert!(by_ctrl_c.modal_stack.is_empty());
-            assert_eq!(by_ctrl_c.focus, base, "History caller restored");
+            assert_eq!(
+                by_ctrl_c.modal_stack.top().map(|frame| frame.surface),
+                Some(Surface::History),
+                "History caller restored on top"
+            );
+            assert_eq!(by_ctrl_c.modal_stack.len(), 1);
+            assert_eq!(by_ctrl_c.focus, base, "base focus untouched");
         } else if *name == "BookmarkList" {
             assert!(!is_open(&by_ctrl_c, Surface::BookmarkList));
         } else if *name == "WaveOverlay" {

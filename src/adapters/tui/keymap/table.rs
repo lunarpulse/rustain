@@ -64,12 +64,6 @@ pub fn attached_mission_remedy() -> &'static str {
     });
     TEXT.as_str()
 }
-/// Local sidebar panels need the sidebar column (`layout::SIDEBAR_MIN_WIDTH`).
-pub const PANEL_NARROW: &str =
-    "This panel needs a terminal at least 120 columns wide: widen the window and try again.";
-
-const SIDEBAR_MIN_WIDTH: u16 = 120;
-
 /// Interim ownership remedy, shared by leader rows and nested palette actions.
 pub const CLOSE_WINDOW_FIRST: &str = "Please close the window first to open this surface.";
 
@@ -232,9 +226,7 @@ pub fn palette_availability(action: &PaletteAction, c: &AvailCtx) -> Availabilit
     use PaletteAction::*;
     let target = match action {
         ExecuteCommand(name, args) => palette_command_target(name, args.as_deref()),
-        OpenPanel(_) | DeleteAllConversations | PasteImageFromClipboard => {
-            PaletteTarget::LegacySurface
-        }
+        DeleteAllConversations | PasteImageFromClipboard => PaletteTarget::LegacySurface,
         SwitchModel { .. } | SwitchProfile(_) => PaletteTarget::LocalSurface,
         InsertMention(_) | ShowVersion | NewTab | CloseTab | ApplyAdapterOverride { .. } | Noop => {
             PaletteTarget::NoLegacySurface
@@ -259,17 +251,6 @@ fn attached_density(c: &AvailCtx) -> Availability {
     match c.host {
         Host::Attached => Availability::Unavailable(attached_mission_remedy()),
         Host::Local => host_gate(c, attached_mission_remedy()),
-    }
-}
-/// A sidebar panel: local only, and only where the sidebar column fits.
-fn panel(c: &AvailCtx) -> Availability {
-    if c.frame_origin && c.host == Host::Local {
-        return base_target(c);
-    }
-    match c.host {
-        Host::Attached => Availability::Unavailable(attached_mission_remedy()),
-        Host::Local if c.width < SIDEBAR_MIN_WIDTH => Availability::Unavailable(PANEL_NARROW),
-        Host::Local => Availability::Available,
     }
 }
 /// A Mission Control tab: local at every width, refused in the attached host (A20).
@@ -331,7 +312,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('e')], LeaderCmd::Artifacts, "Artifacts").slash("/artifacts").avail(attached_mission).help(C, "Ctrl+X, E", "Mission Control: Artifacts tab (durable artifacts, read-only replay)").witness("Mission Control · Artifacts"),
     l(&[Key::Char('t')], LeaderCmd::Tasks, "Tasks").avail(attached_mission).help(C, "Ctrl+X, T", "Mission Control: Tasks tab (the active conversation's plan; Enter opens the task window)").witness("Mission Control · Tasks"),
     l(&[Key::Char('u')], LeaderCmd::Usage, "Usage").avail(attached_panel).help(C, "Ctrl+X, U", "Usage / cost").witness("Usage & Cost"),
-    l(&[Key::Char('h')], LeaderCmd::History, "History").avail(panel).help(C, "Ctrl+X, H", "History panel (past conversations)").witness(NARROW_WITNESS),
+    l(&[Key::Char('h')], LeaderCmd::History, "History").avail(attached_mission).help(C, "Ctrl+X, H", "History window (past conversations; Enter opens one, d deletes one, / searches)").witness("History"),
     l(&[Key::Char('w')], LeaderCmd::Monitor, "Monitor").avail(attached_density).help(C, "Ctrl+X, W", "Toggle Monitor mode (sidebar + banners); again returns to Focus").witness("Density: Monitor"),
     l(&[Key::Char('d')], LeaderCmd::Detach, "Detach").slash("/detach").attached().help(C, "Ctrl+X, D", "Detach from the daemon (attached client only)"),
     l(&[Key::Char('?')], LeaderCmd::Help, "Help").help(C, "Ctrl+X, ?", "This help overlay").witness("Keybindings"),
@@ -343,9 +324,6 @@ const LEADER: &[Binding] = &[
     l(&[Key::Ctrl('c')], LeaderCmd::Cancel, "").does("Close the menu without doing anything"),
     l(&[Key::Ctrl('q')], LeaderCmd::QuitRequest, "").does("Ask to quit without closing the menu, like Ctrl+Q in any window"),
 ];
-
-/// What an 80x24 local screen shows after a sidebar-panel chord (the remedy toast).
-const NARROW_WITNESS: &str = "This panel needs a terminal at least 120";
 
 /// Every row of the shipped table, groups concatenated in a fixed order.
 pub fn all_rows() -> Vec<Binding> {

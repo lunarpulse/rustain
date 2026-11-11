@@ -30,7 +30,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, E` | Mission Control: Artifacts tab (durable artifacts, read-only replay) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, T` | Mission Control: Tasks tab (the active conversation's plan; Enter opens the task window) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, U` | Usage / cost | local, attached | portable | not available in an attached session |
-| `Ctrl+X, H` | History panel (past conversations) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
+| `Ctrl+X, H` | History window (past conversations; Enter opens one, d deletes one, / searches) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, W` | Toggle Monitor mode (sidebar + banners); again returns to Focus | local, attached | portable | not available in an attached session |
 | `Ctrl+X, D` | Detach from the daemon (attached client only) | attached | portable |  |
 | `Ctrl+X, ?` | This help overlay | local, attached | portable |  |
@@ -137,32 +137,20 @@ Also inherits: Global.
 | `m` | Toggle bookmark on current message | local | portable |  |
 | `'` | Open bookmark list panel | local | portable |  |
 
-## Sidebar
-
-Also inherits: Global.
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `j` | Select the next entry | local | portable |  |
-| `k` | Select the previous entry | local | portable |  |
-| `q` | Quit; asks first if work or a draft exists | local | portable |  |
-| `Esc` | Return focus to the chat | local | portable |  |
-| `Tab` | Move focus to the input box | local | portable |  |
-| `Shift+Tab` | Switch to the previous tab | local | portable |  |
-| `Ctrl+T` | Open a new tab | local | portable |  |
-| `Ctrl+P` | Open the command palette | local | portable |  |
-| `Ctrl+C` | Stop active work; when idle, ask to quit | local | portable |  |
-| `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
-| `Enter` | Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts and the A2A log have their own Enter | local | portable |  |
-
 ## History
 
-Also inherits: Sidebar.
+Also inherits: Inspector body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `d` | Delete the selected conversation | local | portable |  |
+| `Enter` | Open the selected conversation (a new tab, or switch to its tab) and close History | local | portable |  |
+| `d` | Delete the selected conversation; a decision confirms it | local | portable |  |
 | `/` | Cross-conversation search | local | portable |  |
+| `Esc` | Back to the frame beneath | local | portable |  |
+| `Ctrl+C` | Back to the frame beneath without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above History | local | portable |  |
+| `Ctrl+P` | Open the command palette above History | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing History | local | portable |  |
 
 ## Search (typing)
 

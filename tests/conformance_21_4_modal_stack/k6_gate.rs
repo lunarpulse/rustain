@@ -352,6 +352,17 @@ const RULES: &[(&str, &str)] = &[
         "mission-21-7-d",
         r"\bdrill_down_task\b|\bContext\s*::\s*(?:ChatDrill|ChatReorder|SidebarTasks|TasksReorder)\b|\bPanelCmd\s*::\s*(?:Drill|Tasks|Reorder)\w*|\bPanelType\s*::\s*Tasks\b|\bauto_open_suppressed_conversations\b|\bauto_open_on_task_plan\b",
     ),
+    // Story 21.7 slice 7-E (A25, clause e): the History sidebar panel, its painter and context
+    // are gone; History is the `Surface::History` frame. Every symbol only the panel used went
+    // with it (A17: deleted in the slice that orphans it): the sidebar focus slot and the panel
+    // enum, the sidebar contexts and commands, the sidebar selection/count/scroll fields, the
+    // sidebar open/delete actions and the panel opener. `Surface::History`, `Context::History`,
+    // `history_window::`, `history_inspector::`, `history_bridge::` and `sidebar_visible` (the
+    // monitor column's flag until 7-F) stay legal.
+    (
+        "mission-21-7-e",
+        r"\brender_history_panel\b|\bPanelType\b|\bContext\s*::\s*Sidebar(?:History)?\b|\bFocusState\s*::\s*Sidebar\b|\bSidebarCmd\b|\bsidebar_(?:panel|selected|entry_count|scroll_offset)\b|\b(?:OpenSidebarConversation|DeleteSidebarConversation|PanelOpenOutcome|reveal_sidebar)\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -622,6 +633,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "mission-21-7-b",
                     "mission-21-7-c",
                     "mission-21-7-d",
+                    "mission-21-7-e",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2876,4 +2888,73 @@ fn k12_story21_7_d_the_task_drill_down_and_sidebar_panel_are_unpinnable_and_the_
     );
     assert!(PINS.is_empty());
     assert!(RULES.iter().any(|(name, _)| *name == "mission-21-7-c"));
+}
+
+// Story 21.7 slice 7-E (A25, clause e): the History sidebar panel and the sidebar focus it alone
+// used are gone; History is a frame. The clause is RED on a synthetic source through the same
+// scanner function, cannot be pinned (a hard rule), and leaves the frame's own names and the
+// monitor column's flag alone.
+#[test]
+fn k12_story21_7_e_the_history_sidebar_panel_is_unpinnable_and_the_frame_stays_legal() {
+    for text in [
+        "sidebar::render_history_panel(a, b, c, 0, None, t);",
+        "let p = PanelType::History;",
+        "let p = visual::PanelType :: History;",
+        "let c = Context::SidebarHistory;",
+        "let c = keymap::Context :: Sidebar;",
+        "s.focus = FocusState::Sidebar { panel: p, selected: 0 };",
+        "let c = SidebarCmd::SelectNext;",
+        "s.sidebar_panel = None;",
+        "s.sidebar_selected = 3;",
+        "s.sidebar_entry_count = 0;",
+        "s.sidebar_scroll_offset = 0;",
+        "let a = InputAction::OpenSidebarConversation;",
+        "let a = InputAction::DeleteSidebarConversation;",
+        "let o = PanelOpenOutcome::Opened;",
+        "reveal_sidebar(state);",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("mission-21-7-e|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("mission-21-7-e|")),
+            "{text}: {errors:?}"
+        );
+    }
+    // Positive controls the clause must not touch: the History frame, its context, window,
+    // painter and bridge, the monitor column's flag, and near-miss names.
+    let legal = "fn real() { let _ = Surface::History; let _ = Context::History; \
+        history_window::open(s, i, 0); history_inspector::row_text(a, 0, 9); \
+        history_bridge::open(s, i); let _ = s.sidebar_visible; \
+        let _ = InputAction::OpenHistoryEntry(id); let _ = SurfaceTarget::History; \
+        let _ = sidebar_panels; let _ = PanelTypes; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("mission-21-7-e|")),
+        "{errors:?}"
+    );
+    let masked = "// render_history_panel PanelType::History Context::SidebarHistory\n\
+        #[cfg(test)] mod tests { fn t() { let _ = FocusState::Sidebar { panel: p, selected: 0 }; } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("mission-21-7-e|"))
+    );
+    assert!(PINS.is_empty());
+    assert!(RULES.iter().any(|(name, _)| *name == "mission-21-7-e"));
 }

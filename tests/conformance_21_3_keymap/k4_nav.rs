@@ -1,4 +1,4 @@
-//! Story 21.3 conformance leg K4 (navigation contexts): Sidebar(History),
+//! Story 21.3 conformance leg K4 (navigation contexts): History (the 21-7 frame),
 //! SearchTyping, SearchNavigating and BookmarkList against the real local
 //! dispatch, through `support::press` only.
 //!
@@ -14,29 +14,51 @@
 //! appends itself (the whole printable range is one arm, not a row).
 
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::history_window::{self, Fit};
 use rustain::adapters::tui::keymap::table::GlobalCmd;
 use rustain::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
-use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
+use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd};
 use rustain::adapters::tui::keymap::table_overlay::OverlayCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
 use rustain::adapters::tui::presentation::{Surface, is_open, reducer, text_field::TextField};
 use rustain::adapters::tui::state::{SearchSubstate, TuiState};
-use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::PanelType;
+use rustain::domain::models::{ConversationSummary, FocusState};
+use rustain::domain::services::session_index::SessionIndex;
 
 use super::support::{assert_global_effect, fresh, global_owned, is_inert, press};
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 
-/// The History sidebar panel focused, five entries, entry 1 selected.
+/// The History window open over five conversations (`h0` newest .. `h4`), every rail hint
+/// painted whole (what a wide paint offers), `h1` selected.
 fn history_state() -> TuiState {
+    let summaries = (0..5)
+        .map(|i| ConversationSummary {
+            id: format!("h{i}"),
+            title: format!("Conversation {i}"),
+            created_at: 1_000 - i64::from(i) * 10,
+            updated_at: 1_000 - i64::from(i) * 10,
+            message_count: 3,
+            has_fork_source: false,
+        })
+        .collect();
+    let index = SessionIndex::build(summaries);
     let mut state = TuiState::new(130, 24);
-    state.sidebar_entry_count = 5;
-    state.sidebar_selected = 1;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 1,
-    };
+    history_window::open(&mut state, &index, 2_000);
+    state
+        .history_window
+        .as_ref()
+        .expect("the window is open")
+        .set_fit(Fit {
+            rows: 5,
+            viewport: 5,
+            open: true,
+            delete: true,
+            search: true,
+            ..Fit::default()
+        });
+    assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);
+    assert_eq!(selected(&state).as_deref(), Some("h1"));
     state
 }
 
@@ -91,158 +113,178 @@ fn assert_resolves(from: Context, row: &Binding) {
     }
 }
 
-// ── Sidebar / SidebarHistory ──────────────────────────────────────────────
+// ── History ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq)]
-struct SidebarSalient {
+struct HistorySalient {
     focus: FocusState,
-    selected: usize,
+    top: Option<Surface>,
+    depth: usize,
+    selected: Option<String>,
     input: String,
-    cross_search: bool,
-    palette: bool,
-    help: bool,
+    leader: bool,
 }
 
-fn sidebar_salient(state: &TuiState) -> SidebarSalient {
-    SidebarSalient {
+fn history_salient(state: &TuiState) -> HistorySalient {
+    HistorySalient {
         focus: state.focus.clone(),
-        selected: state.sidebar_selected,
+        top: state.modal_stack.top().map(|frame| frame.surface),
+        depth: state.modal_stack.len(),
+        selected: selected(state),
         input: state.input_buffer.clone(),
-        cross_search: is_open(state, Surface::CrossSearch),
-        palette: is_open(state, Surface::CommandPalette),
-        help: is_open(state, Surface::Help),
+        leader: state.pending_leader.is_some(),
     }
 }
 
-fn sidebar_witness(cmd: SidebarCmd, keys: &[Key]) {
+/// The conversation id the open History window has selected.
+fn selected(state: &TuiState) -> Option<String> {
+    state
+        .history_window
+        .as_ref()
+        .and_then(|window| window.selected_id().map(str::to_owned))
+}
+
+fn history_witness(command: CommandId, keys: &[Key]) {
+    use rustain::adapters::tui::keymap::table_mission::MissionCmd;
+    use rustain::adapters::tui::presentation::viewer::ViewerCmd;
     let key = keys[0];
     let mut state = history_state();
-    match cmd {
-        SidebarCmd::SelectNext => {
+    let sel = |state: &TuiState| selected(state).expect("a selected conversation");
+    match command {
+        CommandId::Viewer(ViewerCmd::LineDown) => {
             assert_eq!(press(&mut state, key), InputAction::Consumed);
-            assert_eq!(state.sidebar_selected, 2);
-            assert_eq!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: PanelType::History,
-                    selected: 2
-                }
-            );
+            assert_eq!(sel(&state), "h2");
             // The selection stops on the last entry.
-            state.sidebar_selected = 4;
+            for _ in 0..6 {
+                press(&mut state, key);
+            }
+            assert_eq!(sel(&state), "h4");
+        }
+        CommandId::Viewer(ViewerCmd::LineUp) => {
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert_eq!(sel(&state), "h0");
             press(&mut state, key);
-            assert_eq!(state.sidebar_selected, 4);
+            assert_eq!(sel(&state), "h0", "the selection stops on the first entry");
         }
-        SidebarCmd::SelectPrev => {
+        CommandId::Viewer(ViewerCmd::HalfDown) => {
             assert_eq!(press(&mut state, key), InputAction::Consumed);
-            assert_eq!(state.sidebar_selected, 0);
-            assert_eq!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: PanelType::History,
-                    selected: 0
-                }
-            );
-            press(&mut state, key);
-            assert_eq!(
-                state.sidebar_selected, 0,
-                "the selection stops on the first entry"
-            );
+            assert_eq!(sel(&state), "h3", "half of the 5-row viewport is 2");
         }
-        SidebarCmd::Quit => assert_eq!(press(&mut state, key), InputAction::Quit),
-        SidebarCmd::FocusChat => {
+        CommandId::Viewer(ViewerCmd::HalfUp) => {
             assert_eq!(press(&mut state, key), InputAction::Consumed);
-            assert_eq!(state.focus, FocusState::Chat);
+            assert_eq!(sel(&state), "h0");
         }
-        SidebarCmd::FocusInput => {
+        CommandId::Viewer(ViewerCmd::PageDown) => {
             assert_eq!(press(&mut state, key), InputAction::Consumed);
-            assert_eq!(state.focus, FocusState::Input);
+            assert_eq!(sel(&state), "h4");
         }
-        SidebarCmd::PrevTab => assert_eq!(press(&mut state, key), InputAction::SwitchToPrevTab),
-        SidebarCmd::NewTab => assert_eq!(press(&mut state, key), InputAction::NewTab),
-        SidebarCmd::OpenPalette => {
-            let base = state.focus.clone();
+        CommandId::Viewer(ViewerCmd::PageUp) => {
             assert_eq!(press(&mut state, key), InputAction::Consumed);
-            assert_eq!(state.focus, base);
-            assert!(is_open(&state, Surface::CommandPalette));
+            assert_eq!(sel(&state), "h0");
         }
-        SidebarCmd::CancelOrQuit => {
-            assert_eq!(press(&mut state, key), InputAction::CancelOrQuit)
+        CommandId::Viewer(ViewerCmd::Top) => {
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert_eq!(sel(&state), "h0");
         }
-        SidebarCmd::PasteClipboard => {
-            assert_eq!(press(&mut state, key), InputAction::RequestClipboardPaste)
+        CommandId::Viewer(ViewerCmd::Tail) => {
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert_eq!(sel(&state), "h4");
         }
-        SidebarCmd::OpenConversation => {
-            assert_eq!(press(&mut state, key), InputAction::OpenSidebarConversation)
-        }
-        SidebarCmd::DeleteConversation => {
+        CommandId::Mission(MissionCmd::HistoryOpen) => {
             assert_eq!(
                 press(&mut state, key),
-                InputAction::DeleteSidebarConversation
-            )
+                InputAction::OpenHistoryEntry("h1".to_owned())
+            );
         }
-        SidebarCmd::OpenCrossSearch => {
-            let base = state.focus.clone();
+        CommandId::Mission(MissionCmd::HistoryDelete) => {
+            assert_eq!(
+                press(&mut state, key),
+                InputAction::DeleteHistoryEntry("h1".to_owned())
+            );
+        }
+        CommandId::Mission(MissionCmd::HistorySearch) => {
             assert_eq!(press(&mut state, key), InputAction::OpenCrossSearch);
-            assert_eq!(state.focus, base);
             assert!(is_open(&state, Surface::CrossSearch));
-            assert_eq!(state.modal_stack.len(), 1);
+            assert_eq!(
+                state.modal_stack.len(),
+                2,
+                "CrossSearch opens above History"
+            );
             let frame = state.modal_stack.top().unwrap();
             assert_eq!(frame.surface, Surface::CrossSearch);
             assert_eq!(frame.conversation_id, None);
+            assert!(is_open(&state, Surface::History));
         }
+        CommandId::Mission(MissionCmd::Back) => {
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert!(!is_open(&state, Surface::History));
+            assert_eq!(state.modal_stack.len(), 0);
+        }
+        CommandId::Global(GlobalCmd::OpenLeader) => {
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert!(state.pending_leader.is_some(), "Ctrl+X opens the leader");
+            assert!(is_open(&state, Surface::History), "History stays beneath");
+        }
+        CommandId::Input(InputCmd::OpenPalette) => {
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert!(is_open(&state, Surface::CommandPalette));
+            assert!(is_open(&state, Surface::History), "History stays beneath");
+        }
+        CommandId::Overlay(OverlayCmd::QuitRequest) => {
+            assert_eq!(press(&mut state, key), InputAction::Quit);
+            assert!(is_open(&state, Surface::History), "History stays open");
+        }
+        other => panic!("History row {keys:?} carries an unwitnessed command {other:?}"),
     }
 }
 
 #[test]
-fn every_sidebar_row_resolves_to_its_command_by_value() {
-    let common = rows(Context::Sidebar);
-    let history = rows(Context::SidebarHistory);
-    assert!(
-        common.len() >= 10,
-        "the common Sidebar rows, got {}",
-        common.len()
+fn every_history_row_resolves_to_its_command_by_value() {
+    let own = rows(Context::History);
+    let inherited = rows(Context::InspectorBody);
+    assert_eq!(
+        own.len(),
+        8,
+        "Enter d / Esc Ctrl+C Ctrl+X Ctrl+P Ctrl+Q, got {}",
+        own.len()
     );
     assert!(
-        history.len() >= 2,
-        "the History rows, got {}",
-        history.len()
+        inherited.len() >= 10,
+        "the RU-25 scroll rows, got {}",
+        inherited.len()
     );
-    for row in common.into_iter().chain(history) {
-        let CommandId::Sidebar(cmd) = row.command else {
-            panic!("Sidebar row {row:?} carries a non-Sidebar command");
-        };
-        // The History panel is the focused panel: it inherits the common rows.
-        assert_resolves(Context::SidebarHistory, row);
-        sidebar_witness(cmd, row.keys);
+    for row in own.into_iter().chain(inherited) {
+        // The History frame inherits the RU-25 rows through its parent.
+        assert_resolves(Context::History, row);
+        history_witness(row.command, row.keys);
     }
 }
 
 #[test]
-fn keys_without_a_sidebar_row_do_nothing_in_the_history_panel() {
+fn keys_without_a_history_row_do_nothing_in_the_history_frame() {
     let mut swept = 0;
     for key in Key::universe() {
-        if global_owned(Context::SidebarHistory, key) {
+        if global_owned(Context::History, key) {
             assert_global_effect(&mut history_state(), key);
             continue;
         }
         if !matches!(
-            keymap::resolve(Context::SidebarHistory, Host::Local, &[key]),
+            keymap::resolve(Context::History, Host::Local, &[key]),
             Resolved::Miss
         ) {
             continue;
         }
         let mut state = history_state();
-        let before = sidebar_salient(&state);
+        let before = history_salient(&state);
         let action = press(&mut state, key);
         assert!(
             is_inert(&action),
             "{key:?} without a History row returned {action:?}"
         );
         assert_eq!(
-            sidebar_salient(&state),
+            history_salient(&state),
             before,
-            "{key:?} moved Sidebar state"
+            "{key:?} moved History state"
         );
         swept += 1;
     }
@@ -253,9 +295,31 @@ fn keys_without_a_sidebar_row_do_nothing_in_the_history_panel() {
 
     // Positive control: a key WITH a row visibly changes state.
     let mut state = history_state();
-    let before = sidebar_salient(&state);
+    let before = history_salient(&state);
     press(&mut state, Key::Char('j'));
-    assert_ne!(sidebar_salient(&state), before);
+    assert_ne!(history_salient(&state), before);
+}
+
+/// A History key acts only where its rail hint was painted: with nothing painted `Enter`, `d`
+/// and `/` are inert and move nothing.
+#[test]
+fn history_actions_are_inert_where_their_hint_was_not_painted() {
+    for key in [Key::Enter, Key::Char('d'), Key::Char('/')] {
+        let mut state = history_state();
+        state
+            .history_window
+            .as_ref()
+            .expect("open")
+            .set_fit(Fit::default());
+        let before = history_salient(&state);
+        let action = press(&mut state, key);
+        assert!(is_inert(&action), "{key:?} unpainted returned {action:?}");
+        assert_eq!(
+            history_salient(&state),
+            before,
+            "{key:?} unpainted moved state"
+        );
+    }
 }
 
 // ── SearchTyping / SearchNavigating ───────────────────────────────────────

@@ -236,9 +236,11 @@ mod tests {
     }
 
     #[test]
-    fn story21_3_which_key_qualifies_panels_below_the_sidebar_width() {
+    fn story21_7_which_key_offers_history_at_every_local_width() {
+        // History is a frame (A21): no sidebar-width qualifier at 80 columns.
         let text = paint(80, 12, &local(80));
-        assert!(text.contains("[H] History (n/a)"), "{text}");
+        assert!(text.contains("[H] History"), "{text}");
+        assert!(!text.contains("[H] History (n/a)"), "{text}");
         assert!(text.contains("[P] Profile"), "{text}");
         assert!(!text.contains("[P] Profile (n/a)"), "{text}");
     }

@@ -278,7 +278,7 @@ fn ac10_plan_start_leaves_the_sidebar_closed_at_any_width() {
             "test-plan"
         ));
         assert!(!state.sidebar_visible, "width {width}");
-        assert_eq!(state.sidebar_panel, None, "width {width}");
+        assert!(state.history_window.is_none(), "width {width}");
     }
 }
 
@@ -406,7 +406,7 @@ fn ac1_plan_execution_started_opens_nothing_and_follows_the_plan() {
         "test-plan"
     ));
     assert!(!state.sidebar_visible);
-    assert_eq!(state.sidebar_panel, None);
+    assert!(state.history_window.is_none(), "no History frame payload");
     assert!(state.modal_stack.top().is_none(), "no frame opens");
     assert_eq!(state.focus, focus_before, "focus does not move");
     assert_eq!(

@@ -236,18 +236,12 @@ fn every_printable_types_into_every_text_field() {
             (field.open)(&mut state);
             let action = press(&mut state, Key::Char(c));
             if field.name == "cross-search query" {
-                assert_eq!(state.modal_stack.len(), 1);
+                assert_eq!(state.modal_stack.len(), 2, "CrossSearch above History");
                 assert_eq!(
                     state.modal_stack.top().unwrap().surface,
                     rustain::adapters::tui::presentation::Surface::CrossSearch
                 );
-                assert_eq!(
-                    state.focus,
-                    FocusState::Sidebar {
-                        panel: rustain::domain::models::visual::PanelType::History,
-                        selected: 0,
-                    }
-                );
+                assert_eq!(state.focus, FocusState::Input);
             }
             let text = (field.text)(&state);
             let name = field.name;

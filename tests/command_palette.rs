@@ -341,26 +341,37 @@ fn test_ctrl_p_pushes_over_existing_help_frame() {
 }
 
 // ============================================================
-// Integration: Ctrl+P opens palette from Sidebar (Task 9.5)
+// Integration: Ctrl+P opens palette from the History window (Task 9.5; 21-7 7-E)
 // ============================================================
 
+/// The History window open over an empty index (a frame: it owns no focus).
+fn open_history_window(state: &mut TuiState) {
+    rustain::adapters::tui::history_window::open(
+        state,
+        &rustain::domain::services::session_index::SessionIndex::new(),
+        0,
+    );
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::History);
+}
+
 #[test]
-fn test_ctrl_p_opens_palette_from_sidebar() {
-    use rustain::domain::models::visual::PanelType;
+fn test_ctrl_p_opens_palette_from_history_window() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    open_history_window(&mut state);
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert_eq!(state.modal_stack.len(), 2);
     assert_eq!(
         state.focus,
-        FocusState::Sidebar {
-            panel: PanelType::History,
-            selected: 0,
-        }
+        FocusState::Input,
+        "the base focus is untouched"
+    );
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::History,
+        "the palette closes back onto the History window"
     );
 }
 
@@ -390,22 +401,21 @@ fn test_ctrl_x_opens_which_key_from_chat() {
 }
 
 #[test]
-fn test_ctrl_x_opens_which_key_from_sidebar() {
-    use rustain::domain::models::visual::PanelType;
+fn test_ctrl_x_opens_which_key_from_history_window() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    open_history_window(&mut state);
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.pending_leader.is_some());
+    assert_eq!(state.pending_leader, Some(Context::History));
     assert_eq!(
         state.focus,
-        FocusState::Sidebar {
-            panel: PanelType::History,
-            selected: 0,
-        }
+        FocusState::Input,
+        "the base focus is untouched"
+    );
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::History,
+        "the menu opens above History, which stays open"
     );
 }
 

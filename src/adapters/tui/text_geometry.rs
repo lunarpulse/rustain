@@ -88,6 +88,25 @@ pub fn ellipsize<'a>(text: &'a str, budget: usize, marker: &str) -> Cow<'a, str>
     Cow::Owned(out)
 }
 
+/// Truncate `text` to `max_width` display cells with a `...` marker. Cuts on whole
+/// extended-grapheme boundaries (never inside a ZWJ sequence or before a combining mark).
+/// Budgets below the three-cell marker return the whole-grapheme prefix that fits, with no
+/// marker; from three cells up the marker is inside the budget.
+#[must_use]
+pub fn truncate_to_width(text: &str, max_width: usize) -> String {
+    const MARKER: &str = "...";
+    if cells(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width < MARKER.len() {
+        return clip(text, max_width).to_string();
+    }
+    let mut result = String::with_capacity(max_width);
+    result.push_str(clip(text, max_width - MARKER.len()));
+    result.push_str(MARKER);
+    result
+}
+
 /// `n` spaces; one allocation, no per-cell work.
 #[inline]
 #[must_use]
@@ -538,6 +557,37 @@ mod tests {
             for width in 0..12 {
                 assert!(cells(&plain(&slice_line(&wide, from, width))) <= width);
             }
+        }
+    }
+
+    // ── `truncate_to_width` (moved here from the deleted `widgets/sidebar.rs`, Story 21.7 7-E) ──
+
+    #[test]
+    fn test_truncate_to_width() {
+        assert_eq!(truncate_to_width("Hello", 10), "Hello");
+        assert_eq!(truncate_to_width("Hello World", 8), "Hello...");
+        assert_eq!(truncate_to_width("Test", 3), "...");
+    }
+
+    #[test]
+    fn test_truncate_to_width_multibyte() {
+        // CJK characters are 2 columns wide each
+        let text = "こんにちは世界"; // 7 chars, 14 columns
+        let result = truncate_to_width(text, 8);
+        // max_width=8, minus 3 for "..." leaves 5 columns for CJK
+        // 2 CJK chars = 4 columns (next would exceed 5), so "こん..."
+        assert!(result.ends_with("..."));
+        assert_eq!(result, "こん...");
+    }
+
+    #[test]
+    fn display_width_truncate_to_width_never_leaves_a_zwj_fragment() {
+        for budget in 0..14 {
+            let out = truncate_to_width(&G.repeat(6), budget);
+            assert!(cells(&out) <= budget.max(3), "budget {budget}: {out:?}");
+            assert!(!out.ends_with('\u{200d}'), "budget {budget}: {out:?}");
+            let body = out.trim_end_matches('.');
+            assert_eq!(body.len() % G.len(), 0, "whole families only: {out:?}");
         }
     }
 }

@@ -9,10 +9,43 @@ use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
 use rustain::adapters::tui::state::{Direction, TuiState};
 use rustain::domain::events::DomainInputEvent;
+use rustain::domain::models::ConversationSummary;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::PanelType;
+use rustain::domain::services::session_index::SessionIndex;
 
 use super::support::{StubWave, fresh, press};
+
+/// The History window open over five conversations (`h0` newest .. `h4`), every rail hint
+/// painted whole, `h1` selected.
+fn history_open() -> TuiState {
+    use rustain::adapters::tui::history_window::{self, Fit};
+    let summaries = (0..5)
+        .map(|i| ConversationSummary {
+            id: format!("h{i}"),
+            title: format!("Conversation {i}"),
+            created_at: 1_000 - i64::from(i) * 10,
+            updated_at: 1_000 - i64::from(i) * 10,
+            message_count: 3,
+            has_fork_source: false,
+        })
+        .collect();
+    let mut s = TuiState::new(130, 24);
+    history_window::open(&mut s, &SessionIndex::build(summaries), 2_000);
+    s.history_window
+        .as_ref()
+        .expect("the window is open")
+        .set_fit(Fit {
+            rows: 5,
+            viewport: 5,
+            open: true,
+            delete: true,
+            search: true,
+            ..Fit::default()
+        });
+    assert_eq!(press(&mut s, Key::Down), InputAction::Consumed);
+    assert_eq!(s.history_window.as_ref().unwrap().selected_id(), Some("h1"));
+    s
+}
 
 fn chat() -> TuiState {
     let mut state = fresh();
@@ -57,7 +90,7 @@ fn chat_sequences_set_the_pending_tail_and_clear_it() {
 
 /// DF-256: Tasks-tab `Enter` opens the selected task's window (a `TaskRef`); with no task the
 /// Tasks tab has nothing to open and `Enter` is consumed (never the composer or the Stage).
-/// The sidebar's open-entry fallback is witnessed on History.
+/// History's `Enter` opens the selected conversation by id.
 #[test]
 fn tasks_enter_opens_the_task_window_and_history_enter_opens_the_entry() {
     let mut s = super::support::tasks_hub();
@@ -77,44 +110,40 @@ fn tasks_enter_opens_the_task_window_and_history_enter_opens_the_entry() {
     );
     assert_eq!(press(&mut s, Key::Enter), InputAction::Consumed);
 
-    let mut s = fresh();
-    s.sidebar_visible = true;
-    s.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 1,
-    };
+    let mut s = history_open();
     assert_eq!(
         press(&mut s, Key::Enter),
-        InputAction::OpenSidebarConversation
+        InputAction::OpenHistoryEntry("h1".to_owned())
     );
 }
 
-/// DF-262: shrinking below the sidebar width drops the sidebar and the sidebar focus; a wide
-/// resize keeps them. (The task drill-down this once also dropped is gone, 21-7 7-D.)
+/// DF-262: shrinking below the sidebar width drops the Monitor sidebar column; a wide resize
+/// keeps it. The History window is a frame of its own (21-7 7-E): a resize at any width leaves
+/// it open on top with focus untouched (the column no longer holds focus or History).
 #[test]
-fn narrow_resize_clears_the_sidebar() {
+fn narrow_resize_clears_the_sidebar_column_and_keeps_the_history_frame() {
     let setup = || {
-        let mut s = fresh();
+        let mut s = history_open();
         s.terminal_width = 130;
         s.sidebar_visible = true;
-        s.sidebar_panel = Some(PanelType::History);
-        s.focus = FocusState::Sidebar {
-            panel: PanelType::History,
-            selected: 0,
-        };
         s
     };
+    let history_on_top = |s: &TuiState| {
+        s.modal_stack.top().map(|frame| frame.surface)
+            == Some(rustain::adapters::tui::presentation::Surface::History)
+    };
     let mut s = setup();
+    let focus = s.focus.clone();
     let resize = |s: &mut TuiState, width| handle_input(s, &DomainInputEvent::Resize(width, 30));
     assert_eq!(resize(&mut s, 100), InputAction::Consumed);
     assert!(!s.sidebar_visible);
-    assert_eq!(s.sidebar_panel, None);
-    assert_eq!(s.focus, FocusState::Chat);
+    assert!(history_on_top(&s), "the History frame survives the resize");
+    assert_eq!(s.focus, focus);
 
     let mut s = setup();
     resize(&mut s, 140);
     assert!(s.sidebar_visible);
-    assert_eq!(s.sidebar_panel, Some(PanelType::History));
+    assert!(history_on_top(&s));
 }
 
 /// Messages `Esc` with no kept filter is not swallowed by the tab: the one Mission Control frame
@@ -185,33 +214,30 @@ fn a_z_prefix_swallows_the_wave_key_after_it() {
     );
 }
 
-/// The Sidebar-family children declare no row for these keys, so each takes the Sidebar
-/// context's effect through its parent link (a changed `parents()` or a deleted parent row
-/// shows here).
+/// The History frame declares no row for the RU-25 scroll keys, so each takes the
+/// `InspectorBody` effect through its parent link (a changed `parents()` or a deleted parent row
+/// shows here): the selection moves by conversation id.
 #[test]
-fn sidebar_family_children_take_the_sidebar_effect_for_inherited_keys() {
-    let effect = |panel: PanelType, key: Key| {
-        let mut s = fresh();
-        s.sidebar_visible = true;
-        s.focus = FocusState::Sidebar { panel, selected: 0 };
+fn history_frame_takes_the_inspector_body_effect_for_inherited_keys() {
+    let effect = |key: Key| {
+        let mut s = history_open();
         let action = press(&mut s, key);
-        let focus = match s.focus {
-            FocusState::Sidebar { .. } => "Sidebar".to_string(),
-            other => format!("{other:?}"),
-        };
-        format!("{action:?} | {focus}")
+        let id = s.history_window.as_ref().and_then(|w| w.selected_id());
+        format!("{action:?} | {}", id.unwrap_or("-"))
     };
     let keys = [
-        (Key::Esc, "Consumed | Chat"),
-        (Key::Char('q'), "Quit | Sidebar"),
-        (Key::Tab, "Consumed | Input"),
-        (Key::Ctrl('c'), "CancelOrQuit | Sidebar"),
-        (Key::Ctrl('t'), "NewTab | Sidebar"),
-        (Key::Alt('v'), "RequestClipboardPaste | Sidebar"),
-        (Key::Enter, "OpenSidebarConversation | Sidebar"),
+        (Key::Char('j'), "Consumed | h2"),
+        (Key::Down, "Consumed | h2"),
+        (Key::Char('k'), "Consumed | h0"),
+        (Key::Up, "Consumed | h0"),
+        (Key::Char('g'), "Consumed | h0"),
+        (Key::Char('G'), "Consumed | h4"),
+        (Key::PageDown, "Consumed | h4"),
+        (Key::PageUp, "Consumed | h0"),
+        (Key::Ctrl('d'), "Consumed | h3"),
+        (Key::Ctrl('u'), "Consumed | h0"),
     ];
     for (key, expect) in keys {
-        let panel = PanelType::History;
-        assert_eq!(effect(panel, key), expect, "{panel:?} {key:?}");
+        assert_eq!(effect(key), expect, "History {key:?}");
     }
 }

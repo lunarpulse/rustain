@@ -25,8 +25,9 @@ workspace and its git branch (read from `.git/HEAD`, no `git` process), the
 active model, provider and sign-in state, three things to try, up to three
 recent sessions of this workspace (newest first, with their age) and the keys
 that work in this host at this width. The recent sessions are informational;
-open one from the History panel (`Ctrl+X h`), which needs a terminal at least
-120 columns wide; the key line names it only where it is available. The attached
+open one from the History window (`Ctrl+X h`, at every terminal width; `Enter` opens
+the selected conversation, `d` asks to delete it, `/` searches across them, `Esc`
+closes it); the key line names it. The attached
 client shows the workspace, its branch and the daemon it is attached to. The
 launchpad facts (git branch, sign-in state) are recomputed only when the
 conversation, model, provider or its lock state changes; the recent-session

@@ -7,10 +7,11 @@
 
 #![allow(dead_code)]
 
-use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 
-/// Apply density mode transition: update mode and reconcile the sidebar.
+/// Apply density mode transition: update mode and the column's visibility. The column paints
+/// the read-only monitor body and is never a focus target, so no focus changes (7-E: the
+/// History sidebar panel it used to open and focus is the History window now).
 /// Extracted from event_loop.rs dispatch arm per code review D-2 (AC-11 ≤10 LOC ratchet).
 pub(crate) fn apply_density_transition(
     state: &mut TuiState,
@@ -20,20 +21,6 @@ pub(crate) fn apply_density_transition(
     state.density_mode = mode;
     state.density_user_overridden = true;
     state.sidebar_visible = mode.default_sidebar_visible();
-    if state.sidebar_visible {
-        state.sidebar_panel = Some(crate::domain::models::visual::PanelType::History);
-        let selected = state.sidebar_selected;
-        reducer::set_base(
-            state,
-            crate::domain::models::FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::History,
-                selected,
-            },
-        );
-    } else {
-        state.sidebar_panel = None;
-        reducer::set_base(state, crate::domain::models::FocusState::Chat);
-    }
     let _ = event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
         conversation_id: None,
         level: crate::domain::models::NoticeLevel::Info,

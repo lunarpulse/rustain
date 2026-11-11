@@ -35,7 +35,6 @@ macro_rules! site {
 }
 
 const SITES: &[Site] = &[
-    site!("widgets/sidebar.rs", ["truncate_to_width"]),
     site!("widgets/modal.rs", ["ellipsize"]),
     site!(
         "widgets/chat_pane/word_wrap.rs",
@@ -60,7 +59,7 @@ const SITES: &[Site] = &[
         ["new", "render", "row_line", "fit", "shrink", "rule"]
     ),
     site!("widgets/hyperlink.rs", ["encode"]),
-    site!("text_geometry.rs", ["slice_line"]),
+    site!("text_geometry.rs", ["slice_line", "truncate_to_width"]),
     site!("block_viewer/mod.rs", ["window"]),
     site!("widgets/block_viewer.rs", ["render", "status"]),
     site!(

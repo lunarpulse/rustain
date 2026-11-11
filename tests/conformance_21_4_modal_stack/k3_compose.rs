@@ -340,7 +340,7 @@ fn tiny_terminal_painter_keeps_the_shared_minimum_size_message() {
 }
 
 #[test]
-fn wide_sidebar_cells_below_the_frame_are_dimmed_without_reflow() {
+fn wide_monitor_column_cells_below_the_frame_are_dimmed_without_reflow() {
     let mut state = TuiState::new(130, 30);
     let area = Rect::new(0, 0, 130, 30);
     let before = compute_layout(area, &state.theme, "", 2, true, DensityMode::Monitor).unwrap();
@@ -352,14 +352,18 @@ fn wide_sidebar_cells_below_the_frame_are_dimmed_without_reflow() {
     );
     let buffer = draw(&state, &after, Some("System · Quit"));
     let top = geometry::frame_rect(geometry::modal_region(&after, area));
-    let sidebar = after.sidebar.expect("named sidebar witness");
+    let sidebar = after.sidebar.expect("named Monitor column witness");
     for y in sidebar.y..sidebar.bottom() {
         for x in sidebar.x..sidebar.right() {
             if !top.contains((x, y).into()) {
-                assert_eq!(buffer[(x, y)].symbol(), "s", "sidebar moved at ({x},{y})");
+                assert_eq!(
+                    buffer[(x, y)].symbol(),
+                    "s",
+                    "Monitor column moved at ({x},{y})"
+                );
                 assert!(
                     buffer[(x, y)].modifier.contains(Modifier::DIM),
-                    "sidebar escaped the frame dim at ({x},{y})"
+                    "Monitor column escaped the frame dim at ({x},{y})"
                 );
             }
         }
@@ -369,7 +373,7 @@ fn wide_sidebar_cells_below_the_frame_are_dimmed_without_reflow() {
 #[test]
 fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
     use rustain::adapters::tui::widgets::input_box;
-    use rustain::domain::models::{FocusState, visual::PanelType};
+    use rustain::domain::models::FocusState;
     for surface in ["search", "reverse", "cross"] {
         let mut state = TuiState::new(130, 30);
         match surface {
@@ -391,13 +395,13 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
                 assert_eq!(state.reverse_search.selected_match, Some(1));
             }
             _ => {
+                // CrossSearch is opened from the History frame (old -> new: focus `Sidebar`).
+                use rustain::adapters::tui::history_window;
+                use rustain::domain::services::session_index::SessionIndex;
                 state.sidebar_visible = true;
                 state.density_mode = DensityMode::Monitor;
-                state.sidebar_panel = Some(PanelType::History);
-                state.focus = FocusState::Sidebar {
-                    panel: PanelType::History,
-                    selected: 0,
-                };
+                history_window::open(&mut state, &SessionIndex::new(), 0);
+                super::k7_cross_search::paint(&state);
                 let history_focus = state.focus.clone();
                 assert_eq!(
                     press(&mut state, Key::Char('/')),
@@ -744,9 +748,10 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
         Context, resolve::no_binding_text, table::CLOSE_WINDOW_FIRST,
     };
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-        // `t` (21-7 7-D) is a Mission Control tab like `r`/`s`: available from a frame origin, so
-        // the unavailable-from-a-window panel chord this leg witnesses is `h` (History).
-        for key in [Key::Char('h'), Key::Char('~')] {
+        // `h` (History, 21-7 7-E) and `t` (7-D) are Mission Control tabs like `r`/`s`: available
+        // from a frame origin, so the unavailable-from-a-window chord this leg witnesses is `w`
+        // (the density toggle still needs the base).
+        for key in [Key::Char('w'), Key::Char('~')] {
             let mut state = TuiState::new(width, height);
             state.input_buffer = "kept draft".into();
             state.cursor_position = 4;
@@ -758,7 +763,7 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
             let focus = state.focus.clone();
             let layout = layout(&state);
             let count = state.notifications.records().len();
-            let expected = if key == Key::Char('h') {
+            let expected = if key == Key::Char('w') {
                 CLOSE_WINDOW_FIRST.to_owned()
             } else {
                 no_binding_text(key, Context::Help.name())
@@ -779,14 +784,14 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
                 (top..region.bottom()).any(|y| row(&menu, region, y).contains(&expected)),
                 "{width}x{height} {key:?}: feedback must paint IN WhichKey, not under Help"
             );
-            if key == Key::Char('h') {
+            if key == Key::Char('w') {
                 let (x, y) = (top..region.bottom())
                     .find_map(|y| {
                         let text = row(&menu, region, y);
-                        text.find("History (n/a)")
+                        text.find("Monitor (n/a)")
                             .map(|x| (text[..x].chars().count() as u16, y))
                     })
-                    .expect("unavailable History row remains visible");
+                    .expect("unavailable Monitor row remains visible");
                 let cell = &menu[(region.x + x, y)];
                 assert!(
                     cell.modifier
@@ -823,7 +828,6 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
 fn nested_palette_refusal_is_visible_without_dispatch() {
     use rustain::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
     use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
-    use rustain::domain::models::visual::PanelType;
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         let mut state = TuiState::new(width, height);
         state.input_buffer = "palette caller draft".into();
@@ -843,7 +847,7 @@ fn nested_palette_refusal_is_visible_without_dispatch() {
                 description: String::new(),
                 shortcut: None,
                 scope: PaletteScope::All,
-                action: PaletteAction::OpenPanel(PanelType::History),
+                action: PaletteAction::DeleteAllConversations,
             })
             .to_vec();
         assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);

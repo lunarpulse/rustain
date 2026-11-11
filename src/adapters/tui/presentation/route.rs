@@ -210,6 +210,12 @@ pub fn route(
         crate::adapters::tui::adapters_window::on_wheel(state, *delta);
         return Some(RouteEffect::Consumed);
     }
+    if surface == Surface::History
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        crate::adapters::tui::history_window::on_wheel(state, *delta);
+        return Some(RouteEffect::Consumed);
+    }
     if surface == Surface::Login && Key::from_domain(event).is_none() {
         return Some(RouteEffect::Action(
             crate::adapters::tui::handlers::login::on_key(state, event),
@@ -314,7 +320,12 @@ pub fn route(
         Surface::Adapters if host == Host::Local => RouteEffect::Action(
             crate::adapters::tui::adapters_window::on_key(state, key, host),
         ),
-        Surface::AgentWindow | Surface::TaskWindow | Surface::Adapters => RouteEffect::Consumed,
+        Surface::History if host == Host::Local => RouteEffect::Action(
+            crate::adapters::tui::history_window::on_key(state, key, host),
+        ),
+        Surface::AgentWindow | Surface::TaskWindow | Surface::Adapters | Surface::History => {
+            RouteEffect::Consumed
+        }
         Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
             Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
                 RouteEffect::Decision(effect)

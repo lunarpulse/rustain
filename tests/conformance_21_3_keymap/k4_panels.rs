@@ -14,7 +14,6 @@ use rustain::adapters::tui::task_window;
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::Conversation;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::PanelType;
 
 use super::support::{StubWave, fresh, press, reorder_hub, task_ref, task_window_state, tasks_hub};
 use super::witness::{Case, W, local, run, w, wp};
@@ -352,7 +351,7 @@ fn retained_wave_rows_in_chat_ignore_an_armed_reorder() {
     }
 }
 
-/// DF-262: shrinking below 120 columns drops the sidebar and the sidebar focus; Chat has no task
+/// DF-262: shrinking below 120 columns drops the Monitor sidebar column; Chat has no task
 /// verb at any width. Replaces the old drill-down fallback (an open drill-down survived 120 and was
 /// dropped at 119, so `r s e c` stopped being task verbs): there is no drill-down, so `r s e` are
 /// Chat keys with nothing to do both before and after the resize, and `c` always copies.
@@ -360,7 +359,6 @@ fn retained_wave_rows_in_chat_ignore_an_armed_reorder() {
 fn narrow_resize_drops_the_sidebar_and_chat_has_no_task_verbs() {
     let mut state = TuiState::new(160, 40);
     state.sidebar_visible = true;
-    state.sidebar_panel = Some(PanelType::History);
     state.focus = FocusState::Chat;
     state.task_panel_state.last_executed_plan_id = Some("plan-1".to_owned());
 
@@ -376,7 +374,7 @@ fn narrow_resize_drops_the_sidebar_and_chat_has_no_task_verbs() {
     );
 
     assert_eq!(resize(&mut state, 119), InputAction::Consumed);
-    assert_eq!((state.sidebar_visible, state.sidebar_panel), (false, None));
+    assert!(!state.sidebar_visible);
     assert_eq!(
         (state.focus.clone(), state.terminal_width),
         (FocusState::Chat, 119)

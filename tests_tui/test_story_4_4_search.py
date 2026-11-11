@@ -112,4 +112,5 @@ class TestCrossSearch:
         tui.send("hello")
         tui.wait(1.0)
         tui.close_overlay()
-        tui.close_history()  # Close sidebar
+        tui.send(ESC)  # History is a frame: Esc closes it (no toggle chord)
+        tui.wait_for_screen_not_contains("┌History", timeout=5.0)

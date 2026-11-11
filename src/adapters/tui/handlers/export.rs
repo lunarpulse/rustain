@@ -108,14 +108,9 @@ pub fn close_cross_search(state: &mut TuiState) {
         {
             return;
         }
+        // The frame beneath (History, which opened the search) is the top frame again: the
+        // focus returns through the stack, nothing is written to the base (K-23).
         reducer::close(state, Surface::CrossSearch);
-        reducer::settle_stage_base(
-            state,
-            FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::History,
-                selected: state.sidebar_selected,
-            },
-        );
     });
 }
 

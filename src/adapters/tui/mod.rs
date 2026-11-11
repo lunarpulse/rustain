@@ -12,6 +12,7 @@ pub mod editor_suspend;
 pub mod fanout_spec;
 pub mod handlers;
 pub mod hints;
+pub mod history_window;
 pub mod image;
 pub mod keymap;
 pub mod launchpad;

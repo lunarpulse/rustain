@@ -7,11 +7,9 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use rustain::adapters::tui::keymap::table::{
-    ATTACHED_PROFILE, ATTACHED_SIGN_IN, PANEL_NARROW, attached_mission_remedy,
-    attached_panel_remedy,
+    ATTACHED_PROFILE, ATTACHED_SIGN_IN, attached_mission_remedy, attached_panel_remedy,
 };
 use rustain::adapters::tui::keymap::{AvailCtx, Key};
-use rustain::adapters::tui::notifications::NoticeSeverity;
 use rustain::adapters::tui::presentation::{Surface, reducer};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
@@ -53,8 +51,9 @@ fn position(text: &str, needle: &str) -> usize {
 
 #[test]
 fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
-    // Local, 80 columns: every sidebar-panel chord is (n/a); the overlays are not. The Room
-    // chord (21-7, 7-A) opens the Mission Control Room tab at every width: available.
+    // Local, 80 columns: no chord is (n/a) any more (Room, A2A log, Artifacts, Adapters, Agents,
+    // Tasks and History all open Mission Control tabs or frames); the overlays are not either.
+    // The Room chord (21-7, 7-A) opens the Mission Control Room tab at every width: available.
     let narrow = paint(80, 12, &AvailCtx::local(80, DensityMode::Focus));
     assert!(
         narrow.contains("[R] Room") && !narrow.contains("[R] Room (n/a)"),
@@ -80,8 +79,8 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         "80 cols: the Tasks chord is available:\n{narrow}"
     );
     assert!(
-        narrow.contains("[H] History (n/a)"),
-        "80 cols: `[H] History (n/a)` missing:\n{narrow}"
+        narrow.contains("[H] History") && !narrow.contains("[H] History (n/a)"),
+        "80 cols: the History chord is available (a frame at every width):\n{narrow}"
     );
     for painted in [
         "[P] Profile",
@@ -138,19 +137,15 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
     }
     assert!(!attached.contains("[F] Focus") && !narrow.contains("[D] Dashboard"));
 
-    // Pressing an (n/a) chord posts exactly its remedy (never a silent no-op).
+    // `Ctrl+X h` is no longer width-qualified (21-7 7-E: the History window is a frame at every
+    // local width): it asks for the window at 80 columns and posts no refusal.
     let mut state = TuiState::new(80, 24);
     press(&mut state, Key::Ctrl('x'));
-    press(&mut state, Key::Char('h'));
-    let notices: Vec<(NoticeSeverity, String)> = state
-        .notifications
-        .records()
-        .map(|r| (r.severity, r.message.clone()))
-        .collect();
     assert_eq!(
-        notices,
-        vec![(NoticeSeverity::Info, PANEL_NARROW.to_string())]
+        press(&mut state, Key::Char('h')),
+        rustain::adapters::tui::app::InputAction::OpenHistory
     );
+    assert_eq!(state.notifications.records().count(), 0);
     // The attached remedies are the registry's (what the attached host posts).
     assert!(
         ATTACHED_PROFILE.contains("rustain profile")
@@ -226,13 +221,7 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         ("ProfileSwitcher", FocusState::Input),
         ("ReverseSearch", FocusState::Input),
         ("Search", FocusState::Input),
-        (
-            "CrossSearch",
-            FocusState::Sidebar {
-                panel: rustain::domain::models::visual::PanelType::History,
-                selected: 0,
-            },
-        ),
+        ("CrossSearch", FocusState::Input),
         ("BookmarkList", FocusState::Chat),
         ("UsagePanel", FocusState::Input),
         ("WaveOverlay", FocusState::Chat),
@@ -319,9 +308,10 @@ fn every_command_a_generated_hint_names_has_a_row() {
     use rustain::adapters::tui::keymap::CommandId;
     use rustain::adapters::tui::keymap::render::{key_text, key_text_at};
     use rustain::adapters::tui::keymap::table_mission::MissionCmd as M;
-    use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SidebarCmd};
+    use rustain::adapters::tui::keymap::table_nav::BookmarkCmd;
     use rustain::adapters::tui::keymap::table_overlay::OverlayCmd as O;
     use rustain::adapters::tui::keymap::table_panels::PanelCmd as P;
+    use rustain::adapters::tui::presentation::viewer::ViewerCmd;
     let commands: Vec<CommandId> = vec![
         O::PaneYes.into(),
         O::PaneNo.into(),
@@ -333,9 +323,11 @@ fn every_command_a_generated_hint_names_has_a_row() {
         O::ModelWarnNo.into(),
         O::ProfileYes.into(),
         O::ProfileBack.into(),
-        SidebarCmd::FocusChat.into(),
-        SidebarCmd::SelectNext.into(),
-        SidebarCmd::SelectPrev.into(),
+        M::HistoryOpen.into(),
+        M::HistoryDelete.into(),
+        M::HistorySearch.into(),
+        CommandId::Viewer(ViewerCmd::LineDown),
+        CommandId::Viewer(ViewerCmd::LineUp),
         BookmarkCmd::Jump.into(),
         BookmarkCmd::Undo.into(),
         BookmarkCmd::Close.into(),

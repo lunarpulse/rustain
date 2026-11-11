@@ -205,7 +205,7 @@ fn the_launchpad_at_130x30_lists_every_row_of_the_design() {
 }
 
 #[test]
-fn the_launchpad_at_80x24_drops_the_history_key_it_cannot_open() {
+fn the_launchpad_at_80x24_names_the_history_key_that_opens_the_window() {
     let dir = git_workspace("ref: refs/heads/main\n");
     let mut state = local_state(80, 24, dir.path(), &[]);
     let painted = paint_local(
@@ -219,8 +219,11 @@ fn the_launchpad_at_80x24_drops_the_history_key_it_cannot_open() {
     );
     let rows = column(&painted, 80);
     assert_eq!(rows.len(), 15, "every design row fits 80x24: {rows:?}");
-    assert_eq!(rows[14], "^X ? Help · ^P Commands · ^X m Model");
-    assert!(!painted.iter().any(|row| row.contains("History")));
+    // History is a frame (Story 21.7 A21): `^X h` opens it at every local width.
+    assert_eq!(
+        rows[14],
+        "^X ? Help · ^P Commands · ^X m Model · ^X h History"
+    );
     assert_eq!(rows[0], "Welcome to Rustain.");
     assert_eq!(rows[4], "Type a message to start.");
 }
@@ -253,7 +256,10 @@ fn the_launchpad_at_60x16_keeps_the_design_inside_the_column() {
         rows[1]
     );
     assert_eq!(rows[4], "Type a message to start.");
-    assert_eq!(rows[14], "^X ? Help · ^P Commands · ^X m Model");
+    assert_eq!(
+        rows[14],
+        "^X ? Help · ^P Commands · ^X m Model · ^X h History"
+    );
 }
 
 #[test]
@@ -327,7 +333,7 @@ fn the_attached_launchpad_has_its_own_variant() {
             ],
             "width {width}"
         );
-        // `@` and the model/history rows are local-only or sidebar-only.
+        // `@` and the model/history rows are local-only.
         let text = painted.join("\n");
         assert!(!text.contains('@') && !text.contains("History") && !text.contains("Model"));
         assert!(!text.contains("Recent"));
@@ -339,7 +345,7 @@ fn fit_keeps_core_rows_and_drops_recent_first() {
     let dir = git_workspace("ref: refs/heads/main\n");
     let welcome = "Welcome to Rustain.";
     let start = "Type a message to start.";
-    let keys = "^X ? Help · ^P Commands · ^X m Model";
+    let keys = "^X ? Help · ^P Commands · ^X m Model · ^X h History";
     let model = "claude-opus · Anthropic · signed in";
     let ask = "  • Ask about this project: \"explain this codebase\"";
     let mention = "  • @ Mention a file to add it as context";
@@ -534,9 +540,10 @@ fn key_line_paints_only_available_rows() {
             .map(|row| row.trim().to_owned())
             .expect("a key line")
     };
-    // History is a sidebar panel: unavailable below 120 columns, available at 120.
-    assert!(!key_line(119).contains("History"));
-    assert!(key_line(120).contains("^X h History"));
+    // History is a frame (Story 21.7 A21): the key is named at every local width.
+    for width in [60u16, 80, 119, 120] {
+        assert!(key_line(width).contains("^X h History"), "{width}");
+    }
     assert!(key_line(130).ends_with("^X m Model · ^X h History"));
 }
 
@@ -580,7 +587,7 @@ fn an_unrefreshed_tab_keeps_the_receipt_bound_rows() {
             String::new(),
             "Type a message to start.".to_owned(),
             String::new(),
-            "^X ? Help · ^P Commands · ^X m Model".to_owned(),
+            "^X ? Help · ^P Commands · ^X m Model · ^X h History".to_owned(),
         ]
     );
 }
@@ -623,7 +630,10 @@ fn the_launchpad_at_80x24_and_60x16_pins_every_row() {
         );
         assert_eq!(
             column(&painted, width),
-            full_rows(&ws(&dir), "^X ? Help · ^P Commands · ^X m Model"),
+            full_rows(
+                &ws(&dir),
+                "^X ? Help · ^P Commands · ^X m Model · ^X h History"
+            ),
             "{width}x{height}"
         );
     }
@@ -632,7 +642,10 @@ fn the_launchpad_at_80x24_and_60x16_pins_every_row() {
 #[test]
 fn the_blank_separators_are_added_after_content_in_a_fixed_order() {
     let dir = git_workspace("ref: refs/heads/main\n");
-    let full = full_rows(&ws(&dir), "^X ? Help · ^P Commands · ^X m Model");
+    let full = full_rows(
+        &ws(&dir),
+        "^X ? Help · ^P Commands · ^X m Model · ^X h History",
+    );
     // Separators are the lowest priority: first the one after the meta rows
     // (row 4), then the one before the key line (row 14), then the one before
     // Recent (row 9).

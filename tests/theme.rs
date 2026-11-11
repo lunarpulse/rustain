@@ -331,23 +331,23 @@ fn test_density_mode_variants() {
 #[test]
 fn test_focus_state_variants() {
     use rustain::domain::models::FocusState;
-    use rustain::domain::models::visual::PanelType;
 
-    // Base focus has three variants; decisions are separate presentation frames.
+    // Base focus has two variants (21-7 7-E removed the sidebar variant: History is a frame);
+    // decisions and windows are separate presentation frames.
     let input = FocusState::Input;
     let chat = FocusState::Chat;
-    let sidebar = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
 
-    // Chat is a unit variant (scroll state owned by TuiState)
+    // Both are unit variants (scroll state owned by TuiState); the match is exhaustive, so a
+    // new variant forces a new assertion here.
+    for focus in [&input, &chat] {
+        match focus {
+            FocusState::Input | FocusState::Chat => {}
+        }
+    }
     assert_eq!(chat, FocusState::Chat);
 
     // All variants are distinct
     assert_ne!(input, chat);
-    assert_ne!(input, sidebar);
-    assert_ne!(chat, sidebar);
 }
 
 // Covers: FR22 (vim keybindings)

@@ -129,6 +129,11 @@ fn tab_switch_pops_stage_bound_frames_only() {
     state = super::k7_cross_search::history();
     state.active_tab_id = tabs.active_tab_id();
     super::k7_cross_search::open(&mut state);
+    // 21.7 7-E: CrossSearch is now opened above the History frame. This witness is about the
+    // four-deep global stack, so the History frame beneath is released through the reducer
+    // (reducer-unit setup, not a user path) and the original owner order is kept.
+    presentation::reducer::close(&mut state, Surface::History);
+    assert_eq!(state.modal_stack.len(), 1);
     let cross = populate_global_cross(&mut state);
     let payload = cross_payload(&state);
     presentation::reducer::open(&mut state, Surface::Search);
@@ -1461,6 +1466,10 @@ fn global_cross_survives_all_stage_reasons_with_mixed_continuations() {
             state.active_tab_id = tabs.active_tab_id();
             paint_active_stage(&tabs, state, &conversation, 130);
             super::k7_cross_search::open(state);
+            // Reducer-unit setup (see the first witness above): release the History frame the
+            // search was opened from so the four-deep owner order below is unchanged.
+            reducer::close(state, Surface::History);
+            assert_eq!(state.modal_stack.len(), 1);
             if placement == "cross-suspended" {
                 // Reducer-unit reachability only: reorder the four owners so
                 // Cross can be displaced. No History opener inside Frames.

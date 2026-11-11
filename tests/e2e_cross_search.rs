@@ -1,6 +1,6 @@
 //! E2E tests for cross-conversation search (Story 4-4 AC5, AC6, AC7).
 //!
-//! Exercises the input-dispatch layer (/ key in sidebar, j/k navigation,
+//! Exercises the input-dispatch layer (/ key in the History window, j/k navigation,
 //! Enter, Esc, Backspace) and the widget render path. The actual async
 //! scan (`run_cross_search`) is covered by unit tests in
 //! `domain/services/cross_search.rs`.
@@ -10,28 +10,58 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::presentation::{Surface, is_open};
+use rustain::adapters::tui::history_window;
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::layout::compute_layout;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::presentation::occlusion::OpaqueRects;
+use rustain::adapters::tui::presentation::{Shell, Surface, compose, is_open};
 use rustain::adapters::tui::state::{CrossSearchState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::cross_search;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::PanelType;
+use rustain::domain::models::{DensityMode, FocusState};
 use rustain::domain::services::cross_search::CrossSearchResult;
+use rustain::domain::services::session_index::SessionIndex;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn sidebar_focus_state() -> TuiState {
+/// The History window (empty index) painted once, so its rail hints are recorded: the
+/// state `/` is pressed in.
+fn history_state() -> TuiState {
     let mut s = TuiState::new(130, 30);
-    s.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    history_window::open(&mut s, &SessionIndex::new(), 1_700_000_000);
+    let area = ratatui::layout::Rect::new(0, 0, 130, 30);
+    let layout = compute_layout(
+        area,
+        &s.theme,
+        &s.input_buffer,
+        1,
+        false,
+        DensityMode::Focus,
+    )
+    .expect("a real chat viewport");
+    let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            let shell = Shell::new(frame.area(), &layout);
+            compose(
+                frame,
+                &s,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
+        })
+        .unwrap();
+    assert!(history_window::is_top(&s));
     s
 }
 
 fn cross_search_state() -> TuiState {
-    let mut s = sidebar_focus_state();
+    let mut s = history_state();
     assert_eq!(
         handle_input(&mut s, &DomainInputEvent::KeyPress('/')),
         InputAction::OpenCrossSearch
@@ -40,16 +70,13 @@ fn cross_search_state() -> TuiState {
     s
 }
 
+/// CrossSearch is the top frame, above the History window it was opened from; the base focus
+/// is untouched.
 fn assert_cross_search_frame(state: &TuiState) {
-    assert_eq!(
-        state.focus,
-        FocusState::Sidebar {
-            panel: PanelType::History,
-            selected: 0,
-        }
-    );
+    assert_eq!(state.focus, TuiState::new(130, 30).focus);
     assert!(is_open(state, Surface::CrossSearch));
-    assert_eq!(state.modal_stack.len(), 1);
+    assert_eq!(state.modal_stack.len(), 2);
+    assert!(is_open(state, Surface::History));
     let frame = state.modal_stack.top().expect("CrossSearch owns a frame");
     assert_eq!(frame.surface, Surface::CrossSearch);
     assert_eq!(frame.conversation_id, None);
@@ -86,8 +113,8 @@ fn stub_result(id: &str, title: &str, excerpt: &str, msg_idx: usize) -> CrossSea
 // ── AC5: / key opens cross-search overlay ─────────────────────────────────
 
 #[test]
-fn test_e2e_slash_in_sidebar_opens_cross_search() {
-    let mut state = sidebar_focus_state();
+fn test_e2e_slash_in_history_window_opens_cross_search() {
+    let mut state = history_state();
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
     assert_eq!(action, InputAction::OpenCrossSearch);
     assert_cross_search_frame(&state);
@@ -95,7 +122,7 @@ fn test_e2e_slash_in_sidebar_opens_cross_search() {
 }
 
 #[test]
-fn test_e2e_slash_outside_sidebar_does_not_open_cross_search() {
+fn test_e2e_slash_outside_history_does_not_open_cross_search() {
     let mut state = TuiState::new(130, 30);
     state.focus = FocusState::Chat;
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
@@ -268,8 +295,11 @@ fn test_e2e_cross_search_esc_returns_close() {
     assert_cross_search_frame(&state);
     rustain::adapters::tui::handlers::export::close_cross_search(&mut state);
     assert!(!is_open(&state, Surface::CrossSearch));
-    assert!(state.modal_stack.is_empty());
-    assert_eq!(state.focus, sidebar_focus_state().focus);
+    // Focus returns through the stack: the History window it was searched from is on top
+    // again (and nothing wrote the base focus).
+    assert_eq!(state.modal_stack.len(), 1);
+    assert!(history_window::is_top(&state));
+    assert_eq!(state.focus, TuiState::new(130, 30).focus);
 }
 
 // ── AC5: Overlay widget render ─────────────────────────────────────────────

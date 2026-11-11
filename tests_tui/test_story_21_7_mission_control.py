@@ -11,6 +11,10 @@ Artifacts) and `Enter` on the artifact row open the window titled `Artifact · <
 body row and the `[c] Copy` hint; `c` writes exactly the seeded source bytes to the clipboard file;
 `Esc` closes the window, then the hub.
 
+Leg E (slice 7-E, 80x24): two saved sessions; the launchpad key line names `^X h History`;
+`Ctrl+X h` paints the `History` frame with both titles and the rail; `j` then `Enter` opens the
+second (older) session and its transcript row is on the Stage with the frame gone.
+
 Offline first: RUSTAIN_MISSION_DESKCHECK=1 with RUSTAIN_MISSION_FRAMES=<dir> consumes only the
 frames written by the ignored Rust test `story21_7_smoke_frames_export` (60x16, 80x24, 130x30);
 no binary or subprocess is started. Every predicate passes on the intended frame and fails on
@@ -257,6 +261,47 @@ def torn_task_window(screen):
     return _torn_frame(screen, f"Task 2 · {TASK_ROW}", TASK_RESULT, "Needs you (1)", {})
 
 
+HISTORY_TITLE = "History"
+HISTORY_A = "Alpha history session"
+HISTORY_B = "Bravo history session"
+HISTORY_ROW = "Parser B wins: it has fewer cases."
+
+
+def launchpad_key_ok(screen):
+    """The launchpad key line names the generated History chord (registry text, any width)."""
+    return any(re.fullmatch(r"\s*\^X \? Help .*\^X h History\s*", row) for row in _rows(screen))
+
+
+def history_frame_ok(screen):
+    """`History` title row, both saved titles with their `msgs` facts inside the frame, the rail
+    with `Open` and the way out last, and the status row intact below."""
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, HISTORY_TITLE)
+    if top is None or bottom is None or bottom < top + 3:
+        return False
+    inside = rows[top + 1:bottom - 1]
+    both = all(any(re.fullmatch(r".*│.*" + re.escape(t) + r" · .* · \d+ msgs.*│\s*", row) for row in inside)
+               for t in (HISTORY_A, HISTORY_B))
+    rail = re.fullmatch(r"\s*│.*\[Enter\] Open.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
+    status = any(STATUS in row for row in rows[bottom + 1:])
+    return both and rail and status
+
+
+def torn_history(screen):
+    return _torn_frame(screen, HISTORY_TITLE, HISTORY_B, "Needs you (1)", {})
+
+
+def torn_launchpad(screen):
+    rows = _rows(screen)
+    index = next(i for i, row in enumerate(rows) if "^X h History" in row)
+    return {"key line cut": "\n".join(rows[:index] + [rows[index][: rows[index].index("History")]] + rows[index + 1:]),
+            "key line missing": "\n".join(rows[:index] + rows[index + 1:])}
+
+
+def transcript_ok(screen):
+    return HISTORY_ROW in screen and _frame_top(_rows(screen), HISTORY_TITLE) is None
+
+
 def _deskcheck():
     frames = Path(os.environ["RUSTAIN_MISSION_FRAMES"])
     for width, height in SIZES:
@@ -317,6 +362,20 @@ def _deskcheck():
             assert not tasks_frame_ok(torn), f"{name}: torn Tasks control `{label}` must fail:\n{torn}"
         for label, torn in torn_task_window(window).items():
             assert not task_window_ok(torn), f"{name}: torn window control `{label}` must fail:\n{torn}"
+    for width, height in SIZES:
+        name = f"{width}x{height}"
+        launch = (frames / f"launchpad-{name}.txt").read_text(encoding="utf-8")
+        history = (frames / f"history-open-{name}.txt").read_text(encoding="utf-8")
+        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
+        assert launchpad_key_ok(launch), f"{name}: the launchpad key line must name History\n{launch}"
+        assert history_frame_ok(history), f"{name}: the History frame must pass\n{history}"
+        for label, frame in (("the Stage", before), ("the launchpad", launch)):
+            assert not history_frame_ok(frame), f"{name}: History is absent from {label}"
+        assert not launchpad_key_ok(history) and not launchpad_key_ok(before), name
+        for label, torn in torn_history(history).items():
+            assert not history_frame_ok(torn), f"{name}: torn History control `{label}` must fail:\n{torn}"
+        for label, torn in torn_launchpad(launch).items():
+            assert not launchpad_key_ok(torn), f"{name}: torn launchpad control `{label}` must fail:\n{torn}"
     print("desk-check ok", [f"{w}x{h}" for w, h in SIZES])
 
 
@@ -643,5 +702,59 @@ def test_leg_d_tasks_tab_and_task_window_at_80x24(monkeypatch):
                                 ("task-open", window), ("stage-after", after)):
                 (evidence / f"{name}.txt").write_text(frame, encoding="utf-8")
             assert stage_rows(after)[:3] == stage_rows(before)[:3], f"Esc must restore the Stage:\n{before}\n{after}"
+            (evidence / "run.json").write_text(json.dumps(
+                {"viewport": [80, 24], "binary": binary, "result": "PASS"}) + "\n")
+
+def _history_session(session_id: str, title: str, updated: int, with_turns: bool) -> dict:
+    base = json.loads((Path(__file__).parent / "fixtures" / "sessions" / "story21_9_stage_polish.json").read_text())
+    session = {**base, "id": session_id, "title": title, "updatedAt": updated, "createdAt": updated}
+    if not with_turns:
+        session = {**session, "messages": [], "turns": []}
+    return session
+
+
+@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_e_history_window_at_80x24(monkeypatch):
+    """Leg E (7-E): two saved sessions; the launchpad key line names `^X h History`; `Ctrl+X h`
+    -> the `History` frame with both titles; `j`, `Enter` -> the older session's transcript row
+    on the Stage and the frame gone. Hermetic."""
+    monkeypatch.setattr(harness, "TERM_COLS", 80)
+    monkeypatch.setattr(harness, "TERM_ROWS", 24)
+    with tempfile.TemporaryDirectory(prefix="21-7-e-") as root:
+        root = Path(root)
+        workspace = root / "workspace"
+        sessions = workspace / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        for sid, title, updated, turns in (("story21-7-alpha", HISTORY_A, 1700000, True),
+                                           ("story21-7-bravo", HISTORY_B, 1700100, False)):
+            (sessions / f"{sid}.meta.json").write_text(json.dumps(_history_session(sid, title, updated, turns)))
+        (workspace / ".env").write_text("")
+        home = root / "home"
+        home.mkdir()
+        data = root / "data"
+        data.mkdir()
+        env = {"HOME": str(home), "RUSTAIN_PROFILE": "", "RUSTAIN_CLIPBOARD": "file",
+               "RUSTAIN_DATA_DIR": str(data)}
+        evidence_parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir()))
+        evidence = evidence_parent / "21-7-leg-e"
+        evidence.mkdir(parents=True, exist_ok=True)
+        binary = str(harness._resolve_binary()[0])
+        with RustainTUI(fresh=False, build=False, workspace=workspace, env_overrides=env) as tui, \
+                (evidence / "raw.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            launch = tui.wait_until(launchpad_key_ok, "the launchpad key line names History", timeout=15)
+            assert not history_frame_ok(launch)
+            tui.send(CTRL_X + "h")
+            history = tui.wait_until(history_frame_ok, "the History frame with both sessions", timeout=15)
+            tui.send("j")
+            tui.wait_until(lambda s: any(re.search(r"▸ .*" + HISTORY_A, row) for row in _rows(s)),
+                           "the older session selected", timeout=10)
+            tui.send("\r")
+            after = tui.wait_until(transcript_ok, "the opened session's transcript row", timeout=15)
+            for name, frame in (("launchpad", launch), ("history-open", history), ("transcript", after)):
+                (evidence / f"{name}.txt").write_text(frame, encoding="utf-8")
             (evidence / "run.json").write_text(json.dumps(
                 {"viewport": [80, 24], "binary": binary, "result": "PASS"}) + "\n")

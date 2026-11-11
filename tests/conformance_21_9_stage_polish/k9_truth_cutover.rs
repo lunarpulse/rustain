@@ -85,12 +85,9 @@ fn launchpad_keys_are_the_registry_rows_compact_labels() {
 #[test]
 fn launchpad_keys_follow_availability_by_host_and_width() {
     let narrow = launchpad_keys(Host::Local, &AvailCtx::local(80, DensityMode::Focus));
-    assert_eq!(
-        narrow.items.len(),
-        3,
-        "History needs the sidebar column: {narrow:?}"
-    );
-    assert!(narrow.items.iter().all(|item| !item.contains("History")));
+    // History is a frame (Story 21.7 A21), local at every width: the key line names it at 80.
+    assert_eq!(narrow.items.len(), 4, "{narrow:?}");
+    assert!(narrow.items.iter().any(|item| item.contains("History")));
     let attached = launchpad_keys(Host::Attached, &AvailCtx::attached(130, false));
     // `@` is local-only; the model selector and History are not attached keys.
     assert_eq!(attached.mention, None);

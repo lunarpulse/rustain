@@ -1,5 +1,3 @@
-use super::visual::PanelType;
-
 /// Which UI region has keyboard focus.
 /// Scroll state is owned by TuiState (adapter concern), not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7,5 +5,4 @@ use super::visual::PanelType;
 pub enum FocusState {
     Input,
     Chat,
-    Sidebar { panel: PanelType, selected: usize },
 }

@@ -37,7 +37,7 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
 use super::orchestration_glyph::spoke_result_glyph;
-use super::sidebar::truncate_to_width;
+use crate::adapters::tui::text_geometry::truncate_to_width;
 use crate::domain::models::SpokeResult;
 
 /// Minimum terminal width (columns) for the side-by-side layout. Below this the

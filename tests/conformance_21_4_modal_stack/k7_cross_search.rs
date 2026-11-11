@@ -1,25 +1,59 @@
 //! CrossSearch witnesses use its History slash opener and production dispatch.
 use super::keymap_support::press;
-use rustain::adapters::tui::{app::InputAction, keymap::Key, state::TuiState};
+use rustain::adapters::tui::{
+    app::InputAction,
+    history_window,
+    keymap::{Host, Key},
+    layout::compute_layout,
+    notification_log::LogFacts,
+    state::TuiState,
+};
 use rustain::adapters::tui::{
     handlers::export::{self, CrossSearchResultsOutcome as Outcome, CrossSearchScanAction as Scan},
     presentation::{self, Surface},
 };
-use rustain::domain::models::{
-    FocusState,
-    visual::{DensityMode, PanelType},
-};
-use rustain::domain::services::cross_search::CrossSearchResult;
+use rustain::domain::models::visual::DensityMode;
+use rustain::domain::services::{cross_search::CrossSearchResult, session_index::SessionIndex};
 
+/// One production compose of the open frames, as the draw does: a History key acts only if its
+/// rail hint was painted by the last draw (`HistoryWindowState::fit`).
+pub(super) fn paint(state: &TuiState) {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let area = Rect::new(0, 0, state.terminal_width, state.terminal_height);
+    let layout = compute_layout(
+        area,
+        &state.theme,
+        &state.input_buffer,
+        1,
+        state.sidebar_visible,
+        state.density_mode,
+    )
+    .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let shell = presentation::Shell::new(frame.area(), &layout);
+            presentation::compose(
+                frame,
+                state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                |_frame| {},
+            );
+        })
+        .unwrap();
+}
+
+/// 21.7 7-E (old -> new): the sidebar History panel (focus `Sidebar`) is the History window, a
+/// stack frame, opened on an empty session index and painted once.
 pub(super) fn history() -> TuiState {
     let mut state = TuiState::new(130, 30);
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
     state.sidebar_visible = true;
-    state.sidebar_panel = Some(PanelType::History);
     state.density_mode = DensityMode::Monitor;
+    history_window::open(&mut state, &SessionIndex::new(), 0);
+    paint(&state);
     state
 }
 
@@ -37,6 +71,7 @@ fn real_history_opener_owns_a_global_frame_at_narrow_widths() {
             Some("Cross-Search")
         );
         assert!(state.modal_stack.top().unwrap().conversation_id.is_none());
+        assert!(presentation::is_open(&state, Surface::History));
         assert_eq!(
             state.focus, caller,
             "opening must not overwrite interrupted base focus"
@@ -48,6 +83,10 @@ fn real_history_opener_owns_a_global_frame_at_narrow_widths() {
         assert_eq!(
             state.modal_stack.top().map(|frame| frame.title()),
             Some("Cross-Search")
+        );
+        assert!(
+            presentation::is_open(&state, Surface::History),
+            "CrossSearch is opened above the History frame it was searched from"
         );
     }
 }
@@ -164,20 +203,23 @@ fn covered_live_owner_receives_its_completion_without_taking_keys() {
 }
 
 #[test]
-fn esc_and_ctrl_c_apply_the_legacy_history_return_without_leaving_an_owner() {
+fn esc_and_ctrl_c_return_to_the_history_frame_without_leaving_an_owner() {
     for key in [Key::Esc, Key::Ctrl('c')] {
         let mut state = history();
+        let caller = state.focus.clone();
         open(&mut state);
         let pending = query(&mut state, "ab");
         assert_eq!(press(&mut state, key), InputAction::CloseCrossSearch);
         export::close_cross_search(&mut state);
         assert!(!presentation::is_open(&state, Surface::CrossSearch));
         assert_eq!(
-            state.focus,
-            FocusState::Sidebar {
-                panel: PanelType::History,
-                selected: 0
-            }
+            state.modal_stack.top().map(|frame| frame.surface),
+            Some(Surface::History),
+            "closing the search leaves the History frame it was opened from on top"
+        );
+        assert_eq!(
+            state.focus, caller,
+            "focus returns through the stack; nothing writes the base"
         );
         assert!(state.cross_search.query.is_empty());
         assert!(!state.cross_search.running);
@@ -345,8 +387,15 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
                 "existing={existing}"
             );
             assert!(h.state.cross_search.query.is_empty() && !h.state.cross_search.running);
+            // The search was opened from History: a successful open closes CrossSearch AND the
+            // History frame beneath, then settles the base focus on the Stage.
+            assert!(
+                !presentation::is_open(&h.state, Surface::History),
+                "existing={existing} with_permission={with_permission}"
+            );
+            assert!(h.state.modal_stack.is_empty());
             if !with_permission {
-                assert_eq!(h.state.focus, FocusState::Chat);
+                assert_eq!(h.state.focus, rustain::domain::models::FocusState::Chat);
             }
             assert_eq!(h.state.search_state.query.as_str(), "ab");
             assert_eq!(
@@ -712,6 +761,10 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
     assert_eq!(super::stage_support::view(&tabs), before_view);
     assert_eq!(super::stage_support::cache_keys(&h, &tabs), before_cache);
     assert_eq!(pixels(&h), before_pixels);
+    // The search came from History: closing the search returned to it; the scroll control
+    // below is the Stage's, so close the window first.
+    assert_eq!(press(&mut h.state, Key::Esc), InputAction::Consumed);
+    assert!(h.state.modal_stack.is_empty());
     let InputAction::MouseScroll(delta) = app::handle_input(&mut h.state, &wheel) else {
         panic!("uncovered production scroll dispatcher must be reachable");
     };
@@ -941,10 +994,9 @@ fn a_real_stream_keeps_appending_under_cross_search() {
         content: "first line\n".into(),
         parent_tool_use_id: None,
     });
-    h.state.focus = history().focus;
     h.state.sidebar_visible = true;
-    h.state.sidebar_panel = Some(PanelType::History);
     h.state.density_mode = DensityMode::Monitor;
+    history_window::open(&mut h.state, &SessionIndex::new(), 0);
     h.state.input_buffer = "kept draft".into();
     h.state.cursor_position = 4;
     let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
@@ -969,6 +1021,13 @@ fn a_real_stream_keeps_appending_under_cross_search() {
     );
     assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
     export::close_cross_search(&mut h.state);
+    // The History frame the search was opened from is the top frame again; `Esc` goes back.
+    assert_eq!(
+        h.state.modal_stack.top().map(|frame| frame.surface),
+        Some(Surface::History)
+    );
+    assert_eq!(press(&mut h.state, Key::Esc), InputAction::Consumed);
+    assert!(!presentation::is_open(&h.state, Surface::History));
     let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(screen.contains("independent appended row"), "{screen}");
     assert!(h.streaming.is_streaming);
@@ -1066,7 +1125,7 @@ fn cross_search_boundary_owns_every_ingress_and_recovers_after_tiny_resize() {
 }
 
 #[test]
-fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_visibly() {
+fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_legacy_targets_visibly() {
     use rustain::{
         adapters::tui::{
             keymap::{Context, table::CLOSE_WINDOW_FIRST},
@@ -1086,9 +1145,12 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
     open(&mut h.state);
     let _ = query(&mut h.state, "ab");
     let owner = h.state.modal_stack.top().cloned();
+    let caller = h.state.focus.clone();
     press(&mut h.state, Key::Ctrl('x'));
     assert_eq!(h.state.pending_leader, Some(Context::CrossSearch));
-    assert_eq!(press(&mut h.state, Key::Char('h')), InputAction::Consumed);
+    // old -> new: `h` (History) was the refused chord; History is a stack surface now, so the
+    // refusal is witnessed on `w`, the density toggle that still needs the base.
+    assert_eq!(press(&mut h.state, Key::Char('w')), InputAction::Consumed);
     assert_eq!(h.state.pending_leader, Some(Context::CrossSearch));
     assert_eq!(
         h.state.leader_feedback.as_ref().unwrap().message,
@@ -1122,7 +1184,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
     );
     press(&mut h.state, Key::Esc);
     for action in [
-        PaletteAction::OpenPanel(PanelType::History),
+        PaletteAction::DeleteAllConversations,
         PaletteAction::ExecuteCommand("notifications".into(), None),
     ] {
         press(&mut h.state, Key::Ctrl('p'));
@@ -1138,7 +1200,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
             action: action.clone(),
         }];
         let effect = press(&mut h.state, Key::Enter);
-        if matches!(action, PaletteAction::OpenPanel(_)) {
+        if matches!(action, PaletteAction::DeleteAllConversations) {
             assert_eq!(effect, InputAction::Consumed);
             assert_eq!(
                 h.state.modal_stack.top().unwrap().surface,
@@ -1168,12 +1230,95 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
         }
         assert_eq!(h.state.modal_stack.top(), owner.as_ref());
         assert_eq!(h.state.cross_search.query.as_str(), "ab");
-        assert_eq!(
-            h.state.focus,
-            FocusState::Sidebar {
-                panel: PanelType::History,
-                selected: 0
-            }
+        assert_eq!(h.state.focus, caller);
+        assert!(
+            presentation::is_open(&h.state, Surface::History),
+            "the History frame the search was opened from stays beneath"
         );
     }
+}
+
+#[test]
+fn the_history_chord_over_cross_search_truncates_back_to_the_history_frame() {
+    use rustain::infrastructure::runtime::history_bridge;
+    let mut state = history();
+    open(&mut state);
+    let _ = query(&mut state, "ab");
+    press(&mut state, Key::Ctrl('x'));
+    // 21.7 7-E: `Ctrl+X h` is no longer refused over a frame (the old CLOSE_WINDOW_FIRST); the
+    // window is one frame at a time, so re-opening it truncates to the existing frame.
+    assert_eq!(press(&mut state, Key::Char('h')), InputAction::OpenHistory);
+    assert!(state.leader_feedback.is_none());
+    history_bridge::open(&mut state, &SessionIndex::new());
+    assert_eq!(
+        state.modal_stack.top().map(|frame| frame.surface),
+        Some(Surface::History)
+    );
+    assert!(!presentation::is_open(&state, Surface::CrossSearch));
+    assert!(state.cross_search.query.is_empty() && !state.cross_search.running);
+}
+
+/// 7-E regression: CrossSearch is opened from the History window, so a successful result open
+/// must close History too — otherwise it stays the top frame over the opened conversation and
+/// the base focus is never set to Chat. A failed open (unknown conversation) keeps both.
+#[tokio::test]
+async fn a_successful_result_open_closes_the_history_window_beneath_the_search() {
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::domain::{
+        models::{
+            generate_conversation_id,
+            session::{SessionManager, SessionState},
+        },
+        ports::StoragePort,
+        services::session_index::SessionIndex,
+    };
+    use rustain::infrastructure::runtime::event_loop;
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let (mut h, mut tabs) = super::stage_support::stage(130, 30);
+    h.conversation = tabs.active_tab().conversation.clone();
+    h.state = history();
+    h.state.active_tab_id = tabs.active_tab_id();
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
+    let mut target = h.conversation.clone();
+    target.id = generate_conversation_id();
+    target.title = "Stored destination".into();
+    target.messages[1].content = format!("ab selected match\n{}", target.messages[1].content);
+    storage.save_conversation(&target).await.unwrap();
+    open(&mut h.state);
+    assert_eq!(h.state.modal_stack.len(), 2, "History beneath CrossSearch");
+    let scan = query(&mut h.state, "ab");
+    assert_eq!(
+        deliver(&mut h.state, scan, "Stored destination"),
+        Outcome::Applied
+    );
+    h.state.cross_search.results[0].conversation_id = target.id.clone();
+    h.state.cross_search.results[0].first_match_message_index = 1;
+    assert_eq!(
+        press(&mut h.state, Key::Enter),
+        InputAction::OpenCrossSearchResult
+    );
+    let mut session = SessionManager::new(SessionState::Empty);
+    let mut index = SessionIndex::new();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    event_loop::apply_open_cross_search_result(
+        &mut tabs,
+        &mut h.conversation,
+        &mut h.streaming,
+        &mut session,
+        &mut h.state,
+        &mut h.turn_queue,
+        &storage,
+        &storage,
+        &mut index,
+        &tx,
+    )
+    .await;
+    assert_eq!(h.conversation.id, target.id);
+    assert!(
+        h.state.modal_stack.is_empty(),
+        "the opened conversation is not covered by History"
+    );
+    assert!(!presentation::is_open(&h.state, Surface::History));
+    assert_eq!(h.state.focus, rustain::domain::models::FocusState::Chat);
 }

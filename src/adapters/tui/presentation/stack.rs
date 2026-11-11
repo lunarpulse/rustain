@@ -43,6 +43,10 @@ pub enum Surface {
     /// The Adapters window (Story 21.7 A21): global, one at a time; its payload is
     /// `TuiState.adapters_window` (a snapshot of the port and MCP health taken at open).
     Adapters,
+    /// The History window (Story 21.7 A21): global, one at a time; its payload is
+    /// `TuiState.history_window` (a snapshot of the session index, re-read when the index
+    /// changed). Local only: the attached host has no session index.
+    History,
 }
 
 impl Surface {
@@ -71,6 +75,7 @@ impl Surface {
             Self::AgentWindow => "Agent",
             Self::TaskWindow => "Task",
             Self::Adapters => "Adapters",
+            Self::History => "History",
         }
     }
 
@@ -99,6 +104,7 @@ impl Surface {
             Self::AgentWindow => Context::AgentWindow,
             Self::TaskWindow => Context::TaskWindow,
             Self::Adapters => Context::Adapters,
+            Self::History => Context::History,
         }
     }
 
@@ -122,6 +128,7 @@ impl Surface {
                 | Self::AgentWindow
                 | Self::TaskWindow
                 | Self::Adapters
+                | Self::History
         )
     }
 }

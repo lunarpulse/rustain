@@ -149,15 +149,10 @@ fn screen(buffer: &Buffer) -> String {
 // ── RU-6 arrival matrix ──────────────────────────────────────────────────────
 
 #[test]
-fn k10_an_idle_empty_input_chat_or_sidebar_takes_the_first_arrival() {
-    for focus in [
-        FocusState::Input,
-        FocusState::Chat,
-        FocusState::Sidebar {
-            panel: rustain::domain::models::visual::PanelType::History,
-            selected: 0,
-        },
-    ] {
+fn k10_an_idle_empty_input_or_chat_takes_the_first_arrival() {
+    // The sidebar-focus case is gone with `FocusState::Sidebar` (Story 21.7 7-E): the History
+    // sidebar panel is a stack frame now, not a base focus; the base focus is Input or Chat.
+    for focus in [FocusState::Input, FocusState::Chat] {
         let (mut state, _c) = clocked(80, 24);
         state.focus = focus.clone();
         assert_eq!(

@@ -1,17 +1,27 @@
-//! E2E tests for Story 4.2: Conversation History Sidebar.
-//! Tests SessionIndex integration, sidebar keyboard navigation,
-//! focus cycling, sidebar widget rendering, and live updates.
+//! E2E tests for Story 4.2 (conversation history), as migrated by Story 21.7 (7-E): the
+//! History sidebar PANEL is gone; History is an L2 frame (`history_window`). Tests the
+//! SessionIndex integration, the History window's paint and keyboard navigation (selection by
+//! conversation id), that Tab never targets a sidebar, and the sidebar column's resize rule.
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::history_window;
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::layout::compute_layout;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::presentation::occlusion::OpaqueRects;
+use rustain::adapters::tui::presentation::{Shell, Surface, compose, is_open};
 use rustain::adapters::tui::state::TuiState;
-use rustain::adapters::tui::widgets::sidebar;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::visual::{DeleteConfirmTarget, PanelType};
-use rustain::domain::models::{ConversationSummary, FocusState, StatusState};
-use rustain::domain::services::session_index::{SessionIndex, SessionSummary};
+use rustain::domain::models::visual::DeleteConfirmTarget;
+use rustain::domain::models::{ConversationSummary, DensityMode, FocusState, StatusState};
+use rustain::domain::services::session_index::SessionIndex;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
+
+/// The `now` every History window of this file is opened at (unix seconds).
+const NOW: i64 = 1_700_000_000;
 
 fn make_state() -> TuiState {
     TuiState::with_capability(
@@ -32,134 +42,157 @@ fn make_summary(id: &str, title: &str, updated_at: i64) -> ConversationSummary {
     }
 }
 
-// ── AC1: Ctrl+X h reveals/toggles the History sidebar (Ctrl+H is inert) ─────
+/// `count` conversations `e0` (newest) .. `e{count-1}` (oldest).
+fn numbered_index(count: usize) -> SessionIndex {
+    SessionIndex::build(
+        (0..count)
+            .map(|i| make_summary(&format!("e{i}"), &format!("Chat {i}"), NOW - 100 * i as i64))
+            .collect(),
+    )
+}
+
+/// Paint the stack once through the production compositor (the same boundary the host draws
+/// through) and return the screen rows. The paint also records what the History window
+/// painted (`fit`), which its keys act on.
+fn paint(state: &TuiState) -> Vec<String> {
+    let (width, height) = (state.terminal_width, state.terminal_height);
+    let area = Rect::new(0, 0, width, height);
+    let layout = compute_layout(
+        area,
+        &state.theme,
+        &state.input_buffer,
+        1,
+        false,
+        DensityMode::Focus,
+    )
+    .expect("a real chat viewport");
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let shell = Shell::new(frame.area(), &layout);
+            compose(
+                frame,
+                state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
+        })
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect()
+}
+
+/// Open the History window on `index` and paint it once (a History key acts only if its rail
+/// hint was painted by the last draw).
+fn open_history(state: &mut TuiState, index: &SessionIndex) -> String {
+    history_window::open(state, index, NOW);
+    paint(state).join("\n")
+}
+
+fn selected(state: &TuiState) -> Option<String> {
+    state
+        .history_window
+        .as_ref()
+        .and_then(|window| window.selected_id())
+        .map(str::to_owned)
+}
+
+// ── AC1: Ctrl+X h opens the History window at every width (Ctrl+H is inert) ─────
 
 #[test]
-fn test_ctrl_x_h_reveals_the_history_sidebar() {
-    let mut state = make_state();
-    assert!(!state.sidebar_visible);
+fn test_ctrl_x_h_opens_the_history_window() {
+    for width in [60, 80, 119, 120, 130] {
+        let mut state = TuiState::with_capability(
+            width,
+            24,
+            rustain::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
+        assert!(!state.sidebar_visible);
 
-    // The chord asks the host to open (or, when already showing, close) the
-    // History panel; `panel_bridge::open_panel` toggles it, so a second chord
-    // yields the very same request.
-    for _ in 0..2 {
-        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('h'));
-        assert_eq!(action, InputAction::OpenPanel(PanelType::History));
-        assert!(state.pending_leader.is_none());
+        // The chord asks the host to open the History window; a second chord yields the very
+        // same request (there is no panel toggle and no 120-column refusal any more).
+        for _ in 0..2 {
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+            let action = handle_input(&mut state, &DomainInputEvent::KeyPress('h'));
+            assert_eq!(action, InputAction::OpenHistory, "{width} columns");
+            assert!(state.pending_leader.is_none());
+        }
+
+        // Ctrl+H no longer toggles anything (Story 21.3 AC6).
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlH));
+        assert!(
+            matches!(action, InputAction::Consumed | InputAction::Ignored),
+            "{action:?}"
+        );
+        assert!(!state.sidebar_visible);
+        assert!(!is_open(&state, Surface::History), "Ctrl+H opens nothing");
     }
-
-    // Ctrl+H no longer toggles anything (Story 21.3 AC6).
-    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlH));
-    assert!(
-        matches!(action, InputAction::Consumed | InputAction::Ignored),
-        "{action:?}"
-    );
-    assert!(!state.sidebar_visible);
 }
 
-// ── AC2: Sidebar renders conversation list ──────────────────────────────────
+// ── AC2: the History window renders the conversation list ────────────────────
 
 #[test]
-fn test_sidebar_renders_empty_state() {
-    let backend = TestBackend::new(40, 10);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = rustain::adapters::tui::theme::Theme::dark();
-
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            sidebar::render_history_panel(area, frame.buffer_mut(), &[], 0, None, &theme);
-        })
-        .unwrap();
-
-    let buf = terminal.backend().buffer().clone();
-    let content: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
-    assert!(content.contains("No conversations"));
+fn test_history_window_renders_empty_state() {
+    let mut state = make_state();
+    let screen = open_history(&mut state, &SessionIndex::new());
+    assert!(is_open(&state, Surface::History));
+    assert!(screen.contains("History"), "{screen}");
+    assert!(screen.contains("No conversations"), "{screen}");
+    assert!(screen.contains("Back"), "the way out is painted: {screen}");
 }
 
 #[test]
-fn test_sidebar_renders_entries() {
-    let backend = TestBackend::new(50, 10);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = rustain::adapters::tui::theme::Theme::dark();
-
-    let entries = vec![
-        SessionSummary::new(
-            "a".to_string(),
-            "First Chat".to_string(),
-            1_700_000_000,
-            1_699_999_000,
-            3,
-        ),
-        SessionSummary::new(
-            "b".to_string(),
-            "Second Chat".to_string(),
-            1_699_999_000,
-            1_699_998_000,
-            7,
-        ),
-    ];
-
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            sidebar::render_history_panel(area, frame.buffer_mut(), &entries, 0, None, &theme);
-        })
-        .unwrap();
-
-    let buf = terminal.backend().buffer().clone();
-    let content: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
-    assert!(content.contains("First Chat"));
-    assert!(content.contains("Second Chat"));
+fn test_history_window_renders_entries() {
+    let mut state = make_state();
+    let index = SessionIndex::build(vec![
+        ConversationSummary {
+            message_count: 3,
+            ..make_summary("a", "First Chat", NOW)
+        },
+        ConversationSummary {
+            message_count: 7,
+            ..make_summary("b", "Second Chat", NOW - 1000)
+        },
+    ]);
+    let screen = open_history(&mut state, &index);
+    assert!(screen.contains("First Chat"), "{screen}");
+    assert!(screen.contains("Second Chat"), "{screen}");
+    assert!(screen.contains("3 msgs"), "{screen}");
+    assert!(screen.contains("7 msgs"), "{screen}");
 }
 
 #[test]
-fn test_sidebar_highlights_active_conversation() {
-    let backend = TestBackend::new(50, 10);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = rustain::adapters::tui::theme::Theme::dark();
-
-    let mut entries = vec![
-        SessionSummary::new(
-            "a".to_string(),
-            "Active One".to_string(),
-            1_700_000_000,
-            1_699_999_000,
-            3,
-        ),
-        SessionSummary::new(
-            "b".to_string(),
-            "Inactive".to_string(),
-            1_699_999_000,
-            1_699_998_000,
-            7,
-        ),
-    ];
-    entries[0].is_active = true;
-
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            sidebar::render_history_panel(area, frame.buffer_mut(), &entries, 0, Some("a"), &theme);
-        })
-        .unwrap();
-
-    let buf = terminal.backend().buffer().clone();
-    let content: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
-    // Active entry shows bullet indicator
-    assert!(content.contains("●"));
+fn test_history_window_highlights_active_conversation() {
+    let mut state = make_state();
+    let mut index = SessionIndex::build(vec![
+        make_summary("a", "Active One", NOW),
+        make_summary("b", "Inactive", NOW - 1000),
+    ]);
+    index.set_active(Some("a"));
+    let screen = open_history(&mut state, &index);
+    // Active entry shows the bullet indicator; the inactive one does not.
+    assert!(screen.contains("● Active One"), "{screen}");
+    assert!(!screen.contains("● Inactive"), "{screen}");
 }
 
-// ── AC3: Focus cycling (Tab key, Esc) ───────────────────────────────────────
+// ── AC3: Tab never targets a sidebar; Esc leaves the History window ───────────
 
 #[test]
 fn test_tab_from_chat_with_sidebar_never_focuses_sidebar() {
     // S16.6 AC5: Tab in Chat emits CycleInvocationInFocusedTurn. Since Story 21.7 (7-D,
     // RU-21-7-13) the event-loop fallback when no item cycles is the NEXT TAB, even with the
-    // sidebar visible: the sidebar is never a Tab target. The harness has no event loop, so the
-    // production seams checked are the dispatcher (the action; focus stays on Chat, no
-    // sidebar-focus transition) and the registry text every help surface prints.
+    // sidebar visible: the sidebar is never a Tab target (7-E: `FocusState` has no Sidebar
+    // variant at all). The harness has no event loop, so the production seams checked are the
+    // dispatcher (the action; focus stays on Chat) and the registry text every help surface
+    // prints.
     let mut state = make_state();
     state.sidebar_visible = true;
     state.focus = FocusState::Chat;
@@ -199,127 +232,103 @@ fn test_tab_from_chat_without_sidebar_switches_tab() {
 }
 
 #[test]
-fn test_tab_from_sidebar_returns_to_input() {
+fn test_tab_in_history_window_is_consumed_and_keeps_the_frame() {
+    // Old `test_tab_from_sidebar_returns_to_input` proved Tab left the (deleted) sidebar
+    // focus. The History window is a modal frame: an unbound Tab is consumed and neither closes
+    // it nor moves the selection.
     let mut state = make_state();
     state.sidebar_visible = true;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    open_history(&mut state, &numbered_index(3));
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.focus, FocusState::Input);
+    assert!(history_window::is_top(&state));
+    assert_eq!(selected(&state).as_deref(), Some("e0"));
 }
 
 #[test]
-fn test_esc_from_sidebar_returns_to_chat() {
+fn test_esc_from_history_window_closes_it() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    state.focus = FocusState::Chat;
+    open_history(&mut state, &numbered_index(3));
+    assert!(is_open(&state, Surface::History));
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.focus, FocusState::Chat);
+    assert!(!is_open(&state, Surface::History));
+    assert!(
+        state.history_window.is_none(),
+        "the frame owned the payload"
+    );
+    assert!(state.modal_stack.is_empty());
+    assert_eq!(state.focus, FocusState::Chat, "the base focus is untouched");
 }
 
-// ── AC4: Keyboard navigation (j/k/Enter/d) ─────────────────────────────────
+// ── AC4: Keyboard navigation (j/k/Enter/d), selection by conversation id ──────
 
 #[test]
-fn test_sidebar_j_moves_selection_down() {
+fn test_history_j_moves_selection_down() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 5;
-    state.sidebar_selected = 0;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    open_history(&mut state, &numbered_index(5));
+    assert_eq!(selected(&state).as_deref(), Some("e0"));
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.sidebar_selected, 1);
+    assert_eq!(selected(&state).as_deref(), Some("e1"));
 }
 
 #[test]
-fn test_sidebar_j_clamps_at_bottom() {
+fn test_history_j_clamps_at_bottom() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 3;
-    state.sidebar_selected = 2; // At last entry
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 2,
-    };
-
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
-    assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.sidebar_selected, 2); // Stays at 2
+    open_history(&mut state, &numbered_index(3));
+    for _ in 0..5 {
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        assert_eq!(action, InputAction::Consumed);
+    }
+    assert_eq!(selected(&state).as_deref(), Some("e2")); // Stays at the last entry
 }
 
 #[test]
-fn test_sidebar_k_moves_selection_up() {
+fn test_history_k_moves_selection_up() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 5;
-    state.sidebar_selected = 3;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 3,
-    };
+    open_history(&mut state, &numbered_index(5));
+    for _ in 0..3 {
+        handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+    }
+    assert_eq!(selected(&state).as_deref(), Some("e3"));
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.sidebar_selected, 2);
+    assert_eq!(selected(&state).as_deref(), Some("e2"));
 }
 
 #[test]
-fn test_sidebar_k_clamps_at_top() {
+fn test_history_k_clamps_at_top() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 5;
-    state.sidebar_selected = 0;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    open_history(&mut state, &numbered_index(5));
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.sidebar_selected, 0); // Stays at 0
+    assert_eq!(selected(&state).as_deref(), Some("e0")); // Stays at the first entry
 }
 
 #[test]
-fn test_sidebar_enter_opens_conversation() {
+fn test_history_enter_opens_conversation() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 3;
-    state.sidebar_selected = 1;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 1,
-    };
+    open_history(&mut state, &numbered_index(3));
+    handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::OpenSidebarConversation);
+    assert_eq!(action, InputAction::OpenHistoryEntry("e1".to_string()));
 }
 
 #[test]
-fn test_sidebar_d_deletes_conversation() {
+fn test_history_d_deletes_conversation() {
     let mut state = make_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 3;
-    state.sidebar_selected = 0;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    open_history(&mut state, &numbered_index(3));
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
-    assert_eq!(action, InputAction::DeleteSidebarConversation);
+    assert_eq!(action, InputAction::DeleteHistoryEntry("e0".to_string()));
 }
 
 // ── AC9: SessionIndex sorted by updated_at ──────────────────────────────────
@@ -386,16 +395,15 @@ fn test_session_index_remove_updates_index() {
     assert!(index.get("c").is_some());
 }
 
-// ── AC11: Resize hides sidebar when too narrow ──────────────────────────────
+// ── AC11: Resize hides the sidebar column when too narrow ───────────────────
+// (7-E: the column paints `Monitor · <Tab>` and is never a focus target; the P11 shrink
+// reset still hides it below 120 columns and leaves the focus where it was.)
 
 #[test]
 fn test_resize_hides_sidebar_when_narrow() {
     let mut state = make_state();
     state.sidebar_visible = true;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    state.focus = FocusState::Chat;
 
     // Simulate resize to below SIDEBAR_MIN_WIDTH
     let action = handle_input(
@@ -404,21 +412,19 @@ fn test_resize_hides_sidebar_when_narrow() {
     );
     assert_eq!(action, InputAction::Consumed);
     assert!(!state.sidebar_visible);
-    assert_eq!(state.focus, FocusState::Chat); // Focus moved out of sidebar
+    assert_eq!(state.focus, FocusState::Chat, "the column never held focus");
 }
 
 #[test]
 fn test_resize_keeps_sidebar_when_wide_enough() {
     let mut state = make_state();
     state.sidebar_visible = true;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    state.focus = FocusState::Chat;
 
     // Resize to exactly SIDEBAR_MIN_WIDTH — should keep sidebar
     let _action = handle_input(&mut state, &DomainInputEvent::Resize(120, 24));
     assert!(state.sidebar_visible);
+    assert_eq!(state.focus, FocusState::Chat);
 }
 
 // ── AC5/AC6: Delete confirmation flow (Story 21.1 S2: decision queue, 21.6 frame) ──
@@ -432,7 +438,6 @@ fn test_resize_keeps_sidebar_when_wide_enough() {
 use rustain::adapters::tui::decision_queue::{
     self, DecisionEffect, DecisionKind, DecisionSubject, PaneOutcome,
 };
-use rustain::adapters::tui::notification_log::LogFacts;
 use rustain::adapters::tui::notifications::NotificationStore;
 use rustain::domain::clock::MockClock;
 use rustain::domain::models::NotificationsConfig;
@@ -542,17 +547,16 @@ fn test_delete_confirmation_esc_cancels() {
 #[test]
 fn test_e2e_delete_with_confirmation() {
     let (mut state, clock) = pane_state();
-    state.sidebar_visible = true;
-    state.sidebar_entry_count = 3;
-    state.sidebar_selected = 0;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
+    let index = SessionIndex::build(vec![make_summary("conv-123", "Test", NOW)]);
+    history_window::open(&mut state, &index, NOW);
+    paint(&state);
 
-    // Step 1: press 'd' to initiate the delete (the sidebar key is unchanged).
+    // Step 1: press 'd' in the History window; the action carries the selected id.
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
-    assert_eq!(action, InputAction::DeleteSidebarConversation);
+    assert_eq!(
+        action,
+        InputAction::DeleteHistoryEntry("conv-123".to_string())
+    );
     assert!(
         state.decisions.is_empty(),
         "nothing is asked until the host raises it"
@@ -565,6 +569,32 @@ fn test_e2e_delete_with_confirmation() {
     assert_eq!(
         outcome,
         Some(PaneOutcome::Effect(DecisionEffect::ConfirmDelete))
+    );
+}
+
+/// A cancelled delete asked from the History window leaves History on top (focus returns
+/// through the stack; nothing writes the base focus).
+#[test]
+fn test_e2e_delete_cancel_returns_to_the_history_window() {
+    let (mut state, clock) = pane_state();
+    let index = SessionIndex::build(vec![make_summary("conv-123", "Test", NOW)]);
+    history_window::open(&mut state, &index, NOW);
+    paint(&state);
+    begin_delete_confirmation(&mut state, single());
+    assert!(!history_window::is_top(&state), "the decision is on top");
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('n'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::CancelDelete))
+    );
+    decision_queue::apply_resolved_action(&mut state, InputAction::CancelDelete);
+    assert!(state.decisions.is_empty());
+    assert!(history_window::is_top(&state), "History is on top again");
+    assert_eq!(
+        state.history_window.as_ref().and_then(|w| w.selected_id()),
+        Some("conv-123"),
+        "the selection survived the question"
     );
 }
 
@@ -609,7 +639,6 @@ fn test_e2e_delete_cancel() {
 #[test]
 fn test_e2e_bulk_delete_with_confirmation() {
     let (mut state, clock) = pane_state();
-    state.sidebar_entry_count = 5;
     begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count: 5 });
     ready(&mut state, &clock);
     let outcome = press(&mut state, DomainInputEvent::KeyPress('y'));
@@ -650,8 +679,8 @@ fn story21_1_delete_keys_are_inert_for_500ms_and_never_replayed() {
     );
 }
 
-/// The sidebar `y` with no frame is not an answer (the old overlay arm is gone): a
-/// deferred delete question stays queued, holds no frame, and a sidebar `y` neither
+/// A plain `y` with no decision frame is not an answer (the old overlay arm is gone): a
+/// deferred delete question stays queued, holds no frame, and a stray `y` neither
 /// confirms it nor removes it.
 // Old: a hand-seeded delete slot. New: the
 // question is a queue item raised by `begin_delete_confirmation`, then set aside
@@ -666,10 +695,6 @@ fn story21_1_a_stray_y_without_a_pane_never_confirms_a_delete() {
     );
     assert!(state.modal_stack.is_empty(), "no frame holds the question");
     assert!(state.decisions.holds(DecisionKind::DeleteConversations));
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     assert_ne!(action, InputAction::ConfirmDelete);
     assert!(
@@ -684,7 +709,6 @@ fn story21_1_a_stray_y_without_a_pane_never_confirms_a_delete() {
 #[test]
 fn test_e2e_bulk_delete_confirmation_is_a_decision_item_and_ends_in_one_notice() {
     let (mut state, clock) = pane_state();
-    state.sidebar_entry_count = 2;
     begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count: 2 });
     let item = state
         .decisions

@@ -5,12 +5,11 @@
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::Key;
-use rustain::adapters::tui::keymap::table::PANEL_NARROW;
 use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::{DensityMode, PanelType};
+use rustain::domain::models::visual::DensityMode;
 
 use super::support::{is_inert, press};
 
@@ -37,14 +36,14 @@ fn notices(state: &TuiState) -> Vec<(NoticeSeverity, String)> {
 
 #[test]
 fn every_leader_follow_up_runs_its_command_by_value() {
-    // `h` is the one local sidebar panel left; `t` (21-7, 7-D) opens the Mission Control Tasks
-    // tab at any width (below).
-    let panels = [('h', PanelType::History)];
-    for (key, panel) in panels {
+    // `h` asks for the History window (21-7 7-E: a frame, at every width); `t` (21-7, 7-D)
+    // opens the Mission Control Tasks tab at any width (below).
+    {
+        let key = 'h';
         let mut state = wide();
         assert_eq!(
             leader(&mut state, Key::Char(key)),
-            InputAction::OpenPanel(panel),
+            InputAction::OpenHistory,
             "{key}"
         );
         assert!(state.pending_leader.is_none(), "{key}: the leader closed");
@@ -353,20 +352,21 @@ fn escape_and_ctrl_c_cancel_the_leader_silently() {
 }
 
 #[test]
-fn width_unavailable_panel_answers_with_its_remedy() {
-    // 80 columns: the sidebar column cannot fit, so the panel chord is `(n/a)`
-    // and the key answers with the remedy instead of moving focus invisibly. (`t`, `l` and `e`
-    // are not here: they open Mission Control tabs and need no sidebar column.)
-    {
-        let key = 'h';
-        let mut state = TuiState::new(80, 24);
-        let action = leader(&mut state, Key::Char(key));
-        assert!(is_inert(&action), "{key}: {action:?}");
-        assert_eq!(state.focus, FocusState::Input, "{key}: focus unchanged");
+fn history_chord_answers_at_every_width_with_no_narrow_refusal() {
+    // 21-7 7-E: History is a frame of its own, so `Ctrl+X h` opens it at every local width: the
+    // 120-column refusal (`PANEL_NARROW`) is gone; the key never moves focus or posts a notice.
+    for (width, height) in [(60, 16), (80, 24), (119, 30), (120, 30), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        let action = leader(&mut state, Key::Char('h'));
+        assert_eq!(action, InputAction::OpenHistory, "{width} cols");
         assert_eq!(
-            notices(&state),
-            vec![(NoticeSeverity::Info, PANEL_NARROW.to_string())],
-            "{key}"
+            state.focus,
+            FocusState::Input,
+            "{width} cols: focus unchanged"
+        );
+        assert!(
+            notices(&state).is_empty(),
+            "{width} cols: no refusal notice"
         );
     }
     // Control: the Usage overlay needs no sidebar column, so it still runs.
@@ -385,8 +385,5 @@ fn the_leader_is_untimed_across_ticks() {
         notifications::tick(&mut state);
     }
     assert!(state.pending_leader.is_some(), "no timeout closes the menu");
-    assert_eq!(
-        press(&mut state, Key::Char('h')),
-        InputAction::OpenPanel(PanelType::History)
-    );
+    assert_eq!(press(&mut state, Key::Char('h')), InputAction::OpenHistory);
 }

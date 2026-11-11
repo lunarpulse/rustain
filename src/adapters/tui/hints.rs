@@ -30,7 +30,6 @@ pub fn contextual_hint(
     match focus {
         FocusState::Input => render_tips::tip(Context::Input, Host::Local, is_vscode, false),
         FocusState::Chat => render_tips::tip(Context::Chat, Host::Local, is_vscode, stage_target),
-        _ => None,
     }
 }
 

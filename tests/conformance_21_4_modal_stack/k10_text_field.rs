@@ -3,15 +3,14 @@ use super::keymap_support::press;
 use super::stage_support::{cache_keys, chat_pixels, paste, stage, view};
 use rustain::adapters::tui::{
     app::{InputAction, handle_input},
+    history_window,
     keymap::Key,
     presentation::{Surface, text_field::TextField},
     state::TuiState,
 };
 use rustain::domain::events::DomainInputEvent;
-use rustain::domain::models::{
-    FocusState, TabManager,
-    visual::{DensityMode, PanelType},
-};
+use rustain::domain::models::{FocusState, TabManager, visual::DensityMode};
+use rustain::domain::services::session_index::SessionIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
@@ -42,26 +41,25 @@ fn key(h: &mut crate::e2e_harness::TestHarness, tabs: &mut TabManager, key: Key)
 
 impl Field {
     fn prepare(self, state: &mut TuiState) {
-        state.focus = if self == Self::Cross {
+        if self == Self::Cross {
+            // CrossSearch is opened from the History frame; the Monitor column no longer
+            // paints History (old -> new: the sidebar-focus fixture is gone).
             state.sidebar_visible = true;
-            state.sidebar_panel = Some(PanelType::History);
             state.density_mode = DensityMode::Monitor;
-            FocusState::Sidebar {
-                panel: PanelType::History,
-                selected: 0,
-            }
-        } else {
-            FocusState::Input
-        };
+        }
+        state.focus = FocusState::Input;
     }
 
     fn begin_open(self, state: &mut TuiState) -> (u16, u16) {
         self.prepare(state);
         let size = (state.terminal_width, state.terminal_height);
         if self == Self::Cross {
-            // The legacy History opener is reachable at 130 columns; the
-            // resulting global frame then owns editing at all supported sizes.
+            // The History window is opened and painted at 130 columns (its `/` hint must have
+            // been painted); the resulting global frame then owns editing at all supported
+            // sizes.
             handle_input(state, &DomainInputEvent::Resize(130, 30));
+            history_window::open(state, &SessionIndex::new(), 0);
+            super::k7_cross_search::paint(state);
         }
         size
     }
@@ -526,6 +524,12 @@ fn non_search_fields_do_not_navigate_the_owning_stage() {
                     "first Esc clears only the child"
                 );
                 key(&mut h, &mut tabs, Key::Esc);
+            }
+            if field == Field::Cross {
+                // The History frame the search was opened from is the top frame again.
+                assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::History);
+                key(&mut h, &mut tabs, Key::Esc);
+                assert!(h.state.modal_stack.is_empty());
             }
             h.render_active_tab(&tabs);
             assert_eq!(

@@ -1390,7 +1390,7 @@ def _bbii_shell(screen, draft):
     return rows, top-1
 
 
-def _bbii_frame(screen, hidden, draft, title, closing=None):
+def _bbii_frame(screen, hidden, draft, title, closing=None, spaced=True):
     shell = _bbii_shell(screen, draft)
     if not shell or not hidden:
         return None
@@ -1400,7 +1400,7 @@ def _bbii_frame(screen, hidden, draft, title, closing=None):
             (width*9//10, min(region, max(5, region*85//100))))
     left, top = (width-w)//2, (region-h)//2
     box = tuple(row[left:left+w] for row in rows[top:top+h])
-    prefix = "┌ "+title+" "
+    prefix = ("┌ "+title+" ") if spaced else ("┌"+title)
     bottom = "└"+(closing or "")
     if (len(box) < 5 or box[0] != prefix+"─"*(w-len(prefix)-1)+"┐"
             or box[-1] != bottom+"─"*(w-len(bottom)-1)+"┘"
@@ -1410,7 +1410,7 @@ def _bbii_frame(screen, hidden, draft, title, closing=None):
 
 
 def _bbii_cross(screen, hidden, draft, query, count=None, selected=None):
-    box = _bbii_frame(screen, hidden, draft, "Cross-Search", " [Enter] open  [Esc] close ")
+    box = _bbii_frame(screen, hidden, draft, "History › Cross-Search", " [Enter] open  [Esc] close ")
     if not box or box[1][1:-1].rstrip() != ("/ "+query).rstrip():
         return None
     summary = count or ("Type at least 2 characters" if len(query) < 2 else "No matches found")
@@ -1444,16 +1444,17 @@ def _bbii_history(screen, hidden, draft, require_entry=True, title=TURN):
     rows, status = shell
     if len(rows[0]) != 130 or len(rows) != 30 or "Cross-Search" in screen:
         return None
-    left = 130-min(50, max(30, 130*3//10))
-    sidebar = tuple(r[left:] for r in rows)
-    if (sidebar[0] != "┌History"+"─"*(130-left-9)+"┐"
-            or sidebar[-1] != "└"+"─"*(130-left-2)+"┘"
-            or any(not (r.startswith("│") and r.endswith("│")) for r in sidebar[1:-1])
-            or (require_entry and not any(title in r and "[2]" in r for r in sidebar[1:-1]))
-            or (not require_entry and not any("No conversations" in r for r in sidebar[1:-1]))
+    # History is a centred L2 frame (Story 21.7 A21), not the sidebar column: its title sits in
+    # the top rail without padding; an entry row reads `<title> · <age> · 2 msgs`.
+    box = _bbii_frame(screen, hidden, draft, "History", spaced=False)
+    if not box:
+        return None
+    body = [r[1:-1] for r in box[1:-1]]
+    if ((require_entry and not any(title in r and "2 msgs" in r for r in body))
+            or (not require_entry and not any("No conversations" in r for r in body))
             or any("Cross-Search" in r or "System · Quit" in r for r in rows[:status])):
         return None
-    return sidebar[0], sidebar[-1], title if require_entry else "No conversations"
+    return box[0], box[-1], title if require_entry else "No conversations"
 
 
 def _bbii_base(screen, hidden, draft):
@@ -1490,7 +1491,7 @@ def _deskcheck_bb1b_ii_frames(directory):
                 def predicate(screen, hidden=r["cursor_hidden"], q=query, c=count, t=title):
                     return _bbii_cross(screen, hidden, draft, q, c, t)
                 assert predicate(r["screen"]), r
-                box = _bbii_frame(r["screen"], r["cursor_hidden"], draft, "Cross-Search",
+                box = _bbii_frame(r["screen"], r["cursor_hidden"], draft, "History › Cross-Search",
                                     " [Enter] open  [Esc] close ")
                 rows = r["screen"].split("\n")
                 top = next(y for y, row in enumerate(rows) if box[0] in row)
@@ -1518,8 +1519,8 @@ def _deskcheck_bb1b_ii_frames(directory):
                     assert not predicate(unfiltered["screen"]), "independent absent-results owner"
             draft = FULL_DRAFT if full else DRAFT
             filtered = frames[width, height, full, "cross-filtered"]
-            for stage, title in (("cross-quit", "Cross-Search › System · Quit"),
-                                 ("base-quit", "System · Quit")):
+            for stage, title in (("cross-quit", "History › Cross-Search › System · Quit"),
+                                 ("base-quit", "History › System · Quit" if width == 130 else "System · Quit")):
                 r = frames[width, height, full, stage]
                 assert r["draft"] == draft
                 def quit_predicate(screen, hidden=r["cursor_hidden"]):
@@ -1565,7 +1566,9 @@ def _deskcheck_bb1b_ii_frames(directory):
                 assert r["draft"] == (FULL_DRAFT if full else DRAFT)
                 assert _bbii_history(r["screen"], r["cursor_hidden"], r["draft"], require_entry=False), r
                 rows = r["screen"].split("\n")
-                for y in (0, 1, harness.composer_top(rows)-1, len(rows)-1):
+                box = _bbii_frame(r["screen"], True, r["draft"], "History", spaced=False)
+                top = next(y for y, row in enumerate(rows) if box[0] in row)
+                for y in (top, top+len(box)-1, harness.composer_top(rows)-1, len(rows)-1):
                     torn = rows.copy(); torn[y] = " "*width
                     assert not _bbii_history("\n".join(torn), True, r["draft"], require_entry=False), y
                 assert not _bbii_history(r["screen"], False, r["draft"], require_entry=False)
@@ -1580,10 +1583,12 @@ def _deskcheck_bb1b_ii_frames(directory):
                 assert not history_predicate(filtered["screen"]), "independent Cross owner"
                 assert not history_predicate(populated["screen"], hidden=False)
                 assert not _bbii_history(populated["screen"], True, draft, title="")
-                for before, after in ((populated["history_title"], "x"*len(populated["history_title"])), ("[2]", "[3]")):
+                for before, after in ((populated["history_title"], "x"*len(populated["history_title"])), ("2 msgs", "3 msgs")):
                     assert not history_predicate(populated["screen"].replace(before, after))
                 rows = populated["screen"].split("\n")
-                for y in (0, 1, harness.composer_top(rows)-1, len(rows)-1):
+                box = _bbii_frame(populated["screen"], True, draft, "History", spaced=False)
+                top = next(y for y, row in enumerate(rows) if box[0] in row)
+                for y in (top, top+len(box)-1, harness.composer_top(rows)-1, len(rows)-1):
                     torn = rows.copy(); torn[y] = " "*width
                     assert not history_predicate("\n".join(torn)), (full, y)
     # Read an actual FileSystemStorage serialization, not a hand-written echo of
@@ -1666,7 +1671,7 @@ def _bb1b_ii_leg(tui, ws):
          cross("Bb1ablocked"))
     step("restore-query-after-paste", b"\x15Bb1a", cross("Bb1a", "1/1 matches", title))
     step("cross-quit", b"\x11",
-         lambda s: _bbii_quit(s, tui.screen.cursor.hidden, FULL_DRAFT, "Cross-Search › System · Quit"))
+         lambda s: _bbii_quit(s, tui.screen.cursor.hidden, FULL_DRAFT, "History › Cross-Search › System · Quit"))
     step("cross-quit-cancel", b"n", lambda s: cross("Bb1a", "1/1 matches", title)(s) == owner)
     for label, key in (("esc", b"\x1b"), ("ctrl-c", b"\x03")):
         step("history-return-"+label, key, lambda s: _bbii_history(s, tui.screen.cursor.hidden, FULL_DRAFT, title=persisted["history_title"]))
@@ -1804,7 +1809,7 @@ def _bb2b_list(screen, hidden, draft, kind, token=None):
 
 
 def _bb2b_cross(screen, hidden, draft, query, position, cells, count=None, title=None):
-    box = _bbii_frame(screen, hidden, draft, "Cross-Search", " [Enter] open  [Esc] close ")
+    box = _bbii_frame(screen, hidden, draft, "History › Cross-Search", " [Enter] open  [Esc] close ")
     if not box or not _bbii_cross(screen, hidden, draft, query, count, title):
         return None
     rows, region = _bbii_shell(screen, draft)

@@ -1,7 +1,7 @@
 //! K4 — shell cells (Story 21.11, AC4).
 //!
 //! Every test drives a real public renderer (`status_bar::render`,
-//! `tab_bar::render_tab_bar`, `sidebar::render_history_panel`,
+//! `tab_bar::render_tab_bar`, `history_inspector::row_text`,
 //! `stage_search::render`, `reverse_search::render`, `cross_search::render`,
 //! `bookmark_list::render`, `command_palette::render`) into a `TestBackend`
 //! buffer and reads the painted cells back. Expected values come from the
@@ -29,7 +29,8 @@ use rustain::adapters::tui::state::{
 };
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{
-    bookmark_list, command_palette, cross_search, reverse_search, sidebar, status_bar, tab_bar,
+    bookmark_list, command_palette, cross_search, history_inspector, reverse_search, status_bar,
+    tab_bar,
 };
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use rustain::domain::models::tab::TabManager;
@@ -345,39 +346,34 @@ fn k4_tab_active_title_that_cannot_fit_is_cut_on_a_grapheme() {
     }
 }
 
-// ── sidebar ────────────────────────────────────────────────────────────────
+// ── History window row ─────────────────────────────────────────────────────
+// (Story 21.7 7-E: the History sidebar panel and its `render_history_panel` are gone; the row
+// is the History window's `history_inspector::row_text`, whose title is cut by
+// `text_geometry::truncate_to_width`.)
 
-fn sidebar_panel(width: u16, title: &str) -> Painted {
-    let theme = Theme::dark();
+/// The title between the indicator and ` · just now · 3 msgs`, after the row-level invariants
+/// (no family fragment, the age and count always survive) of the History row built at `width`.
+fn history_body(width: usize, title: &str) -> String {
     let now = now_unix();
     let entry = SessionSummary::new("c1".into(), title.into(), now, now, 3);
-    paint(width, 3, |frame| {
-        sidebar::render_history_panel(frame.area(), frame.buffer_mut(), &[entry], 0, None, &theme);
-    })
-}
-
-/// The title between the indicator and ` just now [3]`, after the row-level
-/// invariants (whole clusters, no family fragment).
-fn sidebar_body(width: u16, title: &str) -> String {
-    let painted = sidebar_panel(width, title);
-    let row = row_text(&painted.buffer, 1);
+    let row = history_inspector::row_text(&entry, now, width);
     let (body, _) = row
-        .strip_prefix("│  ")
-        .and_then(|rest| rest.split_once(" just now [3]"))
+        .strip_prefix("  ")
+        .and_then(|rest| rest.split_once(" · just now · 3 msgs"))
         .unwrap_or_else(|| panic!("{width} {title:?}: {row:?}"));
-    assert_whole_clusters(&painted.buffer);
+    assert!(cells(&row) <= width, "{width} {title:?}: {row:?}");
     assert_no_partial_family(&row);
     body.to_string()
 }
 
 #[test]
-fn k4_sidebar_title_fits_its_budget_and_cuts_on_whole_graphemes() {
-    // Row = 2-cell indicator + title + ` just now` + ` [3]`; the title budget
-    // is the inner width minus 17.
-    for width in [30u16, 60, 80, 130] {
-        let budget = usize::from(width) - 2 - 17;
+fn k4_history_title_fits_its_budget_and_cuts_on_whole_graphemes() {
+    // Row = 2-cell indicator + title + ` · just now` + ` · 3 msgs` (20 cells); the title
+    // budget is the row width minus 22. The window passes `inner width - 2` as the row width.
+    for width in [30usize, 60, 80, 130] {
+        let budget = width - 22;
         for unit in UNITS {
-            assert_fit_then_cut(unit, budget, "...", &|title| sidebar_body(width, title));
+            assert_fit_then_cut(unit, budget, "...", &|title| history_body(width, title));
         }
     }
 }

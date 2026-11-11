@@ -111,10 +111,12 @@ impl PaletteRegistry {
         });
         self.slash_entries.push(PaletteEntry {
             name: "history".to_string(),
-            description: "Open the conversation history panel".to_string(),
+            description: "Open the History window (past conversations)".to_string(),
             shortcut: shortcut_for(CommandId::Leader(LeaderCmd::History)),
             scope: PaletteScope::All,
-            action: PaletteAction::OpenPanel(crate::domain::models::visual::PanelType::History),
+            action: PaletteAction::OpenSurface(
+                crate::domain::models::palette::SurfaceTarget::History,
+            ),
         });
         self.slash_entries.push(PaletteEntry {
             name: "agents".to_string(),

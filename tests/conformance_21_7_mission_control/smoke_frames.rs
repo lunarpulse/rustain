@@ -193,4 +193,44 @@ async fn story21_7_smoke_frames_export() {
         )
         .expect("write");
     }
+    // Leg E (7-E): the launchpad key line and the History frame over two saved sessions (the
+    // live leg seeds the same two titles through saved session files).
+    for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+        use rustain::domain::models::ConversationSummary;
+        use rustain::domain::services::session_index::SessionIndex;
+        let summary = |id: &str, title: &str, updated: i64| ConversationSummary {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            created_at: updated,
+            updated_at: updated,
+            message_count: 2,
+            has_fork_source: false,
+        };
+        let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
+        rig.f.sessions = SessionIndex::build(vec![
+            summary("alpha", "Alpha history session", 1_700_000),
+            summary("bravo", "Bravo history session", 1_700_100),
+        ]);
+        // The launchpad shows on an empty conversation (and needs its environment facts).
+        rig.f.h.state.launchpad_env = Some(rustain::adapters::tui::launchpad::LaunchpadEnv::new(
+            rig.ws.path().to_path_buf(),
+            |_| false,
+        ));
+        let tab = rig.f.tabs.active_tab_mut();
+        tab.conversation.turns.clear();
+        tab.conversation.rebuild_messages_mirror();
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("launchpad-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+        rustain::infrastructure::runtime::history_bridge::open(&mut rig.f.h.state, &rig.f.sessions);
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("history-open-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+    }
 }

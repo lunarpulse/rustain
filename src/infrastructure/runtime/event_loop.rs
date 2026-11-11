@@ -52,12 +52,13 @@ use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
-    autocomplete_popup, chat_pane, input_box, sidebar, status_bar, toast_layer,
+    autocomplete_popup, chat_pane, input_box, monitor, status_bar, toast_layer,
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
+use crate::infrastructure::runtime::history_bridge;
 use crate::infrastructure::runtime::launchpad_facts;
-use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
+use crate::infrastructure::runtime::panel_bridge;
 #[cfg(feature = "a2a")]
 use crate::infrastructure::runtime::team_proposal_bridge::synchronize_surface;
 use crate::infrastructure::runtime::{
@@ -258,7 +259,7 @@ pub fn paint_wave_base(
 use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::turn::TurnId;
-use crate::domain::models::visual::{DeleteConfirmTarget, PanelType};
+use crate::domain::models::visual::DeleteConfirmTarget;
 use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FocusState, ImageAttachment, MessageRole, NoticeLevel, PermissionMode, PlanStatus,
@@ -685,7 +686,6 @@ pub async fn run(
     // Mark the active conversation as open and active in the index
     session_index.set_open(&conversation.id, true);
     session_index.set_active(Some(&conversation.id));
-    state.sidebar_entry_count = session_index.len();
 
     // P4: Cache last filter text to avoid re-scanning on every keystroke
     let mut last_autocomplete_filter = String::new();
@@ -2417,7 +2417,6 @@ pub async fn run(
                                     // Update sidebar: mark new conversation open/active
                                     session_index.set_open(&conversation.id, true);
                                     session_index.set_active(Some(&conversation.id));
-                                    state.sidebar_entry_count = session_index.len();
                                     state.input_buffer.clear();
                                     state.cursor_position = 0;
                                     state.input_scroll_offset = 0;
@@ -2568,46 +2567,20 @@ pub async fn run(
                                 InputAction::OpenMissionControl(tab) => room_bridge::refresh_mission_tab(&app_state, &mut state, &conversation.id, tab, security.current_mode()).await,
                                 InputAction::OpenMessages => transparency_bridge::open_messages(&app_state, &mut state, &conversation.id).await,
                                 InputAction::OpenArtifactWindow(id) => artifact_bridge::open_window(&app_state, &mut state, &conversation.id, &id, security.current_mode()).await,
-                                InputAction::OpenPanel(panel_type) => {
-                                    match panel_bridge::open_panel(&mut state, &conversation, panel_type) {
-                                        PanelOpenOutcome::Opened => {
-                                            state.needs_redraw = true;
-                                        }
-                                        PanelOpenOutcome::Notice(notice) => {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(notice.conversation_id),
-                                                level: notice.level,
-                                                message: notice.message,
-                                            });
-                                        }
-                                        PanelOpenOutcome::Handled => {}
-                                    }
-                                }
+                                InputAction::OpenHistory => history_bridge::open(&mut state, &session_index),
                                 InputAction::ExportTransparency => {
                                     transparency_bridge::export_command(&app_state, &mut state, &conversation.id).await;
                                 }
-                                InputAction::OpenSidebarConversation => {
-                                    // History is the only remaining panel whose
-                                    // Enter action resolves a conversation.
-                                    if state.sidebar_panel
-                                        != Some(
-                                            crate::domain::models::visual::PanelType::History,
-                                        )
-                                    {
-                                        continue;
-                                    }
-                                    // Resolve conversation ID from sidebar selection
-                                    let resolved_id = session_index.entries()
-                                        .get(state.sidebar_selected)
-                                        .map(|e| e.conversation_id.clone());
-                                    if let Some(conv_id) = resolved_id {
+                                InputAction::OpenHistoryEntry(conv_id) => {
+                                    // The window names the conversation by id; the live index
+                                    // decides whether it is still there.
+                                    if session_index.get(&conv_id).is_none() {
+                                        history_bridge::gone(&mut state);
+                                    } else {
                                         // Check if already open in a tab
                                         if conv_id == conversation.id {
                                             // Already active — just switch focus and close sidebar
-                                            state.sidebar_visible = false;
-                                            state.sidebar_panel = None;
-                                            reducer::set_base(&mut state, FocusState::Chat);
-                                            state.needs_redraw = true;
+                                            history_bridge::finish_open(&mut state);
                                         } else if tab_manager.find_by_conversation(&conv_id).is_some() {
                                             // Open in another tab — switch to it
                                             save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
@@ -2622,10 +2595,7 @@ pub async fn run(
                                                 }
                                                 session_index.set_active(Some(&conv_id));
                                             }
-                                            state.sidebar_visible = false;
-                                            state.sidebar_panel = None;
-                                            reducer::set_base(&mut state, FocusState::Chat);
-                                            state.needs_redraw = true;
+                                            history_bridge::finish_open(&mut state);
                                         } else {
                                             // Not open — load from storage into a new tab
                                             match storage.load_conversation(&conv_id).await {
@@ -2658,22 +2628,12 @@ pub async fn run(
                                                     // Update session_index
                                                     session_index.set_open(&conv_id, true);
                                                     session_index.set_active(Some(&conv_id));
-                                                    state.sidebar_visible = false;
-                                                    state.sidebar_panel = None;
-                                                    reducer::set_base(&mut state, FocusState::Chat);
-                                                    state.needs_redraw = true;
+                                                    history_bridge::finish_open(&mut state);
                                                 }
                                                 Ok(None) => {
                                                     tracing::warn!("Sidebar: conversation {} not found in storage", conv_id);
                                                     session_index.remove(&conv_id);
-                                                    state.sidebar_entry_count = session_index.len();
-                                                    // Clamp sidebar selection after removal
-                                                    if state.sidebar_entry_count > 0 {
-                                                        state.sidebar_selected = state.sidebar_selected.min(state.sidebar_entry_count - 1);
-                                                    } else {
-                                                        state.sidebar_selected = 0;
-                                                    }
-                                                    state.needs_redraw = true;
+                                                    history_bridge::gone(&mut state);
                                                 }
                                                 Err(e) => {
                                                     tracing::error!("Failed to load conversation {}: {}", conv_id, e);
@@ -2688,25 +2648,8 @@ pub async fn run(
                                 InputAction::AgentPauseResume(agent_id) => mission_bridge::pause_resume_agent(&mut state, &app_state.agent_core, tab_manager.active_tab().read_only, &agent_id).await,
                                 InputAction::AgentKill(agent_id) => mission_bridge::kill(&mut state, &conversation.id, tab_manager.active_tab().read_only, agent_id),
                                 InputAction::OpenAdapters => mission_bridge::open_adapters(&mut state, &app_state.agent_core),
-                                InputAction::DeleteSidebarConversation => {
-                                    // Resolve conversation ID from sidebar selection
-                                    if let Some(entry) = session_index.entries().get(state.sidebar_selected) {
-                                        let conv_id = entry.conversation_id.clone();
-                                        let title = entry.title.clone();
-
-                                        // Don't delete the active conversation if it's the only tab
-                                        if conv_id == conversation.id && tab_manager.tab_count() == 1 {
-                                            notifications::info(&mut state, NoticeSource::Session, "Cannot delete the only open conversation");
-                                        } else {
-                                            // Show confirmation prompt (AC5)
-                                            let display_title = if title.is_empty() { "Untitled".to_string() } else { title };
-                                            begin_delete_confirmation(&mut state, DeleteConfirmTarget::Single {
-                                                id: conv_id.clone(),
-                                                title: display_title,
-                                            });
-                                        }
-                                        state.needs_redraw = true;
-                                    }
+                                InputAction::DeleteHistoryEntry(conv_id) => {
+                                    history_bridge::delete_entry(&mut state, &session_index, &conversation.id, tab_manager.tab_count(), &conv_id);
                                 }
                                 InputAction::DeleteAllConversations => {
                                     // Show confirmation prompt (AC6)
@@ -2762,12 +2705,6 @@ pub async fn run(
                                                     }
                                                 });
                                                 session_index.remove(&conv_id);
-                                                state.sidebar_entry_count = session_index.len();
-                                                if state.sidebar_entry_count > 0 {
-                                                    state.sidebar_selected = state.sidebar_selected.min(state.sidebar_entry_count - 1);
-                                                } else {
-                                                    state.sidebar_selected = 0;
-                                                }
                                             }
                                             DeleteConfirmTarget::Bulk { .. } => {
                                                 #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_all(&mut state, &app_state).await;
@@ -2779,11 +2716,7 @@ pub async fn run(
                                                     .map(|e| e.conversation_id.clone())
                                                     .collect();
                                                 // Clear the index immediately to prevent race with new conversations
-                                                session_index.clear();
-                                                state.sidebar_entry_count = 0;
-                                                state.sidebar_selected = 0;
-                                                // F14: Reset sidebar_scroll_offset during DeleteAll
-                                                state.sidebar_scroll_offset = 0;
+                                                history_bridge::clear_all(&mut state, &mut session_index);
 
                                                 let fs_ref = fs_storage.clone();
                                                 tokio::spawn(async move {
@@ -2883,7 +2816,6 @@ pub async fn run(
                                                         // Update session index
                                                         session_index.set_open(&conversation.id, true);
                                                         session_index.set_active(Some(&conversation.id));
-                                                        state.sidebar_entry_count = session_index.len();
                                                         // Show fork hint in status bar
                                                         let hint_msg = if is_last {
                                                             "Forked at last message — both copies are now identical".to_string()
@@ -3104,7 +3036,6 @@ pub async fn run(
                                                         let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                         session_index.set_open(&conversation.id, true);
                                                         session_index.set_active(Some(&conversation.id));
-                                                        state.sidebar_entry_count = session_index.len();
                                                         let hint_msg = if is_last {
                                                             "Forked at last message \u{2014} both copies are now identical".to_string()
                                                         } else {
@@ -4273,7 +4204,6 @@ pub async fn run(
                                         if conversation.title.is_empty() { None } else { Some(conversation.title.clone()) },
                                         Some(conversation.messages.len()),
                                     );
-                                    state.sidebar_entry_count = session_index.len();
 
                                     // Persist conversation on turn complete
                                     if persist {
@@ -6500,6 +6430,9 @@ pub async fn apply_open_cross_search_result(
     let preserved_query = std::mem::take(&mut state.cross_search.query);
     app::with_card_focus_reconcile(state, |state| {
         presentation::reducer::close(state, presentation::Surface::CrossSearch);
+        // The search was opened from History: a successful open shows the conversation, so
+        // the window beneath is done too (a failed open returned above and keeps both).
+        presentation::reducer::close(state, presentation::Surface::History);
         position_cross_search_result(tab_manager, state, result.first_match_message_index);
         presentation::reducer::settle_stage_base(state, FocusState::Chat);
     });
@@ -6937,6 +6870,13 @@ pub fn render(
     if crate::adapters::tui::mission_control::tasks_surface_open(state) {
         crate::adapters::tui::mission_control::tasks::sync(state, conversation);
     }
+    // The History window reads the in-memory session index (never storage): re-read it only
+    // when the index changed.
+    crate::adapters::tui::history_window::sync(
+        state,
+        session_index,
+        crate::domain::models::session_meta::now_unix(),
+    );
     let tab_manager_for_bar = tab_manager.as_deref();
     let preview_clock = tab_manager_for_bar
         .is_none()
@@ -7049,49 +6989,9 @@ pub fn render(
                     );
                 }
 
-                // P1/AC1: Render sidebar when visible
-                let active_conv_id =
-                    tab_manager_for_bar.map(|tm| tm.active_tab().conversation.id.as_str());
-                if let Some(sidebar_area) = app_layout.sidebar {
-                    sidebar::render_history_panel(
-                        sidebar_area,
-                        frame.buffer_mut(),
-                        session_index.entries(),
-                        state.sidebar_selected,
-                        active_conv_id,
-                        theme,
-                    );
-                }
-
-                // Story 8.4b AC-4: Render dashboard panel when in Dashboard mode
-                if let Some(panel_area) = app_layout.dashboard_panel {
-                    match state.sidebar_panel {
-                        Some(crate::domain::models::visual::PanelType::History) => {
-                            sidebar::render_history_panel(
-                                panel_area,
-                                frame.buffer_mut(),
-                                session_index.entries(),
-                                state.sidebar_selected,
-                                active_conv_id,
-                                theme,
-                            );
-                        }
-                        None => {
-                            use ratatui::widgets::Widget;
-                            let block = ratatui::widgets::Block::default()
-                                .title(format!(
-                                    " No panel selected — {} for Tasks ",
-                                    crate::adapters::tui::keymap::render::leader_follow_up_long(
-                                        crate::adapters::tui::keymap::table::LeaderCmd::Tasks
-                                    )
-                                ))
-                                .borders(ratatui::widgets::Borders::ALL)
-                                .border_style(
-                                    ratatui::style::Style::default().fg(theme.colors.fg_muted),
-                                );
-                            block.render(panel_area, frame.buffer_mut());
-                        }
-                    }
+                // The column paints the current Mission Control tab body, read-only (A16).
+                if let Some(column) = app_layout.sidebar.or(app_layout.dashboard_panel) {
+                    monitor::render(frame, column, state);
                 }
 
                 // Story 4-4 AC2: thread search query + focused match into chat pane
@@ -7997,7 +7897,6 @@ mod tests {
                         clock.clone(),
                     );
                     state.sidebar_visible = sidebar;
-                    state.sidebar_selected = 3;
                     if kind == DecisionKind::LargeImage {
                         decision_queue::raise_large_image(
                             &mut state,
@@ -8086,14 +7985,7 @@ mod tests {
                             "{expected:?}, sidebar={sidebar}: Help returns to its original base focus"
                         );
                     } else {
-                        let baseline = if expected == InputAction::CancelDelete && sidebar {
-                            FocusState::Sidebar {
-                                panel: PanelType::History,
-                                selected: 3,
-                            }
-                        } else {
-                            FocusState::Input
-                        };
+                        let baseline = FocusState::Input;
                         assert_eq!(state.focus, baseline, "{expected:?}: base-origin behavior");
                     }
                 }

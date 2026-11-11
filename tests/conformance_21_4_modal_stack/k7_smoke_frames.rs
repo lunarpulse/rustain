@@ -624,22 +624,21 @@ fn bb1b_ii_capture(
     assert!(rows.last().unwrap().starts_with('└'), "{screen}");
     if stage == "history-return" {
         assert_eq!(buffer.area.width, 130);
-        assert!(h.state.modal_stack.is_empty());
-        assert!(matches!(
-            h.state.focus,
-            rustain::domain::models::FocusState::Sidebar {
-                panel: rustain::domain::models::visual::PanelType::History,
-                ..
-            }
-        ));
-        assert!(
-            layout.sidebar.is_some() && screen.contains("History"),
-            "{screen}"
+        assert_eq!(h.state.modal_stack.len(), 1);
+        assert_eq!(
+            h.state.modal_stack.top().unwrap().surface,
+            Surface::History,
+            "closing the search returns to the History frame it was opened from"
         );
+        assert!(screen.contains("History"), "{screen}");
         assert!(h.state.cross_search.query.is_empty() && !h.state.cross_search.running);
     } else {
         let owner = h.state.modal_stack.top().unwrap();
-        assert_eq!(h.state.modal_stack.len(), 1);
+        assert_eq!(
+            h.state.modal_stack.len(),
+            2,
+            "CrossSearch sits above the History frame"
+        );
         assert_eq!(owner.surface, Surface::CrossSearch);
         assert_eq!(owner.title(), "Cross-Search");
         assert!(owner.conversation_id.is_none(), "CrossSearch is global");
@@ -839,7 +838,8 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
             }
             assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
             export::close_cross_search(&mut h.state);
-            assert!(h.state.modal_stack.is_empty());
+            assert_eq!(h.state.modal_stack.len(), 1);
+            assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::History);
             assert_eq!(h.state.input_buffer, draft);
             assert_eq!(h.state.cursor_position, draft.chars().count());
             if width == 130 {
@@ -946,13 +946,18 @@ fn bb1b_ii_aux_capture(
         "history-populated" => {
             assert_eq!(index.entries().len(), 1);
             assert_eq!(index.entries()[0].message_count, 2);
+            let title = index.entries()[0].title.trim();
+            let shown = if title.is_empty() {
+                "(Untitled)"
+            } else {
+                title
+            };
             assert!(
-                layout.sidebar.is_some()
-                    && screen.contains(&index.entries()[0].title)
-                    && screen.contains("[2]"),
+                screen.contains(shown) && screen.contains("2 msgs"),
                 "{screen}"
             );
-            assert!(h.state.modal_stack.is_empty());
+            assert_eq!(h.state.modal_stack.len(), 1);
+            assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::History);
         }
         _ => panic!("unknown auxiliary frame {stage}"),
     }
@@ -1088,7 +1093,12 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
             bb1b_ii_request_quit(&mut h.state);
             bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "base-quit", full, &dir);
             press(&mut h.state, Key::Char('n'));
-            assert!(h.state.modal_stack.is_empty());
+            if width < 100 {
+                // A successful open closed the History frame too.
+                assert!(h.state.modal_stack.is_empty());
+            } else {
+                assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::History);
+            }
         }
     }
 }

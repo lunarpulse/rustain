@@ -27,10 +27,12 @@ pub enum SurfaceTarget {
     Tasks,
     /// The Adapters window.
     Adapters,
+    /// The History window (past conversations).
+    History,
 }
 
 /// Actions that can be dispatched from the command palette.
-/// Stub variants (InsertMention, SwitchModel, SwitchProfile, OpenPanel) are
+/// Stub variants (InsertMention, SwitchModel, SwitchProfile) are
 /// reserved for future epics (7, 8) and intentionally not yet constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -50,10 +52,8 @@ pub enum PaletteAction {
     },
     /// Switch to a profile by name (stub for Epic 8).
     SwitchProfile(String),
-    /// Open a sidebar panel (stub for future).
-    OpenPanel(super::visual::PanelType),
-    /// Open a stack surface by name (Story 21.7): Mission Control's Agents tab or the
-    /// Adapters window. Local only; the attached palette never lists it.
+    /// Open a stack surface by name (Story 21.7): Mission Control's Agents tab, the
+    /// Adapters window or the History window. Local only; the attached palette never lists it.
     OpenSurface(SurfaceTarget),
     /// Show version info as a FeedbackBlock in the chat pane.
     // Covers: FR109

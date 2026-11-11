@@ -46,7 +46,7 @@ fn shipped_table_passes_governance() {
 #[test]
 fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
-    assert_eq!(Context::ALL.len(), 61);
+    assert_eq!(Context::ALL.len(), 60);
     assert_eq!(Context::Permission.parents(), &[Context::Decision]);
     assert_eq!(Context::Consent.parents(), &[Context::Decision]);
     assert_eq!(Context::DecisionCompose.parents(), &[Context::CaretField]);
@@ -209,7 +209,7 @@ fn duplicate_key_in_one_context_is_rejected() {
     // the same key for different hosts are all legal.
     let ok = [
         row(Context::Chat, &[Key::Char('j')], quit()),
-        row(Context::Sidebar, &[Key::Char('j')], other()),
+        row(Context::History, &[Key::Char('j')], other()),
         row(Context::Chat, &[Key::Char('k')], other()),
         row(Context::Chat, &[Key::Char('x')], quit()).local(),
         row(Context::Chat, &[Key::Char('x')], other()).attached(),
@@ -259,7 +259,7 @@ fn unknown_and_cyclic_parents_are_rejected() {
     }));
     // A parent that is not declared.
     let undeclared: Vec<(Context, &[Context])> =
-        vec![(Context::Global, &[]), (Context::Chat, &[Context::Sidebar])];
+        vec![(Context::Global, &[]), (Context::Chat, &[Context::History])];
     assert!(
         errors(&rows, &undeclared).contains(&Violation::UnknownParent {
             context: Context::Chat
@@ -268,8 +268,8 @@ fn unknown_and_cyclic_parents_are_rejected() {
     // A cycle terminates and is reported.
     let cycle: Vec<(Context, &[Context])> = vec![
         (Context::Global, &[]),
-        (Context::Chat, &[Context::Sidebar]),
-        (Context::Sidebar, &[Context::Chat]),
+        (Context::Chat, &[Context::History]),
+        (Context::History, &[Context::Chat]),
     ];
     let found = errors(&rows, &cycle);
     assert!(
@@ -377,7 +377,7 @@ fn a_row_shadowing_a_sequence_is_rejected() {
     for ok in [
         [
             row(Context::Chat, g, quit()),
-            row(Context::Sidebar, gg, other()),
+            row(Context::History, gg, other()),
         ],
         [
             row(Context::Chat, g, quit()).local(),

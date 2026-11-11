@@ -10,6 +10,7 @@ pub mod attach_loop;
 pub mod decision_effects;
 pub mod event_bus;
 pub mod event_loop;
+pub mod history_bridge;
 pub mod launchpad_facts;
 pub mod mission_bridge;
 pub(crate) mod notice_actions;

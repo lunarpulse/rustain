@@ -55,7 +55,7 @@ use crate::domain::services::patch_review::{
     MergeBackPolicy, PatchDisposition, operator_patch_decision,
 };
 
-use super::sidebar::truncate_to_width;
+use crate::adapters::tui::text_geometry::truncate_to_width;
 
 /// Characters of an `ArtifactId` shown in a row.
 ///

@@ -136,7 +136,8 @@ pub fn waiting_toast() -> String {
 /// image and delete effects, the question's send / skip, and the spawn / cancel-plan /
 /// agent-kill declines). Surviving caller frames keep their interrupted base focus. Only
 /// an empty stack settles to the recipient/chat or input base for images and declines,
-/// or to sidebar selection for delete cancellation.
+/// or, for a delete cancelled over the History window, to nothing (the window beneath is the
+/// top frame again: focus returns through the stack, K-23).
 pub fn apply_resolved_action(state: &mut TuiState, action: InputAction) {
     match action {
         InputAction::Decision(DecisionEffect::RecoveryContinue) => {
@@ -170,15 +171,7 @@ pub fn apply_resolved_action(state: &mut TuiState, action: InputAction) {
         InputAction::CancelDelete => {
             drop(state.decisions.take_resolved());
             if state.modal_stack.is_empty() {
-                let focus = if state.sidebar_visible {
-                    FocusState::Sidebar {
-                        panel: crate::domain::models::visual::PanelType::History,
-                        selected: state.sidebar_selected,
-                    }
-                } else {
-                    FocusState::Input
-                };
-                presentation::reducer::set_base(state, focus);
+                presentation::reducer::set_base(state, FocusState::Input);
             }
         }
         // The question's answer goes to its own turn (any tab); a skip drops the sender so

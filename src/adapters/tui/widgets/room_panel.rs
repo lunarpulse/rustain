@@ -58,7 +58,7 @@ use crate::domain::models::{NodeState, NodeView, OrchestrationRoom};
 use crate::domain::services::transparency::{STRUCTURAL_REPLAY_CLAIM, format_unix_millis};
 
 use super::orchestration_glyph::{isolation_glyph, node_state_glyph};
-use super::sidebar::truncate_to_width;
+use crate::adapters::tui::text_geometry::truncate_to_width;
 
 /// Label for an unrecognized durable record. Reuses the exact string the
 /// transparency projection already ships, so the two surfaces cannot drift

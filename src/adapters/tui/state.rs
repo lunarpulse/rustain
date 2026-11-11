@@ -2221,6 +2221,9 @@ pub struct TuiState {
     pub task_window: Option<crate::adapters::tui::task_window::TaskWindowState>,
     /// The Adapters window's payload (Story 21.7 A21): the health snapshot taken at open.
     pub adapters_window: Option<crate::adapters::tui::adapters_window::AdaptersWindowState>,
+    /// The History window's payload (Story 21.7 A21): a snapshot of the session index, set by
+    /// the reducer's opener, cleared when the frame closes.
+    pub history_window: Option<crate::adapters::tui::history_window::HistoryWindowState>,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
     /// 18.3a-c AC3).
     pub artifacts_panel: ArtifactsPanelState,
@@ -2267,18 +2270,10 @@ pub struct TuiState {
     pub density_user_overridden: bool,
     /// Story 21.3 A12: (custom command name, discovery generation) already announced.
     pub shadows_announced: std::collections::BTreeSet<(String, u64)>,
-    /// Whether the history sidebar is visible.
+    /// Whether the right-hand column (the read-only monitor body) is visible. Until 7-F it
+    /// follows the Monitor density.
     // Covers: FR107, UX-DR20
     pub sidebar_visible: bool,
-    /// Which sidebar panel is active (History, Tasks, etc.).
-    // Covers: FR107, UX-DR20
-    pub sidebar_panel: Option<crate::domain::models::visual::PanelType>,
-    /// Selected index in the sidebar list.
-    pub sidebar_selected: usize,
-    /// Total number of entries in the sidebar (kept in sync by event loop).
-    pub sidebar_entry_count: usize,
-    /// Scroll offset for the sidebar list.
-    pub sidebar_scroll_offset: usize,
     /// Story 6-3: the task actions' state (the plan the Tasks tab resolves first, the reorder).
     pub task_panel_state: TaskPanelState,
     pub agent_panel_state: AgentPanelState,
@@ -2657,6 +2652,7 @@ impl TuiState {
             agent_window: None,
             task_window: None,
             adapters_window: None,
+            history_window: None,
             daily_budget: None,
             budget_acknowledged: None,
             pending_resolved_model: None,
@@ -2673,10 +2669,6 @@ impl TuiState {
             density_user_overridden: false,
             shadows_announced: std::collections::BTreeSet::new(),
             sidebar_visible: false,
-            sidebar_panel: None,
-            sidebar_selected: 0,
-            sidebar_entry_count: 0,
-            sidebar_scroll_offset: 0,
             task_panel_state: TaskPanelState::default(),
             agent_panel_state: AgentPanelState::default(),
             bookmark_list_selected: 0,

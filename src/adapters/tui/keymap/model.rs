@@ -14,7 +14,7 @@ use super::table_card::CardCmd;
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
 use super::table_mission::MissionCmd;
-use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
+use super::table_nav::{BookmarkCmd, SearchCmd};
 use super::table_overlay::OverlayCmd;
 use super::table_panels::PanelCmd;
 use super::table_permission::PermissionCmd;
@@ -352,8 +352,9 @@ pub enum Context {
     TextEntry,
     Input,
     Chat,
-    Sidebar,
-    SidebarHistory,
+    /// The History window (Story 21.7 A21): the saved conversations, `Enter` opens one, `d`
+    /// deletes one (a decision), `/` searches across them.
+    History,
     SearchTyping,
     SearchNavigating,
     BookmarkList,
@@ -447,14 +448,13 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 61] = [
+    pub const ALL: [Context; 60] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
         Context::Input,
         Context::Chat,
-        Context::Sidebar,
-        Context::SidebarHistory,
+        Context::History,
         Context::SearchTyping,
         Context::SearchNavigating,
         Context::BookmarkList,
@@ -519,8 +519,7 @@ impl Context {
             Context::TextEntry => "Text field",
             Context::Input => "Input",
             Context::Chat => "Chat",
-            Context::Sidebar => "Sidebar",
-            Context::SidebarHistory => "History",
+            Context::History => "History",
             Context::SearchTyping => "Search (typing)",
             Context::SearchNavigating => "Search (navigating)",
             Context::BookmarkList => "Bookmarks",
@@ -636,10 +635,11 @@ impl Context {
             Context::DecisionCompose => &[Context::CaretField],
             // The answer field is a decision field plus its own `Ctrl+D` skip.
             Context::Question => &[Context::DecisionCompose],
-            Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
+            Context::TextEntry | Context::Chat => &[Context::Global],
             Context::Input => &[Context::TextEntry],
             Context::CaretField => &[Context::TextEntry],
-            Context::SidebarHistory => &[Context::Sidebar],
+            // The History window: the RU-25 scroll rows (they move the selection).
+            Context::History => &[Context::InspectorBody],
             // The task window: the Markdown body rows (`v`) and the RU-25 scroll rows.
             Context::TaskWindow => &[Context::MarkdownBody],
             // The reorder context is exclusive: only its own rows act.
@@ -774,7 +774,6 @@ pub enum CommandId {
     Leader(LeaderCmd),
     Input(InputCmd),
     Chat(ChatCmd),
-    Sidebar(SidebarCmd),
     Search(SearchCmd),
     Bookmark(BookmarkCmd),
     Permission(PermissionCmd),
@@ -804,7 +803,6 @@ command_from!(
     Leader(LeaderCmd),
     Input(InputCmd),
     Chat(ChatCmd),
-    Sidebar(SidebarCmd),
     Search(SearchCmd),
     Bookmark(BookmarkCmd),
     Permission(PermissionCmd),

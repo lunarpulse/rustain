@@ -477,15 +477,10 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
         keymap::table::CLOSE_WINDOW_FIRST,
         presentation::{self, Surface},
     };
-    use rustain::domain::models::{
-        palette::{PaletteAction, PaletteEntry, PaletteScope},
-        visual::PanelType,
+    use rustain::domain::models::palette::{
+        PaletteAction, PaletteEntry, PaletteScope, SurfaceTarget,
     };
     let mut targets = vec![
-        (
-            PaletteAction::OpenPanel(PanelType::History),
-            InputAction::OpenPanel(PanelType::History),
-        ),
         (
             PaletteAction::DeleteAllConversations,
             InputAction::DeleteAllConversations,
@@ -556,6 +551,9 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
         }
     }
     for action in [
+        // 21.7 7-E: History is a stack surface that opens over whatever the palette was opened
+        // from (old -> new: the sidebar-panel palette action was a legacy target, refused nested).
+        PaletteAction::OpenSurface(SurfaceTarget::History),
         PaletteAction::ShowVersion,
         PaletteAction::ExecuteCommand("notifications".into(), None),
         PaletteAction::ExecuteCommand("mode".into(), Some("plan".into())),
@@ -1251,14 +1249,10 @@ fn cross_search_closing_paths_settle_real_queued_permissions_and_covering_does_n
         super::k7_cross_search::open(&mut h.state);
         if path == "replacement" {
             export::close_cross_search(&mut h.state);
-            // Reducer-unit depth-cap fixture, not an unavailable History chord
-            // claimed reachable inside another frame.
-            for surface in [
-                Surface::Help,
-                Surface::ModelSelector,
-                Surface::ProfileSwitcher,
-                Surface::CrossSearch,
-            ] {
+            // Reducer-unit depth-cap fixture, not an unavailable History chord claimed
+            // reachable inside another frame. The History frame the search was opened from is
+            // the bottom of the stack, so three more owners fill the four-frame cap.
+            for surface in [Surface::Help, Surface::ModelSelector, Surface::CrossSearch] {
                 presentation::reducer::open(&mut h.state, surface);
             }
             assert_eq!(h.state.modal_stack.len(), 4);

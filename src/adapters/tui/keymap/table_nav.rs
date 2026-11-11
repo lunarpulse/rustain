@@ -1,46 +1,10 @@
-//! Sidebar(History), Search and BookmarkList rows (Story 21.3 AC5).
+//! Search and BookmarkList rows (Story 21.3 AC5).
 //!
-//! `Sidebar` rows are the arms common to every sidebar panel; `SidebarHistory`
-//! rows are the History panel's own. Panel-specific arms of the other panels
-//! (Tasks reorder/arrows/`x p s`, Agents inspector, Room/Artifacts `Enter`,
-//! A2A log drill) belong to slice 3-B and are not rows here.
-//!
-//! The sidebar is a local-only surface (the attached client has no sidebar), so
-//! every Sidebar row is `.local()`; Search and BookmarkList are local frames
-//! too. One row per line on purpose (`rustfmt::skip`): the table is data.
+//! The History sidebar panel and its `Sidebar` rows are gone (Story 21.7 7-E): History is a
+//! frame of its own with its rows in `table_mission`. Search and BookmarkList are local frames.
+//! One row per line on purpose (`rustfmt::skip`): the table is data.
 
 use super::model::{Binding, CommandId, Context, HelpCat, Key, bind};
-
-/// Commands of the Sidebar and SidebarHistory contexts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SidebarCmd {
-    /// `j`: move the selection down one entry.
-    SelectNext,
-    /// `k`: move the selection up one entry.
-    SelectPrev,
-    /// `q`: quit request.
-    Quit,
-    /// `Esc`: return focus to Chat.
-    FocusChat,
-    /// `Tab`: move focus to the composer.
-    FocusInput,
-    /// `Shift+Tab`: previous tab.
-    PrevTab,
-    /// `Ctrl+T`: new tab.
-    NewTab,
-    /// `Ctrl+P`: command palette.
-    OpenPalette,
-    /// `Ctrl+C`: stop active work; when idle, guarded quit.
-    CancelOrQuit,
-    /// `Alt+V`: paste from the system clipboard.
-    PasteClipboard,
-    /// History `Enter`: open the selected conversation.
-    OpenConversation,
-    /// History `d`: delete the selected conversation.
-    DeleteConversation,
-    /// History `/`: cross-conversation search.
-    OpenCrossSearch,
-}
 
 /// Commands of the SearchTyping and SearchNavigating contexts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,19 +36,6 @@ pub enum BookmarkCmd {
     Close,
 }
 
-const fn s(keys: &'static [Key], cmd: SidebarCmd, label: &'static str) -> Binding {
-    bind(Context::Sidebar, keys, CommandId::Sidebar(cmd), label)
-}
-
-const fn h(keys: &'static [Key], cmd: SidebarCmd, label: &'static str) -> Binding {
-    bind(
-        Context::SidebarHistory,
-        keys,
-        CommandId::Sidebar(cmd),
-        label,
-    )
-}
-
 const fn t(keys: &'static [Key], cmd: SearchCmd, label: &'static str) -> Binding {
     bind(Context::SearchTyping, keys, CommandId::Search(cmd), label)
 }
@@ -104,8 +55,8 @@ const fn b(keys: &'static [Key], cmd: BookmarkCmd, label: &'static str) -> Bindi
 
 const SB: HelpCat = HelpCat::Search;
 
-/// One slice (consts cannot be concatenated): Search, then BookmarkList, then
-/// Sidebar and SidebarHistory. Search rows come first and keep the shipped help
+/// One slice (consts cannot be concatenated): Search, then BookmarkList. Search rows come
+/// first and keep the shipped help
 /// order (Enter, n / N, Ctrl+U, Esc) so the generated Search category reads as
 /// it did before; Chat's `m` and `'` follow in `table_chat`.
 ///
@@ -135,19 +86,4 @@ pub const ROWS: &[Binding] = &[
     b(&[Key::Enter], BookmarkCmd::Jump, "").local().does("Jump to the selected bookmark"),
     b(&[Key::Esc], BookmarkCmd::Close, "").local().does("Close the bookmark list"),
     b(&[Key::Ctrl('c')], BookmarkCmd::Close, "").local().does("Close the bookmark list (back one frame)"),
-    // ── Sidebar (every panel) ──
-    s(&[Key::Char('j')], SidebarCmd::SelectNext, "").local().does("Select the next entry"),
-    s(&[Key::Char('k')], SidebarCmd::SelectPrev, "").local().does("Select the previous entry"),
-    s(&[Key::Char('q')], SidebarCmd::Quit, "").local().does("Quit; asks first if work or a draft exists"),
-    s(&[Key::Esc], SidebarCmd::FocusChat, "").local().does("Return focus to the chat"),
-    s(&[Key::Tab], SidebarCmd::FocusInput, "").local().does("Move focus to the input box"),
-    s(&[Key::ShiftTab], SidebarCmd::PrevTab, "").local().does("Switch to the previous tab"),
-    s(&[Key::Ctrl('t')], SidebarCmd::NewTab, "").local().does("Open a new tab"),
-    s(&[Key::Ctrl('p')], SidebarCmd::OpenPalette, "").local().does("Open the command palette"),
-    s(&[Key::Ctrl('c')], SidebarCmd::CancelOrQuit, "").local().does("Stop active work; when idle, ask to quit"),
-    s(&[Key::Alt('v')], SidebarCmd::PasteClipboard, "").local().alt("palette: paste image from clipboard").does("Paste an image or text from the system clipboard"),
-    s(&[Key::Enter], SidebarCmd::OpenConversation, "").local().does("Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts and the A2A log have their own Enter"),
-    // ── SidebarHistory ──
-    h(&[Key::Char('d')], SidebarCmd::DeleteConversation, "").local().does("Delete the selected conversation"),
-    h(&[Key::Char('/')], SidebarCmd::OpenCrossSearch, "").local().help(SB, "/ (in sidebar)", "Cross-conversation search"),
 ];

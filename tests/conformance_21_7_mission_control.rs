@@ -3,9 +3,11 @@
 //! K2 (keys and route), K3 (identity), K4 (the presented-only Room poll) and the desk-check
 //! frame export of smoke leg A. Slice 7-B adds K5 (the Messages tab: 21-8's A2A log re-homed)
 //! and K6 (the Artifacts tab and the artifact window). Slice 7-C adds K7 (the Agents tab and the
-//! agent window) and K8 (the Adapters window). K12 clause (a) is `mission-21-7-a`, clause (b)
-//! `mission-21-7-b` and clause (c) `mission-21-7-c` in the one cutover scanner
-//! (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add their keystones here.
+//! agent window) and K8 (the Adapters window). Slice 7-D adds K9 (the Tasks tab and the task
+//! window). Slice 7-E adds K10 (History as an L2 frame) and the body half of K11 (the monitor
+//! column paints the current tab body read-only). K12 clauses (a)-(e) are `mission-21-7-a`..`-e`
+//! in the one cutover scanner (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add
+//! their keystones here.
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
 //! through a production door: the room journal is written by the production `NodeJournal`
@@ -44,3 +46,9 @@ mod k8_adapters;
 
 #[path = "conformance_21_7_mission_control/k9_tasks.rs"]
 mod k9_tasks;
+
+#[path = "conformance_21_7_mission_control/k10_history.rs"]
+mod k10_history;
+
+#[path = "conformance_21_7_mission_control/k11_monitor.rs"]
+mod k11_monitor;
