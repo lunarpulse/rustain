@@ -114,7 +114,6 @@ fn paint_base(
 pub(crate) fn render_runtime(
     h: &mut crate::e2e_harness::TestHarness,
     tabs: &mut TabManager,
-    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
 ) -> String {
     rustain::infrastructure::runtime::event_loop::render(
         &mut h.terminal,
@@ -129,7 +128,6 @@ pub(crate) fn render_runtime(
         Some(tabs),
         &rustain::domain::services::session_index::SessionIndex::new(),
         128_000,
-        core,
     )
     .unwrap();
     h.screen_text()
@@ -196,12 +194,10 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
     tabs.active_tab_mut().conversation = h.conversation.clone();
     h.state.active_tab_id = tabs.active_tab_id();
     h.state.focus = FocusState::Chat;
-    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
-
-    let absent = render_runtime(&mut h, &mut tabs, &core);
+    let absent = render_runtime(&mut h, &mut tabs);
     assert!(!absent.contains("handles") && !absent.contains("spawn 5?"));
     h.state.wave_state = Some(WaveViewState::started(AgentId::root(), 3));
-    let first = render_runtime(&mut h, &mut tabs, &core);
+    let first = render_runtime(&mut h, &mut tabs);
     assert!(
         first.contains("3 handles") && first.contains("0/3 done"),
         "{first}"
@@ -209,7 +205,7 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
     assert_ne!(absent, first, "runtime must paint the live strip");
 
     h.state.wave_state.as_mut().unwrap().completed_count = 2;
-    let advanced = render_runtime(&mut h, &mut tabs, &core);
+    let advanced = render_runtime(&mut h, &mut tabs);
     assert!(advanced.contains("2/3 done"), "{advanced}");
     assert!(!advanced.contains("0/3 done"));
     assert_ne!(first, advanced, "runtime progress must change pixels");
@@ -235,7 +231,7 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
             adjusted: None,
         },
     );
-    let gated = render_runtime(&mut h, &mut tabs, &core);
+    let gated = render_runtime(&mut h, &mut tabs);
     assert!(
         gated.contains("spawn 5?") && gated.contains("Confirm"),
         "{gated}"
@@ -258,7 +254,7 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
         &facts,
     );
     assert!(left.is_some(), "the open gate frame owns the key");
-    let adjusted = render_runtime(&mut h, &mut tabs, &core);
+    let adjusted = render_runtime(&mut h, &mut tabs);
     assert!(adjusted.contains("spawn 4?"), "{adjusted}");
     assert!(!adjusted.contains("spawn 5?"));
     assert_ne!(gated, adjusted, "runtime must repaint gate adjustment");
@@ -272,13 +268,13 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
     );
     assert!(cancelled.is_some());
     assert!(h.state.decisions.is_empty());
-    let restored = render_runtime(&mut h, &mut tabs, &core);
+    let restored = render_runtime(&mut h, &mut tabs);
     assert!(
         restored.contains("2/3 done") && !restored.contains("spawn 4?"),
         "{restored}"
     );
     h.state.wave_state = None;
-    let cleared = render_runtime(&mut h, &mut tabs, &core);
+    let cleared = render_runtime(&mut h, &mut tabs);
     assert!(
         !cleared.contains("handles") && !cleared.contains("spawn 4?"),
         "{cleared}"

@@ -570,12 +570,11 @@ fn bb1b_ii_write(
 fn bb1b_ii_capture(
     h: &mut TestHarness,
     tabs: &mut TabManager,
-    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
     stage: &str,
     full: bool,
     dir: &Option<PathBuf>,
 ) {
-    crate::conformance_tui_orchestration::render_runtime(h, tabs, core);
+    crate::conformance_tui_orchestration::render_runtime(h, tabs);
     let buffer = h.terminal.backend().buffer();
     let rows: Vec<String> = (0..buffer.area.height)
         .map(|y| {
@@ -770,12 +769,7 @@ fn bb1b_ii_results(h: &mut TestHarness, query: &str, count: usize) {
     assert_eq!(h.state.cross_search.results.len(), count);
 }
 
-fn bb1b_ii_open_fixture(
-    width: u16,
-    height: u16,
-    draft: &str,
-    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
-) -> (TestHarness, TabManager, u64) {
+fn bb1b_ii_open_fixture(width: u16, height: u16, draft: &str) -> (TestHarness, TabManager, u64) {
     let mut h = TestHarness::with_size(130, 30);
     let reply = (0..60)
         .map(|row| format!("Bb1a-row-{row:02}  \n"))
@@ -799,14 +793,14 @@ fn bb1b_ii_open_fixture(
     h.state.active_tab_id = tabs.active_tab_id();
     h.state.input_buffer = draft.into();
     h.state.cursor_position = draft.chars().count();
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(
         h.screen_text().contains("History"),
         "paint supported History before slash"
     );
     super::k7_cross_search::open(&mut h.state);
     let owner = h.state.modal_stack.top().unwrap().id;
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(h.screen_text().contains("Cross-Search"));
     h.terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     rustain::adapters::tui::app::handle_input(
@@ -819,8 +813,6 @@ fn bb1b_ii_open_fixture(
 #[test]
 fn bb1b_ii_real_frames_for_smoke_predicates() {
     use rustain::adapters::tui::{app::InputAction, handlers::export};
-    use rustain::infrastructure::runtime::agent_core::AgentCore;
-    let core = AgentCore::test_noop();
     let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
@@ -829,8 +821,8 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
             } else {
                 DRAFT
             };
-            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft, &core);
-            bb1b_ii_capture(&mut h, &mut tabs, &core, "cross-unfiltered", full, &dir);
+            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft);
+            bb1b_ii_capture(&mut h, &mut tabs, "cross-unfiltered", full, &dir);
             for (query, count, stage) in [
                 ("Bb1a", 1, "cross-filtered"),
                 ("zzzz", 0, "cross-empty"),
@@ -843,7 +835,7 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
                     }
                 }
                 assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
-                bb1b_ii_capture(&mut h, &mut tabs, &core, stage, full, &dir);
+                bb1b_ii_capture(&mut h, &mut tabs, stage, full, &dir);
             }
             assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
             export::close_cross_search(&mut h.state);
@@ -851,7 +843,7 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
             assert_eq!(h.state.input_buffer, draft);
             assert_eq!(h.state.cursor_position, draft.chars().count());
             if width == 130 {
-                bb1b_ii_capture(&mut h, &mut tabs, &core, "history-return", full, &dir);
+                bb1b_ii_capture(&mut h, &mut tabs, "history-return", full, &dir);
             }
         }
     }
@@ -860,7 +852,6 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
 fn bb1b_ii_aux_capture(
     h: &mut TestHarness,
     tabs: &mut TabManager,
-    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
     index: &rustain::domain::services::session_index::SessionIndex,
     stage: &str,
     full: bool,
@@ -879,7 +870,6 @@ fn bb1b_ii_aux_capture(
         Some(&mut *tabs),
         index,
         128_000,
-        core,
     )
     .unwrap();
     let buffer = h.terminal.backend().buffer();
@@ -997,8 +987,7 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
         ports::StoragePort,
         services::session_index::SessionIndex,
     };
-    use rustain::infrastructure::runtime::{agent_core::AgentCore, event_loop};
-    let core = AgentCore::test_noop();
+    use rustain::infrastructure::runtime::event_loop;
     let dir = output_dir();
     let tmp = tempfile::tempdir().unwrap();
     let storage =
@@ -1010,7 +999,7 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
             } else {
                 DRAFT
             };
-            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft, &core);
+            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft);
             bb1b_ii_results(&mut h, "Bb1a", 1);
             let mut index = SessionIndex::new();
             assert!(
@@ -1056,17 +1045,9 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
                 ),
                 export::CrossSearchResultsOutcome::Applied
             );
-            bb1b_ii_aux_capture(
-                &mut h,
-                &mut tabs,
-                &core,
-                &index,
-                "cross-untitled",
-                full,
-                &dir,
-            );
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "cross-untitled", full, &dir);
             bb1b_ii_request_quit(&mut h.state);
-            bb1b_ii_aux_capture(&mut h, &mut tabs, &core, &index, "cross-quit", full, &dir);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "cross-quit", full, &dir);
             press(&mut h.state, Key::Char('n'));
             assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
             assert_eq!(h.state.cross_search.query.as_str(), "Bb1a");
@@ -1089,27 +1070,11 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
                     &tx,
                 )
                 .await;
-                bb1b_ii_aux_capture(
-                    &mut h,
-                    &mut tabs,
-                    &core,
-                    &index,
-                    "accepted-base",
-                    full,
-                    &dir,
-                );
+                bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "accepted-base", full, &dir);
             } else {
                 assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
                 export::close_cross_search(&mut h.state);
-                bb1b_ii_aux_capture(
-                    &mut h,
-                    &mut tabs,
-                    &core,
-                    &index,
-                    "history-populated",
-                    full,
-                    &dir,
-                );
+                bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "history-populated", full, &dir);
                 if full && let Some(dir) = &dir {
                     let persisted = &h.conversation;
                     assert_eq!(persisted.messages.len(), 2);
@@ -1121,7 +1086,7 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
                 }
             }
             bb1b_ii_request_quit(&mut h.state);
-            bb1b_ii_aux_capture(&mut h, &mut tabs, &core, &index, "base-quit", full, &dir);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "base-quit", full, &dir);
             press(&mut h.state, Key::Char('n'));
             assert!(h.state.modal_stack.is_empty());
         }
@@ -1180,7 +1145,6 @@ fn bb2b_publish_cross(h: &mut TestHarness, count: usize) {
 async fn bb2b_real_frames_for_smoke_predicates() {
     use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
     let dir = output_dir();
-    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
             let draft = if full {
@@ -1314,7 +1278,7 @@ async fn bb2b_real_frames_for_smoke_predicates() {
                 }
                 assert_eq!(h.state.input_buffer, draft);
             }
-            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft, &core);
+            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft);
             capture(&mut h, &tabs, "bb2b", "cross-unfiltered", full, &dir);
             paste(&mut h, &mut tabs, "Bb1a");
             bb2b_publish_cross(&mut h, 1);
@@ -1347,7 +1311,6 @@ async fn bb2b_real_frames_for_smoke_predicates() {
 fn c_capture_local(
     h: &mut TestHarness,
     tabs: &mut TabManager,
-    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
     stage: &str,
     dir: &Option<PathBuf>,
 ) -> String {
@@ -1364,7 +1327,6 @@ fn c_capture_local(
         Some(tabs),
         &rustain::domain::services::session_index::SessionIndex::new(),
         128_000,
-        core,
     )
     .unwrap();
     export_frame(h, "c-local", stage, false, dir)
@@ -1382,7 +1344,6 @@ async fn c_real_local_frames_for_smoke_predicates() {
         models::{FocusState, view_state::ScrollDelta},
     };
     let dir = output_dir();
-    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         let mut h = TestHarness::with_size(width, height);
         let reply = (0..60)
@@ -1406,13 +1367,13 @@ async fn c_real_local_frames_for_smoke_predicates() {
         // scroll effect; the same manager owns the view and production paint.
         tabs.active_tab_mut().conversation = h.conversation.clone();
         h.state.active_tab_id = tabs.active_tab_id();
-        c_capture_local(&mut h, &mut tabs, &core, "initial", &dir);
+        c_capture_local(&mut h, &mut tabs, "initial", &dir);
         for c in "/cnotice ".chars() {
             press(&mut h.state, Key::Char(c));
         }
         assert_eq!(h.state.input_buffer, "/cnotice ");
         assert_eq!(h.state.cursor_position, 9);
-        c_capture_local(&mut h, &mut tabs, &core, "notice-command", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice-command", &dir);
         assert!(matches!(
             press(&mut h.state, Key::Enter),
             InputAction::SubmitWithContext { command: Some(command), .. } if command == "cnotice"
@@ -1423,53 +1384,53 @@ async fn c_real_local_frames_for_smoke_predicates() {
             NoticeSeverity::Warning,
             "Unknown command: /cnotice",
         );
-        c_capture_local(&mut h, &mut tabs, &core, "notice", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice", &dir);
         for k in [Key::Ctrl('x'), Key::Char('n')] {
             press(&mut h.state, k);
         }
-        c_capture_local(&mut h, &mut tabs, &core, "notice-log", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice-log", &dir);
         for k in [Key::Char('x'), Key::Esc] {
             press(&mut h.state, k);
         }
-        c_capture_local(&mut h, &mut tabs, &core, "notice-dismiss-return", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice-dismiss-return", &dir);
         for c in "C-kept draft".chars() {
             press(&mut h.state, Key::Char(c));
         }
-        c_capture_local(&mut h, &mut tabs, &core, "typed", &dir);
+        c_capture_local(&mut h, &mut tabs, "typed", &dir);
         press(&mut h.state, Key::Ctrl('a'));
         assert_eq!(h.state.cursor_position, 0);
-        c_capture_local(&mut h, &mut tabs, &core, "readline-home", &dir);
+        c_capture_local(&mut h, &mut tabs, "readline-home", &dir);
         press(&mut h.state, Key::Ctrl('e'));
         assert_eq!(h.state.cursor_position, 12);
         press(&mut h.state, Key::Left);
         assert_eq!(h.state.cursor_position, 11);
-        c_capture_local(&mut h, &mut tabs, &core, "left", &dir);
+        c_capture_local(&mut h, &mut tabs, "left", &dir);
         press(&mut h.state, Key::End);
         press(&mut h.state, Key::Home);
         press(&mut h.state, Key::Right);
         assert_eq!(h.state.cursor_position, 1);
-        c_capture_local(&mut h, &mut tabs, &core, "caret", &dir);
+        c_capture_local(&mut h, &mut tabs, "caret", &dir);
         handle_input(&mut h.state, &DomainInputEvent::Paste("X".into()));
         assert_eq!(
             (&*h.state.input_buffer, h.state.cursor_position),
             ("CX-kept draft", 2)
         );
-        c_capture_local(&mut h, &mut tabs, &core, "paste", &dir);
+        c_capture_local(&mut h, &mut tabs, "paste", &dir);
         press(&mut h.state, Key::Ctrl('k'));
         assert_eq!((&*h.state.input_buffer, h.state.cursor_position), ("CX", 2));
-        c_capture_local(&mut h, &mut tabs, &core, "kill-tail", &dir);
+        c_capture_local(&mut h, &mut tabs, "kill-tail", &dir);
         press(&mut h.state, Key::Ctrl('u'));
         assert!(h.state.input_buffer.is_empty());
-        c_capture_local(&mut h, &mut tabs, &core, "kill-prefix", &dir);
+        c_capture_local(&mut h, &mut tabs, "kill-prefix", &dir);
         for c in "C-kept draft".chars() {
             press(&mut h.state, Key::Char(c));
         }
-        let bottom = c_capture_local(&mut h, &mut tabs, &core, "bottom", &dir);
+        let bottom = c_capture_local(&mut h, &mut tabs, "bottom", &dir);
         assert!(bottom.contains(REPLY));
         // Local full-page up is Chat Ctrl+B; attached offers Input PgUp.
         press(&mut h.state, Key::Esc);
         assert_eq!(h.state.focus, FocusState::Chat);
-        c_capture_local(&mut h, &mut tabs, &core, "chat-before-scroll", &dir);
+        c_capture_local(&mut h, &mut tabs, "chat-before-scroll", &dir);
         assert_eq!(
             press(&mut h.state, Key::Ctrl('b')),
             InputAction::ScrollFullPageUp
@@ -1480,10 +1441,10 @@ async fn c_real_local_frames_for_smoke_predicates() {
             &h.conversation,
             ScrollDelta::FullPageUp,
         );
-        c_capture_local(&mut h, &mut tabs, &core, "chat-scrolled", &dir);
+        c_capture_local(&mut h, &mut tabs, "chat-scrolled", &dir);
         press(&mut h.state, Key::Char('i'));
         assert_eq!(h.state.focus, FocusState::Input);
-        let scrolled = c_capture_local(&mut h, &mut tabs, &core, "scrolled", &dir);
+        let scrolled = c_capture_local(&mut h, &mut tabs, "scrolled", &dir);
         assert!(scrolled.contains("Bb1a-row-") && !scrolled.contains(REPLY));
         assert!(
             tabs.active_tab().view_state.scroll_offset > 0,
@@ -1494,17 +1455,16 @@ async fn c_real_local_frames_for_smoke_predicates() {
             press(&mut h.state, Key::Ctrl('x'));
             press(&mut h.state, Key::Char(opener));
             assert_eq!(h.state.modal_stack.len(), 1, "cover reached");
-            c_capture_local(&mut h, &mut tabs, &core, kind, &dir);
+            c_capture_local(&mut h, &mut tabs, kind, &dir);
             if kind == "help" {
                 let before = h.state.help_overlay.scroll_offset;
                 press(&mut h.state, Key::Char('j'));
                 assert_eq!(h.state.help_overlay.scroll_offset, before + 1);
-                c_capture_local(&mut h, &mut tabs, &core, "help-scrolled", &dir);
+                c_capture_local(&mut h, &mut tabs, "help-scrolled", &dir);
             }
             press(&mut h.state, Key::Esc);
             assert!(h.state.modal_stack.is_empty(), "owner actually released");
-            let restored =
-                c_capture_local(&mut h, &mut tabs, &core, &format!("{kind}-return"), &dir);
+            let restored = c_capture_local(&mut h, &mut tabs, &format!("{kind}-return"), &dir);
             assert_eq!(
                 restored
                     .lines()

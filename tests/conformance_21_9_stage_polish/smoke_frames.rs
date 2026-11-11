@@ -411,7 +411,6 @@ fn story21_9_smoke_frames_export_tools_and_launchpad() {
             Some(&mut f.tabs),
             &index,
             128_000,
-            &f.core,
         )
         .unwrap();
         save(&f, &dir, &size, "launchpad");

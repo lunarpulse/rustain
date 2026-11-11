@@ -23,8 +23,8 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, P` | Profile switcher | local, attached | portable | not available in an attached session |
 | `Ctrl+X, M` | Model selector | local, attached | portable | not available in an attached session |
 | `Ctrl+X, I` | Sign in to a model provider (/login) | local, attached | portable | not available in an attached session |
-| `Ctrl+X, A` | Adapter Status panel (sidebar) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
-| `Ctrl+X, S` | Subagent panel | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
+| `Ctrl+X, A` | Adapters window (port and MCP server health, read-only) | local, attached | portable | not available in an attached session |
+| `Ctrl+X, S` | Mission Control: Agents tab (subagents; Enter opens the agent window) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, L` | Mission Control: Messages tab (the A2A log, read-only; both hosts) | local, attached | portable |  |
 | `Ctrl+X, R` | Mission Control: Room tab (durable room replay, read-only) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, E` | Mission Control: Artifacts tab (durable artifacts, read-only replay) | local, attached | portable | not available in an attached session |
@@ -401,28 +401,33 @@ Also inherits: Tasks.
 | `k` | Move the selected task up | local | portable |  |
 | `Enter` | Commit the new task order | local | portable |  |
 
-## Agents
+## Agent window
 
-Also inherits: Sidebar.
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `p` | Pause or resume the selected agent | local | portable |  |
-
-## Agent inspector
-
-Also inherits: Sidebar.
+Also inherits: Markdown body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `p` | Pause the open agent, or resume it when suspended | local | portable |  |
-| `x` | Kill the open agent and its subtree (asks to confirm) | local | portable |  |
-| `m` | Change the agent's model (a notice names the model selector) | local | portable |  |
-| `t` | Update the agent's tools (a notice: not available from the inspector yet) | local | portable |  |
-| `c` | Open the agent's output in a read-only conversation tab | local | portable |  |
-| `j` | Scroll the inspector down one line | local | portable |  |
-| `k` | Scroll the inspector up one line | local | portable |  |
-| `Esc` | Close the inspector and return to the Agents list | local | portable |  |
+| `p` | Pause the agent, or resume it when suspended | local | portable |  |
+| `x` | Ask to kill the agent and its subtree; a decision confirms it | local | portable |  |
+| `c` | Copy the agent transcript's original text (refused above 8 MiB), never the sanitized display | local | portable |  |
+| `/` | Show only the transcript lines that contain a query | local | portable |  |
+| `Esc` | Clear a kept filter, else back to the frame beneath | local | portable |  |
+| `Ctrl+C` | Back to the frame beneath without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above the agent window | local | portable |  |
+| `Ctrl+P` | Open the command palette above the agent window | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the agent window | local | portable |  |
+
+## Adapters
+
+Also inherits: Inspector body.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Back to the frame beneath | local | portable |  |
+| `Ctrl+C` | Back to the frame beneath without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above the Adapters window | local | portable |  |
+| `Ctrl+P` | Open the command palette above the Adapters window | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the Adapters window | local | portable |  |
 
 ## Mission Control
 
@@ -433,9 +438,12 @@ Also inherits: Inspector body.
 | `Left` | Select the previous Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
 | `Right` | Select the next Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
 | `Tab` | Move between the list and its detail preview (only where the frame shows both) | local, attached | portable |  |
-| `Enter` | Open the selected row's window (Artifacts) | local | portable |  |
+| `Enter` | Open the selected row's window (Agents, Artifacts) | local | portable |  |
 | `e` | Export the unfiltered A2A log snapshot the Messages view was read from | local | portable |  |
-| `/` | Filter the Messages rows by a case-insensitive query (the closing claim always stays) | local, attached | portable |  |
+| `p` | Pause the selected running agent, or resume a suspended one (Agents) | local | portable |  |
+| `x` | Ask to kill the selected agent and its subtree; a decision confirms it (Agents) | local | portable |  |
+| `c` | Copy the selected row's original text, or its detail text while the detail pane has focus (refused above 8 MiB; list tabs only) | local | portable |  |
+| `/` | Filter a list tab's rows, or the Messages rows, by a case-insensitive query (the closing claim always stays) | local, attached | portable |  |
 | `Esc` | Clear a kept Messages filter, else close Mission Control (back one frame) | local, attached | portable |  |
 | `Ctrl+C` | Clear a kept Messages filter, else close Mission Control (back one frame) without cancelling work | local, attached | portable |  |
 | `Ctrl+X` | Open the Ctrl+X menu above Mission Control | local, attached | portable |  |

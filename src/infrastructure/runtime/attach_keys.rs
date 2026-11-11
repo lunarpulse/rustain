@@ -6801,6 +6801,8 @@ pub(crate) mod tests {
                     | Surface::ToolInspector(_)
                     | Surface::BlockViewer(_)
                     | Surface::ArtifactWindow
+                    | Surface::AgentWindow
+                    | Surface::Adapters
                     | Surface::Login => unreachable!("surface not offered attached"),
                     Surface::ThreadInspector => unreachable!(
                         "the thread frame owns its keys by value: story21_8_attached_thread_frame_keys_act_by_value"

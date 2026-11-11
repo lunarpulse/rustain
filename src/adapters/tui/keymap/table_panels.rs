@@ -25,8 +25,6 @@ pub enum PanelCmd {
     // Sidebar(Tasks), incl. reorder mode.
     TasksPrev, TasksNext, TasksCancelPlan, TasksPause, TasksSkip, TasksDrill,
     ReorderDown, ReorderUp, ReorderCommit,
-    // Sidebar(Agents).
-    AgentPauseToggle,
     // Wave overlay.
     WaveNext, WavePrev, WaveDrill, WaveClose, WaveRerun, WaveDiverge, WaveDivergeClose,
 }
@@ -45,9 +43,6 @@ const fn t(keys: &'static [Key], cmd: PanelCmd) -> Binding {
 }
 const fn r(keys: &'static [Key], cmd: PanelCmd) -> Binding {
     bind(Context::TasksReorder, keys, CommandId::Panel(cmd), "").local()
-}
-const fn a(keys: &'static [Key], cmd: PanelCmd) -> Binding {
-    bind(Context::SidebarAgents, keys, CommandId::Panel(cmd), "").local()
 }
 const fn w(keys: &'static [Key], cmd: PanelCmd) -> Binding {
     bind(Context::WaveOverlay, keys, CommandId::Panel(cmd), "").local()
@@ -89,8 +84,6 @@ pub const ROWS: &[Binding] = &[
     r(&[Key::Char('j')], PanelCmd::ReorderDown).does("Move the selected task down"),
     r(&[Key::Char('k')], PanelCmd::ReorderUp).does("Move the selected task up"),
     r(&[Key::Enter], PanelCmd::ReorderCommit).does("Commit the new task order"),
-    // ── Sidebar(Agents), list only (the inspector arrives with its extraction) ──
-    a(&[Key::Char('p')], PanelCmd::AgentPauseToggle).does("Pause or resume the selected agent"),
     // ── Wave overlay ──
     w(&[Key::Char('j')], PanelCmd::WaveNext).does("Select the next spoke"),
     w(&[Key::Down], PanelCmd::WaveNext).does("Select the next spoke"),

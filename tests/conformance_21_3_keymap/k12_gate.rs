@@ -94,7 +94,6 @@ const ALLOWLIST: &[Allow] = &[
     ("src/domain/services/approval_presentation.rs", &["… more not shown — [r] Review first"], OWNER_PERMANENT, "domain `MORE_MARKER` (TM-09 T5), truth-checked by the card tests against the `r` row"),
     ("src/domain/services/team_policy.rs", &["Standing trust is granted from a sender's consent card ([a] Always allow)"], OWNER_PERMANENT, "standing-trust doctrine text, truth-checked against the consent card"),
     // `Tab` here is a browser-style tab (P2 matches the word), not a key
-    ("src/adapters/tui/agent_inspector_keys.rs", &["Tab is read-only (subagent output view)"], OWNER_PERMANENT, "read-only subagent tab warning, not a key"),
     ("src/infrastructure/runtime/event_loop.rs", &["Tab is read-only (subagent output view)", "Tab save timed out"], OWNER_PERMANENT, "two tab warnings, not keys"),
     ("src/adapters/cli/peer/rows.rs", &["         Awaiting your decision.  [y] Confirm and pin", "         Awaiting your decision.  [y] Update the address"], OWNER_PERMANENT, "shared CLI/TUI peer-add card copy: `cli` may not import `tui` (adapter ratchet); the keys are truth-checked against the Confirm rows by K11"),
     // `[x]` / `[ ]` are checkbox markers, not keys

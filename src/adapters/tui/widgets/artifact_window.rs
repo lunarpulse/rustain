@@ -18,11 +18,38 @@ use crate::adapters::tui::presentation::viewer::{self, ViewerCmd};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry;
 
+/// What differs between the text windows: the keys' context, the command that copies, and the
+/// rail items in front of the shared ones (the agent window's `p` and `x`, tagged by the key
+/// they make live).
+pub(crate) struct Chrome {
+    pub context: KeyContext,
+    pub copy: MissionCmd,
+    pub lead: Vec<(String, Option<&'static str>)>,
+}
+
 pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, show_caret: bool) {
-    let theme = &state.theme;
     let Some(window) = state.artifact_window.as_ref() else {
         return;
     };
+    let chrome = Chrome {
+        context: KeyContext::ArtifactWindow,
+        copy: MissionCmd::CopySource,
+        lead: Vec::new(),
+    };
+    paint(frame, rect, &state.theme, window, title, show_caret, chrome);
+}
+
+/// The shared painter of the text windows: the facts and the body laid out once per (width,
+/// mode, generation) by the state, the filter field and the generated rail.
+pub(crate) fn paint(
+    frame: &mut Frame<'_>,
+    rect: Rect,
+    theme: &crate::adapters::tui::theme::Theme,
+    window: &crate::adapters::tui::artifact_window::ArtifactWindowState,
+    title: &str,
+    show_caret: bool,
+    chrome: Chrome,
+) {
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Block::default()
@@ -116,7 +143,12 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
     }
     let mut live = Live::default();
     if rail_rows > 0 {
-        let (text, painted) = rail_text(window, rows > viewport, usize::from(rail_area.width));
+        let (text, painted) = rail_text(
+            window,
+            rows > viewport,
+            usize::from(rail_area.width),
+            &chrome,
+        );
         live = painted;
         frame.render_widget(
             Line::styled(text, Style::default().fg(theme.colors.fg_secondary)),
@@ -132,6 +164,7 @@ fn rail_text(
     window: &crate::adapters::tui::artifact_window::ArtifactWindowState,
     scrollable: bool,
     width: usize,
+    chrome: &Chrome,
 ) -> (String, Live) {
     if window.search.editing {
         return (
@@ -144,7 +177,7 @@ fn rail_text(
         );
     }
     let shown = window.has_source();
-    let mut items: Vec<(String, Option<&'static str>)> = Vec::with_capacity(4);
+    let mut items: Vec<(String, Option<&'static str>)> = chrome.lead.clone();
     if scrollable {
         items.push((
             format!(
@@ -176,17 +209,14 @@ fn rail_text(
         items.push((
             format!(
                 "{} Search",
-                rail(KeyContext::ArtifactWindow, OverlayCmd::InspectorSearch)
+                rail(chrome.context, OverlayCmd::InspectorSearch)
             ),
             Some("search"),
         ));
     }
     if window.has_source() {
         items.push((
-            format!(
-                "{} Copy",
-                rail(KeyContext::ArtifactWindow, MissionCmd::CopySource)
-            ),
+            format!("{} Copy", rail(chrome.context, chrome.copy)),
             Some("copy"),
         ));
     }
@@ -204,10 +234,7 @@ fn rail_text(
             Some("view"),
         ));
     }
-    let back = format!(
-        "{} Back",
-        rail(KeyContext::ArtifactWindow, MissionCmd::Back)
-    );
+    let back = format!("{} Back", rail(chrome.context, MissionCmd::Back));
     loop {
         let mut text = items
             .iter()
@@ -225,6 +252,8 @@ fn rail_text(
                     Some("search") => live.search = true,
                     Some("copy") => live.copy = true,
                     Some("view") => live.view = true,
+                    Some("pause") => live.pause = true,
+                    Some("kill") => live.kill = true,
                     _ => {}
                 }
             }

@@ -610,7 +610,12 @@ fn test_import_site_count_pinned() {
     //
     // Not covered by `ratchet-signoff-guard.yml`, which gates only the seven named
     // constants in `tests/conformance.rs`.
-    const EXPECTED: usize = 33;
+    // 33 -> 34 (Story 21-7 slice 7-C): `infrastructure/runtime/mission_bridge.rs`
+    // is the runtime-side effect layer behind the Agents tab and the agent window
+    // (roster, spool tail, pause/resume and kill ops). It owns the registry access
+    // the deleted inspector arms in `event_loop.rs` had, so the TUI widgets keep
+    // consuming `AgentRowView` and never name the tree (section 7 below).
+    const EXPECTED: usize = 34;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

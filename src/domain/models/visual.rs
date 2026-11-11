@@ -109,10 +109,9 @@ mod tests {
 pub enum PanelType {
     History,
     Tasks,
-    Agents,
-    Adapters,
-    // The durable Room, the A2A log (Messages) and the artifact list are Mission Control tabs
-    // since Story 21.7: none of them is a sidebar panel.
+    // The durable Room, the A2A log (Messages), the artifact list and the subagent roster are
+    // Mission Control tabs, and the Adapters health is a window, since Story 21.7: none of
+    // them is a sidebar panel.
 }
 
 /// Target of a delete confirmation dialog.

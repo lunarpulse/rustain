@@ -11,8 +11,7 @@
 //! the MCP sub-row builder of `adapter_status_panel`, because it is only
 //! reachable through a feature-gated composite toolset adapter.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -20,17 +19,20 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use rustain::adapters::tui::decision_queue::{self, RevertPreviewItem, RewindPreview};
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::mission_control::McTab;
+use rustain::adapters::tui::presentation::reducer;
+use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::question_lines;
 use rustain::adapters::tui::widgets::plan_card::render_plan_card_lines;
-use rustain::adapters::tui::widgets::{adapter_status_panel, agent_panel, task_panel};
+use rustain::adapters::tui::widgets::{adapter_status_panel, mission_control, task_panel};
 use rustain::domain::models::plan::{
     DelegationInfo, Plan, PlanStatus, PlanSubTask, PlanTask, PlanTaskStatus,
 };
 use rustain::domain::models::profile::{AdapterRef, PortDimension};
 use rustain::domain::models::{AgentId, AgentRowView, HealthSummary, NodeState, OwnershipKind};
-use rustain::domain::ports::SchedulerPort;
-use rustain::infrastructure::runtime::agent_core::AgentCore;
+use rustain::infrastructure::runtime::mission_bridge;
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -745,54 +747,53 @@ fn agent_entry(status: NodeState, isolated: bool) -> AgentRowView {
     }
 }
 
+/// The first list row of the Agents tab painted by the real hub renderer at
+/// `width` x 24 (inner row 0 is the tab row, row 1 the first list row), cut
+/// to the list column and stripped of its 2-cell marker and trailing blanks.
+/// Returns the buffer too, for the cluster and border checks.
 fn agent_row(entry: &AgentRowView, tail: &str, width: u16) -> (Buffer, String) {
-    let mut cache = HashMap::new();
-    cache.insert(entry.agent_id.clone(), tail.to_string());
-    let theme = Theme::dark();
-    let buf = paint(width, 4, |f| {
+    let mut state = TuiState::new(width, 24);
+    state
+        .agent_panel_state
+        .spool_tail_cache
+        .insert(entry.agent_id.clone(), tail.to_string());
+    mission_bridge::apply_roster(&mut state, vec![entry.clone()]);
+    let _ = reducer::open_mission_control(&mut state, McTab::Agents);
+    let buf = paint(width, 24, |f| {
         let area = f.area();
-        agent_panel::render(
-            area,
-            f.buffer_mut(),
-            std::slice::from_ref(entry),
-            0,
-            false,
-            &theme,
-            &cache,
-            &|| 0i64,
-        );
+        mission_control::render(f, area, &state, "Mission Control · Agents", Host::Local);
     })
     .buffer;
-    let text = interior(&buf, 1);
+    // Written out by hand: from an inner width of 96 the hub splits master /
+    // detail (master = 40% of the inner width, at least 28), else the list
+    // owns the whole inner width. The row is cut 2 cells short of its column.
+    let inner = usize::from(width) - 2;
+    let master = if inner >= 96 {
+        (inner * 40 / 100).max(28)
+    } else {
+        inner
+    };
+    let mut used = 0;
+    let mut column = String::new();
+    for g in glyphs(&buf, 2).iter().skip(1) {
+        let cells = g.width().max(1);
+        if used + cells > master {
+            break;
+        }
+        used += cells;
+        column.push_str(g);
+    }
+    let text = column
+        .strip_prefix("▸ ")
+        .or_else(|| column.strip_prefix("  "))
+        .unwrap_or_else(|| panic!("row without a 2-cell marker: {column:?}"))
+        .trim_end()
+        .to_string();
     (buf, text)
 }
 
-/// Independent reference for the task tail: whole graphemes up to `cells`,
-/// and `...` inside the budget when the tail is cut (no marker at ≤ 3 cells).
-fn reference_tail(tail: &str, budget: usize) -> String {
-    fn take(text: &str, cells: usize) -> String {
-        let mut used = 0;
-        let mut out = String::new();
-        for g in text.graphemes(true) {
-            if used + g.width() > cells {
-                break;
-            }
-            used += g.width();
-            out.push_str(g);
-        }
-        out
-    }
-    if tail.width() <= budget {
-        tail.to_string()
-    } else if budget <= 3 {
-        take(tail, budget)
-    } else {
-        format!("{}...", take(tail, budget - 3))
-    }
-}
-
 #[test]
-fn k5a_agent_panel_task_tail_never_pushes_out_the_elapsed_column() {
+fn k5a_agent_row_tail_never_splits_a_cluster_or_pushes_out_the_status() {
     let tails = [
         C.repeat(30),
         G.repeat(25),
@@ -800,85 +801,66 @@ fn k5a_agent_panel_task_tail_never_pushes_out_the_elapsed_column() {
         format!("{G}{A}{}", C.repeat(20)),
         "a".repeat(60),
     ];
-    // Per variant: the row text before the task tail and the cells reserved
-    // besides the tail's own budget (inner = width - 2, minus the 10-cell
-    // `▶ ♦ 模型` prefix incl. gap, the 6-cell ` ⊙ iso` and 7-cell ` queued`
-    // suffixes where present, and the 12-cell elapsed column).
-    for (status, isolated, head, reserved) in [
-        (NodeState::Running, false, "▶ ♦ 模型", 24usize),
-        (NodeState::Created, false, "○ ♦ 模型 queued", 31),
-        (NodeState::Running, true, "▶ ♦ 模型 ⊙ iso", 30),
-        (NodeState::Created, true, "○ ♦ 模型 ⊙ iso queued", 37),
+    // The row is `<state> <owner> <type>[ ⊙ iso] <status>[  <tail>]`: the head
+    // (through the status word) comes before the tail, so a cut hits the tail.
+    for (status, isolated, head) in [
+        (NodeState::Running, false, "▶ ♦ 模型 running"),
+        (NodeState::Created, false, "○ ♦ 模型 queued"),
+        (NodeState::Running, true, "▶ ♦ 模型 ⊙ iso running"),
+        (NodeState::Created, true, "○ ♦ 模型 ⊙ iso queued"),
     ] {
         let entry = agent_entry(status, isolated);
+        let status_word = head.rsplit(' ').next().unwrap();
+        // The narrowest width (28: list column 26, row room 24) holds the head.
+        assert!(head.width() <= 24, "{head:?}");
         for tail in &tails {
+            let full = format!("{head} {tail}");
             for width in 28u16..=130 {
                 let (buf, text) = agent_row(&entry, tail, width);
-                let budget = usize::from(width).saturating_sub(reserved);
-                assert_eq!(
-                    text,
-                    agent_expected(head, tail, budget),
-                    "width {width} {status:?} iso={isolated}"
-                );
+                let context = format!("width {width} {status:?} iso={isolated} {text:?}");
                 assert_whole_clusters(&buf);
-                assert_eq!(glyphs(&buf, 1).last().map(String::as_str), Some("│"));
+                assert_eq!(glyphs(&buf, 2).last().map(String::as_str), Some("│"));
+                // Head first, status word never pushed out.
+                assert!(text.starts_with(head), "{context}");
+                assert!(text.contains(status_word), "{context}");
+                // The painted row is a whole-grapheme prefix of head + tail
+                // that fills the row room (a cut may drop at most one wide
+                // cluster's worth of cells).
+                assert!(full.starts_with(&text), "{context}");
+                let inner = usize::from(width) - 2;
+                let master = if inner >= 96 {
+                    (inner * 40 / 100).max(28)
+                } else {
+                    inner
+                };
+                let room = master - 2;
+                assert!(text.width() <= room, "{context}");
+                if text != full {
+                    // One separator and one wide cluster may not fit.
+                    assert!(text.width() + 3 > room, "{context}");
+                }
             }
         }
     }
-    // Tightest widths (budget 0..=3 around the old `max > 3` gate): the tail
-    // is hidden or clipped without a marker and the elapsed column survives.
-    let entry = agent_entry(NodeState::Running, false);
-    for tail in &tails {
-        for width in 14u16..=27 {
-            let (buf, text) = agent_row(&entry, tail, width);
-            let budget = usize::from(width).saturating_sub(24);
-            assert_eq!(
-                text,
-                agent_expected("▶ ♦ 模型", tail, budget),
-                "width {width}"
-            );
-            assert_whole_clusters(&buf);
-        }
-    }
     // ASCII positive controls.
+    let entry = agent_entry(NodeState::Running, false);
     let (_, text) = agent_row(&entry, "build the project", 80);
-    assert_eq!(text, "▶ ♦ 模型  build the project  0s");
+    assert_eq!(text, "▶ ♦ 模型 running build the project");
+    // Width 60: list room 56, head + gap 18 cells, 38 cells of tail.
     let (_, text) = agent_row(&entry, &"x".repeat(100), 60);
-    assert_eq!(text, format!("▶ ♦ 模型  {}...  0s", "x".repeat(33)));
-}
-
-/// Expected interior row: `head`, the reference-clipped tail (omitted when
-/// empty) and the elapsed column.
-fn agent_expected(head: &str, tail: &str, budget: usize) -> String {
-    let shown = reference_tail(tail, budget);
-    if shown.is_empty() {
-        format!("{head}  0s")
-    } else {
-        format!("{head}  {shown}  0s")
-    }
+    assert_eq!(text, format!("▶ ♦ 模型 running {}", "x".repeat(39)));
 }
 
 // ───────────────────────── adapter status panel ─────────────────────────
 
-struct MetricScheduler(String);
+/// Row y of the scheduler port in the painted lines: persona, memory,
+/// session, tools, channels above it (no border, no title row).
+const SCHEDULER_Y: u16 = 5;
 
-#[async_trait::async_trait]
-impl SchedulerPort for MetricScheduler {
-    fn health_snapshot(&self) -> HealthSummary {
-        HealthSummary::healthy(self.0.clone())
-    }
-}
-
-/// Row y of the scheduler port: border, then persona … channels above it.
-const SCHEDULER_Y: u16 = 6;
-
+/// The adapter lines laid out at the frame inner width (`width - 2`) and
+/// painted one line per row into a buffer exactly that wide.
 fn adapter_buffer(width: u16, metric: Option<&str>, name: Option<&str>) -> Buffer {
-    let core = AgentCore::test_noop();
-    if let Some(metric) = metric {
-        core.scheduler.store(Arc::new(
-            Arc::new(MetricScheduler(metric.to_string())) as Arc<dyn SchedulerPort>
-        ));
-    }
+    let inner = width - 2;
     let mut overrides = BTreeMap::new();
     if let Some(name) = name {
         overrides.insert(
@@ -889,20 +871,21 @@ fn adapter_buffer(width: u16, metric: Option<&str>, name: Option<&str>) -> Buffe
             },
         );
     }
-    let theme = Theme::dark();
-    paint(width, 14, |f| {
-        let area = Rect::new(0, 0, width, 14);
-        adapter_status_panel::render(
-            area,
-            f.buffer_mut(),
-            &core,
-            &overrides,
-            false,
-            usize::MAX,
-            &theme,
-        );
-    })
-    .buffer
+    let rows = adapter_status_panel::build(
+        |port| match (port, metric) {
+            (PortDimension::Scheduler, Some(metric)) => HealthSummary::healthy(metric.to_string()),
+            _ => HealthSummary::unknown(),
+        },
+        Vec::new(),
+        None,
+        &overrides,
+    );
+    let lines = adapter_status_panel::lines(&rows, inner, &Theme::dark());
+    let mut buf = Buffer::empty(Rect::new(0, 0, inner, 14));
+    for (y, line) in lines.iter().enumerate() {
+        buf.set_line(0, y as u16, line, inner);
+    }
+    buf
 }
 
 #[test]
@@ -934,16 +917,17 @@ fn k5a_adapter_panel_name_budget_and_metric_alignment() {
                 let text = row_text(&buf, SCHEDULER_Y);
                 assert!(text.contains(&metric), "{text:?}");
                 // The metric's last cell must sit just before the inner
-                // area's three-cell right margin: cell `width - 4`, exclusive.
+                // area's three-cell right margin: cell `inner - 3` (== `width - 5`),
+                // exclusive. The buffer is the inner area itself: no border.
                 let g = glyphs(&buf, SCHEDULER_Y);
-                let mut body: Vec<&String> = g[..g.len() - 1].iter().collect();
+                let mut body: Vec<&String> = g.iter().collect();
                 while body.last().is_some_and(|s| s.trim().is_empty()) {
                     body.pop();
                 }
                 let metric_end: usize = body.iter().map(|s| s.width().max(1)).sum();
                 assert_eq!(
                     metric_end,
-                    usize::from(width) - 4,
+                    usize::from(width) - 5,
                     "metric {metric:?} name {name:?} width {width}"
                 );
             }

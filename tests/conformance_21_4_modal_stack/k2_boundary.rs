@@ -495,12 +495,10 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
             InputAction::RequestClipboardPaste,
         ),
     ];
-    for panel in [PanelType::Tasks, PanelType::Agents, PanelType::Adapters] {
-        targets.push((
-            PaletteAction::OpenPanel(panel),
-            InputAction::OpenPanel(panel),
-        ));
-    }
+    targets.push((
+        PaletteAction::OpenPanel(PanelType::Tasks),
+        InputAction::OpenPanel(PanelType::Tasks),
+    ));
     for (name, args) in [
         ("retract-auto", "peer-response-id"),
         ("team", "retract peer"),
@@ -1242,11 +1240,10 @@ fn stage_reconcile_releases_the_last_owner_without_opening_the_request() {
 pub(super) fn assert_runtime_permission_painted(
     h: &mut crate::e2e_harness::TestHarness,
     tabs: &mut TabManager,
-    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
     id: &RequestId,
 ) {
     assert_permission_deferred(&h.state, id);
-    let screen = crate::conformance_tui_orchestration::render_runtime(h, tabs, core);
+    let screen = crate::conformance_tui_orchestration::render_runtime(h, tabs);
     assert!(screen.contains("Needs you (1)"), "{screen}");
     assert!(!screen.contains("real permission admission"), "{screen}");
     assert_permission_deferred(&h.state, id);
@@ -1255,8 +1252,6 @@ pub(super) fn assert_runtime_permission_painted(
 #[test]
 fn cross_search_closing_paths_settle_real_queued_permissions_and_covering_does_not() {
     use rustain::adapters::tui::{app, handlers::export};
-    use rustain::infrastructure::runtime::agent_core::AgentCore;
-    let core = AgentCore::test_noop();
     for path in ["Esc", "Ctrl+C", "back", "close", "replacement", "covered"] {
         let mut h = crate::e2e_harness::TestHarness::with_size(130, 30);
         let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
@@ -1367,6 +1362,6 @@ fn cross_search_closing_paths_settle_real_queued_permissions_and_covering_does_n
             export::CrossSearchResultsOutcome::DiscardedStale,
             "{path}"
         );
-        assert_runtime_permission_painted(&mut h, &mut tabs, &core, &id);
+        assert_runtime_permission_painted(&mut h, &mut tabs, &id);
     }
 }

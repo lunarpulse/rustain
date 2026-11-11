@@ -1,5 +1,6 @@
 pub mod accounts_runtime;
-pub mod agent_inspector_keys;
+pub mod adapters_window;
+pub mod agent_window;
 pub mod app;
 pub mod artifact_window;
 pub mod block_viewer;

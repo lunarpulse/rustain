@@ -193,9 +193,7 @@ fn esc_and_ctrl_c_apply_the_legacy_history_return_without_leaving_an_owner() {
 fn fitted_cross_search_keeps_query_selected_result_and_primary_keys() {
     use crate::e2e_harness::TestHarness;
     use rustain::domain::models::TabManager;
-    use rustain::infrastructure::runtime::agent_core::AgentCore;
     use tokio_util::sync::CancellationToken;
-    let core = AgentCore::test_noop();
     for (width, height) in [(130, 30), (80, 24), (60, 16)] {
         for full in [false, true] {
             let mut h = TestHarness::with_size(130, 30);
@@ -206,7 +204,7 @@ fn fitted_cross_search_keeps_query_selected_result_and_primary_keys() {
             let draft = if full { "1\n2\n3\n4\n5\n6\n7\n8" } else { "" };
             h.state.input_buffer = draft.into();
             h.state.cursor_position = draft.chars().count();
-            crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+            crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
             open(&mut h.state);
             let scan = query(&mut h.state, "ab");
             assert_eq!(
@@ -216,15 +214,14 @@ fn fitted_cross_search_keeps_query_selected_result_and_primary_keys() {
             assert_eq!(press(&mut h.state, Key::Left), InputAction::Consumed);
             // The real opener ran and painted at a supported History width
             // before changing the terminal and dispatching its Resize event.
-            crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+            crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
             h.terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             rustain::adapters::tui::app::handle_input(
                 &mut h.state,
                 &rustain::domain::events::DomainInputEvent::Resize(width, height),
             );
-            let screen =
-                crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+            let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
             assert!(
                 screen.contains("/ ab"),
                 "{width}x{height} full={full}: {screen}"
@@ -280,7 +277,7 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
         ports::StoragePort,
         services::session_index::SessionIndex,
     };
-    use rustain::infrastructure::runtime::{agent_core::AgentCore, event_loop};
+    use rustain::infrastructure::runtime::event_loop;
     for existing in [true, false] {
         for with_permission in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
@@ -289,8 +286,7 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
             h.conversation = tabs.active_tab().conversation.clone();
             h.state = history();
             h.state.active_tab_id = tabs.active_tab_id();
-            let core = AgentCore::test_noop();
-            crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+            crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
             assert!(h.state.total_content_height > h.state.viewport_height as usize);
             let mut target = h.conversation.clone();
             target.id = generate_conversation_id();
@@ -380,9 +376,7 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
             assert!(!h.state.auto_scroll());
             let positioned = super::stage_support::view(&tabs);
             if let Some(id) = permission {
-                super::k2_boundary::assert_runtime_permission_painted(
-                    &mut h, &mut tabs, &core, &id,
-                );
+                super::k2_boundary::assert_runtime_permission_painted(&mut h, &mut tabs, &id);
             } else {
                 let action = press(&mut h.state, Key::Ctrl('p'));
                 assert_eq!(action, InputAction::Consumed);
@@ -617,15 +611,13 @@ async fn real_scan_publication_preserves_generation_through_late_and_covered_del
 fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
     use rustain::adapters::tui::{app, handlers::scroll};
     use rustain::domain::{events::DomainInputEvent, models::view_state::ScrollDelta};
-    use rustain::infrastructure::runtime::agent_core::AgentCore;
     let (mut h, mut tabs) = super::stage_support::stage(130, 30);
     h.conversation = tabs.active_tab().conversation.clone();
     h.state = history();
     h.state.active_tab_id = tabs.active_tab_id();
     h.state.input_buffer = "1\n2\n3\n4\n5\n6\n7\n8".into();
     h.state.cursor_position = 5;
-    let core = AgentCore::test_noop();
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     let layout = || {
         rustain::adapters::tui::layout::compute_layout(
             ratatui::layout::Rect::new(0, 0, 130, 30),
@@ -692,7 +684,7 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
             assert_eq!(h.state.cross_search.query.as_str(), "ab");
             assert_eq!(h.state.cross_search.selected, 1);
         }
-        crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+        crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
         assert_eq!(super::stage_support::view(&tabs), before_view);
         assert_eq!(super::stage_support::cache_keys(&h, &tabs), before_cache);
         let actual = rustain::adapters::tui::layout::compute_layout(
@@ -716,7 +708,7 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
     }
     assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
     export::close_cross_search(&mut h.state);
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert_eq!(super::stage_support::view(&tabs), before_view);
     assert_eq!(super::stage_support::cache_keys(&h, &tabs), before_cache);
     assert_eq!(pixels(&h), before_pixels);
@@ -724,7 +716,7 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
         panic!("uncovered production scroll dispatcher must be reachable");
     };
     scroll::handle_apply_scroll_intent(&mut tabs, &mut h.state, &h.conversation, delta);
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert_ne!(
         super::stage_support::view(&tabs),
         before_view,
@@ -746,7 +738,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
             ports::StoragePort,
             services::session_index::SessionIndex,
         },
-        infrastructure::runtime::{agent_core::AgentCore, event_loop},
+        infrastructure::runtime::event_loop,
     };
     use std::sync::Arc;
     for path in ["missing", "covered", "io-error"] {
@@ -788,7 +780,6 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
         }
         h.state = history();
         h.state.active_tab_id = tabs.active_tab_id();
-        let core = AgentCore::test_noop();
         open(&mut h.state);
         let scan = query(&mut h.state, "ab");
         assert_eq!(
@@ -810,7 +801,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
                 Surface::CommandPalette
             );
         }
-        crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+        crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
         if path != "covered" {
             h.terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -842,7 +833,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
         } else {
             None
         };
-        crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+        crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
         let before_view = super::stage_support::view(&tabs);
         assert!(tabs.active_tab().view_state.scroll_offset > 0);
         assert!(!h.state.cross_search.load_failed);
@@ -883,7 +874,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
             press(&mut h.state, Key::Esc);
         }
         assert_eq!(h.state.modal_stack.top(), owner.as_ref());
-        let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+        let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
         assert_eq!(super::stage_support::view(&tabs), before_view, "{path}");
         if path != "covered" {
             assert!(
@@ -902,8 +893,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
             assert_eq!(deliver_event(&mut h.state, event), Outcome::Applied);
             assert!(h.state.cross_search.results.is_empty());
             assert!(!h.state.cross_search.running && h.state.cross_search.load_failed);
-            let screen =
-                crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+            let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
             assert!(
                 screen.contains("Failed to open conversation")
                     && !screen.contains("No matches found"),
@@ -932,20 +922,19 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
             !h.state.cross_search.load_failed,
             "editing releases stale failure feedback"
         );
-        let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+        let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
         assert!(!screen.contains("Failed to open conversation"));
         super::k2_boundary::assert_permission_deferred(&h.state, &id);
         assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
         export::close_cross_search(&mut h.state);
         assert!(!h.state.cross_search.load_failed);
-        super::k2_boundary::assert_runtime_permission_painted(&mut h, &mut tabs, &core, &id);
+        super::k2_boundary::assert_runtime_permission_painted(&mut h, &mut tabs, &id);
     }
 }
 
 #[test]
 fn a_real_stream_keeps_appending_under_cross_search() {
     use rustain::domain::models::{StreamChunk, TabManager};
-    use rustain::infrastructure::runtime::agent_core::AgentCore;
     let mut h = crate::e2e_harness::TestHarness::with_size(130, 30);
     h.send_message("stream beneath CrossSearch");
     h.process_chunk(StreamChunk::Text {
@@ -961,8 +950,7 @@ fn a_real_stream_keeps_appending_under_cross_search() {
     let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
     tabs.active_tab_mut().conversation = h.conversation.clone();
     h.state.active_tab_id = tabs.active_tab_id();
-    let core = AgentCore::test_noop();
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(h.streaming.is_streaming);
     let view = super::stage_support::view(&tabs);
     open(&mut h.state);
@@ -971,7 +959,7 @@ fn a_real_stream_keeps_appending_under_cross_search() {
         content: "independent appended row".into(),
         parent_tool_use_id: None,
     });
-    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(h.streaming.is_streaming);
     assert_eq!(h.state.modal_stack.top(), owner.as_ref());
     assert_eq!(super::stage_support::view(&tabs), view);
@@ -981,7 +969,7 @@ fn a_real_stream_keeps_appending_under_cross_search() {
     );
     assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
     export::close_cross_search(&mut h.state);
-    let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(screen.contains("independent appended row"), "{screen}");
     assert!(h.streaming.is_streaming);
 }
@@ -1089,14 +1077,12 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
             TabManager,
             palette::{PaletteAction, PaletteEntry, PaletteScope},
         },
-        infrastructure::runtime::agent_core::AgentCore,
     };
     let mut h = crate::e2e_harness::TestHarness::with_size(130, 30);
     let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
     tabs.active_tab_mut().conversation = h.conversation.clone();
     h.state = history();
     h.state.active_tab_id = tabs.active_tab_id();
-    let core = AgentCore::test_noop();
     open(&mut h.state);
     let _ = query(&mut h.state, "ab");
     let owner = h.state.modal_stack.top().cloned();
@@ -1108,7 +1094,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
         h.state.leader_feedback.as_ref().unwrap().message,
         CLOSE_WINDOW_FIRST
     );
-    let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(screen.contains("Please close the window first"), "{screen}");
     assert_eq!(press(&mut h.state, Key::Ctrl('q')), InputAction::Quit);
     quit_confirm::request(
@@ -1122,7 +1108,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
         h.state.modal_stack.top().unwrap().surface,
         Surface::QuitConfirm
     );
-    let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+    let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
     assert!(
         screen.contains("Stay") && !screen.contains("┌ Ctrl+X "),
         "{screen}"
@@ -1158,8 +1144,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
                 h.state.modal_stack.top().unwrap().surface,
                 Surface::CommandPalette
             );
-            let screen =
-                crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
+            let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
             assert!(screen.contains("Please close the window first"), "{screen}");
             press(&mut h.state, Key::Esc);
         } else {

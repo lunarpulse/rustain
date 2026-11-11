@@ -131,7 +131,9 @@ fn test_no_new_event_variants_for_subagent() {
 fn test_subagent_panel_does_not_hold_registry() {
     let widget_files = [
         "src/adapters/tui/widgets/agent_panel.rs",
-        "src/adapters/tui/widgets/agent_inspector.rs",
+        "src/adapters/tui/widgets/agent_window.rs",
+        "src/adapters/tui/agent_window.rs",
+        "src/adapters/tui/mission_control/agents.rs",
     ];
     for path in &widget_files {
         let content = fs::read_to_string(path)

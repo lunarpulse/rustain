@@ -80,4 +80,39 @@ async fn story21_7_smoke_frames_export() {
         )
         .expect("write");
     }
+    for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+        let dir_tmp = tempfile::tempdir().expect("scratch spool dir");
+        let tree = rustain::infrastructure::subagent::NodeTree::new();
+        let spool =
+            rustain::infrastructure::subagent::SubagentSpool::new(dir_tmp.path().join("spool"))
+                .await
+                .expect("spool");
+        let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
+        rig.key(Key::Ctrl('x'));
+        rig.key(Key::Char('s'));
+        rustain::infrastructure::runtime::mission_bridge::open_agents_tab_from(
+            &mut rig.f.h.state,
+            &tree,
+            &spool,
+        )
+        .await;
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("agents-open-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+
+        let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
+        rustain::infrastructure::runtime::mission_bridge::open_adapters(
+            &mut rig.f.h.state,
+            &rustain::infrastructure::runtime::agent_core::AgentCore::test_noop(),
+        );
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("adapters-open-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+    }
 }

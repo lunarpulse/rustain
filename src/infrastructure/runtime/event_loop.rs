@@ -28,13 +28,13 @@ use futures::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::mission_bridge::{self, get_subagent_provider};
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
 use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
-use crate::adapters::tui::agent_inspector_keys::{self, InspectorOutcome};
 use crate::adapters::tui::app::{self, InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::decision_queue::{
@@ -357,60 +357,6 @@ fn reconcile_fold_toggle<F>(
 
 // Scroll-intent handler + dispatch_view_scroll helper extracted to
 // `crate::adapters::tui::handlers::scroll` per Story 8.0a Phase 4 Task 9 (scroll).
-
-fn get_subagent_provider(
-    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
-) -> Option<Arc<crate::adapters::subagent::SubagentProvider>> {
-    let tools_arc = agent_core.tools.load_full();
-    let any_ref: &dyn std::any::Any = (*tools_arc).as_any();
-    let composite = any_ref
-        .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()?;
-    composite.subagent_provider().cloned()
-}
-
-async fn refresh_subagent_panel_cache(
-    state: &mut TuiState,
-    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
-) {
-    let Some(provider) = get_subagent_provider(agent_core) else {
-        state.agent_panel_state.cached_entries.clear();
-        crate::adapters::tui::decision_queue::withdraw_gone_agent_kills(state);
-        return;
-    };
-    let registry = provider.registry();
-    let entries: Vec<crate::infrastructure::subagent::RegistryEntry> = registry.list().await;
-    state.agent_panel_state.cached_entries = entries
-        .into_iter()
-        .map(|e: crate::infrastructure::subagent::RegistryEntry| e.to_view())
-        .collect();
-    crate::adapters::tui::decision_queue::withdraw_gone_agent_kills(state);
-}
-
-async fn refresh_spool_tail(
-    state: &mut TuiState,
-    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
-    task_id: &str,
-) {
-    let Some(provider) = get_subagent_provider(agent_core) else {
-        return;
-    };
-    let spool = provider.spool();
-    if let Ok(tail) = spool.read_tail(task_id, 8192).await {
-        let agent_id = crate::domain::models::AgentId::from_validated(task_id.to_string());
-        state
-            .agent_panel_state
-            .spool_tail_cache
-            .insert(agent_id, tail);
-    }
-    // Evict stale entries unconditionally on every refresh
-    state.agent_panel_state.spool_tail_cache.retain(|id, _| {
-        state
-            .agent_panel_state
-            .cached_entries
-            .iter()
-            .any(|e| &e.agent_id == id)
-    });
-}
 
 /// Run the 4-branch tokio::select! event loop.
 #[allow(clippy::too_many_arguments)]
@@ -882,7 +828,6 @@ pub async fn run(
         Some(&mut tab_manager),
         &session_index,
         _ctx_window,
-        &app_state.agent_core,
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
@@ -1109,42 +1054,6 @@ pub async fn run(
                                 if pane_action.is_none() { continue; }
                             }
 
-                            if pane_action.is_none() {
-                                match agent_inspector_keys::on_key(&mut state, &domain_event, tab_manager.active_tab().read_only, &conversation.id) {
-                                    InspectorOutcome::PassThrough => {}
-                                    InspectorOutcome::Consumed => continue,
-                                    InspectorOutcome::SendOp { agent_id, op } => {
-                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
-                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                            let _ = provider.registry().send_op(&agent_id, op).await;
-                                        }
-                                        state.needs_redraw = true;
-                                        continue;
-                                    }
-                                    InspectorOutcome::ModelNotice => {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(conversation.id.clone()),
-                                            level: NoticeLevel::Info,
-                                            message: format!("Change model: close the inspector and press {} to open the model selector", crate::adapters::tui::keymap::render::leader_follow_up_long(crate::adapters::tui::keymap::table::LeaderCmd::Model)),
-                                        });
-                                        continue;
-                                    }
-                                    InspectorOutcome::ToolsNotice => {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(conversation.id.clone()),
-                                            level: NoticeLevel::Info,
-                                            message: "Update tools: not available from the agent inspector yet".to_string(),
-                                        });
-                                        continue;
-                                    }
-                                    InspectorOutcome::OpenConversation(conv) => {
-                                        tab_manager.create_tab();
-                                        tab_manager.active_tab_mut().read_only = true;
-                                        tab_manager.active_tab_mut().conversation = *conv;
-                                        continue;
-                                    }
-                                }
-                            }
 
                             let action = match pane_action {
                                 Some(action) => action,
@@ -1258,7 +1167,7 @@ pub async fn run(
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -1856,14 +1765,14 @@ pub async fn run(
                                             if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
                                                 let registry = provider.registry();
                                                 match registry.cascade_kill(&agent_id, std::time::Duration::from_millis(500)).await {
-                                                    Ok(_) => agent_inspector_keys::close(&mut state),
+                                                    Ok(_) => {}
                                                     Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
                                                         let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                             conversation_id: Some(conversation.id.clone()),
                                                             level: NoticeLevel::Warning,
                                                             message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
                                                         });
-                                                        agent_inspector_keys::close(&mut state);
+                                                        // The agent window follows its agent: it shows the stale copy.
                                                     }
                                                     Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
                                                         let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -1872,12 +1781,12 @@ pub async fn run(
                                                             message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
                                                         });
                                                     }
-                                                    Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => agent_inspector_keys::close(&mut state),
+                                                    Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => {}
                                                 }
                                             } else {
                                                 notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
                                             }
-                                            refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                            mission_bridge::refresh_roster(&mut state, &app_state.agent_core).await;
                                         }
                                         DecisionEffect::SkillTrustAccept | DecisionEffect::SkillTrustDecline | DecisionEffect::SkillTrustInspect
                                         | DecisionEffect::PlanApproveNormal | DecisionEffect::PlanApproveAutoEdit | DecisionEffect::PlanReject | DecisionEffect::PlanRevise
@@ -2256,7 +2165,7 @@ pub async fn run(
                                         submit_turn!(full_text, all_images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -3019,14 +2928,6 @@ pub async fn run(
                                     transparency_bridge::export_command(&app_state, &mut state, &conversation.id).await;
                                 }
                                 InputAction::OpenSidebarConversation => {
-                                    if state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents) {
-                                        if let Some(entry) = state.selected_agent().cloned() {
-                                            state.agent_panel_state.drill_down_agent = Some(entry.agent_id);
-                                            state.agent_panel_state.inspector_scroll_offset = 0;
-                                            state.needs_redraw = true;
-                                        }
-                                        continue;
-                                    }
                                     // History is the only remaining panel whose
                                     // Enter action resolves a conversation.
                                     if state.sidebar_panel
@@ -3124,26 +3025,10 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                InputAction::AgentPauseToggle => {
-                                    if let Some(entry) = state.selected_agent().cloned() {
-                                        let op = match entry.current_status {
-                                            crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
-                                            crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
-                                            _ => {
-                                                // Only Running→Pause and Suspended→Resume are valid
-                                                notifications::info(&mut state, NoticeSource::Task, format!("Cannot pause/resume agent in {:?} state", entry.current_status));
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                        };
-                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                            let registry = provider.registry();
-                                            let _ = registry.send_op(&entry.agent_id, op).await;
-                                        }
-                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
-                                        state.needs_redraw = true;
-                                    }
-                                }
+                                InputAction::OpenAgentWindow(agent_id) => mission_bridge::open_agent_window(&mut state, &app_state.agent_core, agent_id).await,
+                                InputAction::AgentPauseResume(agent_id) => mission_bridge::pause_resume_agent(&mut state, &app_state.agent_core, tab_manager.active_tab().read_only, &agent_id).await,
+                                InputAction::AgentKill(agent_id) => mission_bridge::kill(&mut state, &conversation.id, tab_manager.active_tab().read_only, agent_id),
+                                InputAction::OpenAdapters => mission_bridge::open_adapters(&mut state, &app_state.agent_core),
                                 InputAction::DeleteSidebarConversation => {
                                     // Resolve conversation ID from sidebar selection
                                     if let Some(entry) = session_index.entries().get(state.sidebar_selected) {
@@ -4798,7 +4683,7 @@ pub async fn run(
                                         submit_turn!(queued_msg.content, queued_msg.images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -5587,7 +5472,7 @@ pub async fn run(
                         submit_turn!(text, vec![], false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                         state.active_context_window = _ctx_window;
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                         }
@@ -6406,20 +6291,10 @@ pub async fn run(
                             crate::domain::events::CapabilityEvent::Updated { id, .. } => &id.protocol,
                         };
                         if protocol == "subagent" {
-                            refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
-                            let entry_count = state.agent_panel_state.cached_entries.len();
-                            if state.agent_panel_state.selected_index >= entry_count && entry_count > 0 {
-                                state.agent_panel_state.selected_index = entry_count - 1;
-                            }
-                            if entry_count == 0 {
-                                state.agent_panel_state.selected_index = 0;
-                            }
-                            if let Some(crate::domain::models::visual::PanelType::Agents) = state.sidebar_panel {
-                                state.sidebar_entry_count = entry_count;
-                            }
+                            mission_bridge::refresh_roster(&mut state, &app_state.agent_core).await;
                             if let crate::domain::events::CapabilityEvent::Updated { id, .. } = ev {
                                 if !id.tool.is_empty() {
-                                    refresh_spool_tail(&mut state, &app_state.agent_core, &id.tool).await;
+                                    mission_bridge::refresh_spool_tail(&mut state, &app_state.agent_core, &id.tool).await;
                                 }
                             }
                         }
@@ -6665,7 +6540,7 @@ pub async fn run(
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -7429,7 +7304,6 @@ pub fn render(
     tab_manager: Option<&mut crate::domain::models::tab::TabManager>,
     session_index: &SessionIndex,
     context_window: u32,
-    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Result<()> {
     let tab_manager_for_bar = tab_manager.as_deref();
     let preview_clock = tab_manager_for_bar
@@ -7582,46 +7456,6 @@ pub fn render(
                                 theme,
                             );
                         }
-                        Some(crate::domain::models::visual::PanelType::Agents) => {
-                            use crate::adapters::tui::widgets::agent_panel;
-                            let is_focused = matches!(
-                                state.focus,
-                                FocusState::Sidebar {
-                                    panel: crate::domain::models::visual::PanelType::Agents,
-                                    ..
-                                }
-                            );
-                            let now_fn = || chrono::Utc::now().timestamp_millis();
-                            agent_panel::render(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                &state.agent_panel_state.cached_entries,
-                                state.sidebar_selected,
-                                is_focused,
-                                theme,
-                                &state.agent_panel_state.spool_tail_cache,
-                                &now_fn,
-                            );
-                        }
-                        Some(crate::domain::models::visual::PanelType::Adapters) => {
-                            use crate::adapters::tui::widgets::adapter_status_panel;
-                            let is_focused = matches!(
-                                state.focus,
-                                FocusState::Sidebar {
-                                    panel: crate::domain::models::visual::PanelType::Adapters,
-                                    ..
-                                }
-                            );
-                            adapter_status_panel::render(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                agent_core,
-                                &state.session_overrides,
-                                is_focused,
-                                state.sidebar_selected,
-                                theme,
-                            );
-                        }
                     }
                 }
 
@@ -7676,59 +7510,6 @@ pub fn render(
                                     ratatui::style::Style::default().fg(theme.colors.fg_muted),
                                 );
                             block.render(panel_area, frame.buffer_mut());
-                        }
-                        Some(crate::domain::models::visual::PanelType::Adapters) => {
-                            use crate::adapters::tui::widgets::adapter_status_panel;
-                            let is_focused = matches!(
-                                state.focus,
-                                FocusState::Sidebar {
-                                    panel: crate::domain::models::visual::PanelType::Adapters,
-                                    ..
-                                }
-                            );
-                            adapter_status_panel::render(
-                                panel_area,
-                                frame.buffer_mut(),
-                                agent_core,
-                                &state.session_overrides,
-                                is_focused,
-                                state.sidebar_selected,
-                                theme,
-                            );
-                        }
-                        _ => {
-                            if let Some(crate::domain::models::visual::PanelType::Agents) =
-                                state.sidebar_panel
-                            {
-                                use crate::adapters::tui::widgets::agent_panel;
-                                let is_focused = matches!(
-                                    state.focus,
-                                    FocusState::Sidebar {
-                                        panel: crate::domain::models::visual::PanelType::Agents,
-                                        ..
-                                    }
-                                );
-                                let now_fn = || chrono::Utc::now().timestamp_millis();
-                                agent_panel::render(
-                                    panel_area,
-                                    frame.buffer_mut(),
-                                    &state.agent_panel_state.cached_entries,
-                                    state.sidebar_selected,
-                                    is_focused,
-                                    theme,
-                                    &state.agent_panel_state.spool_tail_cache,
-                                    &now_fn,
-                                );
-                            } else {
-                                use ratatui::widgets::Widget;
-                                let block = ratatui::widgets::Block::default()
-                                    .title(" (panel deferred) ")
-                                    .borders(ratatui::widgets::Borders::ALL)
-                                    .border_style(
-                                        ratatui::style::Style::default().fg(theme.colors.fg_muted),
-                                    );
-                                block.render(panel_area, frame.buffer_mut());
-                            }
                         }
                     }
                 }
@@ -7801,31 +7582,6 @@ pub fn render(
                         state.task_panel_state.expanded_detail = false;
                         state.task_panel_state.detail_scroll_offset = 0;
                         state.task_panel_state.last_executed_plan_id = None;
-                    }
-                } else if let Some(agent_id) = state.agent_panel_state.drill_down_agent.clone() {
-                    use crate::adapters::tui::widgets::agent_inspector;
-                    let entry = state
-                        .agent_panel_state
-                        .cached_entries
-                        .iter()
-                        .find(|e| e.agent_id == agent_id)
-                        .cloned();
-                    if let Some(entry) = entry {
-                        agent_inspector::render(
-                            app_layout.chat_pane,
-                            frame.buffer_mut(),
-                            &entry,
-                            state.agent_panel_state.inspector_scroll_offset,
-                            theme,
-                            &state.agent_panel_state.spool_tail_cache,
-                            &state.agent_panel_state.cached_entries,
-                            crate::domain::models::session_meta::now_unix(),
-                        );
-                        skip_chat_render = true;
-                    } else {
-                        state.agent_panel_state.drill_down_agent = None;
-                        state.agent_panel_state.inspector_scroll_offset = 0;
-                        state.needs_redraw = true;
                     }
                 }
                 if !skip_chat_render {

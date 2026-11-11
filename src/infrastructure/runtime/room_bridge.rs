@@ -140,6 +140,9 @@ pub async fn refresh_mission_tab(
     permission_mode: crate::domain::models::PermissionMode,
 ) {
     match tab {
+        McTab::Agents => {
+            super::mission_bridge::open_agents_tab(state, &app_state.agent_core).await;
+        }
         McTab::Room => {
             refresh_panel(app_state, state).await;
             finalize_room_panel(state);

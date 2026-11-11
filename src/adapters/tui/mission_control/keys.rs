@@ -26,14 +26,14 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
         CommandId::Mission(MissionCmd::PrevTab) => return step_tab(state, false, host),
         CommandId::Mission(MissionCmd::NextTab) => return step_tab(state, true, host),
         CommandId::Mission(MissionCmd::Focus) => toggle_pane(state),
-        // The filter and the export act only where the rail painted their hints whole.
+        // The filter, the export and the row actions act only where the rail painted their
+        // hints whole.
         CommandId::Overlay(OverlayCmd::InspectorSearch) => {
             let mission = &mut state.mission_control;
-            if mission.tab == McTab::Messages
-                && mission.fit().search
-                && let Some(page) = mission.messages.as_mut()
+            if mission.fit().search
+                && let Some(search) = mission.search_mut()
             {
-                page.search.open();
+                search.open();
             }
         }
         CommandId::Mission(MissionCmd::Export) => {
@@ -50,11 +50,37 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
         }
         CommandId::Mission(MissionCmd::Open) => {
             let mission = &state.mission_control;
-            if mission.tab == McTab::Artifacts
-                && mission.fit().open
+            if mission.fit().open
                 && let Some(id) = mission.selected_id()
             {
-                return InputAction::OpenArtifactWindow(id.to_owned());
+                match mission.tab {
+                    McTab::Artifacts => return InputAction::OpenArtifactWindow(id.to_owned()),
+                    McTab::Agents => return super::agents::open_action(id),
+                    _ => {}
+                }
+            }
+        }
+        CommandId::Mission(MissionCmd::AgentPause) => {
+            let mission = &state.mission_control;
+            if mission.tab == McTab::Agents
+                && mission.fit().pause
+                && let Some(id) = mission.selected_id()
+            {
+                return InputAction::AgentPauseResume(super::agents::agent_id(id));
+            }
+        }
+        CommandId::Mission(MissionCmd::AgentKill) => {
+            let mission = &state.mission_control;
+            if mission.tab == McTab::Agents
+                && mission.fit().kill
+                && let Some(id) = mission.selected_id()
+            {
+                return InputAction::AgentKill(super::agents::agent_id(id));
+            }
+        }
+        CommandId::Mission(MissionCmd::CopyRow) => {
+            if state.mission_control.tab.is_list() && state.mission_control.fit().copy {
+                copy_row(state);
             }
         }
         CommandId::Viewer(command) if !command.horizontal() => scroll(state, command),
@@ -63,15 +89,28 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
     InputAction::Consumed
 }
 
-/// `Esc` / `Ctrl+C`: a kept Messages filter clears first, then the frame backs.
+/// `c` on a list tab: the selected row's text, or its detail text while the detail pane has
+/// focus on a wide frame. All or nothing: the byte length is judged before any string is built.
+fn copy_row(state: &mut TuiState) {
+    let mission = &state.mission_control;
+    let detail = mission.pane == McPane::Detail && mission.fit().wide;
+    let text = mission.selected_row().map(|row| {
+        if detail {
+            row.detail.as_str()
+        } else {
+            row.text.as_str()
+        }
+    });
+    let outcome = text.map(|text| {
+        (text.len() <= crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES)
+            .then(|| text.to_owned())
+    });
+    crate::adapters::tui::artifact_window::deliver_copy(state, "row text", outcome);
+}
+
+/// `Esc` / `Ctrl+C`: a kept filter clears first, then the frame backs.
 fn back(state: &mut TuiState) {
-    let kept = state.mission_control.tab == McTab::Messages
-        && state
-            .mission_control
-            .messages
-            .as_ref()
-            .is_some_and(|page| !page.search.query.is_empty());
-    if kept {
+    if state.mission_control.filter_kept() {
         super::clear_search(state);
     } else {
         reducer::back(state);
@@ -151,7 +190,7 @@ fn scroll(state: &mut TuiState, command: ViewerCmd) {
                 viewer::apply(&mut page.viewer, command, rows, viewport);
             }
         }
-        McTab::Artifacts | McTab::Probe => {
+        McTab::Agents | McTab::Artifacts | McTab::Probe => {
             let mission = &mut state.mission_control;
             match (mission.pane, mission.fit().wide) {
                 (McPane::Detail, true) => {

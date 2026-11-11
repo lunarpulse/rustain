@@ -37,12 +37,7 @@ fn notices(state: &TuiState) -> Vec<(NoticeSeverity, String)> {
 
 #[test]
 fn every_leader_follow_up_runs_its_command_by_value() {
-    let panels = [
-        ('a', PanelType::Adapters),
-        ('s', PanelType::Agents),
-        ('t', PanelType::Tasks),
-        ('h', PanelType::History),
-    ];
+    let panels = [('t', PanelType::Tasks), ('h', PanelType::History)];
     for (key, panel) in panels {
         let mut state = wide();
         assert_eq!(
@@ -79,6 +74,45 @@ fn every_leader_follow_up_runs_its_command_by_value() {
         assert!(
             notices(&state).is_empty(),
             "r at {width}x{height}: no notice on a run"
+        );
+    }
+    // `s` (21-7, 7-C) opens the Mission Control Agents tab at any width (the frame at once; the
+    // effect reads the roster) and `a` asks for the Adapters window (the effect reads the
+    // health snapshot and opens it): neither is a sidebar panel.
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        assert_eq!(
+            leader(&mut state, Key::Char('s')),
+            InputAction::OpenMissionControl(rustain::adapters::tui::mission_control::McTab::Agents),
+            "s at {width}x{height}"
+        );
+        assert_eq!(
+            state.modal_stack.top().map(|frame| frame.title()),
+            Some("Mission Control · Agents")
+        );
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "the frame writes no base focus"
+        );
+        assert!(
+            notices(&state).is_empty(),
+            "s at {width}x{height}: no notice"
+        );
+        let mut state = TuiState::new(width, height);
+        assert_eq!(
+            leader(&mut state, Key::Char('a')),
+            InputAction::OpenAdapters,
+            "a at {width}x{height}"
+        );
+        assert!(
+            state.modal_stack.is_empty(),
+            "a: the effect opens the window"
+        );
+        assert_eq!(state.focus, FocusState::Input, "a: origin restored");
+        assert!(
+            notices(&state).is_empty(),
+            "a at {width}x{height}: no notice"
         );
     }
     // `l` (21-7, 7-B) opens the Mission Control Messages tab (the A2A log) and `e` the Artifacts
@@ -297,7 +331,7 @@ fn width_unavailable_panel_answers_with_its_remedy() {
     // 80 columns: the sidebar column cannot fit, so the panel chord is `(n/a)`
     // and the key answers with the remedy instead of moving focus invisibly. (`l` and `e` are
     // not here: they open Mission Control tabs and need no sidebar column.)
-    for key in ['a', 's', 't', 'h'] {
+    for key in ['t', 'h'] {
         let mut state = TuiState::new(80, 24);
         let action = leader(&mut state, Key::Char(key));
         assert!(is_inert(&action), "{key}: {action:?}");

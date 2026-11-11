@@ -116,8 +116,11 @@ const SITES: &[Site] = &[
     ),
     site!("widgets/usage_panel.rs", ["truncate_model"]),
     site!("widgets/result_row.rs", ["render_result_row"]),
-    site!("widgets/adapter_status_panel.rs", ["mcp_health_line"]),
-    site!("widgets/agent_panel.rs", ["render"]),
+    site!(
+        "widgets/adapter_status_panel.rs",
+        ["mcp_health_line", "lines"]
+    ),
+    site!("widgets/agent_panel.rs", ["row_text"]),
     site!("widgets/task_panel.rs", ["render_task_panel"]),
     site!("handlers/team_command.rs", ["render_team_send_rows"]),
     site!("handlers/config.rs", ["short_reason"]),

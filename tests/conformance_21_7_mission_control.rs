@@ -2,8 +2,9 @@
 //! the shared list builder and the Room tab — carries the keystones K1 (open and geometry),
 //! K2 (keys and route), K3 (identity), K4 (the presented-only Room poll) and the desk-check
 //! frame export of smoke leg A. Slice 7-B adds K5 (the Messages tab: 21-8's A2A log re-homed)
-//! and K6 (the Artifacts tab and the artifact window). K12 clause (a) is `mission-21-7-a` and
-//! clause (b) is `mission-21-7-b` in the one cutover scanner
+//! and K6 (the Artifacts tab and the artifact window). Slice 7-C adds K7 (the Agents tab and the
+//! agent window) and K8 (the Adapters window). K12 clause (a) is `mission-21-7-a`, clause (b)
+//! `mission-21-7-b` and clause (c) `mission-21-7-c` in the one cutover scanner
 //! (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add their keystones here.
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
@@ -34,3 +35,9 @@ mod k5_messages;
 
 #[path = "conformance_21_7_mission_control/k6_artifacts.rs"]
 mod k6_artifacts;
+
+#[path = "conformance_21_7_mission_control/k7_agents.rs"]
+mod k7_agents;
+
+#[path = "conformance_21_7_mission_control/k8_adapters.rs"]
+mod k8_adapters;

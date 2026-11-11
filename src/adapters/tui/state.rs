@@ -976,11 +976,11 @@ impl Default for TaskPanelState {
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentPanelState {
-    pub selected_index: usize,
     pub cached_entries: Vec<crate::domain::models::subagent_view::AgentRowView>,
-    pub drill_down_agent: Option<crate::domain::models::AgentId>,
-    pub inspector_scroll_offset: u16,
     pub spool_tail_cache: std::collections::HashMap<crate::domain::models::AgentId, String>,
+    /// Agents whose cached tail is a lossy rendering of bytes that were not valid text (their
+    /// window shows it but refuses to copy it as "the original").
+    pub lossy_tails: std::collections::HashSet<crate::domain::models::AgentId>,
 }
 
 /// Story 6.4: user's choice on the skip cascade card.
@@ -2244,6 +2244,11 @@ pub struct TuiState {
     /// The artifact window's payload (Story 21.7 A15): set by the reducer's opener, cleared
     /// when the frame closes.
     pub artifact_window: Option<crate::adapters::tui::artifact_window::ArtifactWindowState>,
+    /// The agent window's payload (Story 21.7 A7): set by the reducer's opener, cleared when
+    /// the frame closes.
+    pub agent_window: Option<crate::adapters::tui::agent_window::AgentWindowState>,
+    /// The Adapters window's payload (Story 21.7 A21): the health snapshot taken at open.
+    pub adapters_window: Option<crate::adapters::tui::adapters_window::AdaptersWindowState>,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
     /// 18.3a-c AC3).
     pub artifacts_panel: ArtifactsPanelState,
@@ -2681,6 +2686,8 @@ impl TuiState {
             mission_control: crate::adapters::tui::mission_control::MissionControlState::default(),
             artifacts_panel: ArtifactsPanelState::default(),
             artifact_window: None,
+            agent_window: None,
+            adapters_window: None,
             daily_budget: None,
             budget_acknowledged: None,
             pending_resolved_model: None,
@@ -2752,12 +2759,6 @@ impl TuiState {
 
     pub fn task_panel_max_index(&self) -> usize {
         self.task_panel_state.task_count.saturating_sub(1)
-    }
-
-    pub fn selected_agent(&self) -> Option<&crate::domain::models::subagent_view::AgentRowView> {
-        self.agent_panel_state
-            .cached_entries
-            .get(self.sidebar_selected)
     }
 
     pub fn refresh_agent_suggestions(&mut self) {
@@ -3613,17 +3614,7 @@ mod tests {
     fn agent_panel_state_default_empty() {
         let state = AgentPanelState::default();
         assert!(state.cached_entries.is_empty());
-        assert_eq!(state.selected_index, 0);
-        assert!(state.drill_down_agent.is_none());
         assert!(state.spool_tail_cache.is_empty());
-        assert_eq!(state.inspector_scroll_offset, 0);
-    }
-
-    #[test]
-    fn selected_agent_clamps() {
-        let mut tui = TuiState::new(80, 24);
-        tui.agent_panel_state.selected_index = 7;
-        assert!(tui.selected_agent().is_none());
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //! applies them after the draw ([`TuiState::mission_draw_completed`]). The Messages visit
 //! commits by the same rule (A13).
 
+pub mod agents;
 pub mod artifacts;
 pub mod keys;
 pub mod messages;
@@ -25,6 +26,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::adapters::tui::keymap::Host;
+use crate::adapters::tui::presentation::inspector_search::InspectorSearch;
 use crate::adapters::tui::presentation::{Surface, viewer::Viewer};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::room_panel::RoomPaint;
@@ -35,6 +37,8 @@ pub use tabs::{McRow, Resolved, Selection};
 /// that no slice has delivered yet does not exist.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum McTab {
+    /// The subagents of this session (`Ctrl+X s`), a list tab: `Enter` opens the agent window.
+    Agents,
     /// The A2A log (`Ctrl+X l`, `/team log`): 21-8's log view.
     Messages,
     /// The durable room replay (`Ctrl+X r`, `/room`).
@@ -52,6 +56,7 @@ impl McTab {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            McTab::Agents => "Agents",
             McTab::Messages => "Messages",
             McTab::Room => "Room",
             McTab::Artifacts => "Artifacts",
@@ -68,7 +73,7 @@ impl McTab {
     /// A list tab keeps a selection and shows a master list (and, wide, a detail preview).
     #[must_use]
     pub const fn is_list(self) -> bool {
-        matches!(self, McTab::Artifacts | McTab::Probe)
+        matches!(self, McTab::Agents | McTab::Artifacts | McTab::Probe)
     }
 }
 
@@ -81,11 +86,11 @@ pub enum McPane {
     Detail,
 }
 
-/// The tabs an operator can reach now (fixed order): the local host's three, the attached
+/// The tabs an operator can reach now (fixed order): the local host's four, the attached
 /// host's Messages only (A20), plus a registered test probe.
 #[derive(Debug, Clone, Copy)]
 pub struct Delivered {
-    tabs: [McTab; 4],
+    tabs: [McTab; 5],
     len: usize,
 }
 
@@ -118,18 +123,40 @@ pub struct Fit {
     pub export: bool,
     /// The rail painted `Enter Open` whole (a list tab with a selected row).
     pub open: bool,
+    /// The rail painted `p Pause/Resume` whole (an agent that can be paused or resumed).
+    pub pause: bool,
+    /// The rail painted `x Kill` whole (an agent that can be killed).
+    pub kill: bool,
+    /// The rail painted `c Copy` whole (a list tab with a selected row, local host).
+    pub copy: bool,
 }
 
 /// One list tab's rows and the words around them.
 #[derive(Debug, Default)]
 pub struct McList {
-    pub rows: Vec<McRow>,
+    /// Every row the last read produced; `visible` is its filtered view while a filter is kept.
+    all: Vec<McRow>,
+    visible: Option<Vec<McRow>>,
     /// What the list says when it has no rows (a read failure, a zero state).
     pub empty: Option<String>,
     /// One muted line above the rows (a zero-state headline, a hazard count).
     pub note: Option<String>,
-    /// Bumped by every replacement; caches key on it.
+    /// Bumped by every replacement or refilter; caches key on it.
     pub rev: u64,
+}
+
+impl McList {
+    /// The rows the list paints and the keys act on (the filtered view while a filter is kept).
+    #[must_use]
+    pub fn rows(&self) -> &[McRow] {
+        self.visible.as_deref().unwrap_or(&self.all)
+    }
+
+    /// The list has rows before any filter (a filter that matches nothing leaves it empty).
+    #[must_use]
+    pub fn has_rows(&self) -> bool {
+        !self.all.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -145,6 +172,9 @@ pub struct MissionControlState {
     pub messages: Option<LogPage>,
     /// Why the read behind a Messages frame failed (painted instead of "Reading…").
     pub messages_failed: Option<String>,
+    /// The filter of the current list tab (`/`); kept per frame, cleared when the tab changes
+    /// or the frame closes.
+    pub list_search: InspectorSearch,
     selections: HashMap<McTab, Selection>,
     lists: HashMap<McTab, McList>,
     fit: Cell<Fit>,
@@ -159,15 +189,17 @@ impl MissionControlState {
     /// The delivered tabs for `host`.
     #[must_use]
     pub fn delivered(&self, host: Host) -> Delivered {
-        let mut tabs = [McTab::Messages; 4];
+        let mut tabs = [McTab::Messages; 5];
         let mut len = 1;
         if host == Host::Local {
-            tabs[1] = McTab::Room;
-            tabs[2] = McTab::Artifacts;
-            len = 3;
+            tabs[0] = McTab::Agents;
+            tabs[1] = McTab::Messages;
+            tabs[2] = McTab::Room;
+            tabs[3] = McTab::Artifacts;
+            len = 4;
             if self.lists.contains_key(&McTab::Probe) {
-                tabs[3] = McTab::Probe;
-                len = 4;
+                tabs[4] = McTab::Probe;
+                len = 5;
             }
         }
         Delivered { tabs, len }
@@ -202,21 +234,25 @@ impl MissionControlState {
             && let Some(index) = selection
                 .id
                 .as_ref()
-                .and_then(|id| old.rows.iter().position(|row| row.id == *id))
+                .and_then(|id| old.rows().iter().position(|row| row.id == *id))
         {
             selection.at = index;
-            selection.label = old.rows[index].text.clone();
+            selection.label = old.rows()[index].text.clone();
         }
         self.next_rev += 1;
         self.lists.insert(
             tab,
             McList {
-                rows,
+                all: rows,
+                visible: None,
                 empty,
                 note,
                 rev: self.next_rev,
             },
         );
+        if tab == self.tab && !self.list_search.query.as_str().is_empty() {
+            self.refilter();
+        }
     }
 
     /// The list of the current tab (none for a body tab or before its first read).
@@ -225,10 +261,10 @@ impl MissionControlState {
         self.lists.get(&self.tab)
     }
 
-    /// The rows of the current list tab (none for a body tab).
+    /// The visible rows of the current list tab (none for a body tab).
     #[must_use]
     pub fn rows(&self) -> &[McRow] {
-        self.list().map_or(&[], |list| list.rows.as_slice())
+        self.list().map_or(&[], McList::rows)
     }
 
     /// The current tab's selection (empty until the operator or a refresh set one).
@@ -257,6 +293,15 @@ impl MissionControlState {
         }
     }
 
+    /// The selected row of the current list tab, if it is still there.
+    #[must_use]
+    pub fn selected_row(&self) -> Option<&McRow> {
+        match self.resolved() {
+            Resolved::Found(index) => self.rows().get(index),
+            _ => None,
+        }
+    }
+
     /// The last painted measurements (the keys clamp against them).
     #[must_use]
     pub fn fit(&self) -> Fit {
@@ -267,9 +312,12 @@ impl MissionControlState {
         self.fit.set(fit);
     }
 
-    /// Retarget in place: the tab changes, the pane positions start over.
+    /// Retarget in place: the tab changes, the pane positions start over and a list filter
+    /// never follows the operator to another tab.
     pub(crate) fn switch_to(&mut self, tab: McTab) {
         if self.tab != tab {
+            self.list_search.back();
+            self.refilter();
             self.tab = tab;
             self.pane = McPane::Master;
             self.detail = Viewer::default();
@@ -278,9 +326,9 @@ impl MissionControlState {
     }
 
     /// The frame closed: transient positions and the paint facts go, and so does the Messages
-    /// page (a closed visit is never committed; the next one reads the journal again); the
-    /// tab and the per-tab selections stay (the monitor of a later slice follows the last
-    /// tab).
+    /// page (a closed visit is never committed; the next one reads the journal again) and a
+    /// list filter; the tab and the per-tab selections stay (the monitor of a later slice
+    /// follows the last tab).
     pub(crate) fn closed(&mut self) {
         self.pane = McPane::Master;
         self.detail = Viewer::default();
@@ -289,6 +337,8 @@ impl MissionControlState {
         self.room_presented = false;
         self.messages = None;
         self.messages_failed = None;
+        self.list_search.back();
+        self.refilter();
     }
 
     /// The paint of the Room body records what it learned; the host applies it after the draw.
@@ -314,7 +364,7 @@ impl MissionControlState {
         let Some(list) = self.lists.get(&tab) else {
             return;
         };
-        let rows: &[McRow] = &list.rows;
+        let rows: &[McRow] = list.rows();
         let selection = self.selections.entry(tab).or_default();
         let resolved = tabs::resolve(rows, selection);
         let len = tabs::view_len(rows.len(), resolved);
@@ -340,6 +390,60 @@ impl MissionControlState {
             self.detail = Viewer::default();
         }
     }
+
+    /// The filter field of the current tab: Messages' turn filter, a list tab's row filter.
+    #[must_use]
+    pub fn search(&self) -> Option<&InspectorSearch> {
+        match self.tab {
+            McTab::Messages => self.messages.as_ref().map(|page| &page.search),
+            tab if tab.is_list() => Some(&self.list_search),
+            _ => None,
+        }
+    }
+
+    pub fn search_mut(&mut self) -> Option<&mut InspectorSearch> {
+        match self.tab {
+            McTab::Messages => self.messages.as_mut().map(|page| &mut page.search),
+            tab if tab.is_list() => Some(&mut self.list_search),
+            _ => None,
+        }
+    }
+
+    /// A filter is kept (a non-empty query) on the current tab.
+    #[must_use]
+    pub fn filter_kept(&self) -> bool {
+        self.search()
+            .is_some_and(|search| !search.query.as_str().is_empty())
+    }
+
+    /// Re-derive the visible rows of the current list tab from its filter. A selected row the
+    /// filter hides is not "gone": the selection is dropped, never shown as a placeholder.
+    pub(crate) fn refilter(&mut self) {
+        let tab = self.tab;
+        let Some(list) = self.lists.get_mut(&tab) else {
+            return;
+        };
+        let search = &self.list_search;
+        list.visible = (!search.query.as_str().is_empty()).then(|| {
+            list.all
+                .iter()
+                .filter(|row| search.matches(&row.text))
+                .cloned()
+                .collect()
+        });
+        self.next_rev += 1;
+        list.rev = self.next_rev;
+        let hidden = self.selections.get(&tab).is_some_and(|selection| {
+            selection
+                .id
+                .as_ref()
+                .is_some_and(|id| !list.rows().iter().any(|row| row.id == *id))
+        });
+        if hidden {
+            self.selections.remove(&tab);
+        }
+        self.detail = Viewer::default();
+    }
 }
 
 /// Open (or retarget) the one Mission Control frame on Messages with a freshly read log page:
@@ -362,10 +466,14 @@ pub fn open_messages(
     crate::adapters::tui::presentation::reducer::open_mission_control(state, McTab::Messages);
 }
 
-/// The filter field was edited or cleared: the body rows depend on it.
+/// The filter field was edited or cleared: the rows it filters depend on it.
 pub(crate) fn search_changed(state: &mut TuiState) {
-    if let Some(page) = state.mission_control.messages.as_mut() {
-        page.invalidate();
+    if state.mission_control.tab == McTab::Messages {
+        if let Some(page) = state.mission_control.messages.as_mut() {
+            page.invalidate();
+        }
+    } else {
+        state.mission_control.refilter();
     }
     state.needs_redraw = true;
 }
@@ -373,13 +481,22 @@ pub(crate) fn search_changed(state: &mut TuiState) {
 /// `Enter` in the filter field keeps the filter; a query that matches nothing says so and
 /// leaves the view unchanged.
 pub(crate) fn accept_search(state: &mut TuiState) {
-    let Some(page) = state.mission_control.messages.as_mut() else {
+    let mission = &mut state.mission_control;
+    let Some(search) = mission.search_mut() else {
         return;
     };
-    page.search.accept();
-    if !page.has_match() {
-        let query = page.search.query.as_str().to_owned();
-        page.search.back();
+    search.accept();
+    let query = search.query.as_str().to_owned();
+    let matched = if mission.tab == McTab::Messages {
+        mission.messages.as_ref().is_none_or(LogPage::has_match)
+    } else {
+        mission.refilter();
+        query.is_empty() || !mission.rows().is_empty()
+    };
+    if !matched {
+        if let Some(search) = mission.search_mut() {
+            search.back();
+        }
         crate::adapters::tui::notifications::info(
             state,
             crate::adapters::tui::notifications::NoticeSource::Search,
@@ -391,8 +508,8 @@ pub(crate) fn accept_search(state: &mut TuiState) {
 
 /// `Esc` / `Ctrl+C` in the filter field clears it and leaves the field.
 pub(crate) fn clear_search(state: &mut TuiState) {
-    if let Some(page) = state.mission_control.messages.as_mut() {
-        page.search.back();
+    if let Some(search) = state.mission_control.search_mut() {
+        search.back();
     }
     search_changed(state);
 }
@@ -406,15 +523,13 @@ pub fn is_top(state: &TuiState) -> bool {
         .is_some_and(|frame| frame.surface == Surface::MissionControl)
 }
 
-/// The Messages filter field is open (a text context of the frame).
+/// The filter field of the current tab is open (a text context of the frame).
 #[must_use]
 pub fn search_editing(state: &TuiState) -> bool {
-    state.mission_control.tab == McTab::Messages
-        && state
-            .mission_control
-            .messages
-            .as_ref()
-            .is_some_and(|page| page.search.editing)
+    state
+        .mission_control
+        .search()
+        .is_some_and(|search| search.editing)
 }
 
 /// The Room is presented: the LAST COMPLETED DRAW painted its body with at least one row while

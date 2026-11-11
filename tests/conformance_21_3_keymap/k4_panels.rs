@@ -9,8 +9,8 @@ use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::keymap::{Context, Key};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::DomainInputEvent;
+use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::PanelType;
-use rustain::domain::models::{AgentId, FocusState};
 
 use super::support::{StubWave, fresh, press};
 use super::witness::{Case, W, local, run, w, wp};
@@ -48,13 +48,6 @@ fn tasks_state() -> TuiState {
     state
 }
 
-/// A sidebar panel focused with nothing loaded.
-fn panel_state(panel: PanelType) -> TuiState {
-    let mut state = fresh();
-    state.focus = FocusState::Sidebar { panel, selected: 0 };
-    state
-}
-
 /// The Tasks panel focused while its second task is being moved.
 fn reorder_tasks_state() -> TuiState {
     let mut state = tasks_state();
@@ -70,10 +63,6 @@ fn tasks_salient(state: &TuiState) -> String {
         "{:?} idx={idx} drill={drill:?} exp={exp} scroll={scroll} reorder={reorder:?}",
         state.focus
     )
-}
-
-fn panel_salient(state: &TuiState) -> String {
-    format!("{:?} sel={}", state.focus, state.sidebar_selected)
 }
 
 #[test]
@@ -294,52 +283,6 @@ fn tasks_reorder_rows_move_and_commit_the_task() {
         w(&[Key::Alt('v')], "RequestClipboardPaste | Sidebar { panel: Tasks, selected: 1 } idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
     ];
     run(&Case { inherited: INHERITED, ..local(Context::TasksReorder, reorder_tasks_state, tasks_salient, ROWS) });
-}
-
-// ── Agents ────────────────────────────────────────────────────────────────
-
-/// Regression caught: `p` in the Agents list stops toggling the selected agent's pause.
-#[test]
-#[rustfmt::skip]
-fn sidebar_agents_p_toggles_the_selected_agent() {
-    const ROWS: &[W] = &[w(&[Key::Char('p')], "AgentPauseToggle | Sidebar { panel: Agents, selected: 0 } sel=0")];
-    // With the inspector open `p` is consumed: it must not toggle an agent (R3).
-    const OFF: &[W] = &[wp(&[Key::Char('p')], "Consumed | Sidebar { panel: Agents, selected: 0 } sel=0", |s| s.agent_panel_state.drill_down_agent = AgentId::parse("spoke-1").ok())];
-    run(&Case { off: OFF, ..local(Context::SidebarAgents, || panel_state(PanelType::Agents), panel_salient, ROWS) });
-}
-
-// ── Adapters (no own rows) and DF-262 ─────────────────────────────────────
-
-/// Regression caught: the Adapters panel (Sidebar rows only) loses `j`/`k` clamping or its `Enter` action.
-#[test]
-fn adapters_panel_rows_act_by_value() {
-    let mut state = fresh();
-    state.sidebar_entry_count = 3;
-    state.sidebar_selected = 1;
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::Adapters,
-        selected: 1,
-    };
-    for (key, selected) in [('j', 2), ('j', 2), ('k', 1), ('k', 0), ('k', 0)] {
-        assert_eq!(
-            press(&mut state, Key::Char(key)),
-            InputAction::Consumed,
-            "{key}"
-        );
-        let focus = FocusState::Sidebar {
-            panel: PanelType::Adapters,
-            selected,
-        };
-        assert_eq!(
-            (state.sidebar_selected, state.focus.clone()),
-            (selected, focus),
-            "{key}"
-        );
-    }
-    assert_eq!(
-        press(&mut state, Key::Enter),
-        InputAction::OpenSidebarConversation
-    );
 }
 
 /// DF-262 TODAY: shrinking below 120 columns silently drops an open task drill-down, so `r s e c` stop being task verbs.

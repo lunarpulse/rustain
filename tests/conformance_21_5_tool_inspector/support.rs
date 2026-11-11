@@ -14,7 +14,7 @@ use rustain::domain::models::{
     AnchorMode, Conversation, FocusState, InvocationStatus, PartId, TabManager, ToolOutput, Turn,
     TurnPart, WriteDiffState,
 };
-use rustain::infrastructure::runtime::{agent_core::AgentCore, event_loop};
+use rustain::infrastructure::runtime::event_loop;
 use serde_json::Value;
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -73,7 +73,6 @@ pub fn rows(count: usize) -> String {
 pub struct Fixture {
     pub h: TestHarness,
     pub tabs: TabManager,
-    pub core: AgentCore,
     pub clock: Arc<MockClock>,
 }
 
@@ -93,12 +92,7 @@ impl Fixture {
         tabs.active_tab_mut().view_state.mode = AnchorMode::Reading;
         h.state.active_tab_id = tabs.active_tab_id();
         h.state.focus = FocusState::Chat;
-        let mut fixture = Self {
-            h,
-            tabs,
-            core: AgentCore::test_noop(),
-            clock,
-        };
+        let mut fixture = Self { h, tabs, clock };
         fixture.load();
         fixture.h.state.focus = FocusState::Chat;
         fixture.paint();
@@ -187,7 +181,6 @@ impl Fixture {
             Some(&mut self.tabs),
             &rustain::domain::services::session_index::SessionIndex::new(),
             128_000,
-            &self.core,
         )
         .unwrap();
         self.h.screen_text()

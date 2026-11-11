@@ -334,6 +334,15 @@ const RULES: &[(&str, &str)] = &[
         "mission-21-7-b",
         r"\btransparency_panel\b|\bPanelType\s*::\s*(?:TransparencyLog|Artifacts)\b|\bThreadTarget\s*::\s*Log\b|\bContext\s*::\s*Sidebar(?:A2aLog|Room|Artifacts)\b|\bactivate_artifacts_sidebar\b|\bViewKind\s*::\s*Artifact\b|\bopen_log\b|\blog_title\b|\blog_painted\b",
     ),
+    // Story 21.7 slice 7-C (A25, clause c): the agent inspector (it replaced the chat pane), its
+    // key table and the bare-`c` exception, and the Agents and Adapters sidebar panels with their
+    // contexts are gone; the roster is the Agents tab and the agent window, the health the Adapters
+    // window. Field/type/fn accesses, never module paths: `McTab::Agents`, `Surface::AgentWindow`,
+    // `Surface::Adapters`, `agent_window::`, `adapters_window::`, `mission_bridge::` stay legal.
+    (
+        "mission-21-7-c",
+        r"\bagent_inspector(?:_keys)?\b|\bdrill_down_agent\b|\bInspectorCmd\b|\bContext\s*::\s*Sidebar(?:Agents|AgentInspector)\b|\bPanelCmd\s*::\s*AgentPauseToggle\b|\bBARE_C_EXCEPTIONS\b|\bPanelType\s*::\s*(?:Agents|Adapters)\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -602,6 +611,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "thread-21-8-c",
                     "mission-21-7-a",
                     "mission-21-7-b",
+                    "mission-21-7-c",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2711,4 +2721,79 @@ fn k12_story21_7_b_the_log_and_artifact_sidebars_are_unpinnable_and_the_hub_tabs
         RULES.iter().any(|(name, _)| *name == "mission-21-7-a"),
         "the 7-A clause stays untouched"
     );
+}
+
+// Story 21.7 slice 7-C (A25, clause c): the chat-replacing agent inspector, its key table and
+// the bare-`c` exception, the Agents/Adapters sidebar panels and their contexts are gone; the
+// roster is the Agents tab and the agent window, the health is the Adapters window. The clause
+// is RED on a synthetic source through the same scanner function, cannot be pinned (a hard
+// rule), and leaves the legal neighbours alone.
+#[test]
+fn k12_story21_7_c_the_agent_inspector_and_its_sidebars_are_unpinnable_and_the_windows_stay_legal()
+{
+    for text in [
+        "let w = agent_inspector::render(a, b);",
+        "use tui::agent_inspector_keys::on_key;",
+        "s.agent_panel_state.drill_down_agent = None;",
+        "let c: InspectorCmd = x;",
+        "let c = Context::SidebarAgents;",
+        "let c = keymap::Context :: SidebarAgentInspector;",
+        "let c = PanelCmd::AgentPauseToggle;",
+        "const BARE_C_EXCEPTIONS: &[Context] = &[];",
+        "let p = PanelType::Agents;",
+        "let p = visual::PanelType :: Adapters;",
+        "match p { PanelType::Adapters => {} _ => {} }",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("mission-21-7-c|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("mission-21-7-c|")),
+            "{text}: {errors:?}"
+        );
+    }
+    // Positive controls the clause must not touch: the hub's own tab, the two window surfaces
+    // and contexts, the bridge and window module paths, the panels that remain, near-miss names
+    // and the unrelated content-kind variant.
+    let legal = "fn real() { let _ = McTab::Agents; let _ = Surface::AgentWindow; \
+        let _ = Surface::Adapters; let _ = Context::AgentWindow; let _ = Context::Adapters; \
+        mission_bridge::pause_resume(a, b, c, d); agent_window::open(s, id); \
+        adapters_window::open(s, rows); let _ = PanelType::Tasks; let _ = PanelType::History; \
+        let _ = Context::SidebarHistory; let _ = ContentKind::AgentInspector; \
+        let _ = InspectorSearch::default(); let _ = Context::InspectorBody; \
+        let _ = agent_inspectors; let _ = drill_down_agents; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("mission-21-7-c|")),
+        "{errors:?}"
+    );
+    let masked = "// agent_inspector drill_down_agent PanelType::Agents BARE_C_EXCEPTIONS\n\
+        #[cfg(test)] mod tests { fn t() { let _ = PanelType::Agents; let _ = InspectorCmd::Close; } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("mission-21-7-c|"))
+    );
+    assert!(PINS.is_empty());
+    for rule in ["mission-21-7-a", "mission-21-7-b", "thread-21-8-a"] {
+        assert!(
+            RULES.iter().any(|(name, _)| *name == rule),
+            "the earlier rule sets stay untouched: {rule}"
+        );
+    }
 }

@@ -61,7 +61,7 @@ def room_frame_ok(screen):
     top = _frame_top(rows)
     if top is None or top + 3 >= len(rows):
         return False
-    tab_row = re.fullmatch(r"\s*│ Messages  ▸Room   Artifacts\s*│\s*", rows[top + 1]) is not None
+    tab_row = re.fullmatch(r"\s*│ Agents   Messages  ▸Room   Artifacts\s*│\s*", rows[top + 1]) is not None
     body = any(re.fullmatch(r"\s*│Durable Room · as of .*│\s*", row) for row in rows[top + 2:])
     bottom = next((i for i in range(top + 1, len(rows)) if re.fullmatch(r"\s*└─*┘\s*", rows[i])), None)
     if bottom is None or bottom < top + 3:
@@ -111,7 +111,7 @@ def messages_frame_ok(screen):
     top, bottom = _frame_bounds(rows, MESSAGES_TITLE)
     if top is None or bottom is None or bottom < top + 4:
         return False
-    tab_row = re.fullmatch(r"\s*│▸Messages\b.*│\s*", rows[top + 1]) is not None
+    tab_row = re.fullmatch(r"\s*│ Agents  ▸Messages\b.*│\s*", rows[top + 1]) is not None
     seeded = any(re.fullmatch(r".*│ *" + SEED_TS + r" .*\S *│\s*", row) for row in rows[top + 2:bottom - 1])
     rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
     status = any(STATUS in row for row in rows[bottom + 1:])
@@ -167,6 +167,51 @@ def torn_artifact(screen, prefix="aaaaaa"):
     return _torn_frame(screen, artifact_title(prefix), ARTIFACT_BODY.strip(), "Needs you (1)",
                        {"copy hint missing": ("[c] Copy", "")})
 
+AGENTS_TITLE = "Mission Control · Agents"
+EMPTY_COPY = "No agents active."
+
+
+def agents_frame_ok(screen):
+    """Agents title, the marked Agents tab row directly below it, the empty-state copy inside the
+    frame, the rail with the way out last inside it and the status row intact below."""
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, AGENTS_TITLE)
+    if top is None or bottom is None or bottom < top + 3:
+        return False
+    tab_row = re.fullmatch(r"\s*│▸Agents\b.*│\s*", rows[top + 1]) is not None
+    body = any(re.fullmatch(r".*│ *" + re.escape(EMPTY_COPY) + r".*│\s*", row) for row in rows[top + 2:bottom - 1])
+    rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
+    status = any(STATUS in row for row in rows[bottom + 1:])
+    return tab_row and body and rail and status
+
+
+def adapters_frame_ok(screen):
+    """Adapters title, a port row inside the frame, the rail with the way out last, status below."""
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, "Adapters")
+    if top is None or bottom is None or bottom < top + 3:
+        return False
+    body = any(re.fullmatch(r".*│.*\bpersona\b.*│\s*", row) for row in rows[top + 1:bottom - 1])
+    rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
+    status = any(STATUS in row for row in rows[bottom + 1:])
+    return body and rail and status
+
+
+def torn_agents(screen):
+    controls = _torn_frame(screen, AGENTS_TITLE, EMPTY_COPY, "Needs you (1)",
+                           {"tab row unmarked": ("▸Agents", " Agents")})
+    rows = _rows(screen)
+    index = next(i for i, row in enumerate(rows) if EMPTY_COPY in row)
+    controls["cut mid-row"] = "\n".join(rows[:index] + [rows[index][: rows[index].index(EMPTY_COPY) + 6]] + rows[index + 1:])
+    top, _ = _frame_bounds(rows, AGENTS_TITLE)
+    controls["tab row missing"] = "\n".join(rows[:top + 1] + rows[top + 2:])
+    return controls
+
+
+def torn_adapters(screen):
+    return _torn_frame(screen, "Adapters", "persona", "Needs you (1)", {})
+
+
 def _deskcheck():
     frames = Path(os.environ["RUSTAIN_MISSION_FRAMES"])
     for width, height in SIZES:
@@ -197,6 +242,21 @@ def _deskcheck():
             assert not messages_frame_ok(torn), f"{name}: torn Messages control `{label}` must fail:\n{torn}"
         for label, torn in torn_artifact(artifact).items():
             assert not artifact_frame_ok(torn), f"{name}: torn window control `{label}` must fail:\n{torn}"
+    for width, height in SIZES:
+        name = f"{width}x{height}"
+        agents = (frames / f"agents-open-{name}.txt").read_text(encoding="utf-8")
+        adapters = (frames / f"adapters-open-{name}.txt").read_text(encoding="utf-8")
+        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
+        room = (frames / f"room-open-{name}.txt").read_text(encoding="utf-8")
+        assert agents_frame_ok(agents), f"{name}: the Agents tab must pass\n{agents}"
+        assert adapters_frame_ok(adapters), f"{name}: the Adapters window must pass\n{adapters}"
+        for label, frame in (("the Stage", before), ("the Room frame", room)):
+            assert not agents_frame_ok(frame) and not adapters_frame_ok(frame), f"{name}: absent from {label}"
+        assert not agents_frame_ok(adapters) and not adapters_frame_ok(agents), name
+        for label, torn in torn_agents(agents).items():
+            assert not agents_frame_ok(torn), f"{name}: torn Agents control `{label}` must fail:\n{torn}"
+        for label, torn in torn_adapters(adapters).items():
+            assert not adapters_frame_ok(torn), f"{name}: torn Adapters control `{label}` must fail:\n{torn}"
     print("desk-check ok", [f"{w}x{h}" for w, h in SIZES])
 
 
@@ -393,3 +453,51 @@ def test_leg_b_messages_and_artifact_window_at_80x24(monkeypatch):
             assert not any("log: 2" in row for row in _rows(after)), after
             (evidence / "run.json").write_text(json.dumps(
                 {"viewport": [80, 24], "binary": binary, "artifact": artifact_id, "result": "PASS"}) + "\n")
+
+
+@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_c_agents_tab_and_adapters_window_at_80x24(monkeypatch):
+    """Leg C (7-C): `Ctrl+X s` -> the Agents tab with its empty-state copy (no API, no agents);
+    `Esc`; `Ctrl+X a` -> the Adapters window with the port rows. Hermetic, no sleeps."""
+    monkeypatch.setattr(harness, "TERM_COLS", 80)
+    monkeypatch.setattr(harness, "TERM_ROWS", 24)
+    with tempfile.TemporaryDirectory(prefix="21-7-c-") as root:
+        root = Path(root)
+        workspace = root / "workspace"
+        (workspace / ".rustain").mkdir(parents=True)
+        home = root / "home"
+        home.mkdir()
+        data = root / "data"
+        data.mkdir()
+        env = {"HOME": str(home), "RUSTAIN_PROFILE": "", "RUSTAIN_CLIPBOARD": "file",
+               "RUSTAIN_DATA_DIR": str(data)}
+        evidence_parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir()))
+        evidence = evidence_parent / "21-7-leg-c"
+        evidence.mkdir(parents=True, exist_ok=True)
+        binary = str(harness._resolve_binary()[0])
+        with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=env) as tui, \
+                (evidence / "raw.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            before = tui.get_screen_text()
+            assert not agents_frame_ok(before) and not adapters_frame_ok(before)
+            (evidence / "run.json").write_text(json.dumps(
+                {"viewport": [80, 24], "binary": binary, "result": "PENDING"}) + "\n")
+            tui.send(CTRL_X + "s")
+            agents = tui.wait_until(agents_frame_ok, "the Agents tab with its empty-state copy", timeout=15)
+            assert not any("Needs you (" in row for row in _rows(agents))
+            tui.send("\x1b")
+            tui.wait_until(lambda s: _frame_top(_rows(s), AGENTS_TITLE) is None, "the hub closed", timeout=10)
+            tui.send(CTRL_X + "a")
+            adapters = tui.wait_until(adapters_frame_ok, "the Adapters window with the port rows", timeout=15)
+            assert not agents_frame_ok(adapters)
+            tui.send("\x1b")
+            after = tui.wait_until(lambda s: _frame_top(_rows(s), "Adapters") is None, "the window closed", timeout=10)
+            for name, frame in (("stage-before", before), ("agents-open", agents),
+                                ("adapters-open", adapters), ("stage-after", after)):
+                (evidence / f"{name}.txt").write_text(frame, encoding="utf-8")
+            assert stage_rows(after)[:3] == stage_rows(before)[:3], f"Esc must restore the Stage:\n{before}\n{after}"
+            (evidence / "run.json").write_text(json.dumps(
+                {"viewport": [80, 24], "binary": binary, "result": "PASS"}) + "\n")

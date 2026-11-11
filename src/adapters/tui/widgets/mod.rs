@@ -1,6 +1,7 @@
 pub mod adapter_status_panel;
-pub mod agent_inspector;
+pub mod adapters_window;
 pub mod agent_panel;
+pub mod agent_window;
 pub mod apply_card;
 pub mod artifact_window;
 pub mod artifacts_panel;

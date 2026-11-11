@@ -13,13 +13,13 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear};
 
-use super::room_panel;
+use super::{agent_panel, room_panel};
 use crate::adapters::tui::keymap::Context as KeyContext;
 use crate::adapters::tui::keymap::Host;
 use crate::adapters::tui::keymap::render::{rail, rail_arrows, rail_pair};
 use crate::adapters::tui::keymap::table_mission::MissionCmd;
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
-use crate::adapters::tui::mission_control::{Fit, McPane, McTab, tabs};
+use crate::adapters::tui::mission_control::{Fit, McList, McPane, McTab, agents, tabs};
 use crate::adapters::tui::presentation::viewer::{self, ViewerCmd};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry;
@@ -82,11 +82,9 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
         return;
     }
     let mission = &state.mission_control;
-    let messages = (mission.tab == McTab::Messages)
-        .then_some(mission.messages.as_ref())
-        .flatten();
-    let editing = messages.is_some_and(|page| page.search.editing);
-    let kept = messages.is_some_and(|page| !page.search.query.is_empty());
+    let search = mission.search();
+    let editing = search.is_some_and(|search| search.editing);
+    let kept = search.is_some_and(|search| !search.query.as_str().is_empty());
     let plan = plan(inner.height, editing, kept);
     let tab_area = Rect::new(inner.x, inner.y, inner.width, plan.tab);
     // The rows, top to bottom: tab row, body, filter echo, rail (the tab row sits above the
@@ -111,14 +109,12 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
     let mut fit = match mission.tab {
         McTab::Room => paint_room(frame, body, state),
         McTab::Messages => paint_messages(frame, body, state),
-        McTab::Artifacts | McTab::Probe => paint_list(frame, body, state),
+        McTab::Agents | McTab::Artifacts | McTab::Probe => paint_list(frame, body, state),
     };
     if plan.field > 0
-        && let Some(page) = messages
+        && let Some(search) = search
     {
-        let line = page
-            .search
-            .query_line(usize::from(field_area.width), theme, editing);
+        let line = search.query_line(usize::from(field_area.width), theme, editing);
         frame.render_widget(
             Line::from(
                 line.spans
@@ -134,6 +130,9 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
         fit.search = painted.search;
         fit.export = painted.export;
         fit.open = painted.open;
+        fit.pause = painted.pause;
+        fit.kill = painted.kill;
+        fit.copy = painted.copy;
         frame.render_widget(
             Line::styled(text, Style::default().fg(theme.colors.fg_secondary)),
             rail_area,
@@ -277,10 +276,14 @@ fn paint_list(frame: &mut Frame<'_>, area: Rect, state: &TuiState) -> Fit {
         total,
     );
     if total == 0 {
-        let words = mission
-            .list()
-            .and_then(|list| list.empty.as_deref())
-            .unwrap_or("Nothing here yet.");
+        let words = if mission.filter_kept() {
+            "No row matches this filter."
+        } else {
+            mission
+                .list()
+                .and_then(|list| list.empty.as_deref())
+                .unwrap_or("Nothing here yet.")
+        };
         let safe = sanitize_display_line(words);
         for (offset, row) in text_geometry::wrap_hard(&safe, usize::from(master.width).max(1))
             .into_iter()
@@ -381,6 +384,9 @@ struct Painted {
     search: bool,
     export: bool,
     open: bool,
+    pause: bool,
+    kill: bool,
+    copy: bool,
 }
 
 /// The keyed hints of the rail whose keys are inert unless the hint was painted.
@@ -389,6 +395,9 @@ enum Hint {
     Search,
     Export,
     Open,
+    Pause,
+    Kill,
+    Copy,
 }
 
 /// The rail, generated from the registry rows: a key is painted only where it acts (a second
@@ -399,16 +408,6 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
     let mission = &state.mission_control;
     let mut items: Vec<(String, Option<Hint>)> = Vec::with_capacity(6);
     let plain = |text: String| (text, None);
-    if mission.delivered(host).as_slice().len() >= 2 {
-        items.push(plain(format!(
-            "{} Tab",
-            rail_arrows(
-                KeyContext::MissionControl,
-                MissionCmd::PrevTab,
-                MissionCmd::NextTab
-            )
-        )));
-    }
     if fit.scrollable {
         items.push(plain(format!(
             "[{}] {}",
@@ -435,7 +434,48 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             }
         )));
     }
-    if mission.tab == McTab::Messages && mission.messages.is_some() {
+    // Row actions come before the filter and the export: the narrow rail drops from the right.
+    if matches!(mission.tab, McTab::Artifacts | McTab::Agents)
+        && host == Host::Local
+        && mission.selected_id().is_some()
+    {
+        items.push((
+            format!(
+                "{} Open",
+                rail(KeyContext::MissionControl, MissionCmd::Open)
+            ),
+            Some(Hint::Open),
+        ));
+    }
+    if mission.tab == McTab::Agents
+        && host == Host::Local
+        && let Some(entry) = agents::selected(state)
+    {
+        if let Some(label) = agent_panel::pause_label(entry.current_status) {
+            items.push((
+                format!(
+                    "{} {label}",
+                    rail(KeyContext::MissionControl, MissionCmd::AgentPause)
+                ),
+                Some(Hint::Pause),
+            ));
+        }
+        if agent_panel::can_kill(entry) {
+            items.push((
+                format!(
+                    "{} Kill",
+                    rail(KeyContext::MissionControl, MissionCmd::AgentKill)
+                ),
+                Some(Hint::Kill),
+            ));
+        }
+    }
+    let searchable = match mission.tab {
+        McTab::Messages => mission.messages.is_some(),
+        tab if tab.is_list() => mission.list().is_some_and(McList::has_rows),
+        _ => false,
+    };
+    if searchable {
         items.push((
             format!(
                 "{} Search",
@@ -443,6 +483,8 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             ),
             Some(Hint::Search),
         ));
+    }
+    if mission.tab == McTab::Messages && mission.messages.is_some() {
         let exportable = host == Host::Local
             && mission
                 .messages
@@ -458,14 +500,27 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             ));
         }
     }
-    if mission.tab == McTab::Artifacts && host == Host::Local && mission.selected_id().is_some() {
+    // `c` Copy follows the filter: the narrow rail drops it (and its inert key) before them.
+    if mission.tab.is_list() && host == Host::Local && mission.selected_id().is_some() {
         items.push((
             format!(
-                "{} Open",
-                rail(KeyContext::MissionControl, MissionCmd::Open)
+                "{} Copy",
+                rail(KeyContext::MissionControl, MissionCmd::CopyRow)
             ),
-            Some(Hint::Open),
+            Some(Hint::Copy),
         ));
+    }
+    // The tab keys go last: a narrow rail drops from the right, and the row actions and the
+    // filter matter more than a hint for keys that stay live either way.
+    if mission.delivered(host).as_slice().len() >= 2 {
+        items.push(plain(format!(
+            "{} Tab",
+            rail_arrows(
+                KeyContext::MissionControl,
+                MissionCmd::PrevTab,
+                MissionCmd::NextTab
+            )
+        )));
     }
     let back = if search_open(state) {
         format!(
@@ -500,6 +555,9 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
                     Some(Hint::Search) => painted.search = true,
                     Some(Hint::Export) => painted.export = true,
                     Some(Hint::Open) => painted.open = true,
+                    Some(Hint::Pause) => painted.pause = true,
+                    Some(Hint::Kill) => painted.kill = true,
+                    Some(Hint::Copy) => painted.copy = true,
                     None => {}
                 }
             }

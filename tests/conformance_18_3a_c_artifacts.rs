@@ -656,7 +656,6 @@ fn ctrl_x_e_dispatches_the_artifacts_tab() {
     use rustain::adapters::tui::presentation::Surface;
     use rustain::adapters::tui::state::TuiState;
     use rustain::domain::events::{DomainInputEvent, DomainKey};
-    use rustain::domain::models::visual::PanelType;
 
     for width in [160u16, 80u16] {
         for key in ['e', 'E'] {
@@ -676,12 +675,12 @@ fn ctrl_x_e_dispatches_the_artifacts_tab() {
             assert_eq!(state.mission_control.tab, McTab::Artifacts, "{width}");
         }
     }
-    // `a` stays Adapters — the chord table has no collision.
+    // `a` is the Adapters window (21-7, 7-C) — the chord table has no collision.
     let mut state = TuiState::new(160, 24);
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert_eq!(
         handle_input(&mut state, &DomainInputEvent::KeyPress('a')),
-        InputAction::OpenPanel(PanelType::Adapters)
+        InputAction::OpenAdapters
     );
 }
 

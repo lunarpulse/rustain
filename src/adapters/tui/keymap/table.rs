@@ -239,6 +239,8 @@ pub fn palette_availability(action: &PaletteAction, c: &AvailCtx) -> Availabilit
         InsertMention(_) | ShowVersion | NewTab | CloseTab | ApplyAdapterOverride { .. } | Noop => {
             PaletteTarget::NoLegacySurface
         }
+        // A stack surface opens over whatever the palette was opened from.
+        OpenSurface(_) => PaletteTarget::NoLegacySurface,
     };
     match target {
         PaletteTarget::LocalSurface if c.host == Host::Attached => base_target(c),
@@ -322,8 +324,8 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('p')], LeaderCmd::Profile, "Profile").avail(attached_profile).help(C, "Ctrl+X, P", "Profile switcher").witness("Profile Switcher"),
     l(&[Key::Char('m')], LeaderCmd::Model, "Model").avail(attached_sign_in).help(C, "Ctrl+X, M", "Model selector").witness("Select Model"),
     l(&[Key::Char('i')], LeaderCmd::SignIn, "Sign in").avail(attached_sign_in).help(C, "Ctrl+X, I", "Sign in to a model provider (/login)").witness("Sign in"),
-    l(&[Key::Char('a')], LeaderCmd::Adapters, "Adapters").avail(panel).help(C, "Ctrl+X, A", "Adapter Status panel (sidebar)").witness(NARROW_WITNESS),
-    l(&[Key::Char('s')], LeaderCmd::Agents, "Agents").avail(panel).help(C, "Ctrl+X, S", "Subagent panel").witness(NARROW_WITNESS),
+    l(&[Key::Char('a')], LeaderCmd::Adapters, "Adapters").avail(attached_mission).help(C, "Ctrl+X, A", "Adapters window (port and MCP server health, read-only)").witness("Adapters"),
+    l(&[Key::Char('s')], LeaderCmd::Agents, "Agents").avail(attached_mission).help(C, "Ctrl+X, S", "Mission Control: Agents tab (subagents; Enter opens the agent window)").witness("Mission Control · Agents"),
     l(&[Key::Char('l')], LeaderCmd::A2aLog, "A2A log").slash("/team").help(C, "Ctrl+X, L", "Mission Control: Messages tab (the A2A log, read-only; both hosts)").witness("Mission Control · Messages"),
     l(&[Key::Char('r')], LeaderCmd::Room, "Room").slash("/room").avail(attached_mission).help(C, "Ctrl+X, R", "Mission Control: Room tab (durable room replay, read-only)").witness("Mission Control · Room"),
     l(&[Key::Char('e')], LeaderCmd::Artifacts, "Artifacts").slash("/artifacts").avail(attached_mission).help(C, "Ctrl+X, E", "Mission Control: Artifacts tab (durable artifacts, read-only replay)").witness("Mission Control · Artifacts"),
@@ -356,7 +358,6 @@ pub fn all_rows() -> Vec<Binding> {
         super::table_chat::ROWS,
         super::table_nav::ROWS,
         super::table_panels::ROWS,
-        super::table_inspector::ROWS,
         super::table_mission::ROWS,
         super::table_overlay::ROWS,
         super::table_permission::ROWS,

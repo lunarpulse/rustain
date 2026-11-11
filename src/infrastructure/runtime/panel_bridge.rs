@@ -71,19 +71,6 @@ pub(crate) fn open_panel(
         reveal_sidebar(state);
         state.sidebar_visible = true;
         state.sidebar_panel = Some(panel_type);
-        if panel_type == PanelType::Adapters {
-            state.sidebar_entry_count =
-                crate::adapters::tui::widgets::adapter_status_panel::port_count();
-            if state.sidebar_selected >= state.sidebar_entry_count {
-                state.sidebar_selected = 0;
-            }
-        } else if panel_type == PanelType::Agents {
-            state.sidebar_entry_count = state.agent_panel_state.cached_entries.len();
-            if state.sidebar_selected >= state.sidebar_entry_count && state.sidebar_entry_count > 0
-            {
-                state.sidebar_selected = state.sidebar_entry_count - 1;
-            }
-        }
         let selected = state.sidebar_selected;
         reducer::set_base(
             state,
@@ -95,13 +82,7 @@ pub(crate) fn open_panel(
         state.needs_redraw = true;
         PanelOpenOutcome::Opened
     } else {
-        let message = if panel_type == PanelType::Adapters {
-            "Adapter Status: terminal too narrow for sidebar — widen to ≥120 cols or use /memory|/persona|... slash commands"
-        } else if panel_type == PanelType::Agents {
-            "Subagent panel: terminal too narrow for sidebar — widen to ≥120 cols."
-        } else {
-            "Panel requires terminal width >= 120 cols."
-        };
+        let message = "Panel requires terminal width >= 120 cols.";
         PanelOpenOutcome::Notice(task_panel_handlers::PendingNotice {
             conversation_id: conversation.id.clone(),
             level: NoticeLevel::Warning,
@@ -288,16 +269,20 @@ mod tests {
 
     #[test]
     fn story21_3_every_panel_chord_reveals_and_monitor_density_is_not_touched() {
-        for (key, panel) in [('s', PanelType::Agents), ('a', PanelType::Adapters)] {
-            let mut state = TuiState::new(130, 30);
-            let outcome = open_through_the_door(&mut state, key, panel);
-            assert!(matches!(outcome, PanelOpenOutcome::Opened), "{key}");
-            assert!(painted_sidebar(&state), "{key}: revealed");
-            assert_eq!(
-                state.sidebar_panel,
-                Some(panel),
-                "{key}: the REQUESTED panel only"
-            );
+        // `s` and `a` are Mission Control's Agents tab and the Adapters window since Story
+        // 21.7 (7-C): they open frames, never the sidebar, and leave the density alone.
+        let mut agents = TuiState::new(130, 30);
+        assert_eq!(
+            leader(&mut agents, 's'),
+            InputAction::OpenMissionControl(crate::adapters::tui::mission_control::McTab::Agents)
+        );
+        let mut adapters = TuiState::new(130, 30);
+        assert_eq!(leader(&mut adapters, 'a'), InputAction::OpenAdapters);
+        for state in [&agents, &adapters] {
+            assert!(!painted_sidebar(state));
+            assert_eq!(state.density_mode, DensityMode::Focus);
+            assert!(!state.density_user_overridden);
+            assert!(!state.sidebar_visible && state.sidebar_panel.is_none());
         }
         // The Tasks route reveals too.
         let mut state = TuiState::new(130, 30);

@@ -198,8 +198,7 @@ fn sidebar_family_children_take_the_sidebar_effect_for_inherited_keys() {
         (Key::Enter, "OpenSidebarConversation | Sidebar"),
     ];
     for (key, expect) in keys {
-        assert_eq!(effect(PanelType::Adapters, key), expect, "Sidebar {key:?}");
-        for panel in [PanelType::Tasks, PanelType::Agents] {
+        for panel in [PanelType::Tasks, PanelType::History] {
             assert_eq!(effect(panel, key), expect, "{panel:?} {key:?}");
         }
     }

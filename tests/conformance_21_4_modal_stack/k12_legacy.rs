@@ -809,7 +809,7 @@ mod local_occlusion {
                 self.h.conversation.id,
                 self.tabs.active_tab().conversation.id
             );
-            render_runtime(&mut self.h, &mut self.tabs, &self.app.agent_core)
+            render_runtime(&mut self.h, &mut self.tabs)
         }
 
         /// Paint through the shared compositor and model the host's draw result.
@@ -1331,49 +1331,42 @@ mod local_occlusion {
 
     #[tokio::test]
     async fn c_r1_agent_kill_is_retained_without_painting_over_the_promoted_card() {
-        use super::super::keymap_support::decode;
         use crate::conformance_21_6_decision_queue::raisers::press as frame_press;
-        use rustain::adapters::tui::agent_inspector_keys::{self, InspectorOutcome};
-        use rustain::domain::models::visual::PanelType;
+        use rustain::adapters::tui::mission_control::McTab;
         use rustain::domain::models::{AgentId, AgentRowView, NodeState, OwnershipKind};
+        use rustain::infrastructure::runtime::mission_bridge;
         let mut f = Visit::new(130, 40).await;
         let id = AgentId::parse("spoke-1").unwrap();
-        f.h.state.sidebar_visible = true;
-        f.h.state.sidebar_panel = Some(PanelType::Agents);
-        reducer::set_base(
+        mission_bridge::apply_roster(
             &mut f.h.state,
-            FocusState::Sidebar {
-                panel: PanelType::Agents,
-                selected: 0,
-            },
+            vec![AgentRowView {
+                isolated: false,
+                agent_id: id.clone(),
+                parent_id: AgentId::root(),
+                subagent_type: "mixed-kill-agent".into(),
+                spawned_at: 0,
+                depth: 1,
+                current_status: NodeState::Running,
+                ownership: OwnershipKind::Owned,
+                effective_model: String::new(),
+                tools_summary: String::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                turns: 0,
+                wait_reason: None,
+            }],
         );
-        f.h.state.agent_panel_state.cached_entries = vec![AgentRowView {
-            isolated: false,
-            agent_id: id.clone(),
-            parent_id: AgentId::root(),
-            subagent_type: "mixed-kill-agent".into(),
-            spawned_at: 0,
-            depth: 1,
-            current_status: NodeState::Running,
-            ownership: OwnershipKind::Owned,
-            effective_model: String::new(),
-            tools_summary: String::new(),
-            tokens_in: 0,
-            tokens_out: 0,
-            turns: 0,
-            wait_reason: None,
-        }];
-        f.h.state.agent_panel_state.drill_down_agent = Some(id.clone());
+        // The hub's Agents tab with the agent selected: `x` asks to kill exactly it.
+        reducer::open_mission_control(&mut f.h.state, McTab::Agents);
+        f.draw();
+        assert_eq!(press(&mut f.h.state, Key::Char('j')), InputAction::Consumed);
+        f.draw();
         let conversation_id = f.h.conversation.id.clone();
-        assert!(matches!(
-            agent_inspector_keys::on_key(
-                &mut f.h.state,
-                &decode(Key::Char('x')).unwrap(),
-                false,
-                &conversation_id,
-            ),
-            InspectorOutcome::Consumed
-        ));
+        let InputAction::AgentKill(target) = press(&mut f.h.state, Key::Char('x')) else {
+            panic!("`x` on the selected agent must ask to kill it");
+        };
+        assert_eq!(target, id);
+        mission_bridge::kill(&mut f.h.state, &conversation_id, false, target);
         // The kill confirmation is a decision frame naming the agent.
         assert!(f.draw().contains("mixed-kill-agent"));
         assert!(presentation::is_open(&f.h.state, Surface::Decision));
@@ -1398,15 +1391,6 @@ mod local_occlusion {
         assert!(screen.contains("mixed-trust"), "{screen}");
         assert!(!screen.contains("and its subtree?"), "{screen}");
         assert!(f.h.state.decisions.holds(DecisionKind::AgentKill));
-        assert!(matches!(
-            agent_inspector_keys::on_key(
-                &mut f.h.state,
-                &decode(Key::Char('y')).unwrap(),
-                false,
-                &conversation_id,
-            ),
-            InspectorOutcome::PassThrough
-        ));
         f.ready();
         assert_eq!(
             frame_press(&mut f.h.state, Key::Char('y')),

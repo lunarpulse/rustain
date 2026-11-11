@@ -447,6 +447,7 @@ async fn artifact_copy_above_the_bound_builds_nothing() {
         search: false,
         copy: true,
         view: false,
+        ..Live::default()
     });
     rig.key(Key::Char('c'));
     assert_eq!(window(&rig).copy_builds(), 1);

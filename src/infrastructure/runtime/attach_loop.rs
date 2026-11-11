@@ -3854,7 +3854,6 @@ mod tests {
             let mut local_tabs = crate::domain::models::TabManager::default();
             let local_conversation = local_tabs.active_tab().conversation.clone();
             let local_streaming = StreamingState::default();
-            let core = crate::infrastructure::runtime::agent_core::AgentCore::test_noop();
             let index = crate::domain::services::session_index::SessionIndex::new();
             let area = first.backend().buffer().area;
             let layout = crate::adapters::tui::layout::compute_layout(
@@ -3916,7 +3915,6 @@ mod tests {
                     Some(&mut local_tabs),
                     &index,
                     128_000,
-                    &core,
                 )
                 .unwrap();
                 let rendered = attached.paint();

@@ -158,11 +158,6 @@ pub enum Violation {
     EmptyKeys { context: Context },
 }
 
-/// Contexts whose bare `c` is a named exception to RU-21 (PC-14): the agent
-/// inspector (owner 21-7). The spawn gate and skip-cascade exceptions ended with
-/// 21-6 (`t` caps, `a` continues; `c` copies on every decision frame).
-const BARE_C_EXCEPTIONS: &[Context] = &[Context::SidebarAgentInspector];
-
 /// Governance of a table: duplicate normalized keys per context (host-aware),
 /// the parent graph, declared reachability, portable alternatives, PTY bytes,
 /// displayed commands and the bare-`c` rule (KG-1, KG-3, RU-21, RU-22, RU-34).
@@ -236,11 +231,7 @@ pub fn validate(
             row.context,
             Context::TextEntry | Context::Input | Context::SearchTyping
         );
-        if row.keys == [Key::Char('c')]
-            && !text_field
-            && !row.copy
-            && !BARE_C_EXCEPTIONS.contains(&row.context)
-        {
+        if row.keys == [Key::Char('c')] && !text_field && !row.copy {
             push_unique(
                 &mut errors,
                 Violation::BareCNotCopy {

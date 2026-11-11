@@ -119,11 +119,11 @@ OVERLAYS = {
     "186e": ("Notifications", harness.NOTIFICATION_LOG_TITLE, None, "[Esc] Close"),
     "186c": ("Mission Control · Messages", "┌Mission Control · Messages", None, "[Esc] Back"),
     "1865": ("Mission Control · Artifacts", "┌Mission Control · Artifacts", None, "[Esc] Back"),
+    "1861": ("Adapters", "┌Adapters", None, "[Esc] Back"),
+    "1873": ("Mission Control · Agents", "┌Mission Control · Agents", None, "[Esc] Back"),
 }
 # panels: the narrow-terminal remedy toast; the value is the menu item painted `(n/a)` for the row.
 PANELS = {
-    "1861": "[A] Adapters (n/a)",
-    "1873": "[S] Agents (n/a)",
     "1874": "[T] Tasks (n/a)",
     "1868": "[H] History (n/a)",
 }
@@ -140,14 +140,14 @@ EXPECTED_WITNESS = {
     CLEAR: "", "181b": "", "1803": "", "180d": "", QUIT: "",
 }
 MENU_PRESENT = (
-    "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters (n/a)", "[S] Agents (n/a)",
+    "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters", "[S] Agents",
     "[L] A2A log", "[R] Room", "[E] Artifacts", "[T] Tasks (n/a)", "[U] Usage",
     "[H] History (n/a)", "[W] Monitor", "[?] Help", "[N] Notifications", "[X] Clear toasts",
     "[Q] Decisions", "[Enter] Send", "[Esc] Cancel",
 )
 MENU_ABSENT = ("[F]", "[D]", "Dashboard", "Evidence", "Watch", "[L] Log", "Detach",
                "[U] Usage (n/a)", "[W] Monitor (n/a)", "[P] Profile (n/a)", "[M] Model (n/a)",
-               "[L] A2A log (n/a)", "[E] Artifacts (n/a)")
+               "[L] A2A log (n/a)", "[E] Artifacts (n/a)", "[A] Adapters (n/a)", "[S] Agents (n/a)")
 
 # Leg B (slice 3-B1). The six readline rows, as raw PTY bytes: Ctrl+A, Ctrl+E, Ctrl+W, Ctrl+U, Ctrl+K, Ctrl+H.
 CTRL_A, CTRL_E, CTRL_W, CTRL_U, CTRL_K, CTRL_H = (bytes([code]) for code in (0x01, 0x05, 0x17, 0x15, 0x0B, 0x08))

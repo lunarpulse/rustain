@@ -192,6 +192,18 @@ pub fn route(
         crate::adapters::tui::artifact_window::on_wheel(state, *delta);
         return Some(RouteEffect::Consumed);
     }
+    if surface == Surface::AgentWindow
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        crate::adapters::tui::agent_window::on_wheel(state, *delta);
+        return Some(RouteEffect::Consumed);
+    }
+    if surface == Surface::Adapters
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        crate::adapters::tui::adapters_window::on_wheel(state, *delta);
+        return Some(RouteEffect::Consumed);
+    }
     if surface == Surface::Login && Key::from_domain(event).is_none() {
         return Some(RouteEffect::Action(
             crate::adapters::tui::handlers::login::on_key(state, event),
@@ -286,6 +298,14 @@ pub fn route(
             crate::adapters::tui::artifact_window::on_key(state, key, host),
         ),
         Surface::ArtifactWindow => RouteEffect::Consumed,
+        // The agent window and the Adapters window are local: an attached host never opens one.
+        Surface::AgentWindow if host == Host::Local => {
+            RouteEffect::Action(crate::adapters::tui::agent_window::on_key(state, key, host))
+        }
+        Surface::Adapters if host == Host::Local => RouteEffect::Action(
+            crate::adapters::tui::adapters_window::on_key(state, key, host),
+        ),
+        Surface::AgentWindow | Surface::Adapters => RouteEffect::Consumed,
         Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
             Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
                 RouteEffect::Decision(effect)

@@ -1,23 +1,23 @@
-//! Adapter Status panel widget — Story 8.5 AC-2, AC-3.
+//! Adapter status rows — Story 8.5 AC-2, AC-3; the body of the Adapters window (Story 21.7 A21).
 //!
-//! Renders a 7-row list of port dimensions with health indicators,
-//! adapter names, override markers, and key metrics. Pull-based
-//! per-render-tick: calls `health_snapshot()` on each loaded adapter.
+//! A snapshot of the 7 port dimensions with health indicators, adapter names, override markers
+//! and key metrics ([`snapshot`]: one `health_snapshot()` per loaded adapter, taken when the
+//! window opens), and the line builder that lays the snapshot out at a width ([`lines`]). The
+//! snapshot is plain data so the window can scroll it, and so the pure builder ([`build`]) can
+//! be proven without an `AgentCore`.
 
 use std::collections::BTreeMap;
 
 use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Widget},
 };
 
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{AdapterRef, HealthLevel, HealthSummary, McpHealthRow, PortDimension};
 use crate::domain::services::adapter_overlay;
+use crate::domain::services::peer_text::sanitize_display_line;
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
 const PORT_COUNT: usize = 7;
@@ -32,8 +32,26 @@ const PORTS: [(PortDimension, &str); PORT_COUNT] = [
     (PortDimension::Context, "context"),
 ];
 
-pub fn port_count() -> usize {
-    PORT_COUNT
+/// One logical row of the Adapters window.
+#[derive(Debug, Clone)]
+pub enum AdapterLine {
+    /// A port dimension: its health, its active adapter, whether the session overrides it, its
+    /// metric and (when degraded or failing) the suggested action.
+    Port {
+        level: HealthLevel,
+        label: &'static str,
+        adapter: String,
+        overridden: bool,
+        metric: String,
+        action: Option<&'static str>,
+    },
+    /// An MCP server under the tools port (Story 9.1 AC-5).
+    Mcp(McpHealthRow),
+    /// The capability registry summary (Story 9.3a).
+    Registry(String),
+    Blank,
+    /// A muted note (the NoOp footer).
+    Note(String),
 }
 
 fn health_color(level: HealthLevel, theme: &Theme) -> Color {
@@ -67,144 +85,153 @@ fn mcp_health_line(row: &McpHealthRow, inner_width: u16, theme: &Theme) -> Line<
     Line::from(spans)
 }
 
-fn get_adapter_name_from_core(agent_core: &AgentCore, port: PortDimension) -> String {
-    let health = get_health_summary(agent_core, port);
-    if health.metric != "n/a" {
-        health.metric.clone()
-    } else {
-        let label = adapter_overlay::port_label(port);
-        label.to_string()
+/// The rows of the window from the health of every port, the MCP rows, the registry summary and
+/// the session's overrides. Pure: the rows are what `lines` lays out.
+#[must_use]
+pub fn build(
+    health: impl Fn(PortDimension) -> HealthSummary,
+    mcp_rows: Vec<McpHealthRow>,
+    registry_summary: Option<String>,
+    overrides: &BTreeMap<PortDimension, AdapterRef>,
+) -> Vec<AdapterLine> {
+    let mut rows = Vec::with_capacity(PORT_COUNT + mcp_rows.len() + 3);
+    for (port, label) in PORTS {
+        let summary = health(port);
+        // The adapter's own name is its metric when it has one; a NoOp port reports `n/a` and
+        // shows the port's label.
+        let core_name = if summary.metric == "n/a" {
+            adapter_overlay::port_label(port).to_string()
+        } else {
+            summary.metric.clone()
+        };
+        let action = summary
+            .suggested_action
+            .filter(|_| matches!(summary.level, HealthLevel::Degraded | HealthLevel::Error));
+        rows.push(AdapterLine::Port {
+            level: summary.level,
+            label,
+            adapter: sanitize_display_line(&adapter_overlay::active_adapter_for(
+                port, &core_name, overrides,
+            )),
+            overridden: overrides.contains_key(&port),
+            metric: sanitize_display_line(&summary.metric),
+            action,
+        });
+        // MCP sub-rows after the tools row (Story 9.1 AC-5), then the registry summary.
+        if port == PortDimension::Tools && !mcp_rows.is_empty() {
+            // Server names, transports and metrics come from MCP configuration and servers:
+            // each scalar is sanitized here, before any span is measured or built (A9).
+            rows.extend(mcp_rows.iter().map(|row| {
+                AdapterLine::Mcp(McpHealthRow {
+                    server_name: sanitize_display_line(&row.server_name),
+                    transport: sanitize_display_line(&row.transport),
+                    level: row.level,
+                    metric: sanitize_display_line(&row.metric),
+                })
+            }));
+            if let Some(summary) = &registry_summary {
+                rows.push(AdapterLine::Registry(sanitize_display_line(summary)));
+            }
+        }
     }
+    if overrides.is_empty() {
+        rows.push(AdapterLine::Blank);
+        rows.push(AdapterLine::Note(
+            "7 ports loaded — most adapters NoOp (real adapters in Epic 12)".to_owned(),
+        ));
+    }
+    rows
 }
 
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
+/// The snapshot the window opens with: every loaded adapter's `health_snapshot()` once.
+#[must_use]
+pub fn snapshot(
     agent_core: &AgentCore,
     overrides: &BTreeMap<PortDimension, AdapterRef>,
-    focused: bool,
-    selected_row: usize,
-    theme: &Theme,
-) {
-    let border_color = if focused {
-        theme.colors.accent
-    } else {
-        theme.colors.fg_secondary
-    };
+) -> Vec<AdapterLine> {
+    build(
+        |port| get_health_summary(agent_core, port),
+        get_mcp_health_rows(agent_core),
+        get_registry_summary(agent_core),
+        overrides,
+    )
+}
 
-    let block = Block::default()
-        .title(" Adapters ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-    let inner = block.inner(area);
-    block.render(area, buf);
-
-    if inner.height == 0 || inner.width < 10 {
-        return;
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-    let mcp_rows = get_mcp_health_rows(agent_core);
-
-    for (i, (port, label)) in PORTS.iter().enumerate() {
-        let health = get_health_summary(agent_core, *port);
-        let symbol = health.level.symbol();
-        let sym_color = health_color(health.level, theme);
-
-        let core_name = get_adapter_name_from_core(agent_core, *port);
-        let adapter_name = adapter_overlay::active_adapter_for(*port, &core_name, overrides);
-
-        let has_override = overrides.contains_key(port);
-        let mut spans = Vec::new();
-
-        spans.push(Span::styled(
-            format!("{} ", symbol),
-            Style::default().fg(sym_color),
-        ));
-
-        spans.push(Span::styled(
-            format!("{:12}", label),
-            Style::default().fg(theme.colors.fg_primary),
-        ));
-
-        let name_width = 24usize.min(inner.width.saturating_sub(40) as usize);
-        let truncated = geom::ellipsize(&adapter_name, name_width, "…");
-        spans.push(Span::styled(
-            format!(": {}", truncated),
-            Style::default().fg(theme.colors.fg_primary),
-        ));
-        if has_override {
-            spans.push(Span::styled(
-                " [override]",
-                Style::default()
-                    .fg(theme.colors.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        let metric = health.metric.clone();
-        let action_opt = health.suggested_action;
-        let level = health.level;
-        let used_width: usize = spans.iter().map(|s| geom::cells(&s.content)).sum();
-        let available = inner.width.saturating_sub(3) as usize;
-        if available > used_width + 2 {
-            let pad = available.saturating_sub(used_width + geom::cells(&metric));
-            spans.push(Span::raw(geom::spaces(pad)));
-        }
-
-        let metric_color = match level {
-            HealthLevel::Degraded => theme.colors.warning,
-            HealthLevel::Error => theme.colors.error,
-            _ => theme.colors.fg_muted,
-        };
-        spans.push(Span::styled(metric, Style::default().fg(metric_color)));
-
-        if i == selected_row {
-            lines.push(Line::from(spans).style(Style::default().add_modifier(Modifier::REVERSED)));
-        } else {
-            lines.push(Line::from(spans));
-        }
-
-        if let Some(action) = action_opt {
-            if level == HealthLevel::Degraded || level == HealthLevel::Error {
-                lines.push(Line::from(Span::styled(
-                    format!("  → {}", action),
-                    Style::default().fg(theme.colors.fg_muted),
-                )));
+/// The rows at `inner_width` cells, one painted line each (a degraded port adds its action
+/// line). Height is `lines(..).len()`: the window clamps its scroll against exactly this.
+#[must_use]
+pub fn lines(rows: &[AdapterLine], inner_width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    for row in rows {
+        match row {
+            AdapterLine::Port {
+                level,
+                label,
+                adapter,
+                overridden,
+                metric,
+                action,
+            } => {
+                let mut spans = vec![
+                    Span::styled(
+                        format!("{} ", level.symbol()),
+                        Style::default().fg(health_color(*level, theme)),
+                    ),
+                    Span::styled(
+                        format!("{label:12}"),
+                        Style::default().fg(theme.colors.fg_primary),
+                    ),
+                ];
+                let name_width = 24usize.min(inner_width.saturating_sub(40) as usize);
+                let truncated = geom::ellipsize(adapter, name_width, "…");
+                spans.push(Span::styled(
+                    format!(": {truncated}"),
+                    Style::default().fg(theme.colors.fg_primary),
+                ));
+                if *overridden {
+                    spans.push(Span::styled(
+                        " [override]",
+                        Style::default()
+                            .fg(theme.colors.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+                let used_width: usize = spans.iter().map(|s| geom::cells(&s.content)).sum();
+                let available = inner_width.saturating_sub(3) as usize;
+                if available > used_width + 2 {
+                    let pad = available.saturating_sub(used_width + geom::cells(metric));
+                    spans.push(Span::raw(geom::spaces(pad)));
+                }
+                let metric_color = match level {
+                    HealthLevel::Degraded => theme.colors.warning,
+                    HealthLevel::Error => theme.colors.error,
+                    _ => theme.colors.fg_muted,
+                };
+                spans.push(Span::styled(
+                    metric.clone(),
+                    Style::default().fg(metric_color),
+                ));
+                out.push(Line::from(spans));
+                if let Some(action) = action {
+                    out.push(Line::from(Span::styled(
+                        format!("  → {action}"),
+                        Style::default().fg(theme.colors.fg_muted),
+                    )));
+                }
             }
-        }
-
-        // Insert MCP sub-rows after the tools row (Story 9.1 AC-5)
-        if *port == PortDimension::Tools && !mcp_rows.is_empty() {
-            for row in &mcp_rows {
-                lines.push(mcp_health_line(row, inner.width, theme));
-            }
-            // Story 9.3a — registry summary line
-            if let Some(summary) = get_registry_summary(agent_core) {
-                lines.push(Line::from(Span::styled(
-                    format!("   └─ {}", summary),
-                    Style::default().fg(theme.colors.fg_muted),
-                )));
-            }
+            AdapterLine::Mcp(row) => out.push(mcp_health_line(row, inner_width, theme)),
+            AdapterLine::Registry(summary) => out.push(Line::from(Span::styled(
+                format!("   └─ {summary}"),
+                Style::default().fg(theme.colors.fg_muted),
+            ))),
+            AdapterLine::Blank => out.push(Line::from(String::new())),
+            AdapterLine::Note(note) => out.push(Line::from(Span::styled(
+                note.clone(),
+                Style::default().fg(theme.colors.fg_muted),
+            ))),
         }
     }
-
-    let all_noop = overrides.is_empty();
-    if all_noop {
-        lines.push(Line::from(String::new()));
-        lines.push(Line::from(Span::styled(
-            "7 ports loaded — most adapters NoOp (real adapters in Epic 12)",
-            Style::default().fg(theme.colors.fg_muted),
-        )));
-    }
-
-    let max_lines = inner.height as usize;
-    for (i, line) in lines.iter().enumerate().take(max_lines) {
-        let y = inner.y + i as u16;
-        if y < area.bottom() {
-            buf.set_line(inner.x, y, line, inner.width);
-        }
-    }
+    out
 }
 
 fn get_health_summary(agent_core: &AgentCore, port: PortDimension) -> HealthSummary {
@@ -283,6 +310,7 @@ fn get_registry_summary(_agent_core: &AgentCore) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{buffer::Buffer, layout::Rect};
     use unicode_segmentation::UnicodeSegmentation;
 
     const G: &str = "👨\u{200d}👩\u{200d}👧";
@@ -356,5 +384,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn healthy(metric: &str) -> HealthSummary {
+        HealthSummary::healthy(metric.to_owned())
+    }
+
+    fn painted(rows: &[AdapterLine], width: u16) -> Vec<String> {
+        lines(rows, width, &Theme::dark())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn story21_7_the_rows_are_the_seven_ports_with_mcp_rows_under_tools_and_the_noop_footer() {
+        let mcp = McpHealthRow {
+            server_name: "echo".to_owned(),
+            transport: "stdio".to_owned(),
+            level: HealthLevel::Healthy,
+            metric: "7 tools".to_owned(),
+        };
+        let rows = build(
+            |_| HealthSummary::unknown(),
+            vec![mcp],
+            Some("Registry: 9 capabilities (7 MCP, 2 builtin, 0 skill)".to_owned()),
+            &BTreeMap::new(),
+        );
+        let text = painted(&rows, 78);
+        let labels = [
+            "persona",
+            "memory",
+            "session",
+            "tools",
+            "channels",
+            "scheduler",
+            "context",
+        ];
+        for (row, label) in text.iter().zip(labels.iter().take(4)) {
+            assert!(row.contains(label), "{row:?}");
+        }
+        assert!(text[4].starts_with("   └─ "), "{:?}", text[4]);
+        assert!(text[4].contains("echo stdio"), "{:?}", text[4]);
+        assert!(text[4].ends_with("7 tools"), "{:?}", text[4]);
+        assert!(
+            text[5].contains("Registry: 9 capabilities"),
+            "{:?}",
+            text[5]
+        );
+        assert!(text[6].contains("channels"), "{:?}", text[6]);
+        assert_eq!(text[text.len() - 2], "");
+        assert!(text.last().unwrap().contains("7 ports loaded"));
+    }
+
+    #[test]
+    fn story21_7_an_override_is_marked_and_names_its_adapter_and_degraded_ports_add_their_action() {
+        let overrides = BTreeMap::from([(
+            PortDimension::Scheduler,
+            AdapterRef {
+                adapter: "cron".to_owned(),
+                _config: None,
+            },
+        )]);
+        let rows = build(
+            |port| {
+                if port == PortDimension::Memory {
+                    HealthSummary {
+                        level: HealthLevel::Degraded,
+                        metric: "slow".to_owned(),
+                        suggested_action: Some("restart the store"),
+                    }
+                } else {
+                    healthy("ok")
+                }
+            },
+            Vec::new(),
+            None,
+            &overrides,
+        );
+        let text = painted(&rows, 78);
+        assert!(
+            text.iter()
+                .any(|row| row.contains("scheduler") && row.contains(": cron [override]")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter().any(|row| row == "  → restart the store"),
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("7 ports loaded")),
+            "overrides drop the footer"
+        );
     }
 }

@@ -58,6 +58,8 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 | Surface::ThreadInspector
                 | Surface::MissionControl
                 | Surface::ArtifactWindow
+                | Surface::AgentWindow
+                | Surface::Adapters
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
@@ -141,6 +143,41 @@ pub fn open_artifact_window(
         .find(|frame| frame.surface == Surface::ArtifactWindow)
         .expect("the artifact frame was just opened")
         .tool_title = Some(title);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
+}
+
+/// The agent window is one frame at a time (A7): opening another agent retargets its payload
+/// and title in place. The payload slot is set here and cleared by `release_payload`, never
+/// elsewhere; the opening writes no base focus, and a Mission Control frame beneath stays
+/// where it was.
+pub fn open_agent_window(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::agent_window::AgentWindowState,
+    title: String,
+) -> Opened {
+    state.agent_window = Some(payload);
+    let opened = open_frame(state, Surface::AgentWindow, None, Some(title.clone()));
+    state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::AgentWindow)
+        .expect("the agent frame was just opened")
+        .tool_title = Some(title);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
+}
+
+/// The Adapters window (A21): one frame at a time; opening it again replaces its snapshot.
+/// The opening writes no base focus.
+pub fn open_adapters(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::adapters_window::AdaptersWindowState,
+) -> Opened {
+    state.adapters_window = Some(payload);
+    let opened = open_frame(state, Surface::Adapters, None, None);
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
     opened
@@ -601,7 +638,9 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::BlockViewer(_)
         | Surface::ThreadInspector
         | Surface::MissionControl
-        | Surface::ArtifactWindow => {}
+        | Surface::ArtifactWindow
+        | Surface::AgentWindow
+        | Surface::Adapters => {}
     }
 }
 
@@ -799,6 +838,14 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::ArtifactWindow => {
             state.artifact_window = None;
+            None
+        }
+        Surface::AgentWindow => {
+            state.agent_window = None;
+            None
+        }
+        Surface::Adapters => {
+            state.adapters_window = None;
             None
         }
     };

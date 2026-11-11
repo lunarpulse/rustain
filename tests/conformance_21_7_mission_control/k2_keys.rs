@@ -41,10 +41,10 @@ async fn left_and_right_cycle_the_delivered_tabs_in_place_and_are_painted_with_a
         top_title(&rig).as_deref(),
         Some("Mission Control · Artifacts")
     );
-    step(&mut rig, Key::Right, McTab::Messages);
+    step(&mut rig, Key::Right, McTab::Agents);
     assert_eq!(
         top_title(&rig).as_deref(),
-        Some("Mission Control · Messages"),
+        Some("Mission Control · Agents"),
         "wraps"
     );
     step(&mut rig, Key::Left, McTab::Artifacts);
@@ -153,7 +153,7 @@ async fn an_unbound_printable_key_changes_nothing_and_never_reaches_the_composer
         rig.f.h.state.input_buffer.clone(),
         rig.f.h.state.cursor_position,
     );
-    for key in ['z', 'q', 'x', 'i', 'a', '1', '?', ' ', 'Z'] {
+    for key in ['z', 'q', 'y', 'i', 'a', '1', '?', ' ', 'Z'] {
         let resolved = keymap::resolve(Context::MissionControl, Host::Local, &[Key::Char(key)]);
         assert!(
             !matches!(resolved, Resolved::Hit(row) if row.context == Context::MissionControl),

@@ -40,7 +40,7 @@ enum CopyRefusal {
 }
 
 /// What the window shows under the facts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactBody {
     /// The artifact's stored bytes, exactly as read (what `c` copies).
     Source(Vec<u8>),
@@ -54,6 +54,10 @@ pub struct Live {
     pub search: bool,
     pub copy: bool,
     pub view: bool,
+    /// The agent window's `p` hint was painted whole.
+    pub pause: bool,
+    /// The agent window's `x` hint was painted whole.
+    pub kill: bool,
 }
 
 #[derive(Default)]
@@ -90,6 +94,8 @@ pub struct ArtifactWindowState {
     cache: RefCell<Cache>,
     layouts_built: Cell<usize>,
     copy_builds: Cell<usize>,
+    empty_text: &'static str,
+    lossy: bool,
 }
 
 impl std::fmt::Debug for ArtifactWindowState {
@@ -120,12 +126,37 @@ impl ArtifactWindowState {
             cache: RefCell::new(Cache::default()),
             layouts_built: Cell::new(0),
             copy_builds: Cell::new(0),
+            empty_text: "body is empty",
+            lossy: false,
         }
     }
 
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.viewer = Viewer::default();
+    }
+
+    /// The shown body is a lossy rendering of bytes that were not valid text: `c` refuses
+    /// rather than copy the replacement characters as "the original".
+    pub fn set_lossy(&mut self, lossy: bool) {
+        self.lossy = lossy;
+    }
+
+    /// What the window says when its body is empty (default `body is empty`).
+    #[must_use]
+    pub fn with_empty_text(mut self, text: &'static str) -> Self {
+        self.empty_text = text;
+        self
+    }
+
+    /// Replace the facts and the body in place (the agent window follows its agent): the
+    /// scroll position stays, and nothing is laid out again unless something changed.
+    pub fn replace(&mut self, header: String, body: ArtifactBody) {
+        if self.header != header || self.body != body {
+            self.header = header;
+            self.body = body;
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
 
     /// The window has a body that can be shown, searched, toggled and copied.
@@ -194,7 +225,7 @@ impl ArtifactWindowState {
                 )));
             }
             ArtifactBody::Source(bytes) if bytes.is_empty() => {
-                out.lines.extend(literal("body is empty"));
+                out.lines.extend(literal(self.empty_text));
             }
             ArtifactBody::Source(bytes) => {
                 // Bounded per-repaint work: a body above the copy bound shows its first
@@ -310,63 +341,109 @@ impl ArtifactWindowState {
     }
 }
 
+/// Where a text window keeps its state and what it is called. The artifact window and the
+/// agent window share one body, one key executor and one painter and differ only here.
+#[derive(Clone, Copy)]
+pub(crate) struct Slot {
+    pub surface: Surface,
+    pub context: Context,
+    /// The registry command whose key copies the original text.
+    pub copy: MissionCmd,
+    /// What a refused or empty copy names (`artifact body`, `agent transcript`).
+    pub noun: &'static str,
+    pub get: fn(&TuiState) -> Option<&ArtifactWindowState>,
+    pub get_mut: fn(&mut TuiState) -> Option<&mut ArtifactWindowState>,
+}
+
+fn artifact_get(state: &TuiState) -> Option<&ArtifactWindowState> {
+    state.artifact_window.as_ref()
+}
+
+fn artifact_get_mut(state: &mut TuiState) -> Option<&mut ArtifactWindowState> {
+    state.artifact_window.as_mut()
+}
+
+pub(crate) const ARTIFACT: Slot = Slot {
+    surface: Surface::ArtifactWindow,
+    context: Context::ArtifactWindow,
+    copy: MissionCmd::CopySource,
+    noun: "artifact body",
+    get: artifact_get,
+    get_mut: artifact_get_mut,
+};
+
 /// The artifact window is the top frame.
 #[must_use]
 pub fn is_top(state: &TuiState) -> bool {
+    is_top_in(state, &ARTIFACT)
+}
+
+pub(crate) fn is_top_in(state: &TuiState, slot: &Slot) -> bool {
     state
         .modal_stack
         .top()
-        .is_some_and(|frame| frame.surface == Surface::ArtifactWindow)
+        .is_some_and(|frame| frame.surface == slot.surface)
 }
 
 /// The filter field of the window is open (a text context of the frame).
 #[must_use]
 pub fn search_editing(state: &TuiState) -> bool {
-    is_top(state)
-        && state
-            .artifact_window
-            .as_ref()
-            .is_some_and(|window| window.search.editing)
+    search_editing_in(state, &ARTIFACT)
+}
+
+pub(crate) fn search_editing_in(state: &TuiState, slot: &Slot) -> bool {
+    is_top_in(state, slot) && (slot.get)(state).is_some_and(|window| window.search.editing)
 }
 
 pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction {
-    if !is_top(state) {
+    on_key_in(state, key, host, &ARTIFACT, &mut |_, _| None)
+}
+
+/// One key of a text window: it resolves in the slot's context. `extra` sees the resolved
+/// command first (the agent window's `p` and `x`) and may answer it with an action.
+pub(crate) fn on_key_in(
+    state: &mut TuiState,
+    key: Key,
+    host: Host,
+    slot: &Slot,
+    extra: &mut dyn FnMut(&mut TuiState, CommandId) -> Option<InputAction>,
+) -> InputAction {
+    if !is_top_in(state, slot) {
         return InputAction::Consumed;
     }
-    let Resolved::Hit(row) = keymap::resolve(Context::ArtifactWindow, host, &[key]) else {
+    let Resolved::Hit(row) = keymap::resolve(slot.context, host, &[key]) else {
         return InputAction::Consumed;
     };
     state.needs_redraw = true;
+    if let Some(action) = extra(state, row.command) {
+        return action;
+    }
     match row.command {
-        CommandId::Mission(MissionCmd::Back) => back(state),
-        CommandId::Mission(MissionCmd::CopySource) => {
-            if state
-                .artifact_window
-                .as_ref()
-                .is_some_and(|window| window.live().copy)
-            {
-                copy_source(state);
+        CommandId::Mission(MissionCmd::Back) => back_in(state, slot),
+        CommandId::Mission(command) if command == slot.copy => {
+            if (slot.get)(state).is_some_and(|window| window.live().copy) {
+                copy_in(state, slot);
             }
         }
         CommandId::Overlay(OverlayCmd::InspectorSearch) => {
-            if let Some(window) = state.artifact_window.as_mut()
+            if let Some(window) = (slot.get_mut)(state)
                 && window.live().search
             {
                 window.search.open();
             }
         }
         CommandId::Body(BodyCmd::ToggleMode) => {
-            if let Some(window) = state.artifact_window.as_mut()
+            if let Some(window) = (slot.get_mut)(state)
                 && window.live().view
             {
                 window.mode = window.mode.toggled();
                 window.invalidate();
             }
         }
-        CommandId::Viewer(command) if !command.horizontal() => scroll(state, command),
+        CommandId::Viewer(command) if !command.horizontal() => scroll_in(state, slot, command),
         // Sideways movement exists only where the last paint showed a wide block.
         CommandId::Viewer(command) => {
-            if let Some(window) = state.artifact_window.as_mut() {
+            if let Some(window) = (slot.get_mut)(state) {
                 let (widest, cols) = window.wide_fit();
                 viewer::apply_horizontal(&mut window.viewer, command, widest, cols);
             }
@@ -377,20 +454,16 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
 }
 
 /// `Esc` / `Ctrl+C`: a kept filter clears first, then the window backs to what is beneath.
-fn back(state: &mut TuiState) {
-    if state
-        .artifact_window
-        .as_ref()
-        .is_some_and(|window| !window.search.query.is_empty())
-    {
-        clear_search(state);
+fn back_in(state: &mut TuiState, slot: &Slot) {
+    if (slot.get)(state).is_some_and(|window| !window.search.query.is_empty()) {
+        clear_search_in(state, slot);
     } else {
         reducer::back(state);
     }
 }
 
-fn scroll(state: &mut TuiState, command: ViewerCmd) {
-    if let Some(window) = state.artifact_window.as_mut() {
+fn scroll_in(state: &mut TuiState, slot: &Slot, command: ViewerCmd) {
+    if let Some(window) = (slot.get_mut)(state) {
         let (rows, viewport) = window.fit();
         if window.viewer.follow {
             window.viewer.top = usize::MAX;
@@ -404,7 +477,15 @@ pub(crate) fn on_wheel(
     state: &mut TuiState,
     delta: crate::domain::models::view_state::ScrollDelta,
 ) {
-    if let Some(window) = state.artifact_window.as_mut() {
+    on_wheel_in(state, &ARTIFACT, delta);
+}
+
+pub(crate) fn on_wheel_in(
+    state: &mut TuiState,
+    slot: &Slot,
+    delta: crate::domain::models::view_state::ScrollDelta,
+) {
+    if let Some(window) = (slot.get_mut)(state) {
         let (rows, viewport) = window.fit();
         if window.viewer.follow {
             window.viewer.top = usize::MAX;
@@ -416,7 +497,11 @@ pub(crate) fn on_wheel(
 
 /// The filter was edited or cleared: the body rows depend on it.
 pub(crate) fn search_changed(state: &mut TuiState) {
-    if let Some(window) = state.artifact_window.as_mut() {
+    search_changed_in(state, &ARTIFACT);
+}
+
+pub(crate) fn search_changed_in(state: &mut TuiState, slot: &Slot) {
+    if let Some(window) = (slot.get_mut)(state) {
         window.invalidate();
     }
     state.needs_redraw = true;
@@ -424,7 +509,11 @@ pub(crate) fn search_changed(state: &mut TuiState) {
 
 /// `Enter` in the filter field keeps it; a query matching no line says so and is dropped.
 pub(crate) fn accept_search(state: &mut TuiState) {
-    let Some(window) = state.artifact_window.as_mut() else {
+    accept_search_in(state, &ARTIFACT);
+}
+
+pub(crate) fn accept_search_in(state: &mut TuiState, slot: &Slot) {
+    let Some(window) = (slot.get_mut)(state) else {
         return;
     };
     window.search.accept();
@@ -452,51 +541,83 @@ pub(crate) fn accept_search(state: &mut TuiState) {
             format!("Search: no match for \"{query}\""),
         );
     }
-    search_changed(state);
+    search_changed_in(state, slot);
 }
 
 /// `Esc` / `Ctrl+C` in the filter field clears it and leaves the field.
 pub(crate) fn clear_search(state: &mut TuiState) {
-    if let Some(window) = state.artifact_window.as_mut() {
+    clear_search_in(state, &ARTIFACT);
+}
+
+pub(crate) fn clear_search_in(state: &mut TuiState, slot: &Slot) {
+    if let Some(window) = (slot.get_mut)(state) {
         window.search.back();
     }
-    search_changed(state);
+    search_changed_in(state, slot);
 }
 
 /// `c`: copy the artifact's **original** bytes (never the sanitized display). The bound is
 /// checked on the byte length before any string is built; a refusal is a notice, never a
 /// partial copy.
 pub(crate) fn copy_source(state: &mut TuiState) {
+    copy_in(state, &ARTIFACT);
+}
+
+/// Deliver an already-bounded copy: `None` = no source (a notice), `Some(None)` = refused above
+/// the bound (a notice, nothing copied), `Some(Some(text))` = copied. Shared by the hub's `c`.
+pub(crate) fn deliver_copy(state: &mut TuiState, noun: &str, outcome: Option<Option<String>>) {
+    use crate::adapters::tui::handlers::clipboard::{notify_copy, notify_failure};
+    use crate::adapters::tui::notifications::{self, NoticeSource};
+    let copier = state.clipboard_copier.clone();
+    match outcome {
+        None => notifications::info(state, NoticeSource::Clipboard, "Nothing to copy"),
+        Some(None) => notify_failure(state, &format!("{noun} exceeds the 8 MiB copy limit")),
+        Some(Some(text)) => match copier {
+            Some(copier) => notify_copy(state, &text, &*copier),
+            None => notify_copy(
+                state,
+                &text,
+                &crate::adapters::tui::clipboard::copy_to_clipboard,
+            ),
+        },
+    }
+}
+
+pub(crate) fn copy_in(state: &mut TuiState, slot: &Slot) {
     use crate::adapters::tui::handlers::clipboard::{notify_copy, notify_failure};
     use crate::adapters::tui::notifications::{self, NoticeSource};
     let copier = state.clipboard_copier.clone();
     // The bound is judged on the byte length; only then is the copy string built.
-    let outcome = match state.artifact_window.as_ref().map(|window| &window.body) {
+    let outcome = match (slot.get)(state) {
         None => return,
-        Some(ArtifactBody::Source(bytes)) if !bytes.is_empty() => {
-            if bytes.len() > COPY_MAX_BYTES {
-                Err(CopyRefusal::TooLarge)
-            } else if std::str::from_utf8(bytes).is_err() {
-                // The clipboard takes text: never copy a lossy conversion as "the original".
-                Err(CopyRefusal::NotUtf8)
-            } else {
-                let window = state.artifact_window.as_ref().expect("matched above");
-                window.copy_builds.set(window.copy_builds.get() + 1);
-                Ok(String::from_utf8_lossy(bytes).into_owned())
+        Some(window) => match &window.body {
+            ArtifactBody::Source(bytes) if !bytes.is_empty() => {
+                if bytes.len() > COPY_MAX_BYTES {
+                    Err(CopyRefusal::TooLarge)
+                } else if window.lossy || std::str::from_utf8(bytes).is_err() {
+                    // The clipboard takes text: never copy a lossy conversion as "the original".
+                    Err(CopyRefusal::NotUtf8)
+                } else {
+                    window.copy_builds.set(window.copy_builds.get() + 1);
+                    Ok(String::from_utf8_lossy(bytes).into_owned())
+                }
             }
-        }
-        Some(_) => Err(CopyRefusal::Nothing),
+            _ => Err(CopyRefusal::Nothing),
+        },
     };
     let text = match outcome {
         Ok(text) => text,
         Err(CopyRefusal::TooLarge) => {
-            notify_failure(state, "artifact body exceeds the 8 MiB copy limit");
+            notify_failure(
+                state,
+                &format!("{} exceeds the 8 MiB copy limit", slot.noun),
+            );
             return;
         }
         Err(CopyRefusal::NotUtf8) => {
             notify_failure(
                 state,
-                "artifact body is not valid UTF-8; nothing was copied",
+                &format!("{} is not valid UTF-8; nothing was copied", slot.noun),
             );
             return;
         }
@@ -519,8 +640,16 @@ pub(crate) fn copy_source(state: &mut TuiState) {
 /// only where the registry binds it. The open filter field is a text context: the guard stands
 /// aside there.
 pub(crate) fn ignores_raw_key(state: &TuiState, key: &crossterm::event::KeyEvent) -> bool {
+    ignores_raw_key_in(state, &ARTIFACT, key)
+}
+
+pub(crate) fn ignores_raw_key_in(
+    state: &TuiState,
+    slot: &Slot,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-    if !is_top(state) || search_editing(state) {
+    if !is_top_in(state, slot) || search_editing_in(state, slot) {
         return false;
     }
     if key.kind != KeyEventKind::Press {

@@ -13,7 +13,6 @@ use super::table_block::{BlockCmd, BodyCmd};
 use super::table_card::CardCmd;
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
-use super::table_inspector::InspectorCmd;
 use super::table_mission::MissionCmd;
 use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use super::table_overlay::OverlayCmd;
@@ -381,10 +380,11 @@ pub enum Context {
     ChatReorder,
     SidebarTasks,
     TasksReorder,
-    SidebarAgents,
-    /// The agent inspector (the drill-down on one agent): its own keys, then the
-    /// Sidebar rows.
-    SidebarAgentInspector,
+    /// The agent window (Story 21.7 A7): one agent's facts and transcript, `v` rendered or
+    /// source, `p` pause or resume, `x` kill (a decision), `c` copies the transcript.
+    AgentWindow,
+    /// The Adapters window (Story 21.7 A21): the port and MCP health rows, read-only.
+    Adapters,
     /// The Mission Control hub (S-MC): the tab row, the list/detail focus and the RU-25
     /// scroll rows of `InspectorBody`; a frame of its own, never the composer.
     MissionControl,
@@ -472,8 +472,8 @@ impl Context {
         Context::ChatReorder,
         Context::SidebarTasks,
         Context::TasksReorder,
-        Context::SidebarAgents,
-        Context::SidebarAgentInspector,
+        Context::AgentWindow,
+        Context::Adapters,
         Context::MissionControl,
         Context::ArtifactWindow,
         Context::WaveOverlay,
@@ -540,8 +540,8 @@ impl Context {
             Context::ChatReorder => "Chat (reorder)",
             Context::SidebarTasks => "Tasks",
             Context::TasksReorder => "Tasks (reorder)",
-            Context::SidebarAgents => "Agents",
-            Context::SidebarAgentInspector => "Agent inspector",
+            Context::AgentWindow => "Agent window",
+            Context::Adapters => "Adapters",
             Context::MissionControl => "Mission Control",
             Context::ArtifactWindow => "Artifact window",
             Context::WaveOverlay => "Wave overlay",
@@ -625,6 +625,10 @@ impl Context {
             Context::MissionControl => &[Context::InspectorBody],
             // The artifact window: the Markdown body rows (`v`) and the RU-25 scroll rows.
             Context::ArtifactWindow => &[Context::MarkdownBody],
+            // The agent window: the Markdown body rows (`v`) and the RU-25 scroll rows.
+            Context::AgentWindow => &[Context::MarkdownBody],
+            // The Adapters window: the RU-25 scroll rows only.
+            Context::Adapters => &[Context::InspectorBody],
             // The block viewport's chain excludes the thread rows: `l` moves columns there.
             Context::BodyViewport => &[Context::MarkdownBody],
             // The reply field is a caret field of its own, never the composer.
@@ -640,10 +644,7 @@ impl Context {
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],
             Context::CaretField => &[Context::TextEntry],
-            Context::SidebarHistory
-            | Context::SidebarAgents
-            | Context::SidebarAgentInspector
-            | Context::SidebarTasks => &[Context::Sidebar],
+            Context::SidebarHistory | Context::SidebarTasks => &[Context::Sidebar],
             Context::TasksReorder => &[Context::SidebarTasks],
             // Only the non-character keys of Chat are inherited (see `resolve_in`).
             Context::ChatDrill | Context::ChatWave | Context::ChatReorder => &[Context::Chat],
@@ -781,7 +782,6 @@ pub enum CommandId {
     Permission(PermissionCmd),
     Field(FieldCmd),
     Panel(PanelCmd),
-    Inspector(InspectorCmd),
     Overlay(OverlayCmd),
     Card(CardCmd),
     Viewer(ViewerCmd),
@@ -812,7 +812,6 @@ command_from!(
     Permission(PermissionCmd),
     Field(FieldCmd),
     Panel(PanelCmd),
-    Inspector(InspectorCmd),
     Overlay(OverlayCmd),
     Card(CardCmd),
     Viewer(ViewerCmd),

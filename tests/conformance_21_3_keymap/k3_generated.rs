@@ -68,12 +68,13 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
             "80 cols: `{painted}` is available:\n{narrow}"
         );
     }
-    for painted in [
-        "[A] Adapters (n/a)",
-        "[S] Agents (n/a)",
-        "[T] Tasks (n/a)",
-        "[H] History (n/a)",
-    ] {
+    for painted in ["[A] Adapters", "[S] Agents"] {
+        assert!(
+            narrow.contains(painted) && !narrow.contains(&format!("{painted} (n/a)")),
+            "80 cols: `{painted}` is available (21-7 7-C opens a frame at every width):\n{narrow}"
+        );
+    }
+    for painted in ["[T] Tasks (n/a)", "[H] History (n/a)"] {
         assert!(
             narrow.contains(painted),
             "80 cols: `{painted}` missing:\n{narrow}"

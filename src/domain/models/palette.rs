@@ -18,6 +18,15 @@ pub enum PaletteScope {
     Adapter,
 }
 
+/// A stack surface a palette entry opens (Story 21.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceTarget {
+    /// Mission Control, Agents tab.
+    Agents,
+    /// The Adapters window.
+    Adapters,
+}
+
 /// Actions that can be dispatched from the command palette.
 /// Stub variants (InsertMention, SwitchModel, SwitchProfile, OpenPanel) are
 /// reserved for future epics (7, 8) and intentionally not yet constructed.
@@ -41,6 +50,9 @@ pub enum PaletteAction {
     SwitchProfile(String),
     /// Open a sidebar panel (stub for future).
     OpenPanel(super::visual::PanelType),
+    /// Open a stack surface by name (Story 21.7): Mission Control's Agents tab or the
+    /// Adapters window. Local only; the attached palette never lists it.
+    OpenSurface(SurfaceTarget),
     /// Show version info as a FeedbackBlock in the chat pane.
     // Covers: FR109
     ShowVersion,

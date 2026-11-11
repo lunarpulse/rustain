@@ -2,7 +2,6 @@ use crate::adapters::tui::handlers::{login::LoginAction, profile_switch};
 use crate::adapters::tui::keymap::table::GlobalCmd;
 use crate::adapters::tui::keymap::table_chat::ChatCmd;
 use crate::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
-use crate::adapters::tui::keymap::table_inspector::InspectorCmd;
 use crate::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_panels::PanelCmd;
@@ -215,8 +214,14 @@ pub enum InputAction {
     /// Open the selected conversation from sidebar.
     // Covers: FR107, AC4
     OpenSidebarConversation,
-    /// Story 14.4: Pause/Resume the selected agent from the Agents panel list.
-    AgentPauseToggle,
+    /// `Enter` on an Agents row: open the agent's window (the host refreshes its transcript).
+    OpenAgentWindow(crate::domain::models::AgentId),
+    /// `p` on an agent: pause it when running, resume it when suspended (one `Op`).
+    AgentPauseResume(crate::domain::models::AgentId),
+    /// `x` on an agent: ask to kill it (raises the confirmation decision; never a direct op).
+    AgentKill(crate::domain::models::AgentId),
+    /// `Ctrl+X a` / the palette: open the Adapters window with a fresh health snapshot.
+    OpenAdapters,
     /// Delete the selected conversation from sidebar (shows confirmation overlay).
     // Covers: FR113, AC5
     DeleteSidebarConversation,
@@ -534,7 +539,9 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
     }
     if let Event::Key(key) = event
         && (crate::adapters::tui::mission_control::keys::ignores_raw_key(state, key)
-            || crate::adapters::tui::artifact_window::ignores_raw_key(state, key))
+            || crate::adapters::tui::artifact_window::ignores_raw_key(state, key)
+            || crate::adapters::tui::agent_window::ignores_raw_key(state, key)
+            || crate::adapters::tui::adapters_window::ignores_raw_key(state, key))
     {
         return true;
     }
@@ -763,8 +770,8 @@ pub(crate) fn handle_leader_key(
             provider: None,
             origin: crate::adapters::tui::state::LoginOrigin::Chord,
         }),
-        LeaderCmd::Adapters => InputAction::OpenPanel(PanelType::Adapters),
-        LeaderCmd::Agents => InputAction::OpenPanel(PanelType::Agents),
+        LeaderCmd::Adapters => InputAction::OpenAdapters,
+        LeaderCmd::Agents => open_agents(state),
         // The A2A log is Mission Control's Messages tab: the host reads the journal and opens it.
         LeaderCmd::A2aLog => InputAction::OpenMessages,
         LeaderCmd::Room => {
@@ -821,6 +828,26 @@ pub(crate) fn handle_leader_key(
         LeaderCmd::QuitRequest => InputAction::Quit,
         // Attached-only: the local registry has no such row.
         LeaderCmd::Detach | LeaderCmd::Cancel => InputAction::Consumed,
+    }
+}
+
+/// `Ctrl+X s` and the palette's Agents entry: Mission Control opens on the Agents tab at once;
+/// the host then runs the tab's source (the subagent roster).
+fn open_agents(state: &mut TuiState) -> InputAction {
+    use crate::adapters::tui::mission_control::McTab;
+    presentation::reducer::open_mission_control(state, McTab::Agents);
+    InputAction::OpenMissionControl(McTab::Agents)
+}
+
+/// A palette entry that names a stack surface.
+fn open_surface(
+    state: &mut TuiState,
+    target: crate::domain::models::palette::SurfaceTarget,
+) -> InputAction {
+    use crate::domain::models::palette::SurfaceTarget;
+    match target {
+        SurfaceTarget::Agents => open_agents(state),
+        SurfaceTarget::Adapters => InputAction::OpenAdapters,
     }
 }
 
@@ -993,12 +1020,7 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
         FocusState::Sidebar { panel, .. } => match panel {
             PanelType::Tasks if tasks.reorder_mode_for.is_some() => Context::TasksReorder,
             PanelType::Tasks => Context::SidebarTasks,
-            PanelType::Agents if state.agent_panel_state.drill_down_agent.is_some() => {
-                Context::SidebarAgentInspector
-            }
-            PanelType::Agents => Context::SidebarAgents,
             PanelType::History => Context::SidebarHistory,
-            _ => Context::Sidebar,
         },
     })
 }
@@ -1085,8 +1107,6 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
             | Context::SidebarHistory
             | Context::SidebarTasks
             | Context::TasksReorder
-            | Context::SidebarAgents
-            | Context::SidebarAgentInspector
     );
     let Key::Char(c) = key else {
         if context == Context::Autocomplete {
@@ -1142,7 +1162,6 @@ fn execute(
         CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
         CommandId::Panel(cmd) => return exec_panel(state, cmd),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
-        CommandId::Inspector(cmd) => exec_inspector(state, cmd),
         CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Block(_) | CommandId::Body(_) => {
             match state.modal_stack.top().map(|frame| frame.surface) {
                 Some(Surface::BlockViewer(_)) => {
@@ -1157,26 +1176,6 @@ fn execute(
         | CommandId::Thread(_)
         | CommandId::Mission(_) => InputAction::Consumed,
     })
-}
-
-/// Agents-panel inspector keys that reach `handle_input`: the event loop runs
-/// `agent_inspector_keys::on_key` first and owns every effect, so only the pure state
-/// changes happen here.
-fn exec_inspector(state: &mut TuiState, cmd: InspectorCmd) -> InputAction {
-    use crate::adapters::tui::agent_inspector_keys as inspector;
-    match cmd {
-        InspectorCmd::Close => {
-            inspector::close(state);
-            InputAction::Consumed
-        }
-        // Only a read-only tab passes `j`/`k` through (the inspector scrolls them
-        // itself otherwise): there they move the Agents list, as they always did.
-        InspectorCmd::ScrollDown | InspectorCmd::ScrollUp => {
-            sidebar_move(state, cmd == InspectorCmd::ScrollDown)
-        }
-        InspectorCmd::Kill => InputAction::Ignored,
-        _ => InputAction::Consumed,
-    }
 }
 
 fn exec_global(state: &mut TuiState, cmd: GlobalCmd) -> InputAction {
@@ -1680,6 +1679,9 @@ fn edit_query(
                     Some(Surface::ArtifactWindow) => {
                         crate::adapters::tui::artifact_window::search_changed(state);
                     }
+                    Some(Surface::AgentWindow) => {
+                        crate::adapters::tui::agent_window::search_changed(state);
+                    }
                     _ => unreachable!("only inspector frames lend the child field"),
                 }
             }
@@ -1871,10 +1873,6 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd) -> Option<InputAction> {
             state.needs_redraw = true;
             InputAction::TaskReorderCommit
         }
-        PanelCmd::AgentPauseToggle => {
-            state.needs_redraw = true;
-            InputAction::AgentPauseToggle
-        }
     })
 }
 
@@ -1983,8 +1981,9 @@ fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         state.needs_redraw = true;
         return InputAction::Consumed;
     }
-    if let Some(surface @ (Surface::MissionControl | Surface::ArtifactWindow)) =
-        state.modal_stack.top().map(|frame| frame.surface)
+    if let Some(
+        surface @ (Surface::MissionControl | Surface::ArtifactWindow | Surface::AgentWindow),
+    ) = state.modal_stack.top().map(|frame| frame.surface)
     {
         match (surface, cmd) {
             (Surface::MissionControl, OverlayCmd::InspectorAccept) => {
@@ -1992,6 +1991,12 @@ fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
             }
             (Surface::MissionControl, OverlayCmd::InspectorBack) => {
                 crate::adapters::tui::mission_control::clear_search(state);
+            }
+            (Surface::AgentWindow, OverlayCmd::InspectorAccept) => {
+                crate::adapters::tui::agent_window::accept_search(state);
+            }
+            (Surface::AgentWindow, OverlayCmd::InspectorBack) => {
+                crate::adapters::tui::agent_window::clear_search(state);
             }
             (_, OverlayCmd::InspectorAccept) => {
                 crate::adapters::tui::artifact_window::accept_search(state);
@@ -2955,6 +2960,7 @@ pub(crate) fn dispatch_palette_action(
         },
         PaletteAction::SwitchProfile(name) => InputAction::ProfileSwitchRequested(name),
         PaletteAction::OpenPanel(panel) => InputAction::OpenPanel(panel),
+        PaletteAction::OpenSurface(target) => open_surface(state, target),
         PaletteAction::ShowVersion => {
             // Display version info as an Info notice (toast + Notification Log)
             // Covers: FR109
@@ -4446,16 +4452,6 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Sidebar Agents",
-                setup: sidebar(PanelType::Agents),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
-                label: "Sidebar Adapters",
-                setup: sidebar(PanelType::Adapters),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
                 label: "Input with autocomplete popup active (production shape)",
                 setup: Box::new(|s| {
                     s.focus = FocusState::Input;
@@ -4592,6 +4588,33 @@ mod tests {
                         s,
                         crate::adapters::tui::mission_control::McTab::Room,
                     );
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Mission Control Agents tab",
+                setup: Box::new(|s| {
+                    presentation::reducer::open_mission_control(
+                        s,
+                        crate::adapters::tui::mission_control::McTab::Agents,
+                    );
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Agent window",
+                setup: Box::new(|s| {
+                    crate::adapters::tui::agent_window::open(
+                        s,
+                        crate::domain::models::AgentId::new(),
+                    );
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Adapters window",
+                setup: Box::new(|s| {
+                    crate::adapters::tui::adapters_window::open(s, Vec::new());
                 }),
                 expect: CtrlQRowExpectation::Quit,
             },

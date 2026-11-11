@@ -1,259 +1,67 @@
+//! The Agents tab's text builders (Story 21.7 A6): the one-line row, the facts and the detail
+//! preview of an agent. Pure string builders: the hub's list painter and the agent window's
+//! facts layout sanitize them at the span builder, so a subagent type, a model name or a tool
+//! summary can never put a control or a bidi override on a cell.
+//!
+//! A row is `<state glyph> <ownership glyph> <indent><type>[ ⊙ iso] <status>[  <tail>]`: what the
+//! operator must not lose (the status, the typed reason of a parked agent) comes before the
+//! task tail, so a narrow frame cuts the tail first. Nothing in a row depends on the clock:
+//! rows are rebuilt when the registry changes, so the start time is a fact of the window, not a
+//! ticking column.
+
 use std::collections::HashMap;
 
-use ratatui::{
-    prelude::*,
-    style::{Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem},
-};
-
-use crate::domain::models::NodeState;
-use crate::domain::models::subagent_view::{AgentRowView, OwnershipKind};
-use crate::domain::services::plan_runtime::format_elapsed_ms;
-
 use crate::adapters::tui::text_geometry as geom;
+use crate::adapters::tui::widgets::orchestration_glyph::{
+    isolation_glyph, node_state_glyph, ownership_glyph,
+};
+use crate::domain::models::subagent_view::{AgentRowView, OwnershipKind};
+use crate::domain::models::{AgentId, NodeState, WaitReason};
 
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
-    entries: &[AgentRowView],
-    selected: usize,
-    is_focused: bool,
-    theme: &crate::adapters::tui::theme::Theme,
-    spool_tail_cache: &HashMap<crate::domain::models::AgentId, String>,
-    now_fn: &dyn Fn() -> i64,
-) {
-    Clear.render(area, buf);
+/// Cells of the task tail kept in a row (the painter cuts it to the width).
+const TAIL_CELLS: usize = 160;
+/// Lines of recent output in the detail preview.
+const DETAIL_TAIL_LINES: usize = 6;
+/// Descendants listed in the facts (a bound on one build).
+const CHILDREN_MAX: usize = 50;
 
-    let title = " Agents ".to_string();
-    let border_style = if is_focused {
-        Style::default().fg(theme.colors.accent)
-    } else {
-        Style::default().fg(theme.colors.fg_secondary)
-    };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let inner_area = block.inner(area);
-    block.render(area, buf);
-
-    if entries.is_empty() {
-        let lines = vec![
-            Line::from(Span::styled(
-                "No agents active.",
-                Style::default()
-                    .fg(theme.colors.fg_muted)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-            Line::from(Span::styled(
-                "Ask the assistant to delegate or use plan mode.",
-                Style::default()
-                    .fg(theme.colors.fg_muted)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-        ];
-        let para = ratatui::widgets::Paragraph::new(lines).alignment(Alignment::Center);
-        let centered_y = inner_area.y + inner_area.height.saturating_sub(3) / 2;
-        let centered_area = Rect {
-            y: centered_y,
-            height: 3.min(inner_area.height),
-            ..inner_area
-        };
-        para.render(centered_area, buf);
-        return;
+/// The status the operator reads, typed for a parked agent (17.5b AC8): an MCP elicitation is
+/// `awaiting your answer`, a peer's wait is `awaiting your decision`; an unstamped wait keeps
+/// the static `waiting`.
+#[must_use]
+pub fn status_word(entry: &AgentRowView) -> &'static str {
+    match entry.current_status {
+        NodeState::Running => "running",
+        NodeState::Created => "queued",
+        NodeState::Suspended => "resumable",
+        NodeState::Waiting => match entry.wait_reason {
+            Some(WaitReason::AwaitingHumanInput) => "awaiting your answer",
+            Some(WaitReason::AwaitingSpoke) => "awaiting spoke",
+            Some(WaitReason::BudgetPaused) => "budget paused",
+            Some(WaitReason::AwaitingUpstreamArtifact) => "awaiting artifact",
+            Some(WaitReason::AwaitingPeerResponse) => "awaiting your decision",
+            None => "waiting",
+        },
+        NodeState::Completed => "done",
+        NodeState::Failed => "failed",
+        NodeState::Cancelled => "cancelled",
     }
-
-    if inner_area.width == 0 || inner_area.height == 0 {
-        return;
-    }
-
-    let available_height = inner_area.height as usize;
-    if available_height == 0 {
-        return;
-    }
-
-    let scroll_offset = if selected >= available_height {
-        selected.saturating_sub(available_height - 1)
-    } else {
-        0
-    };
-    let visible_count = entries.len().min(available_height);
-    let items: Vec<ListItem> = entries
-        .iter()
-        .skip(scroll_offset)
-        .take(visible_count)
-        .enumerate()
-        .map(|(i, entry)| {
-            let (icon_sym, icon_color) = subagent_icon_for(entry.current_status, theme);
-            let glyph = ownership_glyph(entry.ownership);
-            let indent = indent_for_depth(entry.depth);
-            let now = now_fn();
-            let elapsed_ms = (now - entry.spawned_at).max(0);
-            let elapsed = format_elapsed_ms(elapsed_ms);
-
-            let task_summary = spool_tail_cache
-                .get(&entry.agent_id)
-                .and_then(|s| s.lines().last().map(|l| l.to_string()))
-                .unwrap_or_default();
-
-            let prefix_width = geom::cells(icon_sym)
-                + 1
-                + geom::cells(glyph)
-                + 1
-                + geom::cells(&indent)
-                + geom::cells(&entry.subagent_type)
-                + 2
-                + if entry.isolated {
-                    geom::cells(super::orchestration_glyph::isolation_glyph()) + 1
-                } else {
-                    0
-                };
-
-            let mut spans: Vec<Span> = vec![
-                Span::styled(icon_sym.to_string(), Style::default().fg(icon_color)),
-                Span::raw(" "),
-                Span::styled(
-                    glyph.to_string(),
-                    Style::default().fg(theme.colors.fg_primary),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{}{}", indent, entry.subagent_type),
-                    Style::default().fg(theme.colors.fg_primary),
-                ),
-            ];
-
-            // P9 (TUI): ⊙ iso indicator for isolated children (AC3 "shown, not silent").
-            if entry.isolated {
-                spans.push(Span::styled(
-                    format!(" {}", super::orchestration_glyph::isolation_glyph()),
-                    Style::default().fg(theme.colors.fg_muted),
-                ));
-            }
-
-            // Status suffix: trust-building cue for non-obvious states.
-            // 17.5b (AC8): a `Waiting` node renders its TYPED reason —
-            // `awaiting your answer` for an MCP elicitation — not the static
-            // `"waiting"`. An unstamped `Waiting` node (none exist in 17.5b
-            // production, but defensive) keeps `"waiting"` unchanged.
-            let status_suffix = match entry.current_status {
-                NodeState::Suspended => Some("resumable"),
-                NodeState::Waiting => Some(match entry.wait_reason {
-                    Some(crate::domain::models::WaitReason::AwaitingHumanInput) => {
-                        "awaiting your answer"
-                    }
-                    Some(crate::domain::models::WaitReason::AwaitingSpoke) => "awaiting spoke",
-                    Some(crate::domain::models::WaitReason::BudgetPaused) => "budget paused",
-                    Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact) => {
-                        "awaiting artifact"
-                    }
-                    Some(crate::domain::models::WaitReason::AwaitingPeerResponse) => {
-                        "awaiting your decision"
-                    }
-                    None => "waiting",
-                }),
-                NodeState::Created => Some("queued"),
-                _ => None,
-            };
-
-            // Cells left for the task tail after the actual prefix and status
-            // suffix; 12 cells stay reserved for the elapsed column. The
-            // budget is always applied (it may be zero).
-            let prefix_width = prefix_width + status_suffix.map_or(0, |s| 1 + geom::cells(s));
-            let max_task_width = (inner_area.width as usize).saturating_sub(prefix_width + 12);
-            let truncated_task = geom::ellipsize(&task_summary, max_task_width, "...");
-
-            if let Some(suffix) = status_suffix {
-                spans.push(Span::styled(
-                    format!(" {}", suffix),
-                    Style::default()
-                        .fg(theme.colors.fg_muted)
-                        .add_modifier(Modifier::ITALIC),
-                ));
-            }
-
-            if !truncated_task.is_empty() {
-                spans.push(Span::styled(
-                    format!("  {}", truncated_task),
-                    Style::default().fg(theme.colors.fg_secondary),
-                ));
-            }
-
-            spans.push(Span::styled(
-                format!("  {}", elapsed),
-                Style::default().fg(theme.colors.fg_muted),
-            ));
-
-            let row_style = if i == selected {
-                if is_focused {
-                    Style::default()
-                        .fg(theme.colors.fg_primary)
-                        .add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default().fg(theme.colors.fg_primary)
-                }
-            } else {
-                Style::default()
-            };
-
-            ListItem::new(Line::from(spans)).style(row_style)
-        })
-        .collect();
-
-    let list = List::new(items);
-    let list_area = Rect {
-        x: inner_area.x,
-        y: inner_area.y,
-        width: inner_area.width,
-        height: visible_count as u16,
-    };
-    <List<'_> as Widget>::render(list, list_area, buf);
 }
 
-fn subagent_icon_for(
-    status: NodeState,
-    theme: &crate::adapters::tui::theme::Theme,
-) -> (&'static str, Color) {
+/// `Pause` for a running agent, `Resume` for a suspended one, nothing else.
+#[must_use]
+pub fn pause_label(status: NodeState) -> Option<&'static str> {
     match status {
-        NodeState::Running => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Running),
-            theme.colors.tool_status_executing,
-        ),
-        NodeState::Created => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Created),
-            theme.colors.tool_status_awaiting,
-        ),
-        NodeState::Waiting => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Waiting),
-            theme.colors.tool_status_awaiting,
-        ),
-        NodeState::Suspended => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Suspended),
-            theme.colors.tool_status_awaiting,
-        ),
-        NodeState::Completed => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Completed),
-            theme.colors.tool_status_success,
-        ),
-        NodeState::Failed => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Failed),
-            theme.colors.tool_status_error,
-        ),
-        NodeState::Cancelled => (
-            super::orchestration_glyph::node_state_glyph(NodeState::Cancelled),
-            theme.colors.tool_status_cancelled,
-        ),
+        NodeState::Running => Some("Pause"),
+        NodeState::Suspended => Some("Resume"),
+        _ => None,
     }
 }
 
-fn ownership_glyph(kind: OwnershipKind) -> &'static str {
-    match kind {
-        OwnershipKind::Self_(_) => "\u{2605}",
-        OwnershipKind::Owned => "\u{2666}",
-        OwnershipKind::Peer => "\u{25C7}",
-    }
+/// An agent that has not finished can be killed.
+#[must_use]
+pub const fn can_kill(row: &AgentRowView) -> bool {
+    !row.current_status.is_terminal()
 }
 
 fn indent_for_depth(depth: usize) -> String {
@@ -264,10 +72,193 @@ fn indent_for_depth(depth: usize) -> String {
     }
 }
 
+/// The last non-empty line of the spooled output: what the agent is doing now.
+fn last_line(tail: &str) -> &str {
+    tail.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+}
+
+/// The one-line row of an agent.
+#[must_use]
+pub fn row_text(entry: &AgentRowView, tail: &str) -> String {
+    let mut text = format!(
+        "{} {} {}{}",
+        node_state_glyph(entry.current_status),
+        ownership_glyph(entry.ownership),
+        indent_for_depth(entry.depth),
+        entry.subagent_type
+    );
+    if entry.isolated {
+        text.push(' ');
+        text.push_str(isolation_glyph());
+    }
+    text.push(' ');
+    text.push_str(status_word(entry));
+    let tail = last_line(tail);
+    if !tail.is_empty() {
+        text.push_str("  ");
+        text.push_str(&geom::ellipsize(tail, TAIL_CELLS, "..."));
+    }
+    text
+}
+
+/// The status-first form of a row, used when cutting the row to a narrow list would lose the
+/// status (a parked agent's typed reason must survive 60 columns).
+#[must_use]
+pub fn compact_text(entry: &AgentRowView) -> String {
+    format!(
+        "{} · {} {} {}",
+        status_word(entry),
+        node_state_glyph(entry.current_status),
+        ownership_glyph(entry.ownership),
+        entry.subagent_type
+    )
+}
+
+fn ownership_word(kind: OwnershipKind) -> &'static str {
+    match kind {
+        OwnershipKind::Self_(_) => "this session",
+        OwnershipKind::Owned => "owned subagent",
+        OwnershipKind::Peer => "peer",
+    }
+}
+
+/// One untrusted scalar (a type label, a model, a tools summary) as a single safe line: no
+/// control, escape, bidi or zero-width scalar survives, and it can never become two fact rows.
+fn scalar(text: &str) -> String {
+    crate::domain::services::peer_text::sanitize_display_line(text)
+}
+
+/// The facts of an agent, one per line: the header of the agent window and the head of the
+/// detail preview. `entries` is the whole roster (the children are listed from it).
+#[must_use]
+pub fn facts(entry: &AgentRowView, entries: &[AgentRowView]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "Agent: {}", scalar(&entry.subagent_type));
+    let _ = writeln!(out, "Status: {}", status_word(entry));
+    let _ = writeln!(
+        out,
+        "Ownership: {} {}",
+        ownership_glyph(entry.ownership),
+        ownership_word(entry.ownership)
+    );
+    if entry.isolated {
+        let _ = writeln!(out, "Isolation: {}", isolation_glyph());
+    }
+    let _ = writeln!(out, "Depth: {}", entry.depth);
+    let model = scalar(&entry.effective_model);
+    let _ = writeln!(
+        out,
+        "Model: {}",
+        if model.is_empty() {
+            "(unresolved)"
+        } else {
+            &model
+        }
+    );
+    let tools = scalar(&entry.tools_summary);
+    let _ = writeln!(
+        out,
+        "Tools: {}",
+        if tools.is_empty() {
+            "(unresolved)"
+        } else {
+            &tools
+        }
+    );
+    if entry.spawned_at > 0 {
+        let _ = writeln!(
+            out,
+            "Started: {}",
+            crate::domain::services::transparency::format_unix_millis(entry.spawned_at)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "Tokens: {} in / {} out",
+        entry.tokens_in, entry.tokens_out
+    );
+    let _ = writeln!(out, "Cost: {}", cost_text(entry));
+    let _ = writeln!(out, "Turns: {}", entry.turns);
+    let mut children = Vec::new();
+    collect_children(entries, &entry.agent_id, 1, &mut children);
+    if children.is_empty() {
+        let _ = write!(out, "Children: (none)");
+    } else {
+        let _ = write!(out, "Children:");
+        for (child, depth) in children {
+            let _ = write!(
+                out,
+                "\n{}\u{251C} {} ({})",
+                "  ".repeat(depth),
+                scalar(&child.subagent_type),
+                status_word(child)
+            );
+        }
+    }
+    out
+}
+
+fn cost_text(entry: &AgentRowView) -> String {
+    static PRICING: std::sync::LazyLock<
+        HashMap<String, crate::domain::models::pricing::PricingConfig>,
+    > = std::sync::LazyLock::new(crate::domain::models::AppConfig::default_pricing_catalog);
+    let pricing = &*PRICING;
+    let cost = if entry.effective_model.is_empty() {
+        None
+    } else {
+        crate::domain::services::cost_calculator::cost_for_model_tokens(
+            &entry.effective_model,
+            entry.tokens_in,
+            entry.tokens_out,
+            pricing,
+        )
+    };
+    crate::adapters::tui::widgets::usage_panel::cost_or_na(cost)
+}
+
+fn collect_children<'a>(
+    entries: &'a [AgentRowView],
+    parent: &AgentId,
+    depth: usize,
+    out: &mut Vec<(&'a AgentRowView, usize)>,
+) {
+    for entry in entries {
+        if out.len() >= CHILDREN_MAX {
+            return;
+        }
+        if &entry.parent_id == parent {
+            out.push((entry, depth));
+            collect_children(entries, &entry.agent_id, depth + 1, out);
+        }
+    }
+}
+
+/// The detail preview: the facts, then the last lines of the output.
+#[must_use]
+pub fn detail_text(entry: &AgentRowView, entries: &[AgentRowView], tail: &str) -> String {
+    let mut out = facts(entry, entries);
+    out.push_str("\n\nRecent output:");
+    let lines: Vec<&str> = tail.lines().collect();
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        out.push_str("\n  (no output yet)");
+    } else {
+        let from = lines.len().saturating_sub(DETAIL_TAIL_LINES);
+        for line in &lines[from..] {
+            out.push_str("\n  ");
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::AgentId;
 
     fn make_entry(name: &str, depth: usize, status: NodeState) -> AgentRowView {
         AgentRowView {
@@ -288,153 +279,170 @@ mod tests {
         }
     }
 
-    fn render_to_text(
-        entries: &[AgentRowView],
-        selected: usize,
-        is_focused: bool,
-        width: u16,
-        height: u16,
-    ) -> String {
-        let theme = crate::adapters::tui::theme::Theme::dark();
-        let area = Rect::new(0, 0, width, height);
-        let mut buf = Buffer::empty(area);
-        let cache = HashMap::new();
-        let now_fn: fn() -> i64 = || 0i64;
-        render(
-            area, &mut buf, entries, selected, is_focused, &theme, &cache, &now_fn,
+    #[test]
+    fn story21_7_a_row_names_state_ownership_type_and_status() {
+        let row = row_text(&make_entry("code-reviewer", 1, NodeState::Created), "");
+        assert_eq!(row, "\u{25CB} \u{2666} code-reviewer queued");
+        let peer = AgentRowView {
+            ownership: OwnershipKind::Peer,
+            ..make_entry("remote", 1, NodeState::Running)
+        };
+        assert_eq!(row_text(&peer, ""), "\u{25B6} \u{25C7} remote running");
+    }
+
+    #[test]
+    fn story21_7_the_three_level_tree_indents_two_cells_per_level_up_to_two_levels() {
+        let rows: Vec<String> = [
+            ("orchestrator", 1, NodeState::Running),
+            ("coder", 2, NodeState::Created),
+            ("reviewer", 3, NodeState::Created),
+            ("deep", 4, NodeState::Created),
+        ]
+        .iter()
+        .map(|(name, depth, status)| row_text(&make_entry(name, *depth, *status), ""))
+        .collect();
+        assert!(rows[0].contains("\u{2666} orchestrator"));
+        assert!(rows[1].contains("\u{2666}   coder"), "{}", rows[1]);
+        assert!(rows[2].contains("\u{2666}     reviewer"), "{}", rows[2]);
+        assert!(
+            rows[3].contains("\u{2666}     deep"),
+            "the indent is capped: {}",
+            rows[3]
         );
-        let mut text = String::new();
-        for y in 0..area.height {
-            let mut line = String::new();
-            for x in 0..area.width {
-                line.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
-            }
-            text.push_str(&format!("{}\n", line.trim_end()));
+    }
+
+    #[test]
+    fn story21_7_terminal_states_read_done_failed_and_cancelled() {
+        for (status, word) in [
+            (NodeState::Completed, "done"),
+            (NodeState::Failed, "failed"),
+            (NodeState::Cancelled, "cancelled"),
+        ] {
+            let row = row_text(&make_entry("agent", 1, status), "");
+            assert!(row.ends_with(word), "{row}");
+            assert!(!can_kill(&make_entry("agent", 1, status)), "{status:?}");
         }
-        text
+        assert!(can_kill(&make_entry("agent", 1, NodeState::Running)));
+        assert!(can_kill(&make_entry("agent", 1, NodeState::Waiting)));
     }
 
-    #[test]
-    fn snapshot_agent_panel_empty() {
-        let entries: Vec<AgentRowView> = vec![];
-        let text = render_to_text(&entries, 0, true, 60, 8);
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
-    fn snapshot_agent_panel_single() {
-        let entries = vec![make_entry("code-reviewer", 1, NodeState::Created)];
-        let text = render_to_text(&entries, 0, true, 60, 5);
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
-    fn snapshot_agent_panel_three_level() {
-        let entries = vec![
-            make_entry("orchestrator", 1, NodeState::Running),
-            make_entry("coder", 2, NodeState::Created),
-            make_entry("reviewer", 3, NodeState::Created),
-        ];
-        let text = render_to_text(&entries, 0, true, 60, 5);
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
-    fn snapshot_agent_panel_terminal_states() {
-        let entries = vec![
-            make_entry("agent-ok", 1, NodeState::Completed),
-            make_entry("agent-fail", 1, NodeState::Failed),
-            make_entry("agent-killed", 1, NodeState::Cancelled),
-        ];
-        let text = render_to_text(&entries, 1, true, 60, 5);
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
-    fn test_focused_row_has_reversed_modifier() {
-        let entries = vec![
-            make_entry("alpha", 1, NodeState::Created),
-            make_entry("beta", 1, NodeState::Running),
-        ];
-        let theme = crate::adapters::tui::theme::Theme::dark();
-        let area = Rect::new(0, 0, 60, 5);
-        let mut buf = Buffer::empty(area);
-        let cache = HashMap::new();
-        let now_fn: fn() -> i64 = || 0i64;
-        render(area, &mut buf, &entries, 1, true, &theme, &cache, &now_fn);
-        let inner_y = area.y + 1;
-        let selected_cell = buf.cell((area.x + 1, inner_y + 1)).unwrap();
-        assert!(
-            selected_cell.modifier.contains(Modifier::REVERSED),
-            "selected focused row should have REVERSED modifier"
-        );
-        let unselected_cell = buf.cell((area.x + 1, inner_y)).unwrap();
-        assert!(
-            !unselected_cell.modifier.contains(Modifier::REVERSED),
-            "unselected row should NOT have REVERSED modifier"
-        );
-    }
-    // P9 keystone (AC3 "shown, not silent"): an isolated node renders the ⊙ iso
-    // indicator; a non-isolated node does not. Kill-criterion: dropping the
-    // `isolation_glyph()` render call-site makes the positive assertion RED.
+    // P9 (AC3 "shown, not silent"): an isolated node renders the ⊙ iso indicator; a
+    // non-isolated node does not.
     #[test]
     fn p9_isolated_node_renders_iso_glyph() {
         let mut entry = make_entry("isolated-coder", 1, NodeState::Running);
         entry.isolated = true;
-        let text = render_to_text(&[entry], 0, true, 60, 5);
-        assert!(
-            text.contains("\u{2299} iso"),
-            "P9: an isolated node must render the ⊙ iso indicator (AC3 shown, not silent):\n{text}"
-        );
-        // Negative control: a non-isolated node must NOT render it.
-        let plain = make_entry("plain-coder", 1, NodeState::Running);
-        let plain_text = render_to_text(&[plain], 0, true, 60, 5);
-        assert!(
-            !plain_text.contains("\u{2299} iso"),
-            "P9: a non-isolated node must not render the iso indicator:\n{plain_text}"
-        );
+        let text = row_text(&entry, "");
+        assert!(text.contains("\u{2299} iso"), "{text}");
+        let plain = row_text(&make_entry("plain-coder", 1, NodeState::Running), "");
+        assert!(!plain.contains("\u{2299} iso"), "{plain}");
     }
 
-    /// 17.5b (AC8 / DF-14.4-WR-1): a `Waiting` node renders its TYPED reason.
-    /// The mutant: stamping the reason but reading the static `"waiting"` —
-    /// killed by asserting the typed text appears AND the static string does not.
+    /// 17.5b (AC8 / DF-14.4-WR-1): a `Waiting` node renders its TYPED reason, not the static
+    /// string; an unstamped one keeps `waiting`.
     #[test]
     fn waiting_node_renders_typed_reason_not_the_static_string() {
         let mut entry = make_entry("mcp-task", 1, NodeState::Waiting);
-        entry.wait_reason = Some(crate::domain::models::WaitReason::AwaitingHumanInput);
-        let text = render_to_text(&[entry], 0, true, 60, 5);
-        assert!(
-            text.contains("awaiting your answer"),
-            "AC8: a Waiting MCP-task node must render its typed reason:\n{text}"
-        );
-        assert!(
-            !text.contains(" waiting"),
-            "AC8: the typed reason must replace the static \"waiting\" string:\n{text}"
-        );
-    }
-
-    #[test]
-    fn peer_response_wait_renders_operator_decision_voice() {
-        let mut entry = make_entry("peer-task", 1, NodeState::Waiting);
-        entry.wait_reason = Some(crate::domain::models::WaitReason::AwaitingPeerResponse);
-        let text = render_to_text(&[entry], 0, true, 60, 5);
-        assert!(
-            text.contains("awaiting your decision"),
-            "peer response waits must name the operator decision:\n{text}"
-        );
+        entry.wait_reason = Some(WaitReason::AwaitingHumanInput);
+        let text = row_text(&entry, "");
+        assert!(text.contains("awaiting your answer"), "{text}");
+        assert!(!text.contains(" waiting"), "{text}");
+        let mut peer = make_entry("peer-task", 1, NodeState::Waiting);
+        peer.wait_reason = Some(WaitReason::AwaitingPeerResponse);
+        let text = row_text(&peer, "");
+        assert!(text.contains("awaiting your decision"), "{text}");
         assert!(!text.contains("awaiting your answer"));
+        let plain = row_text(&make_entry("plain-waiter", 1, NodeState::Waiting), "");
+        assert!(plain.ends_with("waiting"), "{plain}");
     }
 
-    /// AC8 no-regression: an UNSTAMPED `Waiting` node still renders the static
-    /// `"waiting"` (every existing node today). The mutant: dropping the
-    /// `None => \"waiting\"` arm — killed by this positive control.
     #[test]
-    fn unstamped_waiting_node_still_renders_waiting() {
-        let entry = make_entry("plain-waiter", 1, NodeState::Waiting);
-        let text = render_to_text(&[entry], 0, true, 60, 5);
+    fn story21_7_the_tail_is_the_last_non_empty_line_and_comes_after_the_status() {
+        let entry = make_entry("coder", 1, NodeState::Running);
+        let row = row_text(&entry, "first\n  building the project  \n\n");
+        assert_eq!(row, "\u{25B6} \u{2666} coder running  building the project");
+        let long = "x".repeat(300);
+        let row = row_text(&entry, &long);
+        assert!(row.ends_with("..."), "{row}");
         assert!(
-            text.contains("waiting"),
-            "AC8: an unstamped Waiting node must keep rendering \"waiting\":\n{text}"
+            geom::cells(&row) < 200,
+            "the tail is bounded: {}",
+            geom::cells(&row)
         );
+    }
+
+    #[test]
+    fn story21_7_the_compact_form_leads_with_the_typed_status() {
+        let mut entry = make_entry("a-very-long-subagent-type-name", 1, NodeState::Waiting);
+        entry.wait_reason = Some(WaitReason::AwaitingHumanInput);
+        assert!(compact_text(&entry).starts_with("awaiting your answer"));
+    }
+
+    #[test]
+    fn story21_7_pause_reads_pause_or_resume_and_nothing_for_other_states() {
+        assert_eq!(pause_label(NodeState::Running), Some("Pause"));
+        assert_eq!(pause_label(NodeState::Suspended), Some("Resume"));
+        for other in [
+            NodeState::Created,
+            NodeState::Waiting,
+            NodeState::Completed,
+            NodeState::Failed,
+            NodeState::Cancelled,
+        ] {
+            assert_eq!(pause_label(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn story21_7_facts_list_the_roster_children_and_the_detail_ends_with_recent_output() {
+        let parent = make_entry("orchestrator", 1, NodeState::Running);
+        let mut child = make_entry("coder", 2, NodeState::Created);
+        child.parent_id = parent.agent_id.clone();
+        let facts = facts(&parent, &[parent.clone(), child.clone()]);
+        assert!(facts.contains("Agent: orchestrator"), "{facts}");
+        assert!(facts.contains("Status: running"), "{facts}");
+        assert!(
+            facts.contains("Children:\n  \u{251C} coder (queued)"),
+            "{facts}"
+        );
+        let detail = detail_text(&parent, std::slice::from_ref(&parent), "one\ntwo");
+        assert!(detail.ends_with("Recent output:\n  one\n  two"), "{detail}");
+        assert!(
+            detail_text(&parent, std::slice::from_ref(&parent), "").ends_with("(no output yet)")
+        );
+    }
+
+    #[test]
+    fn story21_7_7c02_facts_scalars_are_single_safe_lines() {
+        let mut evil = make_entry(
+            "evil\nTokens: 999 in / 0 out\r\u{1b}]0;x\u{7}\u{202e}z\u{200b}",
+            1,
+            NodeState::Running,
+        );
+        evil.effective_model = "m\nTurns: 9".to_owned();
+        evil.tools_summary = "t\u{1b}[31m\u{2066}".to_owned();
+        let text = facts(&evil, std::slice::from_ref(&evil));
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("Tokens:")).count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("Turns:")).count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.contains("Agent: evil Tokens: 999 in / 0 out"),
+            "{text}"
+        );
+        assert!(
+            !text.chars().any(|c| (c.is_control() && c != '\n')
+                || ('\u{202a}'..='\u{202e}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c)),
+            "{text:?}"
+        );
+        let plain = make_entry("café-日本", 1, NodeState::Running);
+        assert!(facts(&plain, &[]).contains("Agent: café-日本"));
     }
 }

@@ -11,7 +11,7 @@
 //! The kind-specific bodies are the line builders of the old cards, borderless
 //! (`ask_user_question`, `skill_trust_prompt`, `plan_approval`, `plan_deviation_card`,
 //! `task_skip_cascade_card`, `cancel_plan_confirm_card`, `delegation_card`,
-//! `exceptional_spawn_gate`, `agent_inspector::kill_lines`); the heavy ones (a question, a
+//! `exceptional_spawn_gate`, `kill_lines`); the heavy ones (a question, a
 //! skill file, a plan's contents) are wrapped once per item, width and colours and cached
 //! on the queue, so a repaint or a scroll key never re-wraps a megabyte.
 
@@ -38,9 +38,9 @@ use crate::adapters::tui::widgets::permission_prompt::{
     ExactInput, FrameRows, PermissionCard, card_rows, review_rows,
 };
 use crate::adapters::tui::widgets::{
-    ModalPart, agent_inspector, apply_card, ask_user_question, cancel_plan_confirm_card,
-    consolidation_card, delegation_card, fit_modal, forget_card, fork_confirm, peer_add_prompt,
-    plan_approval, plan_deviation_card, rewind_confirm, skill_trust_prompt, task_skip_cascade_card,
+    ModalPart, apply_card, ask_user_question, cancel_plan_confirm_card, consolidation_card,
+    delegation_card, fit_modal, forget_card, fork_confirm, peer_add_prompt, plan_approval,
+    plan_deviation_card, rewind_confirm, skill_trust_prompt, task_skip_cascade_card,
     team_proposal_card, team_retract_prompt,
 };
 use crate::domain::models::Plan;
@@ -312,6 +312,17 @@ fn clean(text: &str) -> String {
 
 fn clean_line(text: &str) -> String {
     sanitize_display_line(text)
+}
+
+/// The body of the `Decision: Kill agent` frame (Story 21.6 6-C). The caller sanitizes the
+/// agent label.
+fn kill_lines(label: &str, theme: &Theme) -> Vec<Line<'static>> {
+    vec![Line::from(Span::styled(
+        format!("\u{26A0} Kill {label} and its subtree?"),
+        Style::default()
+            .fg(theme.colors.tool_status_error)
+            .add_modifier(Modifier::BOLD),
+    ))]
 }
 
 /// A plan with every model-written string sanitized for paint.
@@ -642,10 +653,9 @@ fn build_body(
             }),
             width,
         ),
-        DecisionSubject::AgentKill(payload) => wrap_lines(
-            agent_inspector::kill_lines(&clean_line(&payload.label), theme),
-            width,
-        ),
+        DecisionSubject::AgentKill(payload) => {
+            wrap_lines(kill_lines(&clean_line(&payload.label), theme), width)
+        }
         DecisionSubject::Consolidation(payload) => wrap_lines(
             clean_lines(consolidation_card::lines(&payload.card, theme)),
             width,
@@ -1484,9 +1494,7 @@ fn source_text(item: &DecisionItem, theme: &Theme) -> String {
             threshold: gate.threshold,
             adjusted: gate.adjusted,
         })),
-        DecisionSubject::AgentKill(payload) => {
-            plain(&agent_inspector::kill_lines(&payload.label, theme))
-        }
+        DecisionSubject::AgentKill(payload) => plain(&kill_lines(&payload.label, theme)),
         DecisionSubject::Consolidation(payload) => {
             plain(&consolidation_card::lines(&payload.card, theme))
         }

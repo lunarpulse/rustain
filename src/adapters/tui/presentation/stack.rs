@@ -31,6 +31,13 @@ pub enum Surface {
     /// `TuiState.artifact_window` and its painted title is the frame's `tool_title`
     /// (`Artifact · <name>`).
     ArtifactWindow,
+    /// The agent window (Story 21.7 A7): global, one at a time; its payload is
+    /// `TuiState.agent_window` and its painted title is the frame's `tool_title`
+    /// (`Agent · <type>`).
+    AgentWindow,
+    /// The Adapters window (Story 21.7 A21): global, one at a time; its payload is
+    /// `TuiState.adapters_window` (a snapshot of the port and MCP health taken at open).
+    Adapters,
 }
 
 impl Surface {
@@ -56,6 +63,8 @@ impl Surface {
             Self::ThreadInspector => "Thread",
             Self::MissionControl => "Mission Control",
             Self::ArtifactWindow => "Artifact",
+            Self::AgentWindow => "Agent",
+            Self::Adapters => "Adapters",
         }
     }
 
@@ -81,6 +90,8 @@ impl Surface {
             Self::ThreadInspector => Context::ThreadInspector,
             Self::MissionControl => Context::MissionControl,
             Self::ArtifactWindow => Context::ArtifactWindow,
+            Self::AgentWindow => Context::AgentWindow,
+            Self::Adapters => Context::Adapters,
         }
     }
 
@@ -101,6 +112,8 @@ impl Surface {
                 | Self::ThreadInspector
                 | Self::MissionControl
                 | Self::ArtifactWindow
+                | Self::AgentWindow
+                | Self::Adapters
         )
     }
 }
