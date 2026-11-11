@@ -1,5 +1,5 @@
 //! K5a — Story 21.11 AC5: dynamic cards and panels (plan card, ask-user
-//! question, fork / rewind confirmation, task panel, agent panel, adapter
+//! question, fork / rewind confirmation, Tasks tab, agent panel, adapter
 //! status panel) render C/G/A text by display cells.
 //!
 //! Every test enters through the widget's public render entry, paints into a
@@ -26,7 +26,7 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::question_lines;
 use rustain::adapters::tui::widgets::plan_card::render_plan_card_lines;
-use rustain::adapters::tui::widgets::{adapter_status_panel, mission_control, task_panel};
+use rustain::adapters::tui::widgets::{adapter_status_panel, mission_control};
 use rustain::domain::models::plan::{
     DelegationInfo, Plan, PlanStatus, PlanSubTask, PlanTask, PlanTaskStatus,
 };
@@ -664,7 +664,7 @@ fn k5a_rewind_path_budget_exact_fit_and_over_at_60_80_130() {
     }
 }
 
-// ───────────────────────── task panel ─────────────────────────
+// ───────────────────────── Tasks tab ─────────────────────────
 
 fn delegated_plan(agent_name: &str, on_sub_task: bool) -> Plan {
     let info = DelegationInfo {
@@ -686,27 +686,59 @@ fn delegated_plan(agent_name: &str, on_sub_task: bool) -> Plan {
     plan
 }
 
+/// The list row of the delegated task (or sub-task) painted by the real hub renderer on the
+/// Tasks tab at `width` x 24 (the Tasks sidebar panel is gone, 21-7 7-D): the first painted row
+/// that carries the marker, cut to the list column (written out by hand: from an inner width of 96
+/// the hub splits master / detail, master = 40% of the inner width, at least 28, else the list
+/// owns the whole inner width) and stripped of its 2-cell marker and trailing blanks.
+fn task_row(name: &str, on_sub_task: bool, width: u16) -> (Buffer, String) {
+    let plan = delegated_plan(name, on_sub_task);
+    let mut state = TuiState::new(width, 24);
+    let conversation = rustain::domain::models::Conversation {
+        id: "k5a-conv".to_string(),
+        plans: std::collections::HashMap::from([(plan.id.clone(), plan.clone())]),
+        ..rustain::domain::models::Conversation::default()
+    };
+    state.task_panel_state.last_executed_plan_id = Some(plan.id.clone());
+    let _ = reducer::open_mission_control(&mut state, McTab::Tasks);
+    rustain::adapters::tui::mission_control::tasks::sync(&mut state, &conversation);
+    let buf = paint(width, 24, |f| {
+        let area = f.area();
+        mission_control::render(f, area, &state, "Mission Control · Tasks", Host::Local);
+    })
+    .buffer;
+    let inner = usize::from(width) - 2;
+    let master = if inner >= 96 {
+        (inner * 40 / 100).max(28)
+    } else {
+        inner
+    };
+    for y in buf.area.top()..buf.area.bottom() {
+        let mut used = 0;
+        let mut column = String::new();
+        for g in glyphs(&buf, y).iter().skip(1) {
+            let cells = g.width().max(1);
+            if used + cells > master {
+                break;
+            }
+            used += cells;
+            column.push_str(g);
+        }
+        if column.contains("[delegated") {
+            return (buf, column.trim_end().to_string());
+        }
+    }
+    panic!("no painted Tasks row carries the delegation marker at width {width}");
+}
+
 #[test]
-fn k5a_task_panel_delegated_name_marker_is_inside_the_12_cell_budget() {
+fn k5a_task_row_delegated_name_marker_is_inside_the_12_cell_budget() {
     for width in [60u16, 80, 130] {
         for on_sub_task in [false, true] {
-            let row_y = if on_sub_task { 2 } else { 1 };
             let render_row = |name: &str| {
-                let plan = delegated_plan(name, on_sub_task);
-                let buf = paint(width, 8, |f| {
-                    let area = f.area();
-                    task_panel::render_task_panel(
-                        area,
-                        f.buffer_mut(),
-                        Some(&plan),
-                        0,
-                        false,
-                        &Theme::dark(),
-                    );
-                })
-                .buffer;
+                let (buf, row) = task_row(name, on_sub_task, width);
                 assert_whole_clusters(&buf);
-                interior(&buf, row_y)
+                row
             };
             for (unit, cells) in UNITS {
                 let exact = unit.repeat(12 / cells);

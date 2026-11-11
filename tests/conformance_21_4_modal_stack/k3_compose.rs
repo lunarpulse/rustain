@@ -744,7 +744,9 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
         Context, resolve::no_binding_text, table::CLOSE_WINDOW_FIRST,
     };
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-        for key in [Key::Char('t'), Key::Char('~')] {
+        // `t` (21-7 7-D) is a Mission Control tab like `r`/`s`: available from a frame origin, so
+        // the unavailable-from-a-window panel chord this leg witnesses is `h` (History).
+        for key in [Key::Char('h'), Key::Char('~')] {
             let mut state = TuiState::new(width, height);
             state.input_buffer = "kept draft".into();
             state.cursor_position = 4;
@@ -756,7 +758,7 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
             let focus = state.focus.clone();
             let layout = layout(&state);
             let count = state.notifications.records().len();
-            let expected = if key == Key::Char('t') {
+            let expected = if key == Key::Char('h') {
                 CLOSE_WINDOW_FIRST.to_owned()
             } else {
                 no_binding_text(key, Context::Help.name())
@@ -777,14 +779,14 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
                 (top..region.bottom()).any(|y| row(&menu, region, y).contains(&expected)),
                 "{width}x{height} {key:?}: feedback must paint IN WhichKey, not under Help"
             );
-            if key == Key::Char('t') {
+            if key == Key::Char('h') {
                 let (x, y) = (top..region.bottom())
                     .find_map(|y| {
                         let text = row(&menu, region, y);
-                        text.find("Tasks (n/a)")
+                        text.find("History (n/a)")
                             .map(|x| (text[..x].chars().count() as u16, y))
                     })
-                    .expect("unavailable Tasks row remains visible");
+                    .expect("unavailable History row remains visible");
                 let cell = &menu[(region.x + x, y)];
                 assert!(
                     cell.modifier
@@ -820,10 +822,8 @@ fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
 #[test]
 fn nested_palette_refusal_is_visible_without_dispatch() {
     use rustain::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
-    use rustain::domain::models::{
-        palette::{PaletteAction, PaletteEntry, PaletteScope},
-        visual::PanelType,
-    };
+    use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
+    use rustain::domain::models::visual::PanelType;
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         let mut state = TuiState::new(width, height);
         state.input_buffer = "palette caller draft".into();
@@ -843,7 +843,7 @@ fn nested_palette_refusal_is_visible_without_dispatch() {
                 description: String::new(),
                 shortcut: None,
                 scope: PaletteScope::All,
-                action: PaletteAction::OpenPanel(PanelType::Tasks),
+                action: PaletteAction::OpenPanel(PanelType::History),
             })
             .to_vec();
         assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);

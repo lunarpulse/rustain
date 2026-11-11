@@ -190,11 +190,7 @@ pub fn run<R: Runtime + 'static>(case: &Case<R>) {
     let witnessed = |key: Key| case.inherited.iter().any(|w| w.keys == [key]);
     let exclusive = matches!(
         case.context,
-        Context::ChatDrill
-            | Context::TasksReorder
-            | Context::InspectorBody
-            | Context::ToolInspector
-            | Context::BlockViewer
+        Context::InspectorBody | Context::ToolInspector | Context::BlockViewer
     );
     for key in &inherited {
         assert!(

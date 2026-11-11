@@ -50,16 +50,31 @@ pub(crate) fn notify_copy(
     text: &str,
     copy: &dyn Fn(&str) -> ClipboardResult,
 ) {
+    notify_copy_with(state, text, copy, "Copied to clipboard");
+}
+
+/// [`notify_copy`] with the success wording of the thing copied (`Copied error to clipboard.`):
+/// a copy that landed in the fallback file names the file in place of `clipboard`.
+pub(crate) fn notify_copy_with(
+    state: &mut TuiState,
+    text: &str,
+    copy: &dyn Fn(&str) -> ClipboardResult,
+    success: &str,
+) {
     let (severity, message) = if text.is_empty() {
         (NoticeSeverity::Info, "Nothing to copy".to_string())
     } else {
         match copy(text) {
-            ClipboardResult::Osc52Success => {
-                (NoticeSeverity::Success, "Copied to clipboard".to_string())
-            }
+            ClipboardResult::Osc52Success => (
+                NoticeSeverity::Success,
+                success.trim_end_matches('.').to_string(),
+            ),
             ClipboardResult::FallbackSuccess(path) => (
                 NoticeSeverity::Success,
-                format!("Copied to {}", path.display()),
+                match success.trim_end_matches('.').strip_suffix(" to clipboard") {
+                    Some(what) => format!("{what} to {}", path.display()),
+                    None => format!("Copied to {}", path.display()),
+                },
             ),
             ClipboardResult::Failed(error) => {
                 notify_failure(state, &error);

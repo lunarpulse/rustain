@@ -37,7 +37,9 @@ fn notices(state: &TuiState) -> Vec<(NoticeSeverity, String)> {
 
 #[test]
 fn every_leader_follow_up_runs_its_command_by_value() {
-    let panels = [('t', PanelType::Tasks), ('h', PanelType::History)];
+    // `h` is the one local sidebar panel left; `t` (21-7, 7-D) opens the Mission Control Tasks
+    // tab at any width (below).
+    let panels = [('h', PanelType::History)];
     for (key, panel) in panels {
         let mut state = wide();
         assert_eq!(
@@ -52,6 +54,30 @@ fn every_leader_follow_up_runs_its_command_by_value() {
             "{key}: origin restored first"
         );
         assert!(notices(&state).is_empty(), "{key}: no notice on a run");
+    }
+    // `t` (21-7, 7-D) opens the Mission Control Tasks tab at any width (the frame at once; the
+    // effect reads the active conversation's plan): it is no sidebar panel any more.
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        assert_eq!(
+            leader(&mut state, Key::Char('t')),
+            InputAction::OpenMissionControl(rustain::adapters::tui::mission_control::McTab::Tasks),
+            "t at {width}x{height}"
+        );
+        assert_eq!(
+            state.modal_stack.top().map(|frame| frame.title()),
+            Some("Mission Control · Tasks")
+        );
+        assert!(state.pending_leader.is_none());
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "the frame writes no base focus"
+        );
+        assert!(
+            notices(&state).is_empty(),
+            "t at {width}x{height}: no notice on a run"
+        );
     }
     // `r` (21-7, 7-A) opens the Mission Control Room tab at any width, not a sidebar panel.
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
@@ -329,9 +355,10 @@ fn escape_and_ctrl_c_cancel_the_leader_silently() {
 #[test]
 fn width_unavailable_panel_answers_with_its_remedy() {
     // 80 columns: the sidebar column cannot fit, so the panel chord is `(n/a)`
-    // and the key answers with the remedy instead of moving focus invisibly. (`l` and `e` are
-    // not here: they open Mission Control tabs and need no sidebar column.)
-    for key in ['t', 'h'] {
+    // and the key answers with the remedy instead of moving focus invisibly. (`t`, `l` and `e`
+    // are not here: they open Mission Control tabs and need no sidebar column.)
+    {
+        let key = 'h';
         let mut state = TuiState::new(80, 24);
         let action = leader(&mut state, Key::Char(key));
         assert!(is_inert(&action), "{key}: {action:?}");

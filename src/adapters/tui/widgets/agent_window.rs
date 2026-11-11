@@ -22,17 +22,14 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
         lead.push((
             format!(
                 "{} {label}",
-                rail(KeyContext::AgentWindow, MissionCmd::AgentPause)
+                rail(KeyContext::AgentWindow, MissionCmd::Pause)
             ),
             Some("pause"),
         ));
     }
     if can_kill(state) {
         lead.push((
-            format!(
-                "{} Kill",
-                rail(KeyContext::AgentWindow, MissionCmd::AgentKill)
-            ),
+            format!("{} Kill", rail(KeyContext::AgentWindow, MissionCmd::Kill)),
             Some("kill"),
         ));
     }

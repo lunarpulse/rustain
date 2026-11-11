@@ -371,15 +371,14 @@ pub enum Context {
     MarkdownBody,
     BlockViewer,
     ToolInspector,
-    /// The task-panel drill-down (focus Chat): its own keys plus only the
-    /// non-character keys of Chat (`i`, `q`, `z`, `?` stay unreachable there).
-    ChatDrill,
-    /// Chat while a retained wave exists (no drill-down, no reorder).
+    /// Chat while a retained wave exists.
     ChatWave,
-    /// Chat while a task reorder is active.
-    ChatReorder,
-    SidebarTasks,
-    TasksReorder,
+    /// The task window (Story 21.7 A8): one task's facts and result, `v` rendered or source,
+    /// `r s e p` act on the task (each painted only where its status allows it), `c` copies.
+    TaskWindow,
+    /// The Tasks tab while a reorder is active (Story 21.7 A17): `j k Up Down` move the task,
+    /// `Enter` commits, `Esc` cancels; nothing else acts.
+    MissionReorder,
     /// The agent window (Story 21.7 A7): one agent's facts and transcript, `v` rendered or
     /// source, `p` pause or resume, `x` kill (a decision), `c` copies the transcript.
     AgentWindow,
@@ -448,7 +447,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 63] = [
+    pub const ALL: [Context; 61] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -467,11 +466,9 @@ impl Context {
         Context::MarkdownBody,
         Context::BlockViewer,
         Context::ToolInspector,
-        Context::ChatDrill,
         Context::ChatWave,
-        Context::ChatReorder,
-        Context::SidebarTasks,
-        Context::TasksReorder,
+        Context::TaskWindow,
+        Context::MissionReorder,
         Context::AgentWindow,
         Context::Adapters,
         Context::MissionControl,
@@ -535,11 +532,9 @@ impl Context {
             Context::MarkdownBody => "Markdown body",
             Context::BlockViewer => "Block viewer",
             Context::ToolInspector => "Tool inspector",
-            Context::ChatDrill => "Task drill-down",
             Context::ChatWave => "Chat (wave)",
-            Context::ChatReorder => "Chat (reorder)",
-            Context::SidebarTasks => "Tasks",
-            Context::TasksReorder => "Tasks (reorder)",
+            Context::TaskWindow => "Task window",
+            Context::MissionReorder => "Tasks (reorder)",
             Context::AgentWindow => "Agent window",
             Context::Adapters => "Adapters",
             Context::MissionControl => "Mission Control",
@@ -644,10 +639,13 @@ impl Context {
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],
             Context::CaretField => &[Context::TextEntry],
-            Context::SidebarHistory | Context::SidebarTasks => &[Context::Sidebar],
-            Context::TasksReorder => &[Context::SidebarTasks],
+            Context::SidebarHistory => &[Context::Sidebar],
+            // The task window: the Markdown body rows (`v`) and the RU-25 scroll rows.
+            Context::TaskWindow => &[Context::MarkdownBody],
+            // The reorder context is exclusive: only its own rows act.
+            Context::MissionReorder => &[],
             // Only the non-character keys of Chat are inherited (see `resolve_in`).
-            Context::ChatDrill | Context::ChatWave | Context::ChatReorder => &[Context::Chat],
+            Context::ChatWave => &[Context::Chat],
             Context::CommandPalette
             | Context::SearchTyping
             | Context::SearchNavigating

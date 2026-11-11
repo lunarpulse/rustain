@@ -39,11 +39,15 @@ def _chord_tasks(tui: RustainTUI) -> None:
     time.sleep(0.6)
 
 
-def _open_panel_focused(tui: RustainTUI) -> None:
+HUB_TASKS = "Mission Control \u00b7 Tasks"
+
+
+def _open_tab(tui: RustainTUI) -> None:
+    """Open Mission Control on the Tasks tab (nothing is open by itself, so one
+    chord opens it; the old sidebar close-then-reopen dance is gone)."""
     tui.send(ESC)
     time.sleep(0.3)
-    _chord_tasks(tui)  # close-or-open
-    _chord_tasks(tui)  # reopen → focus Sidebar
+    _chord_tasks(tui)
     time.sleep(0.6)
 
 
@@ -99,31 +103,32 @@ def test_palette_opens_no_crash(tui: RustainTUI):
 @pytest.mark.slow
 @pytest.mark.story_6_4
 def test_all_panel_keys_after_plan(tui: RustainTUI):
-    """Execute one plan, then exercise p/s/x/Enter on the task panel."""
+    """Execute one plan, then exercise p/s/x/Enter on the Tasks tab and
+    p/s/r/e/c/Esc in the task window."""
 
     if not _drive_plan(tui):
         pytest.skip("Plan did not finish — LLM non-determinism")
 
-    _open_panel_focused(tui)
-    assert "Tasks" in tui.get_screen_text(), "Panel should be open"
+    _open_tab(tui)
+    assert HUB_TASKS in tui.get_screen_text(), "Tasks tab should be open"
 
     # ── p (pause) on completed task → notice ──
     tui.send("p")
     time.sleep(0.4)
     screen = tui.get_screen_text()
-    assert "cannot be paused" in screen.lower() or "Tasks" in screen, (
-        f"Expected 'cannot be paused' notice or panel still open.\n{screen}"
+    assert "cannot be paused" in screen.lower() or HUB_TASKS in screen, (
+        f"Expected 'cannot be paused' notice or tab still open.\n{screen}"
     )
 
     # ── s (skip) on completed task → notice ──
     tui.send("s")
     time.sleep(0.4)
     screen = tui.get_screen_text()
-    assert "cannot be skipped" in screen.lower() or "Tasks" in screen, (
-        f"Expected 'cannot be skipped' notice or panel still open.\n{screen}"
+    assert "cannot be skipped" in screen.lower() or HUB_TASKS in screen, (
+        f"Expected 'cannot be skipped' notice or tab still open.\n{screen}"
     )
 
-    # ── x (cancel — completed plan → notice) ──
+    # ── x (cancel plan — completed plan → notice) ──
     tui.send("x")
     time.sleep(0.4)
     screen = tui.get_screen_text()
@@ -133,22 +138,29 @@ def test_all_panel_keys_after_plan(tui: RustainTUI):
     tui.send("n")  # dismiss
     time.sleep(0.3)
 
-    # ── Enter (drill-down) ──
+    # ── Enter (task window) ──
     tui.send(ENTER)
     time.sleep(0.6)
     screen2 = tui.get_screen_text()
-    ok = "[Esc] Back" in screen2 or "Tasks" in screen2
-    if not ok:
-        pass
-    assert "Tasks" in screen2 or "[Esc]" in screen2, (
-        f"Panel or drill-down expected.\n{screen2}"
+    assert HUB_TASKS in screen2 or "Task 1 \u00b7" in screen2, (
+        f"Tab or task window expected.\n{screen2}"
     )
 
-    # Tear down: dismiss overlays, close panel, verify TUI alive
+    # ── window keys p / s / r / e / c on the completed task: all inert or
+    #    answered with a notice, never a crash; Esc goes back to the tab ──
+    if "Task 1 \u00b7" in screen2:
+        for key in ("p", "s", "r", "e", "c"):
+            tui.send(key)
+            time.sleep(0.4)
+            assert tui.child.isalive(), f"TUI process died on window key {key!r}"
+        tui.send(ESC)
+        time.sleep(0.4)
+        assert HUB_TASKS in tui.get_screen_text(), "Esc should return to the Tasks tab"
+
+    # Tear down: dismiss overlays (closes the tab), verify TUI alive
     for _ in range(3):
         tui.send(ESC)
         time.sleep(0.2)
-    _chord_tasks(tui)                # close Tasks panel
     time.sleep(0.3)
     tui.chat_mode()
     time.sleep(0.3)
@@ -169,9 +181,9 @@ def test_cancel_during_execution(tui: RustainTUI):
     tui.send("y")
     time.sleep(0.5)
 
-    # Open panel quickly — plan likely still mid-execution (first Bash ~1-2s).
-    _open_panel_focused(tui)
-    assert "Tasks" in tui.get_screen_text()
+    # Open the tab quickly — plan likely still mid-execution (first Bash ~1-2s).
+    _open_tab(tui)
+    assert HUB_TASKS in tui.get_screen_text()
 
     tui.send("x")
     time.sleep(0.6)
@@ -186,7 +198,6 @@ def test_cancel_during_execution(tui: RustainTUI):
     for _ in range(3):
         tui.send(ESC)
         time.sleep(0.2)
-    _chord_tasks(tui)
     time.sleep(0.3)
     tui.chat_mode()
     time.sleep(0.3)

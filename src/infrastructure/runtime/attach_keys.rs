@@ -6802,6 +6802,7 @@ pub(crate) mod tests {
                     | Surface::BlockViewer(_)
                     | Surface::ArtifactWindow
                     | Surface::AgentWindow
+                    | Surface::TaskWindow
                     | Surface::Adapters
                     | Surface::Login => unreachable!("surface not offered attached"),
                     Surface::ThreadInspector => unreachable!(

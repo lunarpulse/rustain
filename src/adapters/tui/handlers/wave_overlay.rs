@@ -46,7 +46,6 @@ pub fn command(state: &mut TuiState, cmd: PanelCmd) -> InputAction {
         }
         PanelCmd::WaveDrill => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
         PanelCmd::WaveRerun => InputAction::WaveRerunSpoke(state.wave_overlay_selected),
-        _ => InputAction::Consumed,
     }
 }
 

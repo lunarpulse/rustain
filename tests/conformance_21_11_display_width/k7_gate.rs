@@ -121,7 +121,7 @@ const SITES: &[Site] = &[
         ["mcp_health_line", "lines"]
     ),
     site!("widgets/agent_panel.rs", ["row_text"]),
-    site!("widgets/task_panel.rs", ["render_task_panel"]),
+    site!("widgets/task_panel.rs", ["row_text", "sub_row_text"]),
     site!("handlers/team_command.rs", ["render_team_send_rows"]),
     site!("handlers/config.rs", ["short_reason"]),
     site!("widgets/input_box.rs", ["input_area_height", "render"]),

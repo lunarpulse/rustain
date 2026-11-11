@@ -30,6 +30,7 @@ pub mod state;
 #[cfg(test)]
 mod story21_2_slash_tests;
 pub mod task_panel_handlers;
+pub mod task_window;
 pub mod terminal;
 pub mod text_geometry;
 #[allow(dead_code)]

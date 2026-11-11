@@ -265,3 +265,130 @@ impl rustain::domain::ports::wave_handle::WaveHandle for StubWave {
         0
     }
 }
+
+// ── 21-7 7-D: the Tasks tab, the task window and the reorder sub-context ──
+
+/// The conversation id of every task fixture.
+pub const TASK_CONVERSATION: &str = "conv-1";
+/// The plan id of every task fixture.
+pub const TASK_PLAN: &str = "plan-1";
+
+/// A conversation with one executing plan of three tasks: 1 completed, 2 pending, 3 failed.
+pub fn plan_conversation() -> rustain::domain::models::Conversation {
+    use rustain::domain::models::Conversation;
+    use rustain::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult};
+    let task = |number: u32, status: PlanTaskStatus| PlanTask {
+        number,
+        title: format!("Task {number}"),
+        description: String::new(),
+        depends_on: vec![],
+        status,
+        started_at_ms: None,
+        completed_at_ms: None,
+        result: (status == PlanTaskStatus::Completed).then(|| TaskResult {
+            text: "all green".to_owned(),
+            tool_call_count: 1,
+            token_count: None,
+        }),
+        error: (status == PlanTaskStatus::Failed).then(|| "boom".to_owned()),
+        waiting_on: vec![],
+        delegated_to: None,
+        sub_tasks: vec![],
+    };
+    let plan = Plan {
+        id: TASK_PLAN.to_owned(),
+        title: "Ship".to_owned(),
+        tasks: vec![
+            task(1, PlanTaskStatus::Completed),
+            task(2, PlanTaskStatus::Pending),
+            task(3, PlanTaskStatus::Failed),
+        ],
+        estimated_effort: None,
+        status: PlanStatus::Executing,
+        created_at: 1,
+        resolved_at: None,
+        host_message_id: None,
+    };
+    Conversation {
+        id: TASK_CONVERSATION.to_owned(),
+        title: "Build".to_owned(),
+        plans: std::collections::HashMap::from([(TASK_PLAN.to_owned(), plan)]),
+        ..Conversation::default()
+    }
+}
+
+/// The `TaskRef` of task `number` of the fixture plan.
+pub fn task_ref(number: u32) -> rustain::adapters::tui::mission_control::tasks::TaskRef {
+    rustain::adapters::tui::mission_control::tasks::TaskRef {
+        conversation_id: TASK_CONVERSATION.to_owned(),
+        plan_id: TASK_PLAN.to_owned(),
+        number,
+    }
+}
+
+/// Mission Control open on the Tasks tab over the fixture plan, rows synced from the
+/// conversation (what the host does before a paint), the second task selected and every
+/// row action painted whole (what a wide paint of a pending task offers).
+pub fn tasks_hub() -> TuiState {
+    use rustain::adapters::tui::mission_control::{Fit, McTab, tasks};
+    let mut state = fresh();
+    rustain::adapters::tui::presentation::reducer::open_mission_control(&mut state, McTab::Tasks);
+    state.task_panel_state.last_executed_plan_id = Some(TASK_PLAN.to_owned());
+    tasks::sync(&mut state, &plan_conversation());
+    state.mission_control.set_fit(Fit {
+        list_rows: 3,
+        list_viewport: 3,
+        open: true,
+        pause: true,
+        kill: true,
+        skip: true,
+        copy: true,
+        ..Fit::default()
+    });
+    assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);
+    assert_eq!(
+        state.mission_control.selected_id(),
+        Some("plan-1#2"),
+        "the fixture selects the second task"
+    );
+    state
+}
+
+/// The fixture hub while task 2 is being moved.
+pub fn reorder_hub() -> TuiState {
+    let mut state = tasks_hub();
+    state.task_panel_state.reorder = Some(rustain::adapters::tui::state::Reorder {
+        conversation_id: TASK_CONVERSATION.to_owned(),
+        plan_id: TASK_PLAN.to_owned(),
+        number: 2,
+        original_order: vec![1, 2, 3],
+    });
+    state
+}
+
+/// The task window open on task `number` of the fixture plan, every row action painted whole.
+pub fn task_window_state(number: u32) -> TuiState {
+    use rustain::adapters::tui::artifact_window::Live;
+    let mut state = fresh();
+    assert!(rustain::adapters::tui::task_window::open(
+        &mut state,
+        &plan_conversation(),
+        &task_ref(number)
+    ));
+    state
+        .task_window
+        .as_ref()
+        .expect("the window is open")
+        .text
+        .set_live(Live {
+            search: true,
+            copy: true,
+            view: true,
+            pause: true,
+            kill: false,
+            skip: true,
+            retry: true,
+            edit: true,
+        });
+    state
+}

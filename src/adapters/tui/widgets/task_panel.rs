@@ -1,436 +1,172 @@
-//! Task panel sidebar widget — Story 6.3.
+//! The Tasks tab's row builders (Story 21.7 A6; Story 6.3's sidebar panel became a Mission
+//! Control tab).
 //!
-//! Renders a scrollable list of plan tasks in the sidebar, driven by
-//! `AppEvent::PlanTaskStatusChanged` (from 6-2a). The panel is read-only: it
-//! reads task state from `conversation.plans[plan_id]` and never mutates plan
-//! or runtime state.
-//!
-//! ## Render signature (architectural rule)
-//!
-//! `render_task_panel` takes `&mut ratatui::buffer::Buffer`, not `&mut Frame`.
-//! See `_bmad-output/implementation-artifacts/6-3-task-panel-and-progress-monitoring.md`
-//! AC7 for the canonical decision: all sidebar / pane widgets from Story 6.3
-//! onward use `&mut Buffer` to match the `StatefulWidget` convention and stay
-//! composable inside other layouts. `&mut Frame` is reserved for top-level
-//! layout composition (cursor positioning, popup overlays).
+//! One builder produces every row text — the hub list, its wide detail preview and the task
+//! window's header all read these functions — so what the list can show is what the keys can
+//! reach (height == paint; DF-CR-10-6-2: the old panel built multi-line list items whose
+//! painted height exceeded the item count). A task is one row; each of its sub-tasks is one
+//! more row directly beneath it (never a hidden line inside the parent's row).
 //!
 //! ## Plan resolution chain
 //!
-//! The panel resolves which plan to render via a three-stage fallback:
+//! The tab resolves which plan to show via a three-stage fallback:
 //! 1. `last_executed_plan_id` — the plan most recently started/completed.
 //! 2. First `Executing` plan in `conversation.plans` (defensive).
 //! 3. Most recently completed plan by `max(task.completed_at_ms)`.
 //!
-//! ## Multi-panel sidebar dispatcher
-//!
-//! This is the second sidebar panel (after History). The render dispatcher in
-//! `event_loop.rs` branches on `state.sidebar_panel` to select which panel
-//! renders. Story 10.4 (subagent panel) will reuse this pattern — do not
-//! introduce a trait-based registry until ≥ 4 panels.
-//!
-//! ## 10.6 sub-task seat
-//!
-//! Story 10.6 (sub-task decomposition, rehomed from 6-2b) will add
-//! `PlanTask.sub_tasks: Vec<PlanSubTask>`. The panel must eventually render
-//! sub-tasks as indented children with a `(k/n sub-tasks)` fraction on the
-//! parent. In 6-3 — with no decomposed plans yet — this is a layout-only seat.
-//!
-//! ## Task control keys (Story 6.4)
-//!
-//! Panel: `p` (Pause/Resume), `s` (Skip), `x` (Cancel plan).
-//! Drill-down Failed: `r` (Retry), `s` (Skip), `e` (Edit).
-//! Drill-down Paused: `p` (Resume).
-
-use ratatui::{
-    prelude::*,
-    style::{Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState},
-};
+//! The rows are plain text: every scalar a plan carries (titles, agent names) is untrusted
+//! model output and is sanitized by the painter at the span builder.
 
 use crate::adapters::tui::text_geometry as geom;
-use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
+use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
-use super::sidebar::truncate_to_width;
-
-struct TaskIcon {
-    symbol: &'static str,
-    color: Color,
-    suffix: String,
+/// A plan scalar (title, agent name) as one safe line: controls, ESC/OSC sequences and bidi
+/// overrides never reach a row, and a newline can never fabricate a second fact row (7D-01).
+#[must_use]
+pub fn safe(text: &str) -> String {
+    crate::domain::services::peer_text::sanitize_display_line(text)
 }
 
-fn task_icon_for(
-    status: PlanTaskStatus,
-    theme: &crate::adapters::tui::theme::Theme,
-    elapsed_ms: i64,
-    waiting_on: &[u32],
-) -> TaskIcon {
+/// The glyph a task or sub-task row opens with.
+#[must_use]
+pub fn status_glyph(status: PlanTaskStatus) -> &'static str {
     match status {
-        PlanTaskStatus::Pending => TaskIcon {
-            symbol: "\u{23F3}",
-            color: theme.colors.fg_muted,
-            suffix: String::new(),
-        },
-        PlanTaskStatus::Running => TaskIcon {
-            symbol: "\u{25CF}",
-            color: theme.colors.tool_status_executing,
-            suffix: format!(" (running {})", format_elapsed_ms(elapsed_ms)),
-        },
-        PlanTaskStatus::Waiting => TaskIcon {
-            symbol: "\u{29D6}",
-            color: theme.colors.tool_status_awaiting,
-            suffix: if waiting_on.is_empty() {
-                " (waiting)".to_string()
-            } else {
-                let deps = waiting_on
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(" (deps: {})", deps)
-            },
-        },
-        PlanTaskStatus::Completed => TaskIcon {
-            symbol: "\u{2713}",
-            color: theme.colors.tool_status_success,
-            suffix: format!(" ({})", format_elapsed_ms(elapsed_ms)),
-        },
-        PlanTaskStatus::Failed => TaskIcon {
-            symbol: "\u{2717}",
-            color: theme.colors.tool_status_error,
-            suffix: format!(" ({})", format_elapsed_ms(elapsed_ms)),
-        },
-        PlanTaskStatus::Skipped => TaskIcon {
-            symbol: "\u{23ED}",
-            color: theme.colors.tool_status_cancelled,
-            suffix: " (skipped)".to_string(),
-        },
-        PlanTaskStatus::Cancelled => TaskIcon {
-            symbol: "\u{2298}",
-            color: theme.colors.tool_status_cancelled,
-            suffix: " (cancelled)".to_string(),
-        },
-        PlanTaskStatus::Paused => TaskIcon {
-            symbol: "\u{23F8}",
-            color: theme.colors.tool_status_awaiting,
-            suffix: " (paused)".to_string(),
-        },
+        PlanTaskStatus::Pending => "\u{23F3}",
+        PlanTaskStatus::Running => "\u{25CF}",
+        PlanTaskStatus::Waiting => "\u{29D6}",
+        PlanTaskStatus::Completed => "\u{2713}",
+        PlanTaskStatus::Failed => "\u{2717}",
+        PlanTaskStatus::Skipped => "\u{23ED}",
+        PlanTaskStatus::Cancelled => "\u{2298}",
+        PlanTaskStatus::Paused => "\u{23F8}",
     }
 }
 
-/// Build a ratatui `Line` for a single sub-task, indented under its parent.
-/// Reuses the same status glyph + delegation badge + elapsed formatting as
-/// top-level tasks (Story 10.6, AC-9).
-fn sub_task_line_for(
-    sub: &PlanSubTask,
-    theme: &crate::adapters::tui::theme::Theme,
-    max_width: u16,
-) -> Line<'static> {
+/// The status as a word (the window header, the detail preview).
+#[must_use]
+pub fn status_word(status: PlanTaskStatus) -> &'static str {
+    match status {
+        PlanTaskStatus::Pending => "Pending",
+        PlanTaskStatus::Running => "Running",
+        PlanTaskStatus::Waiting => "Waiting",
+        PlanTaskStatus::Completed => "Completed",
+        PlanTaskStatus::Failed => "Failed",
+        PlanTaskStatus::Skipped => "Skipped",
+        PlanTaskStatus::Cancelled => "Cancelled",
+        PlanTaskStatus::Paused => "Paused",
+    }
+}
+
+/// The plan's status as a word.
+#[must_use]
+pub fn plan_status_word(status: PlanStatus) -> &'static str {
+    match status {
+        PlanStatus::Executing => "executing",
+        PlanStatus::Completed => "complete",
+        PlanStatus::Cancelled => "cancelled",
+        _ => "not started",
+    }
+}
+
+fn suffix(status: PlanTaskStatus, elapsed_ms: i64, waiting_on: &[u32]) -> String {
+    match status {
+        PlanTaskStatus::Pending => String::new(),
+        PlanTaskStatus::Running => format!(" (running {})", format_elapsed_ms(elapsed_ms)),
+        PlanTaskStatus::Waiting if waiting_on.is_empty() => " (waiting)".to_owned(),
+        PlanTaskStatus::Waiting => {
+            let deps = waiting_on
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" (deps: {deps})")
+        }
+        PlanTaskStatus::Completed | PlanTaskStatus::Failed => {
+            format!(" ({})", format_elapsed_ms(elapsed_ms))
+        }
+        PlanTaskStatus::Skipped => " (skipped)".to_owned(),
+        PlanTaskStatus::Cancelled => " (cancelled)".to_owned(),
+        PlanTaskStatus::Paused => " (paused)".to_owned(),
+    }
+}
+
+/// `[delegated → <agent>]`, the name inside a 12-cell budget.
+fn delegation(info: &crate::domain::models::plan::DelegationInfo) -> String {
+    format!(
+        " [delegated \u{2192} {}]",
+        geom::ellipsize(&safe(&info.agent_name), 12, "\u{2026}")
+    )
+}
+
+/// One task as one row: number, status glyph, title, status suffix, delegation, dependencies
+/// and the sub-task fraction.
+#[must_use]
+pub fn row_text(task: &PlanTask) -> String {
+    let elapsed = task.elapsed_ms().unwrap_or(0);
+    let mut text = format!(
+        "{}. {} {}{}",
+        task.number,
+        status_glyph(task.status),
+        safe(&task.title),
+        suffix(task.status, elapsed, &task.waiting_on)
+    );
+    if let Some(info) = &task.delegated_to {
+        text.push_str(&delegation(info));
+    }
+    if !task.depends_on.is_empty() {
+        let deps = task
+            .depends_on
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!(" deps: {deps}"));
+    }
+    if task.has_sub_tasks() {
+        let (completed, total) = task.sub_task_progress();
+        text.push_str(&format!(" ({completed}/{total} sub-tasks)"));
+    }
+    text
+}
+
+/// One sub-task as one row, indented under its task.
+#[must_use]
+pub fn sub_row_text(sub: &PlanSubTask) -> String {
     let elapsed = sub.elapsed_ms().unwrap_or(0);
-    let icon = task_icon_for(sub.status, theme, elapsed, &[]);
-
-    let mut spans: Vec<Span> = vec![
-        Span::styled("    ".to_string(), Style::default()),
-        Span::styled(
-            format!("{}. ", sub.number),
-            Style::default().fg(theme.colors.fg_secondary),
-        ),
-        Span::styled(icon.symbol.to_string(), Style::default().fg(icon.color)),
-        Span::styled(
-            format!(" {}", sub.title),
-            Style::default().fg(theme.colors.fg_primary),
-        ),
-        Span::styled(
-            icon.suffix.clone(),
-            Style::default().fg(theme.colors.fg_muted),
-        ),
-    ];
-
-    if let Some(ref info) = sub.delegated_to {
-        // 12-cell name budget; the marker is inside it.
-        let name = geom::ellipsize(&info.agent_name, 12, "…");
-        spans.push(Span::styled(
-            format!(" [delegated → {}]", name),
-            Style::default().fg(theme.colors.accent),
-        ));
+    let mut text = format!(
+        "    {}. {} {}{}",
+        sub.number,
+        status_glyph(sub.status),
+        safe(&sub.title),
+        suffix(sub.status, elapsed, &[])
+    );
+    if let Some(info) = &sub.delegated_to {
+        text.push_str(&delegation(info));
     }
-
-    let mut line = Line::from(spans);
-    let display_width = line.width();
-    let max_w = max_width as usize;
-    if display_width > max_w {
-        let composed = format!(
-            "    {}. {} {}{}",
-            sub.number,
-            icon.symbol,
-            sub.title,
-            if let Some(ref info) = sub.delegated_to {
-                format!(" → {}", info.agent_name)
-            } else {
-                String::new()
-            },
-        );
-        let truncated = truncate_to_width(&composed, max_w);
-        line = Line::from(Span::styled(
-            truncated,
-            Style::default().fg(theme.colors.fg_primary),
-        ));
-    }
-
-    line
+    text
 }
 
-pub fn render_task_panel(
-    area: Rect,
-    buf: &mut Buffer,
-    plan: Option<&Plan>,
-    selected_index: usize,
-    is_focused: bool,
-    theme: &crate::adapters::tui::theme::Theme,
-) {
-    Clear.render(area, buf);
-
-    let (title, is_complete) = match plan {
-        Some(p) if p.status == PlanStatus::Executing => {
-            let t = format!(" Tasks \u{B7} {} ", p.title);
-            (
-                truncate_to_width(&t, area.width.saturating_sub(2) as usize),
-                false,
-            )
-        }
-        Some(p) if p.status == PlanStatus::Completed || p.status == PlanStatus::Cancelled => {
-            let t = format!(" Tasks \u{B7} {} (last) ", p.title);
-            (
-                truncate_to_width(&t, area.width.saturating_sub(2) as usize),
-                true,
-            )
-        }
-        _ => (" Tasks ".to_string(), false),
-    };
-
-    let border_style = if is_focused {
-        Style::default().fg(theme.colors.accent)
-    } else {
-        Style::default().fg(theme.colors.fg_secondary)
-    };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let inner_area = block.inner(area);
-    block.render(area, buf);
-
-    match plan {
-        None => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    "No active plan.",
-                    Style::default()
-                        .fg(theme.colors.fg_muted)
-                        .add_modifier(Modifier::ITALIC),
-                )),
-                Line::from(Span::styled(
-                    "Start one by asking for",
-                    Style::default()
-                        .fg(theme.colors.fg_muted)
-                        .add_modifier(Modifier::ITALIC),
-                )),
-                Line::from(Span::styled(
-                    "a complex task.",
-                    Style::default()
-                        .fg(theme.colors.fg_muted)
-                        .add_modifier(Modifier::ITALIC),
-                )),
-            ];
-            let para = ratatui::widgets::Paragraph::new(lines).alignment(Alignment::Center);
-            let centered_y = inner_area.y + inner_area.height.saturating_sub(3) / 2;
-            let centered_area = Rect {
-                y: centered_y,
-                height: 3.min(inner_area.height),
-                ..inner_area
-            };
-            para.render(centered_area, buf);
-        }
-        Some(plan) => {
-            if is_complete {
-                let notice = "\u{2504} Plan complete \u{B7} open a new plan to refresh \u{2504}";
-                let notice_style = Style::default().fg(theme.colors.fg_muted);
-                let notice_line = Line::from(Span::styled(notice.to_string(), notice_style));
-                let notice_para =
-                    ratatui::widgets::Paragraph::new(notice_line).alignment(Alignment::Center);
-                if inner_area.height > 0 {
-                    notice_para.render(
-                        Rect {
-                            height: 1,
-                            ..inner_area
-                        },
-                        buf,
-                    );
-                }
-            }
-
-            let content_start = if is_complete { 1usize } else { 0usize };
-            let available_height = inner_area.height.saturating_sub(content_start as u16) as usize;
-            if available_height == 0 {
-                return;
-            }
-
-            let mut items: Vec<ListItem> = Vec::new();
-            let max_w = inner_area.width as usize;
-
-            for (i, task) in plan.tasks.iter().enumerate() {
-                if items.len() >= available_height {
-                    break;
-                }
-
-                let elapsed = task.elapsed_ms().unwrap_or(0);
-                let icon = task_icon_for(task.status, theme, elapsed, &task.waiting_on);
-
-                let mut spans: Vec<Span> = vec![
-                    Span::styled(
-                        format!("{}. ", task.number),
-                        Style::default().fg(theme.colors.fg_secondary),
-                    ),
-                    Span::styled(icon.symbol.to_string(), Style::default().fg(icon.color)),
-                    Span::styled(
-                        format!(" {}", task.title),
-                        Style::default().fg(theme.colors.fg_primary),
-                    ),
-                    Span::styled(
-                        icon.suffix.clone(),
-                        Style::default().fg(theme.colors.fg_muted),
-                    ),
-                ];
-
-                if let Some(ref info) = task.delegated_to {
-                    // 12-cell name budget; the marker is inside it.
-                    let name = geom::ellipsize(&info.agent_name, 12, "…");
-                    spans.push(Span::styled(
-                        format!(" [delegated → {}]", name),
-                        Style::default().fg(theme.colors.accent),
-                    ));
-                }
-
-                if !task.depends_on.is_empty() {
-                    let deps: Vec<String> = task.depends_on.iter().map(|d| d.to_string()).collect();
-                    spans.push(Span::styled(
-                        format!(" deps: {}", deps.join(", ")),
-                        Style::default().fg(theme.colors.fg_muted),
-                    ));
-                }
-
-                // 10.6: show (k/n sub-tasks) progress fraction on parent
-                if task.has_sub_tasks() {
-                    let (completed, total) = task.sub_task_progress();
-                    spans.push(Span::styled(
-                        format!(" ({}/{} sub-tasks)", completed, total),
-                        Style::default().fg(theme.colors.fg_muted),
-                    ));
-                }
-
-                let mut parent_line = Line::from(spans);
-                let display_width = parent_line.width();
-                if display_width > max_w {
-                    let composed = format!(
-                        "{}. {} {}{}{}{}{}",
-                        task.number,
-                        icon.symbol,
-                        task.title,
-                        icon.suffix,
-                        if let Some(ref info) = task.delegated_to {
-                            format!(" → {}", info.agent_name)
-                        } else {
-                            String::new()
-                        },
-                        if task.depends_on.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " deps: {}",
-                                task.depends_on
-                                    .iter()
-                                    .map(|d| d.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        },
-                        if task.has_sub_tasks() {
-                            let (completed, total) = task.sub_task_progress();
-                            format!(" ({}/{} sub-tasks)", completed, total)
-                        } else {
-                            String::new()
-                        },
-                    );
-                    let truncated = truncate_to_width(&composed, max_w);
-                    parent_line = Line::from(Span::styled(
-                        truncated,
-                        Style::default().fg(theme.colors.fg_primary),
-                    ));
-                }
-
-                // Build multi-line Text when sub-tasks exist so they render indented
-                // under the parent within the same ListItem (preserves 1:1
-                // parent-to-selected_index mapping).
-                let item = if task.has_sub_tasks() {
-                    let mut lines = vec![parent_line];
-                    for sub in &task.sub_tasks {
-                        if lines.len() >= available_height.saturating_sub(items.len()) {
-                            break;
-                        }
-                        lines.push(sub_task_line_for(sub, theme, inner_area.width));
-                    }
-                    let text = Text::from(lines);
-                    if i == selected_index && is_focused {
-                        ListItem::new(
-                            text.style(
-                                Style::default()
-                                    .fg(theme.colors.fg_primary)
-                                    .add_modifier(Modifier::REVERSED),
-                            ),
-                        )
-                    } else {
-                        ListItem::new(text)
-                    }
-                } else {
-                    if i == selected_index && is_focused {
-                        ListItem::new(
-                            parent_line.style(
-                                Style::default()
-                                    .fg(theme.colors.fg_primary)
-                                    .add_modifier(Modifier::REVERSED),
-                            ),
-                        )
-                    } else {
-                        ListItem::new(parent_line)
-                    }
-                };
-
-                items.push(item);
-            }
-
-            if !items.is_empty() {
-                let list_area = Rect {
-                    y: inner_area.y + content_start as u16,
-                    height: available_height as u16,
-                    ..inner_area
-                };
-                let mut list_state = ListState::default();
-                list_state.select(if is_focused && !plan.tasks.is_empty() {
-                    Some(selected_index.min(plan.tasks.len() - 1))
-                } else {
-                    None
-                });
-                let list = List::new(items).highlight_style(
-                    Style::default()
-                        .fg(theme.colors.fg_primary)
-                        .add_modifier(Modifier::REVERSED),
-                );
-                ratatui::widgets::StatefulWidget::render(list, list_area, buf, &mut list_state);
-            }
-        }
+/// What `p` does to a task in this status (`None`: the key is not offered).
+#[must_use]
+pub fn pause_label(status: PlanTaskStatus) -> Option<&'static str> {
+    match status {
+        PlanTaskStatus::Pending | PlanTaskStatus::Running => Some("Pause"),
+        PlanTaskStatus::Paused => Some("Resume"),
+        _ => None,
     }
+}
+
+/// `s` skips a task that has not run yet or failed.
+#[must_use]
+pub fn can_skip(status: PlanTaskStatus) -> bool {
+    matches!(status, PlanTaskStatus::Pending | PlanTaskStatus::Failed)
+}
+
+/// `r` and `e` act on a failed task only.
+#[must_use]
+pub fn can_retry(status: PlanTaskStatus) -> bool {
+    status == PlanTaskStatus::Failed
 }
 
 pub fn resolve_panel_plan<'a>(
@@ -462,14 +198,8 @@ pub fn resolve_panel_plan<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::tui::color_detect::ColorCapability;
-    use crate::adapters::tui::theme::Theme;
     use crate::domain::models::Conversation;
-    use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult};
-
-    fn test_theme() -> Theme {
-        Theme::for_capability(ColorCapability::TrueColor)
-    }
+    use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
 
     fn make_plan(status: PlanStatus, tasks: Vec<PlanTask>) -> Plan {
         Plan {
@@ -501,71 +231,83 @@ mod tests {
         }
     }
 
-    fn collect_buffer(buf: &Buffer, area: Rect) -> String {
-        let mut s = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                s.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
-            }
+    #[test]
+    fn story21_7_a_task_row_is_one_line_with_glyph_suffix_delegation_and_deps() {
+        let mut task = make_task(2, "Review code", PlanTaskStatus::Running);
+        task.delegated_to = Some(crate::domain::models::plan::DelegationInfo {
+            agent_name: "code-reviewer-with-a-long-name".to_string(),
+            agent_id: None,
+            delegated_at_ms: 1_700_000_000,
+            spool_task_id: None,
+        });
+        task.depends_on = vec![1];
+        let row = row_text(&task);
+        assert!(
+            row.starts_with("2. \u{25CF} Review code (running "),
+            "{row}"
+        );
+        assert!(
+            row.contains("[delegated \u{2192} code-review\u{2026}]"),
+            "the agent name keeps a 12-cell budget: {row}"
+        );
+        assert!(row.ends_with(" deps: 1"), "{row}");
+        assert!(!row.contains('\n'));
+        assert_eq!(
+            row_text(&make_task(1, "Setup", PlanTaskStatus::Completed)),
+            "1. \u{2713} Setup (0s)"
+        );
+        assert_eq!(
+            row_text(&make_task(3, "Build", PlanTaskStatus::Pending)),
+            "3. \u{23F3} Build"
+        );
+    }
+
+    #[test]
+    fn story21_7_a_sub_task_is_its_own_indented_row_and_the_parent_shows_the_fraction() {
+        use crate::domain::models::plan::PlanSubTask;
+        let sub = |number: u32, status: PlanTaskStatus| PlanSubTask {
+            number,
+            title: format!("part {number}"),
+            description: String::new(),
+            status,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            delegated_to: None,
+        };
+        let mut task = make_task(1, "Build", PlanTaskStatus::Running);
+        task.sub_tasks = vec![
+            sub(1, PlanTaskStatus::Completed),
+            sub(2, PlanTaskStatus::Pending),
+        ];
+        assert!(row_text(&task).ends_with(" (1/2 sub-tasks)"));
+        assert_eq!(
+            sub_row_text(&task.sub_tasks[1]),
+            "    2. \u{23F3} part 2",
+            "indented under its task, one line"
+        );
+    }
+
+    #[test]
+    fn story21_7_the_status_rules_of_the_keys() {
+        use PlanTaskStatus::{
+            Cancelled, Completed, Failed, Paused, Pending, Running, Skipped, Waiting,
+        };
+        for (status, pause, skip, retry) in [
+            (Pending, Some("Pause"), true, false),
+            (Running, Some("Pause"), false, false),
+            (Paused, Some("Resume"), false, false),
+            (Failed, None, true, true),
+            (Completed, None, false, false),
+            (Skipped, None, false, false),
+            (Cancelled, None, false, false),
+            (Waiting, None, false, false),
+        ] {
+            assert_eq!(pause_label(status), pause, "{status:?}");
+            assert_eq!(can_skip(status), skip, "{status:?}");
+            assert_eq!(can_retry(status), retry, "{status:?}");
         }
-        s
-    }
-
-    #[test]
-    fn render_empty_state() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
-        let area = Rect::new(0, 0, 40, 20);
-        render_task_panel(area, &mut buf, None, 0, true, &test_theme());
-        let content = collect_buffer(&buf, area);
-        assert!(content.contains("No active plan"));
-    }
-
-    #[test]
-    fn render_executing_plan() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
-        let area = Rect::new(0, 0, 40, 20);
-        let plan = make_plan(
-            PlanStatus::Executing,
-            vec![
-                make_task(1, "Task one", PlanTaskStatus::Completed),
-                make_task(2, "Task two", PlanTaskStatus::Running),
-                make_task(3, "Task three", PlanTaskStatus::Pending),
-                make_task(4, "Task four", PlanTaskStatus::Failed),
-            ],
-        );
-        render_task_panel(area, &mut buf, Some(&plan), 0, true, &test_theme());
-        let content = collect_buffer(&buf, area);
-        assert!(content.contains("Task one"));
-        assert!(content.contains("Task two"));
-    }
-
-    #[test]
-    fn render_completed_plan_shows_last() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
-        let area = Rect::new(0, 0, 40, 20);
-        let plan = make_plan(
-            PlanStatus::Completed,
-            vec![make_task(1, "Done task", PlanTaskStatus::Completed)],
-        );
-        render_task_panel(area, &mut buf, Some(&plan), 0, true, &test_theme());
-        let content = collect_buffer(&buf, area);
-        assert!(content.contains("(last)"));
-        assert!(content.contains("Plan complete"));
-    }
-
-    #[test]
-    fn render_narrow_truncates_title() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 20));
-        let area = Rect::new(0, 0, 30, 20);
-        let plan = make_plan(
-            PlanStatus::Executing,
-            vec![make_task(
-                1,
-                "A very long task title that exceeds width",
-                PlanTaskStatus::Pending,
-            )],
-        );
-        render_task_panel(area, &mut buf, Some(&plan), 0, true, &test_theme());
     }
 
     #[test]
@@ -627,29 +369,5 @@ mod tests {
         let result = resolve_panel_plan(&conv, Some("nonexistent"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().tasks[0].title, "B");
-    }
-
-    #[test]
-    fn snapshot_task_panel_with_delegation_badge() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 20));
-        let area = Rect::new(0, 0, 50, 20);
-        let mut task = make_task(2, "Review code", PlanTaskStatus::Running);
-        task.delegated_to = Some(crate::domain::models::plan::DelegationInfo {
-            agent_name: "code-reviewer".to_string(),
-            agent_id: None,
-            delegated_at_ms: 1_700_000_000,
-            spool_task_id: None,
-        });
-        let plan = make_plan(
-            PlanStatus::Executing,
-            vec![
-                make_task(1, "Setup", PlanTaskStatus::Completed),
-                task,
-                make_task(3, "Build", PlanTaskStatus::Pending),
-            ],
-        );
-        render_task_panel(area, &mut buf, Some(&plan), 1, true, &test_theme());
-        let content = collect_buffer(&buf, area);
-        insta::assert_snapshot!(content);
     }
 }

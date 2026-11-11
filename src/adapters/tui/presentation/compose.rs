@@ -134,6 +134,13 @@ pub fn compose(
                 modal.title(),
                 show_caret,
             ),
+            Surface::TaskWindow => crate::adapters::tui::widgets::task_window::render(
+                frame,
+                rect,
+                state,
+                modal.title(),
+                show_caret,
+            ),
             Surface::Adapters => crate::adapters::tui::widgets::adapters_window::render(
                 frame,
                 rect,
@@ -296,6 +303,7 @@ pub fn compose(
                 | Surface::MissionControl
                 | Surface::ArtifactWindow
                 | Surface::AgentWindow
+                | Surface::TaskWindow
                 | Surface::Adapters => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent

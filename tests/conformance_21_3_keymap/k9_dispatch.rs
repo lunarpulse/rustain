@@ -55,46 +55,51 @@ fn chat_sequences_set_the_pending_tail_and_clear_it() {
     assert_eq!(press(&mut s, Key::Char('g')), InputAction::ScrollToTop);
 }
 
-/// DF-256: Tasks `Enter` drills into the selected task, and with no task it is the sidebar's
-/// open-entry key (the Tasks row declines to its parent).
+/// DF-256: Tasks-tab `Enter` opens the selected task's window (a `TaskRef`); with no task the
+/// Tasks tab has nothing to open and `Enter` is consumed (never the composer or the Stage).
+/// The sidebar's open-entry fallback is witnessed on History.
 #[test]
-fn tasks_enter_drills_with_tasks_and_opens_the_entry_without() {
-    let tasks = |count: usize| {
-        let mut s = fresh();
-        s.sidebar_visible = true;
-        s.focus = FocusState::Sidebar {
-            panel: PanelType::Tasks,
-            selected: 1,
-        };
-        s.task_panel_state.task_count = count;
-        s.task_panel_state.selected_index = 1;
-        s
-    };
-    let mut s = tasks(3);
-    assert_eq!(press(&mut s, Key::Enter), InputAction::Consumed);
-    assert_eq!(s.task_panel_state.drill_down_task, Some(2));
-    assert_eq!(s.focus, FocusState::Chat);
+fn tasks_enter_opens_the_task_window_and_history_enter_opens_the_entry() {
+    let mut s = super::support::tasks_hub();
+    assert_eq!(
+        press(&mut s, Key::Enter),
+        InputAction::OpenTaskWindow(super::support::task_ref(2))
+    );
 
-    let mut s = tasks(0);
+    let mut s = fresh();
+    rustain::adapters::tui::presentation::reducer::open_mission_control(
+        &mut s,
+        rustain::adapters::tui::mission_control::McTab::Tasks,
+    );
+    rustain::adapters::tui::mission_control::tasks::sync(
+        &mut s,
+        &rustain::domain::models::Conversation::default(),
+    );
+    assert_eq!(press(&mut s, Key::Enter), InputAction::Consumed);
+
+    let mut s = fresh();
+    s.sidebar_visible = true;
+    s.focus = FocusState::Sidebar {
+        panel: PanelType::History,
+        selected: 1,
+    };
     assert_eq!(
         press(&mut s, Key::Enter),
         InputAction::OpenSidebarConversation
     );
-    assert_eq!(s.task_panel_state.drill_down_task, None);
 }
 
-/// DF-262: shrinking below the sidebar width drops the sidebar, the drill-down and the
-/// sidebar focus; a wide resize keeps them.
+/// DF-262: shrinking below the sidebar width drops the sidebar and the sidebar focus; a wide
+/// resize keeps them. (The task drill-down this once also dropped is gone, 21-7 7-D.)
 #[test]
-fn narrow_resize_clears_the_drill_down_and_the_sidebar() {
+fn narrow_resize_clears_the_sidebar() {
     let setup = || {
         let mut s = fresh();
         s.terminal_width = 130;
         s.sidebar_visible = true;
-        s.sidebar_panel = Some(PanelType::Tasks);
-        s.task_panel_state.drill_down_task = Some(2);
+        s.sidebar_panel = Some(PanelType::History);
         s.focus = FocusState::Sidebar {
-            panel: PanelType::Tasks,
+            panel: PanelType::History,
             selected: 0,
         };
         s
@@ -104,13 +109,12 @@ fn narrow_resize_clears_the_drill_down_and_the_sidebar() {
     assert_eq!(resize(&mut s, 100), InputAction::Consumed);
     assert!(!s.sidebar_visible);
     assert_eq!(s.sidebar_panel, None);
-    assert_eq!(s.task_panel_state.drill_down_task, None);
     assert_eq!(s.focus, FocusState::Chat);
 
     let mut s = setup();
     resize(&mut s, 140);
     assert!(s.sidebar_visible);
-    assert_eq!(s.task_panel_state.drill_down_task, Some(2));
+    assert_eq!(s.sidebar_panel, Some(PanelType::History));
 }
 
 /// Messages `Esc` with no kept filter is not swallowed by the tab: the one Mission Control frame
@@ -136,15 +140,24 @@ fn messages_esc_with_nothing_to_clear_closes_the_frame() {
     );
 }
 
-/// An armed reorder wins `Esc` over an open drill-down (the old arm order): the reorder
-/// cancels and the drill stays open.
+/// An armed reorder owns `Esc` only inside Mission Control's Tasks tab (`MissionReorder`): the
+/// reorder cancels there; Chat's own `Esc` no longer depends on a reorder state (DF-21-3-REORDER-WAVE-PRECEDENCE).
 #[test]
-fn esc_cancels_an_armed_reorder_before_the_drill_down_closes() {
-    let mut s = chat();
-    s.task_panel_state.drill_down_task = Some(2);
-    s.task_panel_state.reorder_mode_for = Some(2);
+fn esc_cancels_an_armed_reorder_only_in_the_tasks_tab() {
+    let mut s = super::support::reorder_hub();
     assert_eq!(press(&mut s, Key::Esc), InputAction::TaskReorderCancel);
-    assert_eq!(s.task_panel_state.drill_down_task, Some(2));
+
+    let mut plain = chat();
+    let expected = press(&mut plain, Key::Esc);
+    let mut armed = chat();
+    armed.task_panel_state.reorder = Some(rustain::adapters::tui::state::Reorder {
+        conversation_id: "c".to_owned(),
+        plan_id: "p".to_owned(),
+        number: 2,
+        original_order: vec![1, 2, 3],
+    });
+    assert_eq!(press(&mut armed, Key::Esc), expected);
+    assert_ne!(expected, InputAction::TaskReorderCancel);
 }
 
 /// With a wave retained, a `z` prefix swallows the wave key after it (`z d` does not open the
@@ -198,8 +211,7 @@ fn sidebar_family_children_take_the_sidebar_effect_for_inherited_keys() {
         (Key::Enter, "OpenSidebarConversation | Sidebar"),
     ];
     for (key, expect) in keys {
-        for panel in [PanelType::Tasks, PanelType::History] {
-            assert_eq!(effect(panel, key), expect, "{panel:?} {key:?}");
-        }
+        let panel = PanelType::History;
+        assert_eq!(effect(panel, key), expect, "{panel:?} {key:?}");
     }
 }

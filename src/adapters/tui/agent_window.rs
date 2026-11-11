@@ -254,7 +254,7 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
         host,
         &SLOT,
         &mut |state, command| match command {
-            CommandId::Mission(MissionCmd::AgentPause) => {
+            CommandId::Mission(MissionCmd::Pause) => {
                 let live = state
                     .agent_window
                     .as_ref()
@@ -268,7 +268,7 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
                     _ => InputAction::Consumed,
                 })
             }
-            CommandId::Mission(MissionCmd::AgentKill) => {
+            CommandId::Mission(MissionCmd::Kill) => {
                 let live = state
                     .agent_window
                     .as_ref()

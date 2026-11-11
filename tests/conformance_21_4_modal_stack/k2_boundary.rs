@@ -495,10 +495,6 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
             InputAction::RequestClipboardPaste,
         ),
     ];
-    targets.push((
-        PaletteAction::OpenPanel(PanelType::Tasks),
-        InputAction::OpenPanel(PanelType::Tasks),
-    ));
     for (name, args) in [
         ("retract-auto", "peer-response-id"),
         ("team", "retract peer"),
@@ -519,16 +515,10 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
             },
         ));
     }
-    targets.extend([
-        (
-            PaletteAction::ExecuteCommand("cancel-plan".into(), None),
-            InputAction::TaskCancelPlan,
-        ),
-        (
-            PaletteAction::ExecuteCommand("reorder-task".into(), None),
-            InputAction::TaskReorderEnter(1),
-        ),
-    ]);
+    targets.extend([(
+        PaletteAction::ExecuteCommand("cancel-plan".into(), None),
+        InputAction::TaskCancelActivePlan,
+    )]);
     for (action, expected) in targets {
         for nested in [false, true] {
             let mut state = TuiState::new(130, 30);

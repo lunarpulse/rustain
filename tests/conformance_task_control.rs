@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 
+use rustain::adapters::tui::mission_control::tasks;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::task_panel_handlers::{
-    dependents, drill_down_task_status, handle_task_pause, handle_task_skip,
-    resolve_panel_task_number,
+    dependents, handle_task_pause, handle_task_skip,
 };
 use rustain::domain::models::{
     Conversation, Plan, PlanStatus, PlanTask, PlanTaskStatus, generate_conversation_id,
@@ -86,7 +86,6 @@ fn make_conv(plan: Plan) -> (Conversation, TuiState) {
     };
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.last_executed_plan_id = Some(plan_id);
-    state.task_panel_state.selected_index = 0;
     (conv, state)
 }
 
@@ -98,9 +97,9 @@ fn ac1_pause_pending_flips_to_paused() {
         PlanStatus::Executing,
         vec![make_task(1, "T1", PlanTaskStatus::Pending)],
     );
-    let (mut conv, mut state) = make_conv(plan);
+    let (mut conv, _state) = make_conv(plan);
 
-    let outcome = handle_task_pause(&mut state, &mut conv, 1);
+    let outcome = handle_task_pause(&mut conv, "test-plan", 1);
     // Should have no notices for a simple pause
     assert!(!outcome.should_resume_advance);
     assert!(outcome.running_task_paused.is_none());
@@ -115,9 +114,9 @@ fn ac1_pause_running_marks_pending_cancel() {
         PlanStatus::Executing,
         vec![make_task(1, "T1", PlanTaskStatus::Running)],
     );
-    let (mut conv, mut state) = make_conv(plan);
+    let (mut conv, _state) = make_conv(plan);
 
-    let outcome = handle_task_pause(&mut state, &mut conv, 1);
+    let outcome = handle_task_pause(&mut conv, "test-plan", 1);
     assert!(!outcome.should_resume_advance);
     // Running task pause should return running_task_paused = Some(n)
     // so the caller can cancel the token
@@ -133,9 +132,9 @@ fn ac1_pause_propagates_to_dependents() {
             make_task_with_deps(2, "T2", PlanTaskStatus::Pending, vec![1]),
         ],
     );
-    let (mut conv, mut state) = make_conv(plan);
+    let (mut conv, _state) = make_conv(plan);
 
-    handle_task_pause(&mut state, &mut conv, 1);
+    handle_task_pause(&mut conv, "test-plan", 1);
     let plan = conv.plans.get("test-plan").unwrap();
     assert_eq!(plan.tasks[0].status, PlanTaskStatus::Paused);
     assert_eq!(plan.tasks[1].status, PlanTaskStatus::Paused);
@@ -147,9 +146,9 @@ fn ac1_resume_paused_back_to_pending() {
         PlanStatus::Executing,
         vec![make_task(1, "T1", PlanTaskStatus::Paused)],
     );
-    let (mut conv, mut state) = make_conv(plan);
+    let (mut conv, _state) = make_conv(plan);
 
-    let outcome = handle_task_pause(&mut state, &mut conv, 1);
+    let outcome = handle_task_pause(&mut conv, "test-plan", 1);
     assert!(outcome.should_resume_advance);
     assert!(outcome.running_task_paused.is_none());
 
@@ -163,9 +162,9 @@ fn ac1_pause_non_pausable_emits_notice() {
         PlanStatus::Executing,
         vec![make_task(1, "T1", PlanTaskStatus::Completed)],
     );
-    let (mut conv, mut state) = make_conv(plan);
+    let (mut conv, _state) = make_conv(plan);
 
-    let outcome = handle_task_pause(&mut state, &mut conv, 1);
+    let outcome = handle_task_pause(&mut conv, "test-plan", 1);
     assert!(
         outcome
             .notices
@@ -199,9 +198,9 @@ fn ac1_resume_was_running_resets_started_at_ms() {
             sub_tasks: vec![],
         }],
     );
-    let (mut conv, mut state) = make_conv(plan);
+    let (mut conv, _state) = make_conv(plan);
 
-    let outcome = handle_task_pause(&mut state, &mut conv, 1);
+    let outcome = handle_task_pause(&mut conv, "test-plan", 1);
     assert!(outcome.should_resume_advance);
 
     let plan = conv.plans.get("test-plan").unwrap();
@@ -233,7 +232,7 @@ fn ac2_skip_pending_no_dependents() {
     );
     let (mut conv, mut state) = make_conv(plan);
 
-    let _notices = handle_task_skip(&mut state, &mut conv, 1);
+    let _notices = handle_task_skip(&mut state, &mut conv, "test-plan", 1);
     let plan = conv.plans.get("test-plan").unwrap();
     assert_eq!(plan.tasks[0].status, PlanTaskStatus::Skipped);
     assert_eq!(plan.tasks[0].error.as_deref(), Some("Skipped by user"));
@@ -253,7 +252,7 @@ fn ac2_skip_with_dependents_shows_cascade() {
     );
     let (mut conv, mut state) = make_conv(plan);
 
-    handle_task_skip(&mut state, &mut conv, 1);
+    handle_task_skip(&mut state, &mut conv, "test-plan", 1);
     let plan = conv.plans.get("test-plan").unwrap();
     assert_eq!(plan.tasks[0].status, PlanTaskStatus::Skipped);
     // The cascade decision is queued (a frame) because T2 depends on T1
@@ -282,7 +281,7 @@ fn ac2_skip_non_skippable_emits_notice() {
     );
     let (mut conv, mut state) = make_conv(plan);
 
-    let notices = handle_task_skip(&mut state, &mut conv, 1);
+    let notices = handle_task_skip(&mut state, &mut conv, "test-plan", 1);
     assert!(
         notices
             .iter()
@@ -319,15 +318,20 @@ fn ac2_skip_failed_preserves_prior_status_in_cascade() {
     );
     let (mut conv, mut state) = make_conv(plan);
 
-    handle_task_skip(&mut state, &mut conv, 1);
+    handle_task_skip(&mut state, &mut conv, "test-plan", 1);
     let pending = queued_cascade(&state).expect("the cascade decision is queued");
     assert_eq!(pending.source_prior_status, PlanTaskStatus::Failed);
 }
 
-// ── AC11: drill_down_task_status ─────────────────────────────────────────────
+// ── AC11: the status a task action is offered from ───────────────────────────
+//
+// old: `drill_down_task_status` read the drilled task's status from the panel state. The
+// drill-down is deleted (A8/A17); the Tasks tab's rows carry the status of every task row
+// (`TasksSource::status_of`, what the rail offers p/s/r/e from), and a ref names its task
+// instead of a "currently drilled" cursor.
 
 #[test]
-fn ac11_drill_down_task_status_returns_status_for_drilled_task() {
+fn ac11_tasks_source_returns_status_for_the_named_task() {
     let plan = make_plan(
         PlanStatus::Executing,
         vec![
@@ -336,28 +340,41 @@ fn ac11_drill_down_task_status_returns_status_for_drilled_task() {
             make_task(3, "T3", PlanTaskStatus::Paused),
         ],
     );
-    let (conv, mut state) = make_conv(plan);
+    let (conv, state) = make_conv(plan);
+    let built = tasks::list(
+        &conv,
+        state.task_panel_state.last_executed_plan_id.as_deref(),
+        None,
+    );
 
-    state.task_panel_state.drill_down_task = Some(1);
     assert_eq!(
-        drill_down_task_status(&state, &conv),
+        built.source.status_of(&tasks::task_id("test-plan", 1)),
         Some(PlanTaskStatus::Completed)
     );
-
-    state.task_panel_state.drill_down_task = Some(2);
     assert_eq!(
-        drill_down_task_status(&state, &conv),
+        built.source.status_of(&tasks::task_id("test-plan", 2)),
         Some(PlanTaskStatus::Failed)
     );
-
-    state.task_panel_state.drill_down_task = Some(3);
     assert_eq!(
-        drill_down_task_status(&state, &conv),
+        built.source.status_of(&tasks::task_id("test-plan", 3)),
         Some(PlanTaskStatus::Paused)
     );
-
-    state.task_panel_state.drill_down_task = None;
-    assert_eq!(drill_down_task_status(&state, &conv), None);
+    // No such task, or a task of another plan: nothing.
+    assert_eq!(
+        built.source.status_of(&tasks::task_id("test-plan", 9)),
+        None
+    );
+    assert_eq!(
+        built.source.status_of(&tasks::task_id("other-plan", 1)),
+        None
+    );
+    // No plan at all: no rows and nothing to act on.
+    let empty = tasks::list(&Conversation::default(), None, None);
+    assert!(empty.rows.is_empty());
+    assert_eq!(
+        empty.source.status_of(&tasks::task_id("test-plan", 1)),
+        None
+    );
 }
 
 // ── Helpers: dependents ──────────────────────────────────────────────────────
@@ -413,10 +430,14 @@ fn dependents_cycle_defensive() {
     assert_eq!(deps, vec![2]); // only T2 depends on T1; T1 is already seen
 }
 
-// ── Helpers: resolve_panel_task_number ───────────────────────────────────────
+// ── Helpers: task numbers of the Tasks tab's rows ────────────────────────────
+//
+// old: `resolve_panel_task_number(state, conv, index)` mapped a sidebar index to a task
+// number. A row now carries its id (`<plan>#<number>`), `parse_id` gives the number back
+// and a row index past the end names nothing.
 
 #[test]
-fn resolve_panel_task_number_works() {
+fn task_numbers_of_the_rows_resolve_by_id() {
     let plan = make_plan(
         PlanStatus::Executing,
         vec![
@@ -425,10 +446,22 @@ fn resolve_panel_task_number_works() {
         ],
     );
     let (conv, state) = make_conv(plan);
+    let built = tasks::list(
+        &conv,
+        state.task_panel_state.last_executed_plan_id.as_deref(),
+        None,
+    );
 
-    assert_eq!(resolve_panel_task_number(&state, &conv, 0), Some(1));
-    assert_eq!(resolve_panel_task_number(&state, &conv, 1), Some(2));
-    assert_eq!(resolve_panel_task_number(&state, &conv, 99), None);
+    let number_at = |index: usize| {
+        built
+            .rows
+            .get(index)
+            .and_then(|row| tasks::parse_id(&row.id))
+            .map(|(_, number)| number)
+    };
+    assert_eq!(number_at(0), Some(1));
+    assert_eq!(number_at(1), Some(2));
+    assert_eq!(number_at(99), None);
 }
 
 // ── Paused normalization in is_terminal ──────────────────────────────────────

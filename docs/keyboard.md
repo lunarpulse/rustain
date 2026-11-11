@@ -28,7 +28,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, L` | Mission Control: Messages tab (the A2A log, read-only; both hosts) | local, attached | portable |  |
 | `Ctrl+X, R` | Mission Control: Room tab (durable room replay, read-only) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, E` | Mission Control: Artifacts tab (durable artifacts, read-only replay) | local, attached | portable | not available in an attached session |
-| `Ctrl+X, T` | Task panel | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
+| `Ctrl+X, T` | Mission Control: Tasks tab (the active conversation's plan; Enter opens the task window) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, U` | Usage / cost | local, attached | portable | not available in an attached session |
 | `Ctrl+X, H` | History panel (past conversations) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, W` | Toggle Monitor mode (sidebar + banners); again returns to Focus | local, attached | portable | not available in an attached session |
@@ -106,7 +106,7 @@ Also inherits: Global.
 | `K` | Jump to the previous content block | local | portable |  |
 | `{` | Jump to previous / next user message | local | portable |  |
 | `}` | Jump to the next user message | local | portable |  |
-| `Tab` | Cycle tools, thinking, code, tables (needs 2+); else sidebar focus, else next tab | local | portable |  |
+| `Tab` | Cycle tools, thinking, code, tables (needs 2+); else next tab | local | portable |  |
 | `z a` | Toggle fold on focused turn | local | portable |  |
 | `z c` | Collapse focused turn | local | portable |  |
 | `z o` | Expand focused turn | local | portable |  |
@@ -336,26 +336,6 @@ Also inherits: Markdown body.
 | `Ctrl+P` | Open the command palette above the tool inspector | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing the tool inspector | local | portable |  |
 
-## Task drill-down
-
-Also inherits: Chat.
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `c` | Copy the drilled task's result | local | portable |  |
-| `r` | Retry the drilled task (the event loop checks its status) | local | portable |  |
-| `s` | Skip the drilled task (the event loop checks its status) | local | portable |  |
-| `e` | Edit the drilled task (the event loop checks its status) | local | portable |  |
-| `p` | Pause the drilled task (the event loop checks its status) | local | portable |  |
-| `j` | Scroll the task result down one line | local | portable |  |
-| `Down` | Scroll the task result down one line | local | portable |  |
-| `k` | Scroll the task result up one line | local | portable |  |
-| `Up` | Scroll the task result up one line | local | portable |  |
-| `g` | Scroll the task result to the top | local | portable |  |
-| `G` | Scroll the task result to the bottom | local | portable |  |
-| `Enter` | Toggle the task result between half and full height | local | portable |  |
-| `Esc` | Leave the drill-down and return to the Tasks panel | local | portable |  |
-
 ## Chat (wave)
 
 Also inherits: Chat.
@@ -368,38 +348,36 @@ Also inherits: Chat.
 | `s` | Close the divergence view of the retained wave | local | portable |  |
 | `r` | Open the retained wave overlay | local | portable |  |
 
-## Chat (reorder)
+## Task window
 
-Also inherits: Chat.
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `Esc` | Cancel the task reorder (the event loop restores the original order) | local | portable |  |
-
-## Tasks
-
-Also inherits: Sidebar.
+Also inherits: Markdown body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Up` | Select the previous task | local | portable |  |
-| `Down` | Select the next task | local | portable |  |
-| `j` | Select the next task | local | portable |  |
-| `k` | Select the previous task | local | portable |  |
-| `x` | Cancel the whole plan (asks to confirm) | local | portable |  |
-| `p` | Pause the selected task | local | portable |  |
-| `s` | Skip the selected task | local | portable |  |
-| `Enter` | Open the selected task's result (the drill-down) | local | portable |  |
+| `p` | Pause the task, or resume it when paused | local | portable |  |
+| `s` | Skip the task; a decision confirms it when other tasks depend on it | local | portable |  |
+| `r` | Retry the failed task | local | portable |  |
+| `e` | Edit the failed task and queue it again | local | portable |  |
+| `c` | Copy the task's result, error or skip reason (refused above 8 MiB), never the sanitized display | local | portable |  |
+| `/` | Show only the body lines that contain a query | local | portable |  |
+| `Esc` | Clear a kept filter, else back to the frame beneath | local | portable |  |
+| `Ctrl+C` | Back to the frame beneath without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above the task window | local | portable |  |
+| `Ctrl+P` | Open the command palette above the task window | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the task window | local | portable |  |
 
 ## Tasks (reorder)
 
-Also inherits: Tasks.
-
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `j` | Move the selected task down | local | portable |  |
-| `k` | Move the selected task up | local | portable |  |
+| `j` | Move the task being reordered down | local | portable |  |
+| `Down` | Move the task being reordered down | local | portable |  |
+| `k` | Move the task being reordered up | local | portable |  |
+| `Up` | Move the task being reordered up | local | portable |  |
 | `Enter` | Commit the new task order | local | portable |  |
+| `Esc` | Cancel the reorder and restore the original order | local | portable |  |
+| `Ctrl+C` | Cancel the reorder and restore the original order without cancelling work | local | portable |  |
+| `Ctrl+Q` | Ask to quit without ending the reorder | local | portable |  |
 
 ## Agent window
 
@@ -438,10 +416,11 @@ Also inherits: Inspector body.
 | `Left` | Select the previous Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
 | `Right` | Select the next Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
 | `Tab` | Move between the list and its detail preview (only where the frame shows both) | local, attached | portable |  |
-| `Enter` | Open the selected row's window (Agents, Artifacts) | local | portable |  |
+| `Enter` | Open the selected row's window (Agents, Tasks, Artifacts) | local | portable |  |
 | `e` | Export the unfiltered A2A log snapshot the Messages view was read from | local | portable |  |
-| `p` | Pause the selected running agent, or resume a suspended one (Agents) | local | portable |  |
-| `x` | Ask to kill the selected agent and its subtree; a decision confirms it (Agents) | local | portable |  |
+| `p` | Pause the selected running agent or task, or resume a suspended agent or a paused task (Agents, Tasks) | local | portable |  |
+| `x` | Ask to kill the selected agent and its subtree (Agents), or to cancel the plan (Tasks); a decision confirms it | local | portable |  |
+| `s` | Skip the selected task; a decision confirms it when other tasks depend on it (Tasks) | local | portable |  |
 | `c` | Copy the selected row's original text, or its detail text while the detail pane has focus (refused above 8 MiB; list tabs only) | local | portable |  |
 | `/` | Filter a list tab's rows, or the Messages rows, by a case-insensitive query (the closing claim always stays) | local, attached | portable |  |
 | `Esc` | Clear a kept Messages filter, else close Mission Control (back one frame) | local, attached | portable |  |

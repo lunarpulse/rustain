@@ -93,8 +93,6 @@ async fn k03_review_from_task_drilldown_restores_full_body_without_sending() {
     let mut f = ProposalFixture::start(vec![host.peer("lena-po")]).await;
     host.reset_counts();
     let body = "READABLE_REVIEW_FIRST\nExact operator-review text.\nREADABLE_REVIEW_LAST";
-    raise(&mut f, body).await;
-    let pending = f.proposal(&f.conversation.id).unwrap().clone();
     f.conversation.plans.insert(
         "detail-plan".into(),
         Plan {
@@ -122,35 +120,23 @@ async fn k03_review_from_task_drilldown_restores_full_body_without_sending() {
         },
     );
     f.state.task_panel_state.last_executed_plan_id = Some("detail-plan".into());
-    f.state.task_panel_state.drill_down_task = Some(1);
-    f.state.task_panel_state.expanded_detail = true;
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
-    terminal
-        .draw(|frame| {
-            let plan = &f.conversation.plans["detail-plan"];
-            rustain::adapters::tui::widgets::task_detail::render(
-                frame.area(),
-                frame.buffer_mut(),
-                plan,
-                &plan.tasks[0],
-                &f.state.theme,
-                16,
-                true,
-                &mut f.state.task_panel_state.detail_scroll_offset,
-            );
-        })
-        .unwrap();
-    let before = terminal
-        .backend()
-        .buffer()
-        .content
-        .chunks(80)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect::<Vec<_>>();
-    assert!(
-        before.iter().any(|row| row.contains("TASK_DETAIL_ONLY")),
-        "{before:#?}"
+    // A task window is open beneath the proposal card (the old drill-down painted under it).
+    let task = rustain::adapters::tui::mission_control::tasks::TaskRef {
+        conversation_id: f.conversation.id.clone(),
+        plan_id: "detail-plan".into(),
+        number: 1,
+    };
+    assert!(rustain::adapters::tui::task_window::open(
+        &mut f.state,
+        &f.conversation,
+        &task
+    ));
+    assert_eq!(
+        f.state.task_window.as_ref().map(|w| w.title()).as_deref(),
+        Some("Task 1 \u{b7} TASK_DETAIL_ONLY")
     );
+    raise(&mut f, body).await;
+    let pending = f.proposal(&f.conversation.id).unwrap().clone();
     assert!(matches!(
         f.key(DomainInputEvent::KeyPress('r')).await,
         InputAction::Consumed
@@ -167,7 +153,10 @@ async fn k03_review_from_task_drilldown_restores_full_body_without_sending() {
         &pending
     ));
     assert_eq!(pending.body, body);
-    assert_eq!(f.state.task_panel_state.drill_down_task, Some(1));
+    assert!(
+        f.state.task_window.is_some(),
+        "the task window stays open beneath the card"
+    );
     assert!(f.state.team_send_blocks.is_empty());
     assert_eq!(host.counts(), HttpCounts { get: 0, post: 0 });
     host.stop().await;

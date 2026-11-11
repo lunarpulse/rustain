@@ -41,3 +41,6 @@ mod k7_agents;
 
 #[path = "conformance_21_7_mission_control/k8_adapters.rs"]
 mod k8_adapters;
+
+#[path = "conformance_21_7_mission_control/k9_tasks.rs"]
+mod k9_tasks;

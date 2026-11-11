@@ -343,6 +343,15 @@ const RULES: &[(&str, &str)] = &[
         "mission-21-7-c",
         r"\bagent_inspector(?:_keys)?\b|\bdrill_down_agent\b|\bInspectorCmd\b|\bContext\s*::\s*Sidebar(?:Agents|AgentInspector)\b|\bPanelCmd\s*::\s*AgentPauseToggle\b|\bBARE_C_EXCEPTIONS\b|\bPanelType\s*::\s*(?:Agents|Adapters)\b",
     ),
+    // Story 21.7 slice 7-D (A25, clause d): the task drill-down, the Tasks sidebar panel and its
+    // contexts, the reorder contexts, the drill/tasks/reorder panel commands and the plan
+    // auto-open state are gone; the plan is the Tasks tab, a task the task window, the reorder
+    // the `MissionReorder` sub-context. `McTab::Tasks`, `Surface::TaskWindow`, `MissionCmd::`
+    // and the wave `PanelCmd` rows stay legal.
+    (
+        "mission-21-7-d",
+        r"\bdrill_down_task\b|\bContext\s*::\s*(?:ChatDrill|ChatReorder|SidebarTasks|TasksReorder)\b|\bPanelCmd\s*::\s*(?:Drill|Tasks|Reorder)\w*|\bPanelType\s*::\s*Tasks\b|\bauto_open_suppressed_conversations\b|\bauto_open_on_task_plan\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -612,6 +621,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "mission-21-7-a",
                     "mission-21-7-b",
                     "mission-21-7-c",
+                    "mission-21-7-d",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2796,4 +2806,74 @@ fn k12_story21_7_c_the_agent_inspector_and_its_sidebars_are_unpinnable_and_the_w
             "the earlier rule sets stay untouched: {rule}"
         );
     }
+}
+
+// Story 21.7 slice 7-D (A25, clause d): the task drill-down (it replaced the chat pane), the
+// Tasks sidebar panel and its contexts, the reorder contexts, the drill/tasks/reorder panel
+// commands and the plan auto-open state are gone; the plan is the Tasks tab, a task is the task
+// window and the reorder is the `MissionReorder` sub-context. The clause is RED on a synthetic
+// source through the same scanner function, cannot be pinned (a hard rule), and leaves the legal
+// neighbours (the wave rows, the hub's own names) alone.
+#[test]
+fn k12_story21_7_d_the_task_drill_down_and_sidebar_panel_are_unpinnable_and_the_window_stays_legal()
+{
+    for text in [
+        "s.task_panel_state.drill_down_task = None;",
+        "let c = Context::ChatDrill;",
+        "let c = keymap::Context :: ChatReorder;",
+        "let c = Context::SidebarTasks;",
+        "let c = Context::TasksReorder;",
+        "let c = PanelCmd::DrillCopy;",
+        "let c = PanelCmd::TasksPause;",
+        "let c = PanelCmd :: ReorderCommit;",
+        "let p = PanelType::Tasks;",
+        "match p { visual::PanelType :: Tasks => {} _ => {} }",
+        "s.task_panel_state.auto_open_suppressed_conversations.clear();",
+        "state.auto_open_on_task_plan = x;",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("mission-21-7-d|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("mission-21-7-d|")),
+            "{text}: {errors:?}"
+        );
+    }
+    // Positive controls the clause must not touch: the hub's Tasks tab, the task window and the
+    // reorder context, the wave rows and the surviving panel, and near-miss names.
+    let legal = "fn real() { let _ = McTab::Tasks; let _ = Surface::TaskWindow; \
+        let _ = Context::TaskWindow; let _ = Context::MissionReorder; \
+        let _ = MissionCmd::ReorderCommit; let _ = PanelCmd::WaveBack; \
+        let _ = PanelType::History; let _ = Context::ChatWave; \
+        task_window::open(s, c, t); tasks::sync(s, c); \
+        let _ = drill_down_tasks; let _ = auto_open_on_task_plans; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("mission-21-7-d|")),
+        "{errors:?}"
+    );
+    let masked = "// drill_down_task PanelType::Tasks Context::ChatDrill\n\
+        #[cfg(test)] mod tests { fn t() { let _ = PanelCmd::DrillCopy; } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("mission-21-7-d|"))
+    );
+    assert!(PINS.is_empty());
+    assert!(RULES.iter().any(|(name, _)| *name == "mission-21-7-c"));
 }

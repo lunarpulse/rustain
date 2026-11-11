@@ -74,12 +74,15 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
             "80 cols: `{painted}` is available (21-7 7-C opens a frame at every width):\n{narrow}"
         );
     }
-    for painted in ["[T] Tasks (n/a)", "[H] History (n/a)"] {
-        assert!(
-            narrow.contains(painted),
-            "80 cols: `{painted}` missing:\n{narrow}"
-        );
-    }
+    // The Tasks chord (21-7, 7-D) opens the Mission Control Tasks tab at every width.
+    assert!(
+        narrow.contains("[T] Tasks") && !narrow.contains("[T] Tasks (n/a)"),
+        "80 cols: the Tasks chord is available:\n{narrow}"
+    );
+    assert!(
+        narrow.contains("[H] History (n/a)"),
+        "80 cols: `[H] History (n/a)` missing:\n{narrow}"
+    );
     for painted in [
         "[P] Profile",
         "[M] Model",
@@ -315,6 +318,7 @@ fn chat_tip_is_at_most_60_cells() {
 fn every_command_a_generated_hint_names_has_a_row() {
     use rustain::adapters::tui::keymap::CommandId;
     use rustain::adapters::tui::keymap::render::{key_text, key_text_at};
+    use rustain::adapters::tui::keymap::table_mission::MissionCmd as M;
     use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SidebarCmd};
     use rustain::adapters::tui::keymap::table_overlay::OverlayCmd as O;
     use rustain::adapters::tui::keymap::table_panels::PanelCmd as P;
@@ -340,15 +344,16 @@ fn every_command_a_generated_hint_names_has_a_row() {
         P::WaveRerun.into(),
         P::WaveDiverge.into(),
         P::WaveClose.into(),
-        P::DrillToggleExpand.into(),
-        P::DrillScrollDown.into(),
-        P::DrillScrollUp.into(),
-        P::DrillCopy.into(),
-        P::DrillClose.into(),
-        P::DrillRetry.into(),
-        P::DrillSkip.into(),
-        P::DrillEdit.into(),
-        P::DrillPause.into(),
+        M::Pause.into(),
+        M::Skip.into(),
+        M::Kill.into(),
+        M::Retry.into(),
+        M::Edit.into(),
+        M::CopyResult.into(),
+        M::ReorderDown.into(),
+        M::ReorderUp.into(),
+        M::ReorderCommit.into(),
+        M::ReorderCancel.into(),
     ];
     for command in commands {
         assert_ne!(key_text(command), "?", "{command:?} has no row");

@@ -186,25 +186,28 @@ pub enum InputAction {
     OpenArtifactWindow(String),
     /// Export the exact transparency report snapshot the Messages tab was read from.
     ExportTransparency,
-    /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
-    CopyTaskResult {
-        plan_id: Option<String>,
-        task_number: u32,
-    },
-    /// Story 6.4: Pause/Resume task (panel `p` or drill-down `p` on Paused).
-    TaskPause(u32),
-    /// Story 6.4: Skip task (panel `s` or drill-down `s` on Failed).
-    TaskSkip(u32),
-    /// Story 6.4: Retry failed task (drill-down `r` on Failed).
-    TaskRetry(u32),
-    /// Story 6.4: Edit failed task (drill-down `e` on Failed).
-    TaskEdit(u32),
-    /// Story 6.4: Cancel plan (panel `x` or palette `!cancel-plan`).
-    TaskCancelPlan,
+    /// `Enter` on a Tasks row: open the task's window (Story 21.7 A8). The host reads the task
+    /// from the **active** conversation and refuses a ref of another one.
+    OpenTaskWindow(crate::adapters::tui::mission_control::tasks::TaskRef),
+    /// Story 6.4 / 21.7 A11: Pause/Resume a task (Tasks tab `p`, task window `p`). The ref names
+    /// the conversation, plan and task; the host resolves it in **that** conversation and
+    /// refuses it when it is not the active writable tab's.
+    TaskPause(crate::adapters::tui::mission_control::tasks::TaskRef),
+    /// Skip a task (Tasks tab `s`, task window `s`); a decision confirms a cascade.
+    TaskSkip(crate::adapters::tui::mission_control::tasks::TaskRef),
+    /// Retry a failed task (task window `r`).
+    TaskRetry(crate::adapters::tui::mission_control::tasks::TaskRef),
+    /// Edit a failed task (task window `e`).
+    TaskEdit(crate::adapters::tui::mission_control::tasks::TaskRef),
+    /// Cancel the plan the ref names (Tasks tab `x`): raises the confirmation decision.
+    TaskCancelPlan(crate::adapters::tui::mission_control::tasks::TaskRef),
+    /// Palette `!cancel-plan`: cancel the active conversation's executing plan (a decision).
+    TaskCancelActivePlan,
     /// Story 6.4: Resume all paused tasks (palette `!resume-all-tasks`).
     TaskResumeAll,
-    /// Story 6.4: Enter reorder mode for selected task (palette `!reorder-task`).
-    TaskReorderEnter(u32),
+    /// Story 6.4: Enter reorder mode for a pending task (palette `!reorder-task` over the
+    /// Tasks tab's selection).
+    TaskReorderEnter(crate::adapters::tui::mission_control::tasks::TaskRef),
     /// Story 6.4: Move reorder target up/down.
     TaskReorderMove(Direction),
     /// Story 6.4: Commit reorder (Enter).
@@ -541,6 +544,7 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
         && (crate::adapters::tui::mission_control::keys::ignores_raw_key(state, key)
             || crate::adapters::tui::artifact_window::ignores_raw_key(state, key)
             || crate::adapters::tui::agent_window::ignores_raw_key(state, key)
+            || crate::adapters::tui::task_window::ignores_raw_key(state, key)
             || crate::adapters::tui::adapters_window::ignores_raw_key(state, key))
     {
         return true;
@@ -784,7 +788,7 @@ pub(crate) fn handle_leader_key(
             presentation::reducer::open_mission_control(state, McTab::Artifacts);
             InputAction::OpenMissionControl(McTab::Artifacts)
         }
-        LeaderCmd::Tasks => InputAction::OpenPanel(PanelType::Tasks),
+        LeaderCmd::Tasks => open_tasks(state),
         LeaderCmd::History => InputAction::OpenPanel(PanelType::History),
         LeaderCmd::Usage => InputAction::OpenUsagePanel,
         // A6: Monitor toggles (Focus/Dashboard -> Monitor, Monitor -> Focus).
@@ -839,6 +843,14 @@ fn open_agents(state: &mut TuiState) -> InputAction {
     InputAction::OpenMissionControl(McTab::Agents)
 }
 
+/// `Ctrl+X t` and the palette's Tasks entry: Mission Control opens on the Tasks tab at once;
+/// the host's next paint builds the rows from the active conversation (`tasks::sync`).
+fn open_tasks(state: &mut TuiState) -> InputAction {
+    use crate::adapters::tui::mission_control::McTab;
+    presentation::reducer::open_mission_control(state, McTab::Tasks);
+    InputAction::OpenMissionControl(McTab::Tasks)
+}
+
 /// A palette entry that names a stack surface.
 fn open_surface(
     state: &mut TuiState,
@@ -847,8 +859,28 @@ fn open_surface(
     use crate::domain::models::palette::SurfaceTarget;
     match target {
         SurfaceTarget::Agents => open_agents(state),
+        SurfaceTarget::Tasks => open_tasks(state),
         SurfaceTarget::Adapters => InputAction::OpenAdapters,
     }
+}
+
+/// The palette's `Reorder task`: the reorder lives in Mission Control's Tasks tab (A17), so it
+/// acts on the task selected there. With the Tasks tab not on top it opens the tab and says how
+/// to choose the task instead of guessing one.
+fn reorder_selected_task(state: &mut TuiState) -> InputAction {
+    let selected = crate::adapters::tui::mission_control::is_top(state)
+        .then(|| crate::adapters::tui::mission_control::tasks::selected_ref(state))
+        .flatten();
+    if let Some(task) = selected {
+        return InputAction::TaskReorderEnter(task);
+    }
+    let action = open_tasks(state);
+    crate::adapters::tui::notifications::info(
+        state,
+        crate::adapters::tui::notifications::NoticeSource::Palette,
+        "Select a pending task, then choose Reorder task again",
+    );
+    action
 }
 
 fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
@@ -899,9 +931,6 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
             if *w < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
                 state.sidebar_visible = false;
                 state.sidebar_panel = None;
-                state.task_panel_state.drill_down_task = None;
-                state.task_panel_state.expanded_detail = false;
-                state.task_panel_state.detail_scroll_offset = 0;
                 if matches!(state.focus, FocusState::Sidebar { .. }) {
                     reducer::set_base(state, FocusState::Chat);
                 }
@@ -1010,16 +1039,11 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
     if state.reverse_search.is_open() {
         return Some(Context::ReverseSearch);
     }
-    let tasks = &state.task_panel_state;
     Some(match &state.focus {
         FocusState::Input => Context::Input,
-        FocusState::Chat if tasks.drill_down_task.is_some() => Context::ChatDrill,
-        FocusState::Chat if tasks.reorder_mode_for.is_some() => Context::ChatReorder,
         FocusState::Chat if state.wave_run.is_some() => Context::ChatWave,
         FocusState::Chat => Context::Chat,
         FocusState::Sidebar { panel, .. } => match panel {
-            PanelType::Tasks if tasks.reorder_mode_for.is_some() => Context::TasksReorder,
-            PanelType::Tasks => Context::SidebarTasks,
             PanelType::History => Context::SidebarHistory,
         },
     })
@@ -1029,10 +1053,8 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
 /// declines in the current state hands the key to its row's parent context; a key
 /// without a row takes the context's typing or default arm.
 fn dispatch(state: &mut TuiState, context: Context, key: Key, host: Host) -> InputAction {
-    if matches!(
-        context,
-        Context::Chat | Context::ChatWave | Context::ChatReorder
-    ) && let Key::Char(c) = key
+    if matches!(context, Context::Chat | Context::ChatWave)
+        && let Key::Char(c) = key
     {
         if let Some(done) = chat_sequence(state, context, c, host) {
             return done;
@@ -1100,13 +1122,9 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
         Context::Global
             | Context::Input
             | Context::Chat
-            | Context::ChatDrill
             | Context::ChatWave
-            | Context::ChatReorder
             | Context::Sidebar
             | Context::SidebarHistory
-            | Context::SidebarTasks
-            | Context::TasksReorder
     );
     let Key::Char(c) = key else {
         if context == Context::Autocomplete {
@@ -1133,10 +1151,6 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
         }
         Context::ModelSelector => model_char(state, None, c).unwrap_or(InputAction::Consumed),
         Context::Input | Context::Autocomplete => type_char(state, c, None),
-        Context::TasksReorder => {
-            state.needs_redraw = true;
-            InputAction::Ignored
-        }
         _ if ignores => InputAction::Ignored,
         _ => InputAction::Consumed,
     }
@@ -1160,7 +1174,7 @@ fn execute(
         CommandId::Sidebar(cmd) => exec_sidebar(state, cmd),
         CommandId::Search(cmd) => exec_search(cmd),
         CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
-        CommandId::Panel(cmd) => return exec_panel(state, cmd),
+        CommandId::Panel(cmd) => crate::adapters::tui::handlers::wave_overlay::command(state, cmd),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
         CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Block(_) | CommandId::Body(_) => {
             match state.modal_stack.top().map(|frame| frame.surface) {
@@ -1590,27 +1604,16 @@ fn sidebar_move(state: &mut TuiState, down: bool) -> InputAction {
     let FocusState::Sidebar { panel, .. } = state.focus else {
         return InputAction::Ignored;
     };
-    let tasks = panel == PanelType::Tasks;
-    let (current, limit) = if tasks {
-        (
-            state.task_panel_state.selected_index,
-            state.task_panel_max_index(),
-        )
-    } else {
-        (
-            state.sidebar_selected,
-            state.sidebar_entry_count.saturating_sub(1),
-        )
-    };
+    // History is the only sidebar panel left (the Tasks panel became a Mission Control tab).
+    let PanelType::History = panel;
+    let current = state.sidebar_selected;
+    let limit = state.sidebar_entry_count.saturating_sub(1);
     let target = if down {
         (current < limit).then_some(current + 1)
     } else {
         current.checked_sub(1)
     };
     if let Some(index) = target {
-        if tasks {
-            state.task_panel_state.selected_index = index;
-        }
         state.sidebar_selected = index;
         reducer::set_base(
             state,
@@ -1748,134 +1751,6 @@ fn exec_bookmark(state: &mut TuiState, cmd: BookmarkCmd) -> InputAction {
         }
     }
 }
-
-/// Commands of the task drill-down, the Chat sub-states, the sidebar panels and the wave
-/// overlay. `None`: the command declines in the current state (the key goes to the parent).
-fn exec_panel(state: &mut TuiState, cmd: PanelCmd) -> Option<InputAction> {
-    let tasks = &mut state.task_panel_state;
-    Some(match cmd {
-        PanelCmd::DrillCopy
-        | PanelCmd::DrillRetry
-        | PanelCmd::DrillSkip
-        | PanelCmd::DrillEdit
-        | PanelCmd::DrillPause => {
-            let n = tasks.drill_down_task?;
-            match cmd {
-                PanelCmd::DrillCopy => InputAction::CopyTaskResult {
-                    plan_id: tasks.last_executed_plan_id.clone(),
-                    task_number: n,
-                },
-                // Story 6.4: status-conditional dispatch: gating is in event_loop.rs.
-                PanelCmd::DrillRetry => InputAction::TaskRetry(n),
-                PanelCmd::DrillSkip => InputAction::TaskSkip(n),
-                PanelCmd::DrillEdit => InputAction::TaskEdit(n),
-                _ => InputAction::TaskPause(n),
-            }
-        }
-        // 6-3 AC7: scroll the result body within the drill-down view (the widget clamps).
-        PanelCmd::DrillScrollDown => {
-            tasks.detail_scroll_offset = tasks.detail_scroll_offset.saturating_add(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::DrillScrollUp => {
-            tasks.detail_scroll_offset = tasks.detail_scroll_offset.saturating_sub(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::DrillTop => {
-            tasks.detail_scroll_offset = 0;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::DrillBottom => {
-            tasks.detail_scroll_offset = u16::MAX;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::DrillToggleExpand => {
-            tasks.expanded_detail = !tasks.expanded_detail;
-            tasks.detail_scroll_offset = 0;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::DrillClose if tasks.reorder_mode_for.is_some() => {
-            state.needs_redraw = true;
-            InputAction::TaskReorderCancel
-        }
-        PanelCmd::DrillClose => {
-            tasks.drill_down_task = None;
-            tasks.expanded_detail = false;
-            tasks.detail_scroll_offset = 0;
-            let selected = tasks.selected_index;
-            reducer::set_base(
-                state,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    selected,
-                },
-            );
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::WaveBack
-        | PanelCmd::WaveOpenOverlay
-        | PanelCmd::WaveOpenDiverge
-        | PanelCmd::WaveCloseDiverge
-        | PanelCmd::WaveOpenFromChat
-        | PanelCmd::WaveNext
-        | PanelCmd::WavePrev
-        | PanelCmd::WaveDrill
-        | PanelCmd::WaveClose
-        | PanelCmd::WaveRerun
-        | PanelCmd::WaveDiverge
-        | PanelCmd::WaveDivergeClose => {
-            crate::adapters::tui::handlers::wave_overlay::command(state, cmd)
-        }
-        PanelCmd::ReorderCancel => {
-            state.needs_redraw = true;
-            InputAction::TaskReorderCancel
-        }
-        PanelCmd::TasksPrev => sidebar_move(state, false),
-        PanelCmd::TasksNext => sidebar_move(state, true),
-        PanelCmd::TasksCancelPlan => {
-            state.needs_redraw = true;
-            InputAction::TaskCancelPlan
-        }
-        // Panel `p` / `s`: 0-based selected index; the event loop resolves the task number.
-        PanelCmd::TasksPause => {
-            state.needs_redraw = true;
-            InputAction::TaskPause(tasks.selected_index as u32)
-        }
-        PanelCmd::TasksSkip => {
-            state.needs_redraw = true;
-            InputAction::TaskSkip(tasks.selected_index as u32)
-        }
-        PanelCmd::TasksDrill if tasks.task_count > 0 => {
-            tasks.drill_down_task = Some((tasks.selected_index + 1) as u32);
-            tasks.expanded_detail = false;
-            tasks.detail_scroll_offset = 0;
-            reducer::set_base(state, FocusState::Chat);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // With no task `Enter` is the sidebar's open-entry key (DF-256).
-        PanelCmd::TasksDrill => return None,
-        PanelCmd::ReorderDown | PanelCmd::ReorderUp => {
-            state.needs_redraw = true;
-            InputAction::TaskReorderMove(if cmd == PanelCmd::ReorderDown {
-                Direction::Down
-            } else {
-                Direction::Up
-            })
-        }
-        PanelCmd::ReorderCommit => {
-            state.needs_redraw = true;
-            InputAction::TaskReorderCommit
-        }
-    })
-}
-
 fn exec_overlay(
     state: &mut TuiState,
     context: Context,
@@ -2931,12 +2806,11 @@ pub(crate) fn dispatch_palette_action(
         PaletteAction::ExecuteCommand(name, args) => {
             // Story 6.4: route task-control palette commands to dedicated InputAction variants
             if name == "cancel-plan" {
-                InputAction::TaskCancelPlan
+                InputAction::TaskCancelActivePlan
             } else if name == "resume-all-tasks" {
                 InputAction::TaskResumeAll
             } else if name == "reorder-task" {
-                let task_n = (state.task_panel_state.selected_index + 1) as u32;
-                InputAction::TaskReorderEnter(task_n)
+                reorder_selected_task(state)
             } else {
                 InputAction::ExecuteCommand { name, args }
             }
@@ -4447,11 +4321,6 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Sidebar Tasks",
-                setup: sidebar(PanelType::Tasks),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
                 label: "Input with autocomplete popup active (production shape)",
                 setup: Box::new(|s| {
                     s.focus = FocusState::Input;
@@ -4598,6 +4467,62 @@ mod tests {
                         s,
                         crate::adapters::tui::mission_control::McTab::Agents,
                     );
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Mission Control Tasks tab (replaces the retired Sidebar Tasks row)",
+                setup: Box::new(|s| {
+                    presentation::reducer::open_mission_control(
+                        s,
+                        crate::adapters::tui::mission_control::McTab::Tasks,
+                    );
+                }),
+                expect: CtrlQRowExpectation::Quit,
+            },
+            Row {
+                label: "Task window (replaces the retired Chat task drill-down)",
+                setup: Box::new(|s| {
+                    use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
+                    let task = PlanTask {
+                        number: 1,
+                        title: "Compile".to_owned(),
+                        description: String::new(),
+                        depends_on: vec![],
+                        status: PlanTaskStatus::Failed,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        result: None,
+                        error: Some("boom".to_owned()),
+                        waiting_on: vec![],
+                        delegated_to: None,
+                        sub_tasks: vec![],
+                    };
+                    let plan = Plan {
+                        id: "p1".to_owned(),
+                        title: "Ship".to_owned(),
+                        tasks: vec![task],
+                        estimated_effort: None,
+                        status: PlanStatus::Executing,
+                        created_at: 1,
+                        resolved_at: None,
+                        host_message_id: None,
+                    };
+                    let conversation = crate::domain::models::Conversation {
+                        id: "conv-1".to_owned(),
+                        plans: std::collections::HashMap::from([("p1".to_owned(), plan)]),
+                        ..Default::default()
+                    };
+                    let task_ref = crate::adapters::tui::mission_control::tasks::TaskRef {
+                        conversation_id: "conv-1".to_owned(),
+                        plan_id: "p1".to_owned(),
+                        number: 1,
+                    };
+                    assert!(crate::adapters::tui::task_window::open(
+                        s,
+                        &conversation,
+                        &task_ref
+                    ));
                 }),
                 expect: CtrlQRowExpectation::Quit,
             },

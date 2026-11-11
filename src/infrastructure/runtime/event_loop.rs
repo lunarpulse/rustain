@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::mission_bridge::{self, get_subagent_provider};
+use super::task_panel_bridge::{self, TaskCtx};
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
 use crate::adapters::palette_registry::PaletteRegistry;
@@ -402,7 +403,6 @@ pub async fn run(
     let login_ctx =
         crate::adapters::tui::login_runtime::LoginCtx::new(app_state.event_bus.clone(), live);
     state.skill_registry = skill_activator.registry_arc();
-    state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
     // Story 8.4b AC-9: seed initial density mode from config
     state.density_mode = config.layout.density_mode;
     crate::adapters::tui::handlers::config::apply_markdown_config(&mut state, &config.markdown);
@@ -1019,6 +1019,7 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         state.local_read_only = tab_manager.active_tab().read_only;
+                        task_panel_bridge::settle_reorder_origin(&mut state, &conversation, tab_manager.tabs_mut());
                         if let crossterm::event::Event::Paste(text) = &event
                             && apply_query_paste(&mut tab_manager, &mut state, &conversation, text, &storage, &session_index, &domain_tx).is_some()
                         {
@@ -2189,365 +2190,33 @@ pub async fn run(
                                 InputAction::CopyToClipboard(content) => {
                                     handlers::clipboard::requested_in(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
-                                InputAction::CopyTaskResult { plan_id, task_number } => {
-                                    let content = plan_id.as_deref()
-                                        .and_then(|id| conversation.plans.get(id))
-                                        .and_then(|plan| plan.tasks.get((task_number - 1) as usize))
-                                        .map(|task| {
-                                            match task.status {
-                                                PlanTaskStatus::Completed => {
-                                                    task.result.as_ref().map(|r| r.text.clone()).unwrap_or_default()
-                                                }
-                                                PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled => {
-                                                    task.error.clone().unwrap_or_default()
-                                                }
-                                                _ => format!("Task {}: {} — {:?}", task.number, task.title, task.status),
-                                            }
-                                        })
-                                        .unwrap_or_default();
-                                    handlers::clipboard::notify_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                InputAction::OpenTaskWindow(task) => {
+                                    if !crate::adapters::tui::task_window::open(&mut state, &conversation, &task) {
+                                        notifications::warning(&mut state, NoticeSource::Task, "That task is no longer available.");
+                                    }
                                 }
-                                // ─── Story 6.4: Task Control & Plan Deviation ───
-
-                                InputAction::TaskPause(n) => {
-                                    let task_number = if state.task_panel_state.drill_down_task.is_some() {
-                                        n
-                                    } else {
-                                        match crate::adapters::tui::task_panel_handlers::resolve_panel_task_number(&state, &conversation, n) {
-                                            Some(tn) => tn,
-                                            None => {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: NoticeLevel::Info,
-                                                    message: "No task selected.".to_string(),
-                                                });
-                                                continue;
-                                            }
-                                        }
-                                    };
-                                    let outcome = crate::adapters::tui::task_panel_handlers::handle_task_pause(
-                                        &mut state,
-                                        &mut conversation,
-                                        task_number,
-                                    );
-                                    for notice in &outcome.notices {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(notice.conversation_id.clone()),
-                                            level: notice.level,
-                                            message: notice.message.clone(),
-                                        });
-                                    }
-                                    // Emit PlanTaskStatusChanged: scoped to release immutable borrow
-                                    let plan_id = state.task_panel_state.last_executed_plan_id.clone().unwrap_or_default();
-                                    let current_status = {
-                                        conversation.plans.get(&plan_id)
-                                            .and_then(|plan| plan.tasks.get((task_number.saturating_sub(1)) as usize))
-                                            .map(|t| t.status)
-                                    };
-                                    if let Some(status) = current_status {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                            conversation_id: conversation.id.clone(),
-                                            plan_id: plan_id.clone(),
-                                            task_number,
-                                            status,
-                                        });
-                                    }
-                                    let running_to_cancel = outcome.running_task_paused;
-                                    let should_advance = outcome.should_resume_advance;
-                                    drop(outcome);
-                                    if let Some(running_n) = running_to_cancel {
-                                        plan_runtime.mark_pause_pending(&plan_id, running_n).await;
-                                        if let Some(snapshot) = plan_runtime.snapshot(&plan_id).await {
-                                            if let Some(token) = snapshot.task_cancels.get(&running_n) {
-                                                token.cancel();
-                                            }
-                                        }
-                                    }
-                                    if should_advance {
-                                        let conv_id = conversation.id.clone();
-                                        let agents_snapshot = {
-                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                let guard = provider.agent_registry().read().await;
-                                                guard.agents().to_vec()
-                                            } else {
-                                                vec![]
-                                            }
-                                        };
-                                        plan_runtime.resume_advance(
-                                            &conv_id,
-                                            &plan_id,
-                                            &mut conversation,
-                                            app_state.event_bus.as_ref(),
-                                        &agents_snapshot,
-                                        security.current_mode(),
-                                    ).await;
-                                    }
-                                    state.needs_redraw = true;
+                                // ─── Story 6.4 / 21.7: task actions, keyed by TaskRef ───
+                                InputAction::TaskPause(task) => {
+                                    let follow = task_panel_bridge::pause(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus), &task);
+                                    if let Some(follow) = follow { task_panel_bridge::run_follow(&plan_runtime, &app_state, &mut conversation, security.current_mode(), follow).await; }
                                 }
-
-                                InputAction::TaskSkip(n) => {
-                                    let task_number = if state.task_panel_state.drill_down_task.is_some() {
-                                        n
-                                    } else {
-                                        match crate::adapters::tui::task_panel_handlers::resolve_panel_task_number(&state, &conversation, n) {
-                                            Some(tn) => tn,
-                                            None => {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: NoticeLevel::Info,
-                                                    message: "No task selected.".to_string(),
-                                                });
-                                                continue;
-                                            }
-                                        }
-                                    };
-                                    let notices = crate::adapters::tui::task_panel_handlers::handle_task_skip(
-                                        &mut state,
-                                        &mut conversation,
-                                        task_number,
-                                    );
-                                    for notice in &notices {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(notice.conversation_id.clone()),
-                                            level: notice.level,
-                                            message: notice.message.clone(),
-                                        });
-                                    }
-                                    let plan_id = state.task_panel_state.last_executed_plan_id.clone().unwrap_or_default();
-                                    let current_status = {
-                                        conversation.plans.get(&plan_id)
-                                            .and_then(|plan| plan.tasks.get((task_number.saturating_sub(1)) as usize))
-                                            .map(|t| t.status)
-                                    };
-                                    if let Some(status) = current_status {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                            conversation_id: conversation.id.clone(),
-                                            plan_id: plan_id.clone(),
-                                            task_number,
-                                            status,
-                                        });
-                                    }
-                                    let should_advance = !state.decisions.items().any(|item| item.kind == crate::adapters::tui::decision_queue::DecisionKind::SkipCascade && item.conversation_id.as_deref() == Some(conversation.id.as_str()));
-                                    if should_advance {
-                                        let conv_id = conversation.id.clone();
-                                        let agents_snapshot = {
-                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                let guard = provider.agent_registry().read().await;
-                                                guard.agents().to_vec()
-                                            } else {
-                                                vec![]
-                                            }
-                                        };
-                                        plan_runtime.resume_advance(
-                                            &conv_id,
-                                            &plan_id,
-                                            &mut conversation,
-                                            app_state.event_bus.as_ref(),
-                                        &agents_snapshot,
-                                        security.current_mode(),
-                                    ).await;
-                                    }
-                                    state.needs_redraw = true;
+                                InputAction::TaskSkip(task) => {
+                                    let follow = task_panel_bridge::skip(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus), &task);
+                                    if let Some(follow) = follow { task_panel_bridge::run_follow(&plan_runtime, &app_state, &mut conversation, security.current_mode(), follow).await; }
                                 }
-
-                                InputAction::TaskRetry(n) => {
-                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
-                                        Some(id) => id.clone(),
-                                        None => {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: NoticeLevel::Info,
-                                                message: "No active plan.".to_string(),
-                                            });
-                                            continue;
-                                        }
-                                    };
-                                    let should_retry = match conversation.plans.get_mut(&plan_id) {
-                                        Some(plan) => {
-                                            let idx = (n.saturating_sub(1)) as usize;
-                                            if idx < plan.tasks.len() && plan.tasks[idx].number == n && plan.tasks[idx].status == PlanTaskStatus::Failed {
-                                                plan.tasks[idx].status = PlanTaskStatus::Pending;
-                                                plan.tasks[idx].started_at_ms = None;
-                                                plan.tasks[idx].completed_at_ms = None;
-                                                plan.tasks[idx].error = None;
-                                                plan.tasks[idx].result = None;
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        }
-                                        None => false,
-                                    };
-                                    if should_retry {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                            conversation_id: conversation.id.clone(),
-                                            plan_id: plan_id.clone(),
-                                            task_number: n,
-                                            status: PlanTaskStatus::Pending,
-                                        });
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(conversation.id.clone()),
-                                            level: NoticeLevel::Info,
-                                            message: format!("Retrying Task {}.", n),
-                                        });
-                                        let conv_id = conversation.id.clone();
-                                        let agents_snapshot = {
-                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                let guard = provider.agent_registry().read().await;
-                                                guard.agents().to_vec()
-                                            } else {
-                                                vec![]
-                                            }
-                                        };
-                                        plan_runtime.resume_advance(
-                                            &conv_id,
-                                            &plan_id,
-                                            &mut conversation,
-                                            app_state.event_bus.as_ref(),
-                                        &agents_snapshot,
-                                        security.current_mode(),
-                                    ).await;
-                                    }
-                                    state.needs_redraw = true;
+                                InputAction::TaskRetry(task) => {
+                                    let follow = task_panel_bridge::retry(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus), &task);
+                                    if let Some(follow) = follow { task_panel_bridge::run_follow(&plan_runtime, &app_state, &mut conversation, security.current_mode(), follow).await; }
                                 }
-
-                                InputAction::TaskEdit(n) => {
-                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
-                                        Some(id) => id.clone(),
-                                        None => continue,
-                                    };
-                                    let has_failed_task = conversation.plans.get(&plan_id)
-                                        .and_then(|p| p.tasks.get((n.saturating_sub(1)) as usize))
-                                        .map(|t| t.number == n && t.status == PlanTaskStatus::Failed)
-                                        .unwrap_or(false);
-                                    if !has_failed_task {
-                                        continue;
-                                    }
-                                    let (orig_title, orig_description) = {
-                                        let plan = conversation.plans.get(&plan_id).unwrap();
-                                        let task = &plan.tasks[(n.saturating_sub(1)) as usize];
-                                        (task.title.clone(), task.description.clone())
-                                    };
-                                    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-                                    let edits_dir = home.join(".rustain").join("edits");
-                                    let _ = std::fs::create_dir_all(&edits_dir);
-                                    let path = edits_dir.join(format!("task-{}-{}.txt", plan_id, n));
-                                    let safe_title = orig_title.replace('\n', " ");
-                                    let template: String = format!(
-                                        "# Edit task title and description below.\n\
-                                         # Save and exit to apply; close without changes to cancel.\n\
-                                         # Lines starting with # are ignored.\n\
-                                         title: {}\n\
-                                         description: |\n{}",
-                                        safe_title,
-                                        {
-                                            let indented: Vec<String> = orig_description
-                                                .lines()
-                                                .map(|l| format!("  {}", l))
-                                                .collect();
-                                            indented.join("\n")
-                                        }
-                                    );
-                                    let _ = std::fs::write(&path, &template);
-                                    // editor_suspend handles terminal suspend/restore internally
-                                    let exit_result = crate::adapters::tui::editor_suspend::run_editor_on_path(&path);
-                                    match exit_result {
-                                        Ok(_exit_status) => {
-                                            match std::fs::read_to_string(&path) {
-                                                Ok(content) => {
-                                                    if content == template {
-                                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                            conversation_id: Some(conversation.id.clone()),
-                                                            level: NoticeLevel::Info,
-                                                            message: "Task edit cancelled.".to_string(),
-                                                        });
-                                                    } else {
-                                                        let (new_title, new_desc_lines) =
-                                                            crate::infrastructure::runtime::task_panel_bridge::parse_task_edit(&content);
-                                                        if new_title.is_empty() {
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                                conversation_id: Some(conversation.id.clone()),
-                                                                level: NoticeLevel::Warning,
-                                                                message: "Failed to parse edited task — missing title. Task unchanged.".to_string(),
-                                                            });
-                                                        } else {
-                                                            let new_desc = new_desc_lines.join("\n");
-                                                            {
-                                                                let plan = conversation.plans.get_mut(&plan_id).unwrap();
-                                                                let idx = (n.saturating_sub(1)) as usize;
-                                                                plan.tasks[idx].title = new_title;
-                                                                plan.tasks[idx].description = new_desc;
-                                                                plan.tasks[idx].status = PlanTaskStatus::Pending;
-                                                                plan.tasks[idx].started_at_ms = None;
-                                                                plan.tasks[idx].completed_at_ms = None;
-                                                                plan.tasks[idx].error = None;
-                                                                plan.tasks[idx].result = None;
-                                                            }
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                                                conversation_id: conversation.id.clone(),
-                                                                plan_id: plan_id.clone(),
-                                                                task_number: n,
-                                                                status: PlanTaskStatus::Pending,
-                                                            });
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                                conversation_id: Some(conversation.id.clone()),
-                                                                level: NoticeLevel::Info,
-                                                                message: format!("Task {} edited and queued for retry.", n),
-                                                            });
-                                                            state.task_panel_state.drill_down_task = None;
-                                                            let conv_id = conversation.id.clone();
-                                                            let agents_snapshot = {
-                                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                                    let guard = provider.agent_registry().read().await;
-                                                                    guard.agents().to_vec()
-                                                                } else {
-                                                                    vec![]
-                                                                }
-                                                            };
-                                                            plan_runtime.resume_advance(
-                                                                &conv_id,
-                                                                &plan_id,
-                                                                &mut conversation,
-                                                                app_state.event_bus.as_ref(),
-                                                             &agents_snapshot,
-                                                             security.current_mode(),
-                                                         ).await;
-                                                        }
-                                                    }
-                                                }
-                                                Err(_) => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: NoticeLevel::Warning,
-                                                        message: "Failed to read edited file. Task unchanged.".to_string(),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        Err(_e) => {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: NoticeLevel::Info,
-                                                message: "Task edit cancelled (editor exited with error).".to_string(),
-                                            });
-                                        }
-                                    }
-                                    state.needs_redraw = true;
+                                InputAction::TaskEdit(task) => {
+                                    let follow = task_panel_bridge::edit(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus), &task);
+                                    if let Some(follow) = follow { task_panel_bridge::run_follow(&plan_runtime, &app_state, &mut conversation, security.current_mode(), follow).await; }
                                 }
-
-                                InputAction::TaskCancelPlan => {
-                                    let executing_plan = conversation.plans.values()
-                                        .find(|p| p.status == PlanStatus::Executing);
-                                    if let Some(plan) = executing_plan {
-                                        handlers::plan_decisions::arrive_cancel_plan_confirmation(&mut state, &conversation, plan.id.clone());
-                                    } else {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(conversation.id.clone()),
-                                            level: NoticeLevel::Info,
-                                            message: "No active plan to cancel.".to_string(),
-                                        });
-                                    }
-                                    state.needs_redraw = true;
+                                InputAction::TaskCancelPlan(task) => {
+                                    task_panel_bridge::cancel_plan(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus), &task);
+                                }
+                                InputAction::TaskCancelActivePlan => {
+                                    task_panel_bridge::cancel_active_plan(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus));
                                 }
 
                                 InputAction::TaskResumeAll => {
@@ -2626,32 +2295,22 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
 
-                                InputAction::TaskReorderEnter(n) => {
-                                    if !crate::infrastructure::runtime::task_panel_bridge::enter_reorder(
-                                        &mut state, &conversation, n, &app_state.event_bus,
-                                    ) {
-                                        continue;
-                                    }
+                                InputAction::TaskReorderEnter(task) => {
+                                    task_panel_bridge::enter_reorder(&mut TaskCtx::for_host(&mut state, &mut conversation, &tab_manager, &app_state.event_bus), &task);
                                 }
 
                                 InputAction::TaskReorderMove(dir) => {
-                                    if !crate::infrastructure::runtime::task_panel_bridge::move_reorder(
-                                        &mut state, &mut conversation, dir, &app_state.event_bus,
-                                    ) {
+                                    if !task_panel_bridge::move_reorder(&mut state, &mut conversation, dir, &app_state.event_bus) {
                                         continue;
                                     }
                                 }
 
                                 InputAction::TaskReorderCommit => {
-                                    crate::infrastructure::runtime::task_panel_bridge::commit_reorder(
-                                        &mut state, &conversation, &app_state.event_bus,
-                                    );
+                                    task_panel_bridge::commit_reorder(&mut state, &conversation, &app_state.event_bus);
                                 }
 
                                 InputAction::TaskReorderCancel => {
-                                    crate::infrastructure::runtime::task_panel_bridge::cancel_reorder(
-                                        &mut state, &mut conversation,
-                                    );
+                                    task_panel_bridge::cancel_reorder(&mut state, &mut conversation);
                                 }
 
                                 // ─── End Story 6.4 ───
@@ -4001,13 +3660,6 @@ pub async fn run(
                                         state.scroll_snapshot = tab_manager.active_tab().view_state.scroll_offset;
                                         state.auto_snapshot = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
                                         state.needs_redraw = true;
-                                    } else if state.sidebar_visible {
-                                        let focus = FocusState::Sidebar {
-                                            panel: crate::domain::models::visual::PanelType::History,
-                                            selected: state.sidebar_selected,
-                                        };
-                                        reducer::set_base(&mut state, focus);
-                                        state.needs_redraw = true;
                                     } else if tab_manager.tab_count() > 1 {
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_next();
@@ -5170,24 +4822,12 @@ pub async fn run(
                             security.current_mode(),
                             app_state.app_config.load().plan.subtask_failure_policy,
                         );
-                        let term_width = state.terminal_width;
-                        let auto_open_setting = state.auto_open_on_task_plan.clone();
-                        let outcome = crate::adapters::tui::task_panel_handlers::handle_plan_execution_started(
+                        crate::adapters::tui::task_panel_handlers::handle_plan_execution_started(
                             &mut state,
                             &conversation,
                             &conversation_id,
                             &plan_id,
-                            term_width,
-                            crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH,
-                            &auto_open_setting,
                         );
-                        for notice in outcome.notices {
-                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                conversation_id: Some(notice.conversation_id),
-                                level: notice.level,
-                                message: notice.message,
-                            });
-                        }
                     }
                     AppEvent::PlanTaskStatusChanged { conversation_id, plan_id, task_number, status: _ } => {
                         let _ = crate::adapters::tui::task_panel_handlers::handle_plan_task_status_changed(
@@ -5209,31 +4849,19 @@ pub async fn run(
                         handlers::plan_decisions::plan_settled(&mut state, &plan_id);
                         if conversation_id == conversation.id {
                             state.task_panel_state.last_executed_plan_id = Some(plan_id.clone());
-                            // PD1 (Sally A1): a real plan-level failure trumps user-set
-                            // suppression — clear the flag and force the panel back open
-                            // so the failure is surfaced even if the user had dismissed it.
-                            if failed > 0
-                                && state
-                                    .task_panel_state
-                                    .auto_open_suppressed_conversations
-                                    .remove(&conversation.id)
-                                && state.terminal_width >= crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH
-                            {
-                                state.sidebar_visible = true;
-                                state.sidebar_panel = Some(crate::domain::models::visual::PanelType::Tasks);
-                                state.task_panel_state.drill_down_task = None;
-                                state.task_panel_state.expanded_detail = false;
-                                state.task_panel_state.detail_scroll_offset = 0;
-                                state.task_panel_state.task_count = conversation
-                                    .plans
-                                    .get(&plan_id)
-                                    .map(|p| p.tasks.len())
-                                    .unwrap_or(0);
+                            // A failed plan opens nothing (Story 21.7 A19, OD-2): it says so, and
+                            // Mission Control's Tasks tab shows what failed.
+                            if failed > 0 {
                                 state.needs_redraw = true;
                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: NoticeLevel::Warning,
-                                    message: "Plan failed — task panel reopened.".to_string(),
+                                    message: format!(
+                                        "Plan failed — {failed} task(s) failed. {} opens Tasks.",
+                                        crate::adapters::tui::keymap::render::leader_follow_up_long(
+                                            crate::adapters::tui::keymap::table::LeaderCmd::Tasks
+                                        )
+                                    ),
                                 });
                             }
                         }
@@ -7305,6 +6933,10 @@ pub fn render(
     session_index: &SessionIndex,
     context_window: u32,
 ) -> Result<()> {
+    // Mission Control's Tasks tab and an open task window follow the active conversation.
+    if crate::adapters::tui::mission_control::tasks_surface_open(state) {
+        crate::adapters::tui::mission_control::tasks::sync(state, conversation);
+    }
     let tab_manager_for_bar = tab_manager.as_deref();
     let preview_clock = tab_manager_for_bar
         .is_none()
@@ -7421,71 +7053,19 @@ pub fn render(
                 let active_conv_id =
                     tab_manager_for_bar.map(|tm| tm.active_tab().conversation.id.as_str());
                 if let Some(sidebar_area) = app_layout.sidebar {
-                    match state.sidebar_panel {
-                        Some(crate::domain::models::visual::PanelType::Tasks) => {
-                            use crate::adapters::tui::widgets::task_panel;
-                            let plan_to_render = task_panel::resolve_panel_plan(
-                                conversation,
-                                state.task_panel_state.last_executed_plan_id.as_deref(),
-                            );
-                            state.task_panel_state.task_count =
-                                plan_to_render.map(|p| p.tasks.len()).unwrap_or(0);
-                            let is_focused = matches!(
-                                state.focus,
-                                FocusState::Sidebar {
-                                    panel: crate::domain::models::visual::PanelType::Tasks,
-                                    ..
-                                }
-                            );
-                            task_panel::render_task_panel(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                plan_to_render,
-                                state.task_panel_state.selected_index,
-                                is_focused,
-                                theme,
-                            );
-                        }
-                        Some(crate::domain::models::visual::PanelType::History) | None => {
-                            sidebar::render_history_panel(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                session_index.entries(),
-                                state.sidebar_selected,
-                                active_conv_id,
-                                theme,
-                            );
-                        }
-                    }
+                    sidebar::render_history_panel(
+                        sidebar_area,
+                        frame.buffer_mut(),
+                        session_index.entries(),
+                        state.sidebar_selected,
+                        active_conv_id,
+                        theme,
+                    );
                 }
 
                 // Story 8.4b AC-4: Render dashboard panel when in Dashboard mode
                 if let Some(panel_area) = app_layout.dashboard_panel {
                     match state.sidebar_panel {
-                        Some(crate::domain::models::visual::PanelType::Tasks) => {
-                            use crate::adapters::tui::widgets::task_panel;
-                            let plan_to_render = task_panel::resolve_panel_plan(
-                                conversation,
-                                state.task_panel_state.last_executed_plan_id.as_deref(),
-                            );
-                            state.task_panel_state.task_count =
-                                plan_to_render.map(|p| p.tasks.len()).unwrap_or(0);
-                            let is_focused = matches!(
-                                state.focus,
-                                FocusState::Sidebar {
-                                    panel: crate::domain::models::visual::PanelType::Tasks,
-                                    ..
-                                }
-                            );
-                            task_panel::render_task_panel(
-                                panel_area,
-                                frame.buffer_mut(),
-                                plan_to_render,
-                                state.task_panel_state.selected_index,
-                                is_focused,
-                                theme,
-                            );
-                        }
                         Some(crate::domain::models::visual::PanelType::History) => {
                             sidebar::render_history_panel(
                                 panel_area,
@@ -7539,52 +7119,7 @@ pub fn render(
                 let bookmark_indices: &[usize] = tab_manager_for_bar
                     .map(|tm| tm.active_tab().session_meta.bookmarks.as_slice())
                     .unwrap_or(&[]);
-                let mut skip_chat_render = false;
-
-                // Drill-down view (6-3); the decision cards paint as queue frames.
-                if let Some(task_number) = state.task_panel_state.drill_down_task {
-                    let plan_opt = state
-                        .task_panel_state
-                        .last_executed_plan_id
-                        .as_deref()
-                        .and_then(|id| conversation.plans.get(id))
-                        .or_else(|| {
-                            // Story 6.4: fallback to resolve_panel_plan when
-                            // last_executed_plan_id is None (e.g. after restart).
-                            // Also back-fill last_executed_plan_id so subsequent
-                            // drill-down lookups hit the cached path.
-                            use crate::adapters::tui::widgets::task_panel;
-                            let p = task_panel::resolve_panel_plan(conversation, None)?;
-                            state.task_panel_state.last_executed_plan_id = Some(p.id.clone());
-                            Some(p)
-                        });
-                    if let Some(plan) = plan_opt {
-                        if let Some(task) = plan.tasks.get((task_number - 1) as usize) {
-                            use crate::adapters::tui::widgets::task_detail;
-                            task_detail::render(
-                                app_layout.chat_pane,
-                                frame.buffer_mut(),
-                                plan,
-                                task,
-                                theme,
-                                app_layout.chat_pane.height,
-                                state.task_panel_state.expanded_detail,
-                                &mut state.task_panel_state.detail_scroll_offset,
-                            );
-                            skip_chat_render = true;
-                        } else {
-                            state.task_panel_state.drill_down_task = None;
-                            state.task_panel_state.expanded_detail = false;
-                            state.task_panel_state.detail_scroll_offset = 0;
-                        }
-                    } else {
-                        state.task_panel_state.drill_down_task = None;
-                        state.task_panel_state.expanded_detail = false;
-                        state.task_panel_state.detail_scroll_offset = 0;
-                        state.task_panel_state.last_executed_plan_id = None;
-                    }
-                }
-                if !skip_chat_render {
+                {
                     // Extract view_state, open_turn, and clock from the active tab.
                     // If no tab manager is available, use defaults (render-only views
                     // like standalone conversation previews).
@@ -7669,10 +7204,6 @@ pub fn render(
                 } else {
                     None
                 };
-                let drill_down_breadcrumb = state
-                    .task_panel_state
-                    .drill_down_task
-                    .map(|n| format!("Tasks > Task {}", n));
                 state
                     .notifications
                     .set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
@@ -7714,7 +7245,7 @@ pub fn render(
                         state.active_skill_count,
                         state.active_agent_name.as_deref(),
                         state.pending_plan_reminder_at_turn,
-                        drill_down_breadcrumb.as_deref(),
+                        None,
                         tab_manager_for_bar.is_some_and(|tm| {
                             matches!(
                                 tm.active_tab().view_state.mode,

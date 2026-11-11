@@ -108,7 +108,6 @@ mod tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PanelType {
     History,
-    Tasks,
     // The durable Room, the A2A log (Messages), the artifact list and the subagent roster are
     // Mission Control tabs, and the Adapters health is a window, since Story 21.7: none of
     // them is a sidebar panel.

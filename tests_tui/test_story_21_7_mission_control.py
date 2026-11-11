@@ -61,7 +61,7 @@ def room_frame_ok(screen):
     top = _frame_top(rows)
     if top is None or top + 3 >= len(rows):
         return False
-    tab_row = re.fullmatch(r"\s*│ Agents   Messages  ▸Room   Artifacts\s*│\s*", rows[top + 1]) is not None
+    tab_row = re.fullmatch(r"\s*│ Agents   Tasks   Messages  ▸Room   Artifacts\s*│\s*", rows[top + 1]) is not None
     body = any(re.fullmatch(r"\s*│Durable Room · as of .*│\s*", row) for row in rows[top + 2:])
     bottom = next((i for i in range(top + 1, len(rows)) if re.fullmatch(r"\s*└─*┘\s*", rows[i])), None)
     if bottom is None or bottom < top + 3:
@@ -111,7 +111,7 @@ def messages_frame_ok(screen):
     top, bottom = _frame_bounds(rows, MESSAGES_TITLE)
     if top is None or bottom is None or bottom < top + 4:
         return False
-    tab_row = re.fullmatch(r"\s*│ Agents  ▸Messages\b.*│\s*", rows[top + 1]) is not None
+    tab_row = re.fullmatch(r"\s*│ Agents   Tasks  ▸Messages\b.*│\s*", rows[top + 1]) is not None
     seeded = any(re.fullmatch(r".*│ *" + SEED_TS + r" .*\S *│\s*", row) for row in rows[top + 2:bottom - 1])
     rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
     status = any(STATUS in row for row in rows[bottom + 1:])
@@ -212,6 +212,51 @@ def torn_adapters(screen):
     return _torn_frame(screen, "Adapters", "persona", "Needs you (1)", {})
 
 
+TASKS_TITLE = "Mission Control · Tasks"
+TASK_ROW = "Review result"
+TASK_RESULT = "Reviewed OK"
+
+
+def tasks_frame_ok(screen):
+    """Tasks title, the marked Tasks tab row directly below it, the seeded task row inside the
+    frame, the rail with the way out last and the status row intact below."""
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, TASKS_TITLE)
+    if top is None or bottom is None or bottom < top + 3:
+        return False
+    tab_row = re.fullmatch(r"\s*│ Agents  ▸Tasks\b.*│\s*", rows[top + 1]) is not None
+    body = any(re.fullmatch(r".*│.*\b2\. .*" + TASK_ROW + r".*│\s*", row) for row in rows[top + 2:bottom - 1])
+    rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
+    status = any(STATUS in row for row in rows[bottom + 1:])
+    return tab_row and body and rail and status
+
+
+def task_window_ok(screen):
+    """Title `Task 2 · <title>`, the rendered result row inside the frame, the rail with the copy
+    hint and the way out, status below; the result is rendered text (no markdown markers)."""
+    rows = _rows(screen)
+    top, bottom = _frame_bounds(rows, f"Task 2 · {TASK_ROW}")
+    if top is None or bottom is None or bottom < top + 2:
+        return False
+    body = any(re.fullmatch(r".*│ *" + TASK_RESULT + r" *│\s*", row) for row in rows[top + 1:bottom - 1])
+    rail = re.fullmatch(r"\s*│.*\[c\] Copy.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
+    status = any(STATUS in row for row in rows[bottom + 1:])
+    return body and rail and status
+
+
+def torn_tasks(screen):
+    controls = _torn_frame(screen, TASKS_TITLE, TASK_ROW, "Needs you (1)",
+                           {"tab row unmarked": ("▸Tasks", " Tasks")})
+    rows = _rows(screen)
+    index = next(i for i, row in enumerate(rows) if TASK_ROW in row)
+    controls["cut mid-row"] = "\n".join(rows[:index] + [rows[index][: rows[index].index(TASK_ROW) + 4]] + rows[index + 1:])
+    return controls
+
+
+def torn_task_window(screen):
+    return _torn_frame(screen, f"Task 2 · {TASK_ROW}", TASK_RESULT, "Needs you (1)", {})
+
+
 def _deskcheck():
     frames = Path(os.environ["RUSTAIN_MISSION_FRAMES"])
     for width, height in SIZES:
@@ -257,6 +302,21 @@ def _deskcheck():
             assert not agents_frame_ok(torn), f"{name}: torn Agents control `{label}` must fail:\n{torn}"
         for label, torn in torn_adapters(adapters).items():
             assert not adapters_frame_ok(torn), f"{name}: torn Adapters control `{label}` must fail:\n{torn}"
+    for width, height in SIZES:
+        name = f"{width}x{height}"
+        tasks = (frames / f"tasks-open-{name}.txt").read_text(encoding="utf-8")
+        window = (frames / f"task-open-{name}.txt").read_text(encoding="utf-8")
+        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
+        room = (frames / f"room-open-{name}.txt").read_text(encoding="utf-8")
+        assert tasks_frame_ok(tasks), f"{name}: the Tasks tab must pass\n{tasks}"
+        assert task_window_ok(window), f"{name}: the task window must pass\n{window}"
+        for label, frame in (("the Stage", before), ("the Room frame", room)):
+            assert not tasks_frame_ok(frame) and not task_window_ok(frame), f"{name}: absent from {label}"
+        assert not tasks_frame_ok(window) and not task_window_ok(tasks), name
+        for label, torn in torn_tasks(tasks).items():
+            assert not tasks_frame_ok(torn), f"{name}: torn Tasks control `{label}` must fail:\n{torn}"
+        for label, torn in torn_task_window(window).items():
+            assert not task_window_ok(torn), f"{name}: torn window control `{label}` must fail:\n{torn}"
     print("desk-check ok", [f"{w}x{h}" for w, h in SIZES])
 
 
@@ -497,6 +557,90 @@ def test_leg_c_agents_tab_and_adapters_window_at_80x24(monkeypatch):
             after = tui.wait_until(lambda s: _frame_top(_rows(s), "Adapters") is None, "the window closed", timeout=10)
             for name, frame in (("stage-before", before), ("agents-open", agents),
                                 ("adapters-open", adapters), ("stage-after", after)):
+                (evidence / f"{name}.txt").write_text(frame, encoding="utf-8")
+            assert stage_rows(after)[:3] == stage_rows(before)[:3], f"Esc must restore the Stage:\n{before}\n{after}"
+            (evidence / "run.json").write_text(json.dumps(
+                {"viewport": [80, 24], "binary": binary, "result": "PASS"}) + "\n")
+
+
+def _plan_session(session_id: str) -> dict:
+    """The saved session leg D opens (the fixture generator): the 21-9 stage-polish session's
+    envelope with one finished plan of three tasks (the second has a markdown-free result)."""
+    base = json.loads((Path(__file__).parent / "fixtures" / "sessions" / "story21_9_stage_polish.json").read_text())
+    task = {"description": "", "dependsOn": [], "toolCalls": [], "waitingOn": [], "subTasks": []}
+    plan = {
+        "id": "p1", "title": "Release", "status": "completed", "createdAt": 1700000,
+        "tasks": [
+            {**task, "number": 1, "title": "Draft notes", "status": "completed",
+             "result": {"text": "Notes **drafted**", "toolCallCount": 1}},
+            {**task, "number": 2, "title": TASK_ROW, "status": "completed",
+             "result": {"text": TASK_RESULT, "toolCallCount": 1}},
+            {**task, "number": 3, "title": "Publish", "status": "pending"},
+        ],
+    }
+    return {**base, "id": session_id, "title": "Plan smoke", "messages": [], "turns": [], "plans": {"p1": plan}}
+
+
+@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_d_tasks_tab_and_task_window_at_80x24(monkeypatch):
+    """Leg D (7-D): a saved session with a plan; `Ctrl+X t` -> the Tasks tab with the task rows;
+    select task 2, `Enter` -> `Task 2 · <title>` with the rendered result row; `c` copies the
+    result to the clipboard file; `Esc` twice closes the window and the hub. Hermetic."""
+    monkeypatch.setattr(harness, "TERM_COLS", 80)
+    monkeypatch.setattr(harness, "TERM_ROWS", 24)
+    session_id = "story21-7-plan"
+    with tempfile.TemporaryDirectory(prefix="21-7-d-") as root:
+        root = Path(root)
+        workspace = root / "workspace"
+        sessions = workspace / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / f"{session_id}.meta.json").write_text(json.dumps(_plan_session(session_id)))
+        (workspace / ".env").write_text("")
+        home = root / "home"
+        home.mkdir()
+        data = root / "data"
+        data.mkdir()
+        env = {"HOME": str(home), "RUSTAIN_PROFILE": "", "RUSTAIN_CLIPBOARD": "file",
+               "RUSTAIN_DATA_DIR": str(data)}
+        evidence_parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir()))
+        evidence = evidence_parent / "21-7-leg-d"
+        evidence.mkdir(parents=True, exist_ok=True)
+        clipboard = data / "clipboard.txt"
+        binary = str(harness._resolve_binary()[0])
+        with RustainTUI(fresh=False, build=False, workspace=workspace, env_overrides=env,
+                        extra_args=["--session", session_id]) as tui, \
+                (evidence / "raw.pty").open("w", encoding="utf-8", newline="") as raw:
+            tui.child.logfile_read = raw
+            assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
+            before = tui.get_screen_text()
+            assert not tasks_frame_ok(before) and not task_window_ok(before)
+            (evidence / "run.json").write_text(json.dumps(
+                {"viewport": [80, 24], "binary": binary, "result": "PENDING"}) + "\n")
+            tui.send(CTRL_X + "t")
+            tasks = tui.wait_until(tasks_frame_ok, "the Tasks tab with the seeded rows", timeout=15)
+            assert not any("Needs you (" in row for row in _rows(tasks))
+            # The first row is selected on open: one `j` selects task 2 (structural wait on the
+            # marker row, no sleeps).
+            assert any(re.search(r"▸ .*1\. ", row) for row in _rows(tasks)), tasks
+            tui.send("j")
+            tui.wait_until(lambda s: any(re.search(r"▸ .*2\. .*" + TASK_ROW, row) for row in _rows(s)),
+                           "task 2 selected", timeout=10)
+            tui.send("\r")
+            window = tui.wait_until(task_window_ok, "the task window with the rendered result", timeout=15)
+            tui.send("c")
+            deadline = time.monotonic() + 10
+            while not clipboard.exists() and time.monotonic() < deadline:
+                tui.wait_until(lambda s: True, "idle", timeout=1)
+            assert clipboard.exists(), f"`c` must write the clipboard file:\n{tui.get_screen_text()}"
+            assert clipboard.read_bytes() == TASK_RESULT.encode("utf-8")
+            tui.send("\x1b")
+            tui.wait_until(lambda s: _frame_top(_rows(s), f"Task 2 · {TASK_ROW}") is None, "the window closed", timeout=10)
+            tui.send("\x1b")
+            after = tui.wait_until(lambda s: _frame_top(_rows(s), TASKS_TITLE) is None, "the hub closed", timeout=10)
+            for name, frame in (("stage-before", before), ("tasks-open", tasks),
+                                ("task-open", window), ("stage-after", after)):
                 (evidence / f"{name}.txt").write_text(frame, encoding="utf-8")
             assert stage_rows(after)[:3] == stage_rows(before)[:3], f"Esc must restore the Stage:\n{before}\n{after}"
             (evidence / "run.json").write_text(json.dumps(

@@ -35,6 +35,11 @@ pub enum Surface {
     /// `TuiState.agent_window` and its painted title is the frame's `tool_title`
     /// (`Agent · <type>`).
     AgentWindow,
+    /// The task window (Story 21.7 A8): global slot, one at a time, **stage-bound** to the
+    /// conversation of its task (the frame carries that conversation id, so a reset, close or
+    /// tab switch of that Stage pops it); its payload is `TuiState.task_window` and its
+    /// painted title is the frame's `tool_title` (`Task <n> · <title>`).
+    TaskWindow,
     /// The Adapters window (Story 21.7 A21): global, one at a time; its payload is
     /// `TuiState.adapters_window` (a snapshot of the port and MCP health taken at open).
     Adapters,
@@ -64,6 +69,7 @@ impl Surface {
             Self::MissionControl => "Mission Control",
             Self::ArtifactWindow => "Artifact",
             Self::AgentWindow => "Agent",
+            Self::TaskWindow => "Task",
             Self::Adapters => "Adapters",
         }
     }
@@ -91,6 +97,7 @@ impl Surface {
             Self::MissionControl => Context::MissionControl,
             Self::ArtifactWindow => Context::ArtifactWindow,
             Self::AgentWindow => Context::AgentWindow,
+            Self::TaskWindow => Context::TaskWindow,
             Self::Adapters => Context::Adapters,
         }
     }
@@ -113,6 +120,7 @@ impl Surface {
                 | Self::MissionControl
                 | Self::ArtifactWindow
                 | Self::AgentWindow
+                | Self::TaskWindow
                 | Self::Adapters
         )
     }

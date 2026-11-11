@@ -923,55 +923,24 @@ impl Default for AutocompleteState {
     }
 }
 
-/// Story 6-3: state for the task panel + drill-down detail view.
-#[derive(Debug, Clone)]
+/// The task actions' shared state (Story 6.3/6.4, trimmed by Story 21.7): the plan the Tasks
+/// tab resolves first, and the reorder in progress. The panel selection, the drill-down and
+/// the auto-open bookkeeping left with the sidebar panel.
+#[derive(Debug, Clone, Default)]
 pub struct TaskPanelState {
-    pub selected_index: usize,
     pub last_executed_plan_id: Option<String>,
-    pub auto_open_skipped_for_plan: Option<String>,
-    pub drill_down_task: Option<u32>,
-    /// 6-3 AC7: when `true`, the drill-down `task_detail` view renders the
-    /// full result body instead of the half-viewport cap. Toggled by Enter
-    /// while inside the drill-down. Reset whenever `drill_down_task` clears.
-    pub expanded_detail: bool,
-    /// 6-3 AC7: scroll offset (in rendered rows) into the result body within
-    /// the drill-down view. j/Down advance, k/Up retreat. The widget clamps
-    /// this against `lines.len() - body_height` on each render. Reset on
-    /// drill-in, drill-out, and the Enter expand/collapse toggle.
-    pub detail_scroll_offset: u16,
-    pub task_count: usize,
-    /// Conversations where the user explicitly closed the Tasks panel via
-    /// `Ctrl+X, T`. Subsequent `PlanExecutionStarted` events suppress auto-open
-    /// for these conversations until the user reopens manually OR a plan in
-    /// the conversation finishes with `failed > 0` (see PlanCompleted arm).
-    /// PD1 (Sally Option 1 + A1).
-    pub auto_open_suppressed_conversations: std::collections::HashSet<String>,
-    /// Conversations that have already received the one-time hint toast
-    /// "Tasks panel hidden for this session — Ctrl+X, T to reopen." Tracked
-    /// per-conversation, shown at most once. PD1 (Sally A2).
-    pub auto_open_hint_shown_for: std::collections::HashSet<String>,
-    /// Story 6.4: task selected for reorder mode.
-    pub reorder_mode_for: Option<u32>,
-    /// Story 6.4: original task order, restored on Esc.
-    pub reorder_original_order: Option<Vec<u32>>,
+    /// Story 6.4: the task being reordered, with the plan and conversation it belongs to and
+    /// the order to restore on Esc (A17: reorder lives in the Tasks tab).
+    pub reorder: Option<Reorder>,
 }
 
-impl Default for TaskPanelState {
-    fn default() -> Self {
-        Self {
-            selected_index: 0,
-            last_executed_plan_id: None,
-            auto_open_skipped_for_plan: None,
-            drill_down_task: None,
-            expanded_detail: false,
-            detail_scroll_offset: 0,
-            task_count: 0,
-            auto_open_suppressed_conversations: std::collections::HashSet::new(),
-            auto_open_hint_shown_for: std::collections::HashSet::new(),
-            reorder_mode_for: None,
-            reorder_original_order: None,
-        }
-    }
+/// A reorder in progress: which task of which plan, and the order Esc restores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reorder {
+    pub conversation_id: String,
+    pub plan_id: String,
+    pub number: u32,
+    pub original_order: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2247,6 +2216,9 @@ pub struct TuiState {
     /// The agent window's payload (Story 21.7 A7): set by the reducer's opener, cleared when
     /// the frame closes.
     pub agent_window: Option<crate::adapters::tui::agent_window::AgentWindowState>,
+    /// The task window's payload (Story 21.7 A8): set by the reducer's opener, cleared when
+    /// the frame closes.
+    pub task_window: Option<crate::adapters::tui::task_window::TaskWindowState>,
     /// The Adapters window's payload (Story 21.7 A21): the health snapshot taken at open.
     pub adapters_window: Option<crate::adapters::tui::adapters_window::AdaptersWindowState>,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
@@ -2307,13 +2279,9 @@ pub struct TuiState {
     pub sidebar_entry_count: usize,
     /// Scroll offset for the sidebar list.
     pub sidebar_scroll_offset: usize,
-    /// Story 6-3: state for the task panel sidebar and drill-down detail view.
+    /// Story 6-3: the task actions' state (the plan the Tasks tab resolves first, the reorder).
     pub task_panel_state: TaskPanelState,
     pub agent_panel_state: AgentPanelState,
-    /// Story 6-3 (PD4): resolved value of `[layout.auto_panels] on_task_plan`.
-    /// `"tasks"` (default) or `"none"`. Read by the `PlanExecutionStarted`
-    /// event arm to decide whether to auto-open the Tasks panel.
-    pub auto_open_on_task_plan: String,
     /// Currently selected row in the bookmark list panel (AC10). `0` when
     /// the panel is closed.
     // Covers: Story 4-4 AC10
@@ -2687,6 +2655,7 @@ impl TuiState {
             artifacts_panel: ArtifactsPanelState::default(),
             artifact_window: None,
             agent_window: None,
+            task_window: None,
             adapters_window: None,
             daily_budget: None,
             budget_acknowledged: None,
@@ -2710,7 +2679,6 @@ impl TuiState {
             sidebar_scroll_offset: 0,
             task_panel_state: TaskPanelState::default(),
             agent_panel_state: AgentPanelState::default(),
-            auto_open_on_task_plan: "tasks".to_string(),
             bookmark_list_selected: 0,
             bookmark_list_count: 0,
             bookmark_owning_tab: None,
@@ -2755,10 +2723,6 @@ impl TuiState {
 
     pub fn replace_agent_registry(&mut self, registry: AgentRegistry) {
         self.agent_registry = registry;
-    }
-
-    pub fn task_panel_max_index(&self) -> usize {
-        self.task_panel_state.task_count.saturating_sub(1)
     }
 
     pub fn refresh_agent_suggestions(&mut self) {

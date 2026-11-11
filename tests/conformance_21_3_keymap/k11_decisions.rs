@@ -897,43 +897,42 @@ fn the_question_answer_erases_its_last_character() {
     );
 }
 
-/// 6-C: a drill-down or a reorder in Chat is not touched by a deferred frame: `Esc` defers
-/// the delegation frame (the chat sub-state stays), and the NEXT `Esc` goes back from the
-/// drill-down or reorder as it always did, posting no cue.
+/// 6-C: a deferred frame leaves the Chat sub-state alone: `Esc` defers the delegation frame, and
+/// the NEXT `Esc` goes back as Chat's own `Esc`, posting no cue. The task drill-down is gone and
+/// a task reorder lives in Mission Control's Tasks tab (21-7 7-D): a reorder record left in the
+/// task panel state does not turn Chat's `Esc` into a reorder cancel, and the reorder's own `Esc`
+/// is witnessed in the `MissionReorder` case (`k4_panels`).
 #[test]
-fn esc_goes_back_from_a_drill_down_or_reorder_after_the_frame_defers() {
-    for (what, drill, reorder, back) in [
-        ("drill-down", Some(3u32), None, InputAction::Consumed),
-        ("reorder", None, Some(2u32), InputAction::TaskReorderCancel),
-    ] {
+fn esc_goes_back_as_chat_after_the_frame_defers_whatever_the_reorder_record_says() {
+    let record = || {
+        Some(rustain::adapters::tui::state::Reorder {
+            conversation_id: "c".to_owned(),
+            plan_id: "p".to_owned(),
+            number: 2,
+            original_order: vec![1, 2, 3],
+        })
+    };
+    let mut backs = Vec::new();
+    for (what, reorder) in [("no record", None), ("a reorder record", record())] {
         let (mut state, _clock, _hold) = open_ready(DecisionKind::Delegation, "reviewer");
         state.focus = FocusState::Chat;
-        state.task_panel_state.drill_down_task = drill;
-        state.task_panel_state.reorder_mode_for = reorder;
+        state.task_panel_state.reorder = reorder.clone();
         assert_eq!(
             press(&mut state, Key::Esc),
             InputAction::Consumed,
             "{what}: Esc defers the frame"
         );
-        assert_eq!(
-            state.task_panel_state.drill_down_task, drill,
-            "{what}: untouched"
-        );
-        assert_eq!(
-            state.task_panel_state.reorder_mode_for, reorder,
-            "{what}: untouched"
-        );
+        assert_eq!(state.task_panel_state.reorder, reorder, "{what}: untouched");
         assert!(state.decisions.holds(DecisionKind::Delegation), "{what}");
-        assert_eq!(
-            press_base(&mut state, Key::Esc),
-            back,
-            "{what}: Esc goes back"
-        );
+        let back = press_base(&mut state, Key::Esc);
+        assert_ne!(back, InputAction::TaskReorderCancel, "{what}: Chat's Esc");
+        backs.push(back);
         assert!(
             cue_records(&state).is_empty(),
             "{what}: a back posts no cue"
         );
     }
+    assert_eq!(backs[0], backs[1], "the record changes nothing in Chat");
 }
 
 /// Every local row of `table_card` has a by-value witness: a `frame_cards()`

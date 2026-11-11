@@ -154,23 +154,33 @@ fn test_sidebar_highlights_active_conversation() {
 // ── AC3: Focus cycling (Tab key, Esc) ───────────────────────────────────────
 
 #[test]
-fn test_tab_from_chat_with_sidebar_focuses_sidebar() {
-    // S16.6 AC5: Tab in Chat now emits CycleInvocationInFocusedTurn.
-    // The event-loop dispatcher guards (focused turn + expanded + >=2 invocations)
-    // and falls through to sidebar focus when guard fails. The harness has no
-    // event loop, so we verify the action and simulate the fallback.
+fn test_tab_from_chat_with_sidebar_never_focuses_sidebar() {
+    // S16.6 AC5: Tab in Chat emits CycleInvocationInFocusedTurn. Since Story 21.7 (7-D,
+    // RU-21-7-13) the event-loop fallback when no item cycles is the NEXT TAB, even with the
+    // sidebar visible: the sidebar is never a Tab target. The harness has no event loop, so the
+    // production seams checked are the dispatcher (the action; focus stays on Chat, no
+    // sidebar-focus transition) and the registry text every help surface prints.
     let mut state = make_state();
     state.sidebar_visible = true;
     state.focus = FocusState::Chat;
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(action, InputAction::CycleInvocationInFocusedTurn);
-    // Simulate event-loop fallback: no focused turn → sidebar focus
-    state.focus = FocusState::Sidebar {
-        panel: PanelType::History,
-        selected: 0,
-    };
-    assert!(matches!(state.focus, FocusState::Sidebar { .. }));
+    assert_eq!(
+        state.focus,
+        FocusState::Chat,
+        "Tab never moves focus to the sidebar"
+    );
+    let help = rustain::adapters::tui::keymap::render_help::help_rows();
+    let tab = help
+        .iter()
+        .find(|row| row.key.starts_with("Tab") && row.description.contains("tables"))
+        .expect("the Chat Tab help row");
+    assert!(
+        tab.description.ends_with("else next tab") && !tab.description.contains("sidebar"),
+        "{}",
+        tab.description
+    );
 }
 
 #[test]

@@ -191,7 +191,7 @@ fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
     let subcommand = args.and_then(|args| args.split_whitespace().next());
     match (name, args) {
         ("login" | "logout" | "accounts" | "models", _) => LocalSurface,
-        ("retract-auto" | "cancel-plan" | "reorder-task", _) => LegacySurface,
+        ("retract-auto" | "cancel-plan", _) => LegacySurface,
         ("room" | "artifacts", None) => NoLegacySurface,
         ("artifact", Some(_)) if matches!(subcommand, Some("apply" | "resolve")) => LegacySurface,
         ("team", Some(_)) if matches!(subcommand, Some("retract")) => LegacySurface,
@@ -204,7 +204,7 @@ fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
             "new" | "clear" | "export" | "deactivate" | "mode" | "plan" | "compact" | "config"
             | "persona" | "memory" | "session" | "tools" | "channels" | "scheduler" | "context"
             | "fanout" | "team" | "peer" | "artifact" | "ml" | "quit" | "notifications" | "detach"
-            | "resume-all-tasks",
+            | "resume-all-tasks" | "reorder-task",
             None,
         ) => NoLegacySurface,
         ("mode", Some("plan" | "normal" | "autoedit" | "yolo"))
@@ -329,7 +329,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('l')], LeaderCmd::A2aLog, "A2A log").slash("/team").help(C, "Ctrl+X, L", "Mission Control: Messages tab (the A2A log, read-only; both hosts)").witness("Mission Control · Messages"),
     l(&[Key::Char('r')], LeaderCmd::Room, "Room").slash("/room").avail(attached_mission).help(C, "Ctrl+X, R", "Mission Control: Room tab (durable room replay, read-only)").witness("Mission Control · Room"),
     l(&[Key::Char('e')], LeaderCmd::Artifacts, "Artifacts").slash("/artifacts").avail(attached_mission).help(C, "Ctrl+X, E", "Mission Control: Artifacts tab (durable artifacts, read-only replay)").witness("Mission Control · Artifacts"),
-    l(&[Key::Char('t')], LeaderCmd::Tasks, "Tasks").avail(panel).help(C, "Ctrl+X, T", "Task panel").witness(NARROW_WITNESS),
+    l(&[Key::Char('t')], LeaderCmd::Tasks, "Tasks").avail(attached_mission).help(C, "Ctrl+X, T", "Mission Control: Tasks tab (the active conversation's plan; Enter opens the task window)").witness("Mission Control · Tasks"),
     l(&[Key::Char('u')], LeaderCmd::Usage, "Usage").avail(attached_panel).help(C, "Ctrl+X, U", "Usage / cost").witness("Usage & Cost"),
     l(&[Key::Char('h')], LeaderCmd::History, "History").avail(panel).help(C, "Ctrl+X, H", "History panel (past conversations)").witness(NARROW_WITNESS),
     l(&[Key::Char('w')], LeaderCmd::Monitor, "Monitor").avail(attached_density).help(C, "Ctrl+X, W", "Toggle Monitor mode (sidebar + banners); again returns to Focus").witness("Density: Monitor"),

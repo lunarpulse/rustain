@@ -13,13 +13,13 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear};
 
-use super::{agent_panel, room_panel};
+use super::{agent_panel, room_panel, task_panel};
 use crate::adapters::tui::keymap::Context as KeyContext;
 use crate::adapters::tui::keymap::Host;
 use crate::adapters::tui::keymap::render::{rail, rail_arrows, rail_pair};
 use crate::adapters::tui::keymap::table_mission::MissionCmd;
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
-use crate::adapters::tui::mission_control::{Fit, McList, McPane, McTab, agents, tabs};
+use crate::adapters::tui::mission_control::{Fit, McList, McPane, McTab, agents, tabs, tasks};
 use crate::adapters::tui::presentation::viewer::{self, ViewerCmd};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry;
@@ -109,7 +109,9 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
     let mut fit = match mission.tab {
         McTab::Room => paint_room(frame, body, state),
         McTab::Messages => paint_messages(frame, body, state),
-        McTab::Agents | McTab::Artifacts | McTab::Probe => paint_list(frame, body, state),
+        McTab::Agents | McTab::Tasks | McTab::Artifacts | McTab::Probe => {
+            paint_list(frame, body, state)
+        }
     };
     if plan.field > 0
         && let Some(search) = search
@@ -132,6 +134,7 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
         fit.open = painted.open;
         fit.pause = painted.pause;
         fit.kill = painted.kill;
+        fit.skip = painted.skip;
         fit.copy = painted.copy;
         frame.render_widget(
             Line::styled(text, Style::default().fg(theme.colors.fg_secondary)),
@@ -386,6 +389,7 @@ struct Painted {
     open: bool,
     pause: bool,
     kill: bool,
+    skip: bool,
     copy: bool,
 }
 
@@ -397,6 +401,7 @@ enum Hint {
     Open,
     Pause,
     Kill,
+    Skip,
     Copy,
 }
 
@@ -405,6 +410,9 @@ enum Hint {
 /// not fit is dropped from the right, the way out always stays. The returned facts say which
 /// keyed hints survived: those keys are live, the others inert.
 fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, Painted) {
+    if crate::adapters::tui::mission_control::reordering(state) {
+        return (reorder_rail(), Painted::default());
+    }
     let mission = &state.mission_control;
     let mut items: Vec<(String, Option<Hint>)> = Vec::with_capacity(6);
     let plain = |text: String| (text, None);
@@ -435,7 +443,7 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
         )));
     }
     // Row actions come before the filter and the export: the narrow rail drops from the right.
-    if matches!(mission.tab, McTab::Artifacts | McTab::Agents)
+    if matches!(mission.tab, McTab::Artifacts | McTab::Agents | McTab::Tasks)
         && host == Host::Local
         && mission.selected_id().is_some()
     {
@@ -447,6 +455,42 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             Some(Hint::Open),
         ));
     }
+    if mission.tab == McTab::Tasks
+        && host == Host::Local
+        && let Some(status) = tasks::selected_status(state)
+    {
+        if let Some(label) = task_panel::pause_label(status) {
+            items.push((
+                format!(
+                    "{} {label}",
+                    rail(KeyContext::MissionControl, MissionCmd::Pause)
+                ),
+                Some(Hint::Pause),
+            ));
+        }
+        if task_panel::can_skip(status) {
+            items.push((
+                format!(
+                    "{} Skip",
+                    rail(KeyContext::MissionControl, MissionCmd::Skip)
+                ),
+                Some(Hint::Skip),
+            ));
+        }
+        if mission
+            .tasks
+            .as_ref()
+            .is_some_and(|source| source.plan_executing)
+        {
+            items.push((
+                format!(
+                    "{} Cancel plan",
+                    rail(KeyContext::MissionControl, MissionCmd::Kill)
+                ),
+                Some(Hint::Kill),
+            ));
+        }
+    }
     if mission.tab == McTab::Agents
         && host == Host::Local
         && let Some(entry) = agents::selected(state)
@@ -455,7 +499,7 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             items.push((
                 format!(
                     "{} {label}",
-                    rail(KeyContext::MissionControl, MissionCmd::AgentPause)
+                    rail(KeyContext::MissionControl, MissionCmd::Pause)
                 ),
                 Some(Hint::Pause),
             ));
@@ -464,7 +508,7 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             items.push((
                 format!(
                     "{} Kill",
-                    rail(KeyContext::MissionControl, MissionCmd::AgentKill)
+                    rail(KeyContext::MissionControl, MissionCmd::Kill)
                 ),
                 Some(Hint::Kill),
             ));
@@ -557,6 +601,7 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
                     Some(Hint::Open) => painted.open = true,
                     Some(Hint::Pause) => painted.pause = true,
                     Some(Hint::Kill) => painted.kill = true,
+                    Some(Hint::Skip) => painted.skip = true,
                     Some(Hint::Copy) => painted.copy = true,
                     None => {}
                 }
@@ -565,6 +610,21 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
         }
         items.pop();
     }
+}
+
+/// The rail while a task is being reordered: the move keys, the commit and the cancel; nothing
+/// else acts (the reorder context has no other row).
+fn reorder_rail() -> String {
+    format!(
+        "[{}] Move  {} Commit  {} Cancel",
+        rail_pair(
+            KeyContext::MissionReorder,
+            MissionCmd::ReorderDown,
+            MissionCmd::ReorderUp
+        ),
+        rail(KeyContext::MissionReorder, MissionCmd::ReorderCommit),
+        rail(KeyContext::MissionReorder, MissionCmd::ReorderCancel),
+    )
 }
 
 fn search_open(state: &TuiState) -> bool {

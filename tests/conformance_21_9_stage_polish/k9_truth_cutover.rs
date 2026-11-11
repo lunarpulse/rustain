@@ -25,7 +25,7 @@ fn tab_and_inspect_texts_name_thinking() {
     let help = tab.help.as_ref().expect("Tab help");
     assert_eq!(
         help.desc,
-        "Cycle tools, thinking, code, tables (needs 2+); else sidebar focus, else next tab"
+        "Cycle tools, thinking, code, tables (needs 2+); else next tab"
     );
     assert!(help.desc.chars().count() <= 83, "the help-row cap");
     let inspect = row(Context::Chat, Host::Local, ChatCmd::Inspect);

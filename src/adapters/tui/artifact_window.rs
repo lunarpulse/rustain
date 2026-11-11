@@ -58,6 +58,12 @@ pub struct Live {
     pub pause: bool,
     /// The agent window's `x` hint was painted whole.
     pub kill: bool,
+    /// The task window's `s` hint was painted whole.
+    pub skip: bool,
+    /// The task window's `r` hint was painted whole.
+    pub retry: bool,
+    /// The task window's `e` hint was painted whole.
+    pub edit: bool,
 }
 
 #[derive(Default)]
@@ -96,6 +102,10 @@ pub struct ArtifactWindowState {
     copy_builds: Cell<usize>,
     empty_text: &'static str,
     lossy: bool,
+    /// What a successful copy says (a task window's status-specific wording); `None`: the
+    /// shared "Copied to clipboard".
+    copy_done: Option<String>,
+    literal: bool,
 }
 
 impl std::fmt::Debug for ArtifactWindowState {
@@ -128,6 +138,8 @@ impl ArtifactWindowState {
             copy_builds: Cell::new(0),
             empty_text: "body is empty",
             lossy: false,
+            copy_done: None,
+            literal: false,
         }
     }
 
@@ -140,6 +152,39 @@ impl ArtifactWindowState {
     /// rather than copy the replacement characters as "the original".
     pub fn set_lossy(&mut self, lossy: bool) {
         self.lossy = lossy;
+    }
+
+    /// What a successful copy says (the task window's `Copied error to clipboard.` etc.).
+    pub fn set_copy_done(&mut self, message: String) {
+        self.copy_done = Some(message);
+    }
+
+    /// The body is literal text (a task's error, skip or cancel reason): it is shown as Source
+    /// and never offered as markdown (`v` is neither painted nor live; 7D-04).
+    pub fn set_literal(&mut self, literal: bool) {
+        let was = self.literal;
+        self.literal = literal;
+        // Entering the literal state forces Source; leaving it (a retried task completed)
+        // returns to the Rendered default.
+        let wanted = if literal {
+            Some(BodyMode::Source)
+        } else if was {
+            Some(BodyMode::Rendered)
+        } else {
+            None
+        };
+        if let Some(mode) = wanted
+            && self.mode != mode
+        {
+            self.mode = mode;
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    /// The body may not be shown as markdown.
+    #[must_use]
+    pub fn is_literal(&self) -> bool {
+        self.literal
     }
 
     /// What the window says when its body is empty (default `body is empty`).
@@ -435,6 +480,7 @@ pub(crate) fn on_key_in(
         CommandId::Body(BodyCmd::ToggleMode) => {
             if let Some(window) = (slot.get_mut)(state)
                 && window.live().view
+                && !window.is_literal()
             {
                 window.mode = window.mode.toggled();
                 window.invalidate();
@@ -584,9 +630,12 @@ pub(crate) fn deliver_copy(state: &mut TuiState, noun: &str, outcome: Option<Opt
 }
 
 pub(crate) fn copy_in(state: &mut TuiState, slot: &Slot) {
-    use crate::adapters::tui::handlers::clipboard::{notify_copy, notify_failure};
+    use crate::adapters::tui::handlers::clipboard::{notify_copy_with, notify_failure};
     use crate::adapters::tui::notifications::{self, NoticeSource};
     let copier = state.clipboard_copier.clone();
+    let success = (slot.get)(state)
+        .and_then(|window| window.copy_done.clone())
+        .unwrap_or_else(|| "Copied to clipboard".to_owned());
     // The bound is judged on the byte length; only then is the copy string built.
     let outcome = match (slot.get)(state) {
         None => return,
@@ -627,11 +676,12 @@ pub(crate) fn copy_in(state: &mut TuiState, slot: &Slot) {
         }
     };
     match copier {
-        Some(copier) => notify_copy(state, &text, &*copier),
-        None => notify_copy(
+        Some(copier) => notify_copy_with(state, &text, &*copier, &success),
+        None => notify_copy_with(
             state,
             &text,
             &crate::adapters::tui::clipboard::copy_to_clipboard,
+            &success,
         ),
     }
 }

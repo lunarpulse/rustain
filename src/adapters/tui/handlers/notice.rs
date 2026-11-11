@@ -21,12 +21,12 @@ pub(crate) fn apply_density_transition(
     state.density_user_overridden = true;
     state.sidebar_visible = mode.default_sidebar_visible();
     if state.sidebar_visible {
-        state.sidebar_panel = Some(crate::domain::models::visual::PanelType::Tasks);
+        state.sidebar_panel = Some(crate::domain::models::visual::PanelType::History);
         let selected = state.sidebar_selected;
         reducer::set_base(
             state,
             crate::domain::models::FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::Tasks,
+                panel: crate::domain::models::visual::PanelType::History,
                 selected,
             },
         );

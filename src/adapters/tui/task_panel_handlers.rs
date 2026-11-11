@@ -15,7 +15,6 @@
 
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::plan::{PlanStatus, PlanTaskStatus};
-use crate::domain::models::visual::PanelType;
 use crate::domain::models::{Conversation, NoticeLevel};
 
 /// Notice the caller should emit via the event bus, scoped to a target
@@ -27,192 +26,27 @@ pub struct PendingNotice {
     pub conversation_id: String,
 }
 
-/// Outcome of `handle_open_panel`. `opened == true` means the visibility flip
-/// landed; `opened == false` with a `notice` means the chord was rejected
-/// (narrow terminal); `opened == false` without a notice means the chord
-/// toggled an already-open panel closed.
-#[derive(Debug, Default, Clone)]
-pub struct OpenPanelOutcome {
-    pub opened: bool,
-    pub closed: bool,
-    pub notice: Option<PendingNotice>,
-}
-
-/// Mirrors the `InputAction::OpenPanel(Tasks)` arm for the **Tasks** panel
-/// only (history/agents/adapters route through other handlers). Returns
-/// the visibility transition + any rejection notice.
-pub fn handle_open_panel_tasks(
-    state: &mut TuiState,
-    conversation: &Conversation,
-    terminal_width: u16,
-    sidebar_min_width: u16,
-) -> OpenPanelOutcome {
-    if state.sidebar_visible && state.sidebar_panel == Some(PanelType::Tasks) {
-        // Toggle close.
-        state.sidebar_visible = false;
-        state.sidebar_panel = None;
-        state.task_panel_state.drill_down_task = None;
-        state.task_panel_state.expanded_detail = false;
-        state.task_panel_state.detail_scroll_offset = 0;
-        // PD1: explicit close suppresses future auto-open for this conversation.
-        state
-            .task_panel_state
-            .auto_open_suppressed_conversations
-            .insert(conversation.id.clone());
-        state.needs_redraw = true;
-        OpenPanelOutcome {
-            opened: false,
-            closed: true,
-            notice: None,
-        }
-    } else if terminal_width >= sidebar_min_width {
-        state.sidebar_visible = true;
-        state.sidebar_panel = Some(PanelType::Tasks);
-        state.sidebar_selected = state.task_panel_state.selected_index;
-        // PD1: explicit re-open clears suppression so the next plan can auto-open again.
-        state
-            .task_panel_state
-            .auto_open_suppressed_conversations
-            .remove(&conversation.id);
-        let resolved = crate::adapters::tui::widgets::task_panel::resolve_panel_plan(
-            conversation,
-            state.task_panel_state.last_executed_plan_id.as_deref(),
-        );
-        state.task_panel_state.task_count = resolved.map(|p| p.tasks.len()).unwrap_or(0);
-        state.needs_redraw = true;
-        OpenPanelOutcome {
-            opened: true,
-            closed: false,
-            notice: None,
-        }
-    } else {
-        OpenPanelOutcome {
-            opened: false,
-            closed: false,
-            notice: Some(PendingNotice {
-                level: NoticeLevel::Warning,
-                message: "Task panel requires terminal width >= 120 cols.".to_string(),
-                conversation_id: conversation.id.clone(),
-            }),
-        }
-    }
-}
-
-/// Outcome of `handle_plan_execution_started`. The notices vec is in
-/// dispatch order. `auto_opened == true` means visibility flipped to open;
-/// `suppressed == true` means user-suppression honored (Sally Option 1).
-#[derive(Debug, Default, Clone)]
-pub struct PlanExecutionStartedOutcome {
-    pub auto_opened: bool,
-    pub suppressed: bool,
-    pub narrow_skipped: bool,
-    pub notices: Vec<PendingNotice>,
-}
-
-/// Mirrors the `AppEvent::PlanExecutionStarted` arm. `auto_open_setting`
-/// is the resolved value of `auto_panels.on_task_plan` (currently
-/// hard-coded `"tasks"` until PD4's schema lands; the helper accepts it as
-/// a parameter so AC1's `auto_open_suppressed_by_config` test can pass
-/// `"none"` and verify the no-op branch).
+/// Mirrors the `AppEvent::PlanExecutionStarted` arm. A plan that starts opens nothing (Story
+/// 21.7 A19, OD-2: the Tasks sidebar it used to auto-open is gone, and the operator opens
+/// Mission Control himself); the plan the Tasks tab resolves first follows it. Returns whether
+/// the event concerned this conversation.
 pub fn handle_plan_execution_started(
     state: &mut TuiState,
     conversation: &Conversation,
     event_conversation_id: &str,
     plan_id: &str,
-    terminal_width: u16,
-    sidebar_min_width: u16,
-    auto_open_setting: &str,
-) -> PlanExecutionStartedOutcome {
-    let mut out = PlanExecutionStartedOutcome::default();
-    if event_conversation_id != conversation.id {
-        return out;
+) -> bool {
+    if event_conversation_id != conversation.id || !conversation.plans.contains_key(plan_id) {
+        return false;
     }
-    let user_suppressed = state
-        .task_panel_state
-        .auto_open_suppressed_conversations
-        .contains(&conversation.id);
-    let task_count = conversation
-        .plans
-        .get(plan_id)
-        .map(|p| p.tasks.len())
-        .unwrap_or(0);
-
-    if user_suppressed && terminal_width >= sidebar_min_width && auto_open_setting != "none" {
-        // PD1 (Sally Option 1): honor user close. Update plan pointer + cursor
-        // so a manual reopen renders correctly.
-        state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
-        state.task_panel_state.selected_index = 0;
-        state.task_panel_state.drill_down_task = None;
-        state.task_panel_state.expanded_detail = false;
-        state.task_panel_state.detail_scroll_offset = 0;
-        state.task_panel_state.auto_open_skipped_for_plan = None;
-        state.task_panel_state.task_count = task_count;
-        out.suppressed = true;
-        // PD1 (Sally A2): one-time hint toast per conversation.
-        if state
-            .task_panel_state
-            .auto_open_hint_shown_for
-            .insert(conversation.id.clone())
-        {
-            out.notices.push(PendingNotice {
-                level: NoticeLevel::Info,
-                message: format!(
-                    "Tasks panel hidden for this session — {} to reopen.",
-                    crate::adapters::tui::keymap::render::leader_follow_up_long(
-                        crate::adapters::tui::keymap::table::LeaderCmd::Tasks
-                    )
-                ),
-                conversation_id: conversation.id.clone(),
-            });
-        }
-    } else if auto_open_setting != "none" && terminal_width >= sidebar_min_width {
-        let was_closed = !state.sidebar_visible || state.sidebar_panel != Some(PanelType::Tasks);
-        state.sidebar_visible = true;
-        state.sidebar_panel = Some(PanelType::Tasks);
-        state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
-        state.task_panel_state.selected_index = 0;
-        state.task_panel_state.drill_down_task = None;
-        state.task_panel_state.expanded_detail = false;
-        state.task_panel_state.detail_scroll_offset = 0;
-        state.task_panel_state.auto_open_skipped_for_plan = None;
-        state.task_panel_state.task_count = task_count;
-        state.needs_redraw = true;
-        out.auto_opened = true;
-        if was_closed {
-            out.notices.push(PendingNotice {
-                level: NoticeLevel::Info,
-                message: format!(
-                    "Task panel opened. Press {} to dismiss.",
-                    crate::adapters::tui::keymap::render::key_text(
-                        crate::adapters::tui::keymap::table_nav::SidebarCmd::FocusChat
-                    )
-                ),
-                conversation_id: conversation.id.clone(),
-            });
-        }
-    } else if terminal_width < sidebar_min_width
-        && state.task_panel_state.auto_open_skipped_for_plan.as_deref() != Some(plan_id)
-    {
-        state.task_panel_state.auto_open_skipped_for_plan = Some(plan_id.to_string());
-        out.narrow_skipped = true;
-        out.notices.push(PendingNotice {
-            level: NoticeLevel::Info,
-            message: format!(
-                "Task panel auto-open skipped \u{2014} terminal too narrow (<120 cols). \
-                 Press {} after resize.",
-                crate::adapters::tui::keymap::render::leader_follow_up_long(
-                    crate::adapters::tui::keymap::table::LeaderCmd::Tasks
-                )
-            ),
-            conversation_id: conversation.id.clone(),
-        });
-    }
-    out
+    state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
+    state.needs_redraw = true;
+    true
 }
 
-/// Mirrors the `AppEvent::PlanTaskStatusChanged` arm. Returns true iff
-/// `needs_redraw` was bumped (i.e. the panel is open and the event
-/// matched the active conversation + a known plan).
+/// Mirrors the `AppEvent::PlanTaskStatusChanged` arm. Returns true iff the event matched the
+/// active conversation and a known plan; the screen is repainted when a Tasks surface is
+/// open.
 pub fn handle_plan_task_status_changed(
     state: &mut TuiState,
     conversation: &Conversation,
@@ -226,32 +60,14 @@ pub fn handle_plan_task_status_changed(
         return false;
     }
     state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
-    if state.sidebar_panel == Some(PanelType::Tasks) {
+    if crate::adapters::tui::mission_control::tasks_surface_open(state) {
         state.needs_redraw = true;
-        true
-    } else {
-        false
     }
+    true
 }
 
-/// Returns the status of the currently drilled-down task, or `None` if no
-/// drill-down is active or the task/plan cannot be resolved.
-/// Used to gate status-conditional dispatch for `TaskPause`, `TaskSkip`, `TaskRetry`,
-/// and `TaskEdit` — Story 6.4 replaces the 6-3 `is_failed_drill_down` gate.
-pub fn drill_down_task_status(
-    state: &TuiState,
-    conversation: &Conversation,
-) -> Option<PlanTaskStatus> {
-    let n = state.task_panel_state.drill_down_task?;
-    let plan_id = state.task_panel_state.last_executed_plan_id.as_ref()?;
-    let plan = conversation.plans.get(plan_id)?;
-    plan.tasks
-        .get(n.saturating_sub(1) as usize)
-        .map(|t| t.status)
-}
-
-/// Resolves the clipboard payload for `InputAction::CopyTaskResult`. Returns
-/// the (text, status_flash_message) pair, or `None` if the plan/task could
+/// The clipboard payload of one task and the status-specific success notice the task window's
+/// `c` shows (DF-277: a `Cancelled` task has its own wording). `None` if the plan/task could
 /// not be resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyTaskOutcome {
@@ -267,8 +83,7 @@ pub fn resolve_copy_task_payload(
 ) -> Option<CopyTaskOutcome> {
     let resolved_plan_id = plan_id.or(last_executed_plan_id)?;
     let plan = conversation.plans.get(resolved_plan_id)?;
-    let idx = (task_number.saturating_sub(1)) as usize;
-    let task = plan.tasks.get(idx)?;
+    let task = plan.tasks.iter().find(|t| t.number == task_number)?;
     let (text, flash_message) = match task.status {
         PlanTaskStatus::Completed => (
             task.result
@@ -284,7 +99,7 @@ pub fn resolve_copy_task_payload(
             match task.status {
                 PlanTaskStatus::Failed => "Copied error to clipboard.".to_string(),
                 PlanTaskStatus::Skipped => "Copied skip reason to clipboard.".to_string(),
-                _ => "Copied to clipboard.".to_string(),
+                _ => "Copied cancel reason to clipboard.".to_string(),
             },
         ),
         _ => (
@@ -326,8 +141,8 @@ pub fn dependents(plan: &crate::domain::models::plan::Plan, task_number: u32) ->
     result
 }
 
-/// Story 6.4: handle pause/resume from the task panel or drill-down view.
-/// Returns notices the caller should emit via the event bus.
+/// Story 6.4: handle pause/resume of one task of `plan_id` (the plan a `TaskRef` names, never
+/// the "last executed" one: Story 21.7 A11). Returns notices the caller should emit.
 #[derive(Debug, Clone)]
 pub struct PauseOutcome {
     pub notices: Vec<PendingNotice>,
@@ -337,52 +152,33 @@ pub struct PauseOutcome {
 }
 
 pub fn handle_task_pause(
-    state: &mut TuiState,
     conversation: &mut Conversation,
+    plan_id: &str,
     task_number: u32,
 ) -> PauseOutcome {
-    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
-        Some(id) => id.clone(),
-        None => {
-            return PauseOutcome {
-                notices: vec![PendingNotice {
-                    level: NoticeLevel::Info,
-                    message: "No active plan.".to_string(),
-                    conversation_id: conversation.id.clone(),
-                }],
-                should_resume_advance: false,
-                running_task_paused: None,
-            };
-        }
-    };
-
-    let plan = match conversation.plans.get_mut(&plan_id) {
-        Some(p) => p,
-        None => {
-            return PauseOutcome {
-                notices: vec![PendingNotice {
-                    level: NoticeLevel::Info,
-                    message: "No active plan.".to_string(),
-                    conversation_id: conversation.id.clone(),
-                }],
-                should_resume_advance: false,
-                running_task_paused: None,
-            };
-        }
-    };
-
-    let idx = (task_number.saturating_sub(1)) as usize;
-    if idx >= plan.tasks.len() {
+    let conversation_id = conversation.id.clone();
+    let Some(plan) = conversation.plans.get_mut(plan_id) else {
         return PauseOutcome {
             notices: vec![PendingNotice {
                 level: NoticeLevel::Info,
-                message: format!("Task {} not found.", task_number),
-                conversation_id: conversation.id.clone(),
+                message: "No active plan.".to_string(),
+                conversation_id,
             }],
             should_resume_advance: false,
             running_task_paused: None,
         };
-    }
+    };
+    let Some(idx) = plan.tasks.iter().position(|t| t.number == task_number) else {
+        return PauseOutcome {
+            notices: vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: format!("Task {} not found.", task_number),
+                conversation_id,
+            }],
+            should_resume_advance: false,
+            running_task_paused: None,
+        };
+    };
 
     let task_status = plan.tasks[idx].status;
 
@@ -496,42 +292,28 @@ pub fn handle_task_pause(
     }
 }
 
-/// Story 6.4: handle skip from the task panel or drill-down view.
+/// Story 6.4: handle skip of one task of `plan_id` (the plan a `TaskRef` names).
 pub fn handle_task_skip(
     state: &mut TuiState,
     conversation: &mut Conversation,
+    plan_id: &str,
     task_number: u32,
 ) -> Vec<PendingNotice> {
-    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
-        Some(id) => id.clone(),
-        None => {
-            return vec![PendingNotice {
-                level: NoticeLevel::Info,
-                message: "No active plan.".to_string(),
-                conversation_id: conversation.id.clone(),
-            }];
-        }
+    let Some(plan) = conversation.plans.get_mut(plan_id) else {
+        return vec![PendingNotice {
+            level: NoticeLevel::Info,
+            message: "No active plan.".to_string(),
+            conversation_id: conversation.id.clone(),
+        }];
     };
 
-    let plan = match conversation.plans.get_mut(&plan_id) {
-        Some(p) => p,
-        None => {
-            return vec![PendingNotice {
-                level: NoticeLevel::Info,
-                message: "No active plan.".to_string(),
-                conversation_id: conversation.id.clone(),
-            }];
-        }
-    };
-
-    let idx = (task_number.saturating_sub(1)) as usize;
-    if idx >= plan.tasks.len() {
+    let Some(idx) = plan.tasks.iter().position(|t| t.number == task_number) else {
         return vec![PendingNotice {
             level: NoticeLevel::Info,
             message: format!("Task {} not found.", task_number),
             conversation_id: conversation.id.clone(),
         }];
-    }
+    };
 
     let task_status = plan.tasks[idx].status;
 
@@ -565,7 +347,7 @@ pub fn handle_task_skip(
                     state,
                     &conversation.id,
                     crate::adapters::tui::decision_queue::SkipCascadePending {
-                        plan_id: plan_id.clone(),
+                        plan_id: plan_id.to_string(),
                         source_task: task_number,
                         source_prior_status: prior_status,
                         source_prior_error: plan.tasks[idx].error.clone(),
@@ -587,19 +369,6 @@ pub fn handle_task_skip(
             }]
         }
     }
-}
-
-/// Story 6.4: resolve a selected_index (0-based, from panel cursor) to a task number.
-/// Returns None if no plan or index out of bounds.
-pub fn resolve_panel_task_number(
-    state: &TuiState,
-    conversation: &Conversation,
-    selected_index: u32,
-) -> Option<u32> {
-    let plan_id = state.task_panel_state.last_executed_plan_id.as_ref()?;
-    let plan = conversation.plans.get(plan_id)?;
-    let idx = selected_index as usize;
-    plan.tasks.get(idx).map(|t| t.number)
 }
 
 #[cfg(test)]

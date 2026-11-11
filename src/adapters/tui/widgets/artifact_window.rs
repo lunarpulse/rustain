@@ -220,7 +220,7 @@ fn rail_text(
             Some("copy"),
         ));
     }
-    if shown && window.search.query.is_empty() {
+    if shown && window.search.query.is_empty() && !window.is_literal() {
         items.push((
             format!(
                 "{} {}",
@@ -254,6 +254,9 @@ fn rail_text(
                     Some("view") => live.view = true,
                     Some("pause") => live.pause = true,
                     Some("kill") => live.kill = true,
+                    Some("skip") => live.skip = true,
+                    Some("retry") => live.retry = true,
+                    Some("edit") => live.edit = true,
                     _ => {}
                 }
             }

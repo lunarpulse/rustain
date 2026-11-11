@@ -43,11 +43,10 @@ fn boundary_state() -> TuiState {
     state
 }
 
-/// Chat inside the task-panel drill-down view (`j k g G c` scroll/copy it).
-fn drill_state(detail_scroll_offset: u16) -> TuiState {
+/// Chat while a plan is executing (what the retired drill-down hung off): the keys stay Chat's.
+fn plan_state() -> TuiState {
     let mut state = chat_state();
-    state.task_panel_state.drill_down_task = Some(3);
-    state.task_panel_state.detail_scroll_offset = detail_scroll_offset;
+    state.task_panel_state.last_executed_plan_id = Some("plan-1".to_owned());
     state
 }
 
@@ -57,8 +56,8 @@ struct Salient {
     focus: FocusState,
     input: String,
     cursor: usize,
-    drill: Option<u32>,
-    detail_scroll: u16,
+    plan: Option<String>,
+    reorder: Option<rustain::adapters::tui::state::Reorder>,
     scroll: usize,
     wave_selected: usize,
     diverge_open: bool,
@@ -70,8 +69,8 @@ fn salient(state: &TuiState) -> Salient {
         focus: state.focus.clone(),
         input: state.input_buffer.clone(),
         cursor: state.cursor_position,
-        drill: state.task_panel_state.drill_down_task,
-        detail_scroll: state.task_panel_state.detail_scroll_offset,
+        plan: state.task_panel_state.last_executed_plan_id.clone(),
+        reorder: state.task_panel_state.reorder.clone(),
         scroll: state.scroll_offset(),
         wave_selected: state.wave_overlay_selected,
         diverge_open: state.wave_diverge_open,
@@ -160,17 +159,19 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
         ChatCmd::ScrollLineDown => {
             let mut state = chat_state();
             assert_eq!(one(&mut state, Key::Char('j')), InputAction::ScrollLineDown);
-            // Inside the task drill-down the same key scrolls the result body.
-            let mut drill = drill_state(4);
-            assert_eq!(one(&mut drill, Key::Char('j')), InputAction::Consumed);
-            assert_eq!(drill.task_panel_state.detail_scroll_offset, 5);
+            // A plan in flight no longer captures the key (the drill-down is gone, 21-7 7-D):
+            // the task result scrolls in the task window, witnessed in k4_panels.
+            let mut running = plan_state();
+            assert_eq!(
+                one(&mut running, Key::Char('j')),
+                InputAction::ScrollLineDown
+            );
         }
         ChatCmd::ScrollLineUp => {
             let mut state = chat_state();
             assert_eq!(one(&mut state, Key::Char('k')), InputAction::ScrollLineUp);
-            let mut drill = drill_state(4);
-            assert_eq!(one(&mut drill, Key::Char('k')), InputAction::Consumed);
-            assert_eq!(drill.task_panel_state.detail_scroll_offset, 3);
+            let mut running = plan_state();
+            assert_eq!(one(&mut running, Key::Char('k')), InputAction::ScrollLineUp);
         }
         ChatCmd::ScrollToTop => match keys {
             [Key::Char('g')] => {
@@ -179,9 +180,8 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
                 assert!(state.pending_g, "a first `g` arms the `gg` chord");
                 assert_eq!(one(&mut state, Key::Char('g')), InputAction::Consumed);
                 assert!(!state.pending_g, "the second `g` completes and clears it");
-                let mut drill = drill_state(7);
-                assert_eq!(one(&mut drill, Key::Char('g')), InputAction::Consumed);
-                assert_eq!(drill.task_panel_state.detail_scroll_offset, 0);
+                let mut running = plan_state();
+                assert_eq!(one(&mut running, Key::Char('g')), InputAction::ScrollToTop);
             }
             [Key::Char('z'), Key::Char('g')] => {
                 let mut state = chat_state();
@@ -196,9 +196,11 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
         ChatCmd::ScrollToBottom => {
             let mut state = chat_state();
             assert_eq!(one(&mut state, Key::Char('G')), InputAction::ScrollToBottom);
-            let mut drill = drill_state(7);
-            assert_eq!(one(&mut drill, Key::Char('G')), InputAction::Consumed);
-            assert_eq!(drill.task_panel_state.detail_scroll_offset, u16::MAX);
+            let mut running = plan_state();
+            assert_eq!(
+                one(&mut running, Key::Char('G')),
+                InputAction::ScrollToBottom
+            );
         }
         ChatCmd::BlockJumpNext => {
             // Viewport top at line 40: the next block boundary below it is 60,
@@ -305,15 +307,12 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
                 one(&mut state, Key::Char('c')),
                 InputAction::CopyToClipboard(String::new())
             );
-            // Inside the task drill-down the same key copies the task result.
-            let mut drill = drill_state(0);
-            let plan_id = drill.task_panel_state.last_executed_plan_id.clone();
+            // A plan in flight no longer turns `c` into a task-result copy: the result is
+            // copied from the task window (`Context::TaskWindow` `c`, k4_panels).
+            let mut running = plan_state();
             assert_eq!(
-                one(&mut drill, Key::Char('c')),
-                InputAction::CopyTaskResult {
-                    plan_id,
-                    task_number: 3
-                }
+                one(&mut running, Key::Char('c')),
+                InputAction::CopyToClipboard(String::new())
             );
         }
         ChatCmd::ForkAtMessage => {

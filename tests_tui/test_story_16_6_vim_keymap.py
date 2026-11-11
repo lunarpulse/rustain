@@ -50,7 +50,7 @@ class TestVimHelpOverlay:
         # Story 21-2 AC5: Tab states the invocation-cycle guard and the real
         # fallback (was "Cycle invocations within focused expanded turn").
         tui.assert_screen_contains("Cycle tools, thinking, code, tables")
-        tui.assert_screen_contains("(needs 2+); else sidebar focus, else next tab")
+        tui.assert_screen_contains("(needs 2+); else next tab")
         # S16.8 rebinding: jump-to-latest-prose moved from G to ]P bracket-prefix chord
         # per ADR-16-03 (chosen over gp to avoid the single-g jump-to-top flicker)
         tui.assert_screen_contains("]P")

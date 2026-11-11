@@ -17,11 +17,25 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
     if !super::is_top(state) {
         return InputAction::Consumed;
     }
-    let Resolved::Hit(row) = keymap::resolve(Context::MissionControl, host, &[key]) else {
+    // A reorder in progress has a context of its own: only its rows act.
+    let context = if super::reordering(state) {
+        Context::MissionReorder
+    } else {
+        Context::MissionControl
+    };
+    let Resolved::Hit(row) = keymap::resolve(context, host, &[key]) else {
         return InputAction::Consumed;
     };
     state.needs_redraw = true;
     match row.command {
+        CommandId::Mission(MissionCmd::ReorderDown) => {
+            return InputAction::TaskReorderMove(crate::adapters::tui::state::Direction::Down);
+        }
+        CommandId::Mission(MissionCmd::ReorderUp) => {
+            return InputAction::TaskReorderMove(crate::adapters::tui::state::Direction::Up);
+        }
+        CommandId::Mission(MissionCmd::ReorderCommit) => return InputAction::TaskReorderCommit,
+        CommandId::Mission(MissionCmd::ReorderCancel) => return InputAction::TaskReorderCancel,
         CommandId::Mission(MissionCmd::Back) => back(state),
         CommandId::Mission(MissionCmd::PrevTab) => return step_tab(state, false, host),
         CommandId::Mission(MissionCmd::NextTab) => return step_tab(state, true, host),
@@ -56,26 +70,55 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
                 match mission.tab {
                     McTab::Artifacts => return InputAction::OpenArtifactWindow(id.to_owned()),
                     McTab::Agents => return super::agents::open_action(id),
+                    McTab::Tasks => {
+                        if let Some(task) = super::tasks::selected_ref(state) {
+                            return InputAction::OpenTaskWindow(task);
+                        }
+                    }
                     _ => {}
                 }
             }
         }
-        CommandId::Mission(MissionCmd::AgentPause) => {
+        CommandId::Mission(MissionCmd::Pause) => {
             let mission = &state.mission_control;
-            if mission.tab == McTab::Agents
-                && mission.fit().pause
+            if mission.fit().pause
                 && let Some(id) = mission.selected_id()
             {
-                return InputAction::AgentPauseResume(super::agents::agent_id(id));
+                match mission.tab {
+                    McTab::Agents => {
+                        return InputAction::AgentPauseResume(super::agents::agent_id(id));
+                    }
+                    McTab::Tasks => {
+                        if let Some(task) = super::tasks::selected_ref(state) {
+                            return InputAction::TaskPause(task);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        CommandId::Mission(MissionCmd::AgentKill) => {
+        CommandId::Mission(MissionCmd::Kill) => {
             let mission = &state.mission_control;
-            if mission.tab == McTab::Agents
-                && mission.fit().kill
+            if mission.fit().kill
                 && let Some(id) = mission.selected_id()
             {
-                return InputAction::AgentKill(super::agents::agent_id(id));
+                match mission.tab {
+                    McTab::Agents => return InputAction::AgentKill(super::agents::agent_id(id)),
+                    McTab::Tasks => {
+                        if let Some(task) = super::tasks::selected_ref(state) {
+                            return InputAction::TaskCancelPlan(task);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        CommandId::Mission(MissionCmd::Skip) => {
+            if state.mission_control.tab == McTab::Tasks
+                && state.mission_control.fit().skip
+                && let Some(task) = super::tasks::selected_ref(state)
+            {
+                return InputAction::TaskSkip(task);
             }
         }
         CommandId::Mission(MissionCmd::CopyRow) => {
@@ -190,7 +233,7 @@ fn scroll(state: &mut TuiState, command: ViewerCmd) {
                 viewer::apply(&mut page.viewer, command, rows, viewport);
             }
         }
-        McTab::Agents | McTab::Artifacts | McTab::Probe => {
+        McTab::Agents | McTab::Tasks | McTab::Artifacts | McTab::Probe => {
             let mission = &mut state.mission_control;
             match (mission.pane, mission.fit().wide) {
                 (McPane::Detail, true) => {

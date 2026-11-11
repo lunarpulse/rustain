@@ -23,6 +23,8 @@ pub enum PaletteScope {
 pub enum SurfaceTarget {
     /// Mission Control, Agents tab.
     Agents,
+    /// Mission Control, Tasks tab.
+    Tasks,
     /// The Adapters window.
     Adapters,
 }

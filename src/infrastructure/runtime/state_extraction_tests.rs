@@ -1,5 +1,6 @@
 //! Behavioral regressions for the 19.21e data-flow extraction.
 use super::{event_bus::EventBus, panel_bridge::tick_status, task_panel_bridge::*};
+use crate::adapters::tui::mission_control::tasks::TaskRef;
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
@@ -56,6 +57,28 @@ fn conversation() -> Conversation {
     conversation
 }
 
+/// `enter_reorder` on task `number` of the fixture plan, as the active tab's host would.
+fn enter(
+    state: &mut TuiState,
+    conversation: &mut Conversation,
+    bus: &EventBus,
+    number: u32,
+) -> bool {
+    let task = TaskRef {
+        conversation_id: conversation.id.clone(),
+        plan_id: "plan".into(),
+        number,
+    };
+    let mut ctx = TaskCtx {
+        state,
+        conversation,
+        read_only: false,
+        tabs: &[],
+        event_bus: bus,
+    };
+    enter_reorder(&mut ctx, &task)
+}
+
 fn order(conversation: &Conversation) -> Vec<u32> {
     conversation.plans["plan"]
         .tasks
@@ -82,7 +105,7 @@ fn cancel_restores_original_order_after_multiple_moves() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.last_executed_plan_id = Some("plan".into());
     let (bus, _events) = EventBus::new(16);
-    assert!(enter_reorder(&mut state, &conversation, 2, &bus));
+    assert!(enter(&mut state, &mut conversation, &bus, 2));
     assert!(move_reorder(
         &mut state,
         &mut conversation,
@@ -105,7 +128,7 @@ fn cancel_restores_original_order_after_multiple_moves() {
     assert_eq!(order(&conversation), [1, 3, 2]);
     cancel_reorder(&mut state, &mut conversation);
     assert_eq!(order(&conversation), [1, 2, 3]);
-    assert!(state.task_panel_state.reorder_mode_for.is_none());
+    assert!(state.task_panel_state.reorder.is_none());
 }
 
 #[test]
@@ -115,7 +138,7 @@ fn dependency_violation_refuses_move_without_reordering() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.last_executed_plan_id = Some("plan".into());
     let (bus, mut events) = EventBus::new(16);
-    assert!(enter_reorder(&mut state, &conversation, 2, &bus));
+    assert!(enter(&mut state, &mut conversation, &bus, 2));
     assert!(move_reorder(
         &mut state,
         &mut conversation,
@@ -136,7 +159,7 @@ fn boundary_move_does_not_change_order_and_commit_survives_later_cancel() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.last_executed_plan_id = Some("plan".into());
     let (bus, _events) = EventBus::new(16);
-    assert!(enter_reorder(&mut state, &conversation, 1, &bus));
+    assert!(enter(&mut state, &mut conversation, &bus, 1));
     assert!(!move_reorder(
         &mut state,
         &mut conversation,
@@ -238,4 +261,128 @@ fn story21_1_ticks_leave_the_typed_status_facts_alone() {
         tick_status(&mut state, &conversation, 250);
         assert_eq!(state.status, status);
     }
+}
+
+// ── Story 21.7: a task action is resolved in the conversation its ref names (A11, PC-3) ──
+
+/// What the plan holds, for "unchanged" comparisons: `(number, status)` in order.
+fn plan_shape(conversation: &Conversation) -> Vec<(u32, PlanTaskStatus)> {
+    conversation.plans["plan"]
+        .tasks
+        .iter()
+        .map(|task| (task.number, task.status))
+        .collect()
+}
+
+/// Run every task action in `ctx` on a ref and assert each one refused: no follow-up, no
+/// decision, no bus event (so no `PlanTaskStatusChanged`), the plan untouched, one Warning
+/// whose text is `warning`.
+fn assert_every_task_action_refused(
+    conversation_id_of_ref: &str,
+    read_only: bool,
+    tabs: &[crate::domain::models::TabState],
+    warning: &str,
+) {
+    let mut conversation = conversation();
+    conversation.plans.get_mut("plan").unwrap().tasks[0].status = PlanTaskStatus::Failed;
+    let before = plan_shape(&conversation);
+    let mut state = TuiState::new(160, 24);
+    let (bus, mut events) = EventBus::new(16);
+    let task = TaskRef {
+        conversation_id: conversation_id_of_ref.to_owned(),
+        plan_id: "plan".into(),
+        number: 1,
+    };
+    let mut ctx = TaskCtx {
+        state: &mut state,
+        conversation: &mut conversation,
+        read_only,
+        tabs,
+        event_bus: &bus,
+    };
+    assert!(pause(&mut ctx, &task).is_none(), "pause refused");
+    assert!(skip(&mut ctx, &task).is_none(), "skip refused");
+    assert!(retry(&mut ctx, &task).is_none(), "retry refused");
+    cancel_plan(&mut ctx, &task);
+
+    assert_eq!(plan_shape(&conversation), before, "the plan is unchanged");
+    assert_eq!(
+        conversation.plans["plan"].status,
+        PlanStatus::Executing,
+        "cancel_plan did not cancel"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "a refused action sends no event (no PlanTaskStatusChanged)"
+    );
+    assert_eq!(
+        state.decisions.items().count(),
+        0,
+        "cancel_plan raised no confirmation"
+    );
+    let warnings: Vec<_> = state
+        .notifications
+        .records()
+        .filter(|record| record.message == warning)
+        .collect();
+    assert!(!warnings.is_empty(), "a Warning says: {warning}");
+    assert!(warnings.iter().all(|record| {
+        record.severity == crate::adapters::tui::notifications::NoticeSeverity::Warning
+    }));
+    assert_eq!(
+        warnings.iter().map(|record| record.count).sum::<u32>(),
+        4,
+        "each of the four actions was refused"
+    );
+}
+
+#[test]
+fn story21_7_admit_refuses_a_ref_of_another_conversation_for_pause_skip_retry_and_cancel_plan() {
+    use crate::domain::models::TabState;
+    let mut other = TabState::new(2);
+    other.conversation.id = "other-conversation".into();
+    other.conversation.title = "Elsewhere".into();
+    assert_every_task_action_refused(
+        "other-conversation",
+        false,
+        &[other],
+        "Open Elsewhere to change its tasks.",
+    );
+}
+
+#[test]
+fn story21_7_admit_names_an_unknown_conversation_generically() {
+    assert_every_task_action_refused(
+        "gone",
+        false,
+        &[],
+        "Open that conversation to change its tasks.",
+    );
+}
+
+#[test]
+fn story21_7_admit_refuses_every_task_action_on_a_read_only_tab() {
+    let own = conversation().id;
+    assert_every_task_action_refused(&own, true, &[], super::mission_bridge::READ_ONLY);
+}
+
+#[test]
+fn story21_7_admit_lets_the_active_conversations_own_ref_through() {
+    let mut conversation = conversation();
+    let mut state = TuiState::new(160, 24);
+    let (bus, _events) = EventBus::new(16);
+    let task = TaskRef {
+        conversation_id: conversation.id.clone(),
+        plan_id: "plan".into(),
+        number: 1,
+    };
+    let mut ctx = TaskCtx {
+        state: &mut state,
+        conversation: &mut conversation,
+        read_only: false,
+        tabs: &[],
+        event_bus: &bus,
+    };
+    assert!(ctx.admit(&task));
+    assert_eq!(state.notifications.records().count(), 0);
 }

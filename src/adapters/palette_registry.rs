@@ -5,7 +5,7 @@ use crate::adapters::tui::keymap::CommandId;
 use crate::adapters::tui::keymap::render::{shortcut_for, shortcut_for_slash, shortcut_then};
 use crate::adapters::tui::keymap::table::LeaderCmd;
 use crate::adapters::tui::keymap::table_input::InputCmd;
-use crate::adapters::tui::keymap::table_panels::PanelCmd;
+use crate::adapters::tui::keymap::table_mission::MissionCmd;
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
 const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
@@ -126,6 +126,15 @@ impl PaletteRegistry {
             ),
         });
         self.slash_entries.push(PaletteEntry {
+            name: "tasks".to_string(),
+            description: "Open Mission Control on the Tasks tab".to_string(),
+            shortcut: shortcut_for(CommandId::Leader(LeaderCmd::Tasks)),
+            scope: PaletteScope::All,
+            action: PaletteAction::OpenSurface(
+                crate::domain::models::palette::SurfaceTarget::Tasks,
+            ),
+        });
+        self.slash_entries.push(PaletteEntry {
             name: "adapters".to_string(),
             description: "Open the Adapters window (port and MCP server health)".to_string(),
             shortcut: shortcut_for(CommandId::Leader(LeaderCmd::Adapters)),
@@ -182,7 +191,7 @@ impl PaletteRegistry {
             description: "Cancel the current executing plan".into(),
             shortcut: shortcut_then(
                 CommandId::Leader(LeaderCmd::Tasks),
-                CommandId::Panel(PanelCmd::TasksCancelPlan),
+                CommandId::Mission(MissionCmd::Kill),
             ),
             scope: PaletteScope::All,
             action: PaletteAction::ExecuteCommand("cancel-plan".into(), None),
@@ -526,7 +535,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 50); // 48 + 1 agents + 1 adapters surface entry (21-7, 7-C); /detach is attached-only
+        assert_eq!(reg.all_entries().len(), 51); // 48 + 1 agents + 1 adapters + 1 tasks surface entry (21-7, 7-C/7-D); /detach is attached-only
         assert!(reg.all_entries().iter().any(|e| e.name == "/notifications"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/login"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/models"));
@@ -549,7 +558,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 50); // 48 + the agents and adapters surface entries (21-7, 7-C)
+        assert_eq!(reg.all_entries().len(), 51); // 48 + the agents, adapters and tasks surface entries (21-7)
     }
 
     #[test]
@@ -565,20 +574,20 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 50); // 48 + the agents and adapters surface entries (21-7, 7-C)
+        assert_eq!(reg.slash_entries.len(), 51); // 48 + the agents, adapters and tasks surface entries (21-7)
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 51);
+        assert_eq!(reg.all_entries().len(), 52);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 51);
+        assert_eq!(reg.all_entries().len(), 52);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 52);
+        assert_eq!(reg.all_entries().len(), 53);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 52);
+        assert_eq!(reg.all_entries().len(), 53);
     }
 
     fn populated() -> PaletteRegistry {

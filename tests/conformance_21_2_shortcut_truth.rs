@@ -117,7 +117,7 @@ fn k5_help_and_hints_tell_the_truth() {
     );
     for tab in all.iter().filter(|b| b.key.starts_with("Tab")) {
         assert!(
-            tab.description.contains("sidebar") && tab.description.contains("next tab"),
+            tab.description.contains("next tab") && !tab.description.contains("sidebar"),
             "Tab row must name the real fallback: {}",
             tab.description
         );

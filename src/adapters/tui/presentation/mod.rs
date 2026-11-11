@@ -67,10 +67,16 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
         Surface::MissionControl if super::mission_control::search_editing(state) => {
             super::keymap::Context::InspectorSearch
         }
+        Surface::MissionControl if super::mission_control::reordering(state) => {
+            super::keymap::Context::MissionReorder
+        }
         Surface::ArtifactWindow if super::artifact_window::search_editing(state) => {
             super::keymap::Context::InspectorSearch
         }
         Surface::AgentWindow if super::agent_window::search_editing(state) => {
+            super::keymap::Context::InspectorSearch
+        }
+        Surface::TaskWindow if super::task_window::search_editing(state) => {
             super::keymap::Context::InspectorSearch
         }
         Surface::Decision => super::decision_queue::frame_context(state),
@@ -106,6 +112,10 @@ pub(crate) fn inspector_search_mut(
             .map(|window| &mut window.search),
         Surface::AgentWindow => state
             .agent_window
+            .as_mut()
+            .map(|window| &mut window.text.search),
+        Surface::TaskWindow => state
+            .task_window
             .as_mut()
             .map(|window| &mut window.text.search),
         _ => None,
@@ -147,12 +157,16 @@ pub fn consistent(state: &TuiState) -> bool {
                                     == Some(block.target.conversation_id.as_str())
                             })
                     }
+                    Surface::TaskWindow => {
+                        frame.tool_title.is_some()
+                            && state.task_window.as_ref().is_some_and(|window| {
+                                frame.conversation_id.as_deref() == Some(window.conversation_id())
+                            })
+                    }
                     Surface::ThreadInspector
                     | Surface::MissionControl
                     | Surface::ArtifactWindow
-                    | Surface::AgentWindow => {
-                        frame.tool_title.is_some()
-                    }
+                    | Surface::AgentWindow => frame.tool_title.is_some(),
                     _ => frame.tool_title.is_none(),
                 }
         })
@@ -174,6 +188,7 @@ pub fn consistent(state: &TuiState) -> bool {
         && is_open(state, Surface::ThreadInspector) == state.thread_inspector.is_some()
         && is_open(state, Surface::ArtifactWindow) == state.artifact_window.is_some()
         && is_open(state, Surface::AgentWindow) == state.agent_window.is_some()
+        && is_open(state, Surface::TaskWindow) == state.task_window.is_some()
         && is_open(state, Surface::Adapters) == state.adapters_window.is_some()
         // In-place stepping may coincide targets; each frame still owns one payload.
         && state.tool_inspectors.keys().all(|id| {

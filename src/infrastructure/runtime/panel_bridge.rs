@@ -31,33 +31,7 @@ pub(crate) fn open_panel(
     conversation: &Conversation,
     panel_type: PanelType,
 ) -> PanelOpenOutcome {
-    if panel_type == PanelType::Tasks {
-        let terminal_width = state.terminal_width;
-        let outcome = task_panel_handlers::handle_open_panel_tasks(
-            state,
-            conversation,
-            terminal_width,
-            layout::SIDEBAR_MIN_WIDTH,
-        );
-        if outcome.opened {
-            reveal_sidebar(state);
-            let selected = state.sidebar_selected;
-            reducer::set_base(
-                state,
-                FocusState::Sidebar {
-                    panel: panel_type,
-                    selected,
-                },
-            );
-        } else if outcome.closed {
-            reducer::set_base(state, FocusState::Chat);
-        }
-        if let Some(notice) = outcome.notice {
-            PanelOpenOutcome::Notice(notice)
-        } else {
-            PanelOpenOutcome::Handled
-        }
-    } else if state.sidebar_visible
+    if state.sidebar_visible
         && state.sidebar_panel == Some(panel_type)
         && state.density_mode != DensityMode::Focus
     {
@@ -124,8 +98,7 @@ pub(crate) fn tick_status(state: &mut TuiState, conversation: &Conversation, tic
         state.needs_redraw = true;
     }
     // Running-task elapsed display must remain live between domain events.
-    if state.sidebar_visible
-        && state.sidebar_panel == Some(PanelType::Tasks)
+    if crate::adapters::tui::mission_control::tasks_surface_open(state)
         && task_panel_handlers::any_plan_has_running_task(conversation)
     {
         state.needs_redraw = true;
@@ -256,9 +229,9 @@ mod tests {
                 selected: state.sidebar_selected
             }
         );
-        // Quiet: no toast, and not the Tasks default.
+        // Quiet: no toast; History (not the retired Tasks default) is the panel.
         assert_eq!(state.notifications.records().count(), 0);
-        assert_ne!(state.sidebar_panel, Some(PanelType::Tasks));
+        assert_eq!(state.sidebar_panel, Some(PanelType::History));
         // A second `Ctrl+X h` closes it again.
         state.focus = FocusState::Input;
         let outcome = open_through_the_door(&mut state, 'h', PanelType::History);
@@ -284,12 +257,21 @@ mod tests {
             assert!(!state.density_user_overridden);
             assert!(!state.sidebar_visible && state.sidebar_panel.is_none());
         }
-        // The Tasks route reveals too.
-        let mut state = TuiState::new(130, 30);
-        let outcome = open_through_the_door(&mut state, 't', PanelType::Tasks);
-        assert!(matches!(outcome, PanelOpenOutcome::Handled));
-        assert!(painted_sidebar(&state), "Tasks: revealed");
-        assert_eq!(state.density_mode, DensityMode::Monitor);
+        // `t` is Mission Control's Tasks tab since Story 21.7 (7-D): a frame, never the
+        // sidebar, and the density is left alone.
+        let mut tasks = TuiState::new(130, 30);
+        assert_eq!(
+            leader(&mut tasks, 't'),
+            InputAction::OpenMissionControl(crate::adapters::tui::mission_control::McTab::Tasks)
+        );
+        assert!(crate::adapters::tui::presentation::is_open(
+            &tasks,
+            crate::adapters::tui::presentation::Surface::MissionControl
+        ));
+        assert!(!painted_sidebar(&tasks));
+        assert_eq!(tasks.density_mode, DensityMode::Focus);
+        assert!(!tasks.density_user_overridden);
+        assert!(!tasks.sidebar_visible && tasks.sidebar_panel.is_none());
         // Control: already in Monitor, nothing is overridden.
         let mut monitor = TuiState::new(130, 30);
         monitor.density_mode = DensityMode::Monitor;
@@ -337,5 +319,52 @@ mod tests {
             PanelOpenOutcome::Opened
         ));
         assert!(painted_sidebar(&palette));
+    }
+
+    #[test]
+    fn story21_7_running_task_tick_repaints_only_while_a_tasks_surface_is_open() {
+        use crate::domain::models::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
+        let mut conversation = conversation();
+        conversation.plans.insert(
+            "plan".into(),
+            Plan {
+                id: "plan".into(),
+                title: "Running".into(),
+                tasks: vec![PlanTask {
+                    number: 1,
+                    title: "Task 1".into(),
+                    description: String::new(),
+                    depends_on: vec![],
+                    status: PlanTaskStatus::Running,
+                    started_at_ms: Some(1),
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
+                    delegated_to: None,
+                    sub_tasks: vec![],
+                }],
+                estimated_effort: None,
+                status: PlanStatus::Executing,
+                created_at: 1_700_000_000,
+                resolved_at: None,
+                host_message_id: None,
+            },
+        );
+        // No Tasks surface (the sidebar History panel is not one): the tick stays quiet.
+        let mut state = TuiState::new(130, 30);
+        open_panel(&mut state, &conversation, PanelType::History);
+        state.needs_redraw = false;
+        tick_status(&mut state, &conversation, 50);
+        assert!(!state.needs_redraw, "no Tasks surface: no repaint");
+        // Mission Control on the Tasks tab: the elapsed time keeps moving.
+        let mut hub = TuiState::new(130, 30);
+        assert_eq!(
+            leader(&mut hub, 't'),
+            InputAction::OpenMissionControl(crate::adapters::tui::mission_control::McTab::Tasks)
+        );
+        hub.needs_redraw = false;
+        tick_status(&mut hub, &conversation, 50);
+        assert!(hub.needs_redraw, "Tasks tab open: running task repaints");
     }
 }

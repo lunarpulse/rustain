@@ -253,14 +253,8 @@ def test_yolo_auto_approve_plan(tui: RustainTUI):
     )
 
     tui.chat_mode()
-    # Task panel auto-opens in YOLO mode (sidebar narrows chat). Close it to
-    # restore full-width viewport (Ctrl+X t toggles the Tasks panel it shows; the
-    # old `toggle_sidebar` palette route is gone with Ctrl+H, Story 21.3), then
-    # scroll up to bring plan card into view.
-    tui.send(CTRL_X)
-    tui.wait(0.2)
-    tui.send("t")
-    tui.wait(0.5)
+    # Story 21.7: plan start opens no Tasks surface (the sidebar auto-open is gone),
+    # so the chat is already full width; scroll up to bring the plan card into view.
     tui.scroll_up(10)
     tui.wait(0.5)
     screen = tui.get_screen_text()

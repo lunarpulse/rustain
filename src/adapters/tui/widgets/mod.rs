@@ -57,6 +57,7 @@ pub mod tab_bar;
 pub mod task_detail;
 pub mod task_panel;
 pub mod task_skip_cascade_card;
+pub mod task_window;
 pub mod team_proposal_card;
 pub mod team_retract_prompt;
 pub mod ticket_form;

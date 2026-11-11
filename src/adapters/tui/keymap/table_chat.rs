@@ -141,7 +141,7 @@ const CHAT: &[Binding] = &[
     c(&[Key::Char('K')], ChatCmd::BlockJumpPrev, "blocks").hint().local().does("Jump to the previous content block"),
     c(&[Key::Char('{')], ChatCmd::UserMessagePrev, "").local().help(N, "{ / }", "Jump to previous / next user message"),
     c(&[Key::Char('}')], ChatCmd::UserMessageNext, "").local().does("Jump to the next user message"),
-    c(&[Key::Tab], ChatCmd::CycleInvocation, "items").hint().local().help(N, "Tab (Chat)", "Cycle tools, thinking, code, tables (needs 2+); else sidebar focus, else next tab"),
+    c(&[Key::Tab], ChatCmd::CycleInvocation, "items").hint().local().help(N, "Tab (Chat)", "Cycle tools, thinking, code, tables (needs 2+); else next tab"),
     // ── vim z-prefix folds, bracket prose-anchor jumps (local sequences) ──
     c(&[Key::Char('z'), Key::Char('a')], ChatCmd::FoldToggle, "").local().help(V, "za", "Toggle fold on focused turn"),
     c(&[Key::Char('z'), Key::Char('c')], ChatCmd::FoldCollapse, "").local().help(V, "zc", "Collapse focused turn"),

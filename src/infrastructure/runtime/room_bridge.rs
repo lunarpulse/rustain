@@ -153,7 +153,9 @@ pub async fn refresh_mission_tab(
         McTab::Messages if state.mission_control.messages.is_none() => {
             super::transparency_bridge::open_messages(app_state, state, conversation_id).await;
         }
-        McTab::Messages | McTab::Probe => {}
+        // The Tasks rows come from the active conversation, which the host's draw reads
+        // (`tasks::sync`): there is no source to read here.
+        McTab::Tasks | McTab::Messages | McTab::Probe => {}
     }
 }
 

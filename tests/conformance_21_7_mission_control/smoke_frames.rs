@@ -115,4 +115,82 @@ async fn story21_7_smoke_frames_export() {
         )
         .expect("write");
     }
+    // Leg D (7-D): the Tasks tab and the task window of the seeded plan (the live leg seeds the
+    // same tasks through a saved session).
+    for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+        use rustain::domain::models::plan::{
+            Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
+        };
+        let task =
+            |number: u32, title: &str, status: PlanTaskStatus, result: Option<&str>| PlanTask {
+                number,
+                title: title.to_owned(),
+                description: String::new(),
+                depends_on: vec![],
+                status,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: result.map(|text| TaskResult {
+                    text: text.to_owned(),
+                    tool_call_count: 1,
+                    token_count: None,
+                }),
+                error: None,
+                waiting_on: vec![],
+                delegated_to: None,
+                sub_tasks: vec![],
+            };
+        let mut rig = Rig::plain(room_workspace(&NODES).await, width, height).await;
+        rig.f.tabs.active_tab_mut().conversation.plans.insert(
+            "p1".to_owned(),
+            Plan {
+                id: "p1".to_owned(),
+                title: "Release".to_owned(),
+                tasks: vec![
+                    task(
+                        1,
+                        "Draft notes",
+                        PlanTaskStatus::Completed,
+                        Some("Notes **drafted**"),
+                    ),
+                    task(
+                        2,
+                        "Review result",
+                        PlanTaskStatus::Completed,
+                        Some("Reviewed OK"),
+                    ),
+                    task(3, "Publish", PlanTaskStatus::Pending, None),
+                ],
+                estimated_effort: None,
+                status: PlanStatus::Completed,
+                created_at: 1,
+                resolved_at: None,
+                host_message_id: None,
+            },
+        );
+        rig.key(Key::Ctrl('x'));
+        rig.key(Key::Char('t'));
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("tasks-open-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+        rig.key(Key::Char('j'));
+        rig.key(Key::Char('j'));
+        rig.f.paint();
+        let conversation = rig.f.conversation().clone();
+        let reference = rustain::adapters::tui::mission_control::tasks::TaskRef {
+            conversation_id: conversation.id.clone(),
+            plan_id: "p1".to_owned(),
+            number: 2,
+        };
+        rustain::adapters::tui::task_window::open(&mut rig.f.h.state, &conversation, &reference);
+        rig.f.paint();
+        std::fs::write(
+            dir.join(format!("task-open-{width}x{height}.txt")),
+            lines(&rig).join("\n"),
+        )
+        .expect("write");
+    }
 }

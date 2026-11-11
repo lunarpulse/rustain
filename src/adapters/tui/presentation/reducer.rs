@@ -59,6 +59,7 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 | Surface::MissionControl
                 | Surface::ArtifactWindow
                 | Surface::AgentWindow
+                | Surface::TaskWindow
                 | Surface::Adapters
         ),
         "identity-bearing frames open through their dedicated reducer"
@@ -165,6 +166,32 @@ pub fn open_agent_window(
         .find(|frame| frame.surface == Surface::AgentWindow)
         .expect("the agent frame was just opened")
         .tool_title = Some(title);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
+}
+
+/// The task window is one frame at a time (A8) and **stage-bound**: the frame carries the
+/// conversation of its task, so a reset, close or tab switch of that Stage pops it
+/// (`reconcile_stage`). Opening another task retargets the payload, the title and the owning
+/// conversation in place. The opening writes no base focus, and a Mission Control frame
+/// beneath stays where it was.
+pub fn open_task_window(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::task_window::TaskWindowState,
+    title: String,
+) -> Opened {
+    let conversation_id = payload.conversation_id().to_owned();
+    state.task_window = Some(payload);
+    if let Some(frame) = state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::TaskWindow)
+    {
+        frame.conversation_id = Some(conversation_id);
+        frame.tool_title = Some(title.clone());
+    }
+    let opened = open_frame(state, Surface::TaskWindow, None, Some(title));
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
     opened
@@ -575,6 +602,10 @@ fn fresh_frame(
             Surface::BlockViewer(key) => {
                 Some(state.block_viewers[&key.0].target.conversation_id.clone())
             }
+            Surface::TaskWindow => state
+                .task_window
+                .as_ref()
+                .map(|window| window.conversation_id().to_owned()),
             _ => None,
         },
         decision,
@@ -640,6 +671,7 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::MissionControl
         | Surface::ArtifactWindow
         | Surface::AgentWindow
+        | Surface::TaskWindow
         | Surface::Adapters => {}
     }
 }
@@ -842,6 +874,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::AgentWindow => {
             state.agent_window = None;
+            None
+        }
+        Surface::TaskWindow => {
+            state.task_window = None;
             None
         }
         Surface::Adapters => {

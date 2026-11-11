@@ -21,6 +21,7 @@ pub mod artifacts;
 pub mod keys;
 pub mod messages;
 pub mod tabs;
+pub mod tasks;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -39,6 +40,9 @@ pub use tabs::{McRow, Resolved, Selection};
 pub enum McTab {
     /// The subagents of this session (`Ctrl+X s`), a list tab: `Enter` opens the agent window.
     Agents,
+    /// The active conversation's resolved plan (`Ctrl+X t`), a list tab: `Enter` opens the task
+    /// window.
+    Tasks,
     /// The A2A log (`Ctrl+X l`, `/team log`): 21-8's log view.
     Messages,
     /// The durable room replay (`Ctrl+X r`, `/room`).
@@ -57,6 +61,7 @@ impl McTab {
     pub const fn label(self) -> &'static str {
         match self {
             McTab::Agents => "Agents",
+            McTab::Tasks => "Tasks",
             McTab::Messages => "Messages",
             McTab::Room => "Room",
             McTab::Artifacts => "Artifacts",
@@ -73,7 +78,10 @@ impl McTab {
     /// A list tab keeps a selection and shows a master list (and, wide, a detail preview).
     #[must_use]
     pub const fn is_list(self) -> bool {
-        matches!(self, McTab::Agents | McTab::Artifacts | McTab::Probe)
+        matches!(
+            self,
+            McTab::Agents | McTab::Tasks | McTab::Artifacts | McTab::Probe
+        )
     }
 }
 
@@ -90,7 +98,7 @@ pub enum McPane {
 /// host's Messages only (A20), plus a registered test probe.
 #[derive(Debug, Clone, Copy)]
 pub struct Delivered {
-    tabs: [McTab; 5],
+    tabs: [McTab; 6],
     len: usize,
 }
 
@@ -123,10 +131,13 @@ pub struct Fit {
     pub export: bool,
     /// The rail painted `Enter Open` whole (a list tab with a selected row).
     pub open: bool,
-    /// The rail painted `p Pause/Resume` whole (an agent that can be paused or resumed).
+    /// The rail painted `p Pause/Resume` whole (an agent or task that can be paused or resumed).
     pub pause: bool,
-    /// The rail painted `x Kill` whole (an agent that can be killed).
+    /// The rail painted `x Kill` / `x Cancel plan` whole (an agent that can be killed, a plan
+    /// that can be cancelled).
     pub kill: bool,
+    /// The rail painted `s Skip` whole (a task that can be skipped).
+    pub skip: bool,
     /// The rail painted `c Copy` whole (a list tab with a selected row, local host).
     pub copy: bool,
 }
@@ -177,6 +188,12 @@ pub struct MissionControlState {
     pub list_search: InspectorSearch,
     selections: HashMap<McTab, Selection>,
     lists: HashMap<McTab, McList>,
+    /// What the Tasks tab was last built from (the conversation, the plan, the task statuses).
+    pub tasks: Option<tasks::TasksSource>,
+    /// Fingerprint of what the Tasks rows were last built from, and how many times they were
+    /// built (the witness that an unchanged repaint rebuilds nothing).
+    pub tasks_fp: Option<u64>,
+    pub tasks_builds: u32,
     fit: Cell<Fit>,
     room_paint: RefCell<Option<RoomPaint>>,
     room_presented: bool,
@@ -189,17 +206,18 @@ impl MissionControlState {
     /// The delivered tabs for `host`.
     #[must_use]
     pub fn delivered(&self, host: Host) -> Delivered {
-        let mut tabs = [McTab::Messages; 5];
+        let mut tabs = [McTab::Messages; 6];
         let mut len = 1;
         if host == Host::Local {
             tabs[0] = McTab::Agents;
-            tabs[1] = McTab::Messages;
-            tabs[2] = McTab::Room;
-            tabs[3] = McTab::Artifacts;
-            len = 4;
+            tabs[1] = McTab::Tasks;
+            tabs[2] = McTab::Messages;
+            tabs[3] = McTab::Room;
+            tabs[4] = McTab::Artifacts;
+            len = 5;
             if self.lists.contains_key(&McTab::Probe) {
-                tabs[4] = McTab::Probe;
-                len = 5;
+                tabs[5] = McTab::Probe;
+                len = 6;
             }
         }
         Delivered { tabs, len }
@@ -217,6 +235,32 @@ impl MissionControlState {
     /// Register (or refresh) the probe list tab.
     pub fn register_probe(&mut self, rows: Vec<McRow>) {
         self.set_list(McTab::Probe, rows, None, None);
+    }
+
+    /// Replace the rows of a list tab only when they (or the words around them) differ from
+    /// what it holds: an unchanged rebuild bumps no revision, so the detail cache and the
+    /// repaint facts keyed on it stay valid. Returns whether anything changed.
+    pub fn set_list_if_changed(
+        &mut self,
+        tab: McTab,
+        rows: Vec<McRow>,
+        empty: Option<String>,
+        note: Option<String>,
+    ) -> bool {
+        if let Some(list) = self.lists.get(&tab)
+            && list.all == rows
+            && list.empty == empty
+            && list.note == note
+        {
+            return false;
+        }
+        self.set_list(tab, rows, empty, note);
+        true
+    }
+
+    /// Drop the selection of `tab` (its rows now name something else).
+    pub fn forget_selection(&mut self, tab: McTab) {
+        self.selections.remove(&tab);
     }
 
     /// Replace the rows of a list tab. The selection is reconciled against the rows it
@@ -530,6 +574,38 @@ pub fn search_editing(state: &TuiState) -> bool {
         .mission_control
         .search()
         .is_some_and(|search| search.editing)
+}
+
+/// A task of the Tasks tab is being reordered **here**: the frame resolves its keys in
+/// `Context::MissionReorder` until the reorder is committed or cancelled. A reorder armed for
+/// another conversation's plan (a decision switched tabs) never captures this tab's keys; the
+/// host restores that order (`task_panel_bridge::settle_reorder_origin`) before the next key.
+#[must_use]
+pub fn reordering(state: &TuiState) -> bool {
+    state.mission_control.tab == McTab::Tasks
+        && state
+            .task_panel_state
+            .reorder
+            .as_ref()
+            .is_some_and(|reorder| {
+                state
+                    .mission_control
+                    .tasks
+                    .as_ref()
+                    .is_some_and(|source| source.conversation_id == reorder.conversation_id)
+            })
+}
+
+/// A surface that shows a plan's tasks is open (the hub on the Tasks tab, or the task
+/// window): a task event repaints, and the running-task tick keeps the elapsed times moving.
+#[must_use]
+pub fn tasks_surface_open(state: &TuiState) -> bool {
+    state.task_window.is_some()
+        || (state.mission_control.tab == McTab::Tasks
+            && state
+                .modal_stack
+                .all_frames()
+                .any(|frame| frame.surface == Surface::MissionControl))
 }
 
 /// The Room is presented: the LAST COMPLETED DRAW painted its body with at least one row while

@@ -294,7 +294,9 @@ fn dense_which_key_keeps_every_registry_key_with_a_full_composer() {
                 }
                 press(&mut state, Key::Ctrl('x'));
                 if frame_origin {
-                    press(&mut state, Key::Char('t'));
+                    // `h` (History) is the panel chord a frame origin refuses; `t` is a Mission
+                    // Control tab since 21-7 7-D and opens the hub from any origin.
+                    press(&mut state, Key::Char('h'));
                 }
                 assert!(state.pending_leader.is_some());
                 let mut avail = match host {
