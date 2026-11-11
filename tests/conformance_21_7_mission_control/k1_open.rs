@@ -143,7 +143,15 @@ async fn a_second_open_retargets_the_one_frame() {
         .state
         .mission_control
         .register_probe(probe_rows(&["a", "b"]));
-    assert_eq!(rig.f.press(Key::Right), InputAction::Consumed);
+    for tab in [
+        rustain::adapters::tui::mission_control::McTab::Artifacts,
+        rustain::adapters::tui::mission_control::McTab::Probe,
+    ] {
+        assert_eq!(
+            rig.f.press(Key::Right),
+            InputAction::OpenMissionControl(tab)
+        );
+    }
     assert_eq!(top_title(&rig).as_deref(), Some("Mission Control · Probe"));
     open_room(&mut rig).await;
     assert_eq!(top_title(&rig).as_deref(), Some("Mission Control · Room"));

@@ -385,11 +385,12 @@ pub enum Context {
     /// The agent inspector (the drill-down on one agent): its own keys, then the
     /// Sidebar rows.
     SidebarAgentInspector,
-    SidebarA2aLog,
     /// The Mission Control hub (S-MC): the tab row, the list/detail focus and the RU-25
     /// scroll rows of `InspectorBody`; a frame of its own, never the composer.
     MissionControl,
-    SidebarArtifacts,
+    /// The artifact window (Story 21.7 A15): one artifact's facts and body, `v` rendered or
+    /// source, `c` copies the original source.
+    ArtifactWindow,
     WaveOverlay,
     Help,
     CommandPalette,
@@ -447,7 +448,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 64] = [
+    pub const ALL: [Context; 63] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -473,9 +474,8 @@ impl Context {
         Context::TasksReorder,
         Context::SidebarAgents,
         Context::SidebarAgentInspector,
-        Context::SidebarA2aLog,
         Context::MissionControl,
-        Context::SidebarArtifacts,
+        Context::ArtifactWindow,
         Context::WaveOverlay,
         Context::Help,
         Context::CommandPalette,
@@ -542,9 +542,8 @@ impl Context {
             Context::TasksReorder => "Tasks (reorder)",
             Context::SidebarAgents => "Agents",
             Context::SidebarAgentInspector => "Agent inspector",
-            Context::SidebarA2aLog => "A2A log",
             Context::MissionControl => "Mission Control",
-            Context::SidebarArtifacts => "Artifacts",
+            Context::ArtifactWindow => "Artifact window",
             Context::WaveOverlay => "Wave overlay",
             Context::Help => "Help",
             Context::CommandPalette => "Command palette",
@@ -624,6 +623,8 @@ impl Context {
             Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector | Context::ThreadInspector => &[Context::MarkdownBody],
             Context::MissionControl => &[Context::InspectorBody],
+            // The artifact window: the Markdown body rows (`v`) and the RU-25 scroll rows.
+            Context::ArtifactWindow => &[Context::MarkdownBody],
             // The block viewport's chain excludes the thread rows: `l` moves columns there.
             Context::BodyViewport => &[Context::MarkdownBody],
             // The reply field is a caret field of its own, never the composer.
@@ -642,8 +643,6 @@ impl Context {
             Context::SidebarHistory
             | Context::SidebarAgents
             | Context::SidebarAgentInspector
-            | Context::SidebarA2aLog
-            | Context::SidebarArtifacts
             | Context::SidebarTasks => &[Context::Sidebar],
             Context::TasksReorder => &[Context::SidebarTasks],
             // Only the non-character keys of Chat are inherited (see `resolve_in`).

@@ -288,12 +288,7 @@ mod tests {
 
     #[test]
     fn story21_3_every_panel_chord_reveals_and_monitor_density_is_not_touched() {
-        for (key, panel) in [
-            ('s', PanelType::Agents),
-            ('a', PanelType::Adapters),
-            ('e', PanelType::Artifacts),
-            ('l', PanelType::TransparencyLog),
-        ] {
+        for (key, panel) in [('s', PanelType::Agents), ('a', PanelType::Adapters)] {
             let mut state = TuiState::new(130, 30);
             let outcome = open_through_the_door(&mut state, key, panel);
             assert!(matches!(outcome, PanelOpenOutcome::Opened), "{key}");

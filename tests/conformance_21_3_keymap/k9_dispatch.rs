@@ -113,18 +113,27 @@ fn narrow_resize_clears_the_drill_down_and_the_sidebar() {
     assert_eq!(s.task_panel_state.drill_down_task, Some(2));
 }
 
-/// A2A log `Esc` with nothing to clear is not swallowed by the log row: it declines to the
-/// sidebar's `Esc` (back to Chat).
+/// Messages `Esc` with no kept filter is not swallowed by the tab: the one Mission Control frame
+/// closes (the A2A log was a sidebar panel whose `Esc` declined to the sidebar's back-to-Chat).
 #[test]
-fn a2a_log_esc_with_nothing_to_clear_returns_to_chat() {
+fn messages_esc_with_nothing_to_clear_closes_the_frame() {
     let mut s = fresh();
-    s.sidebar_visible = true;
-    s.focus = FocusState::Sidebar {
-        panel: PanelType::TransparencyLog,
-        selected: 0,
-    };
+    rustain::adapters::tui::mission_control::open_messages(
+        &mut s,
+        false,
+        &["row one".to_owned(), "— closing claim".to_owned()],
+        None,
+    );
+    assert!(rustain::adapters::tui::presentation::is_open(
+        &s,
+        rustain::adapters::tui::presentation::Surface::MissionControl
+    ));
     assert_eq!(press(&mut s, Key::Esc), InputAction::Consumed);
-    assert_eq!(s.focus, FocusState::Chat);
+    assert!(s.modal_stack.is_empty(), "the frame closed");
+    assert!(
+        s.mission_control.messages.is_none(),
+        "a closed visit drops its page"
+    );
 }
 
 /// An armed reorder wins `Esc` over an open drill-down (the old arm order): the reorder
@@ -188,21 +197,10 @@ fn sidebar_family_children_take_the_sidebar_effect_for_inherited_keys() {
         (Key::Alt('v'), "RequestClipboardPaste | Sidebar"),
         (Key::Enter, "OpenSidebarConversation | Sidebar"),
     ];
-    // The A2A log and Artifacts own `Enter`, so it is theirs, not the Sidebar's.
-    let own_enter = [PanelType::TransparencyLog, PanelType::Artifacts];
     for (key, expect) in keys {
         assert_eq!(effect(PanelType::Adapters, key), expect, "Sidebar {key:?}");
-        for panel in [
-            PanelType::Tasks,
-            PanelType::Agents,
-            PanelType::TransparencyLog,
-            PanelType::Artifacts,
-        ] {
-            if key == Key::Enter && own_enter.contains(&panel) {
-                assert_eq!(effect(panel, key), "Consumed | Sidebar", "{panel:?} Enter");
-            } else {
-                assert_eq!(effect(panel, key), expect, "{panel:?} {key:?}");
-            }
+        for panel in [PanelType::Tasks, PanelType::Agents] {
+            assert_eq!(effect(panel, key), expect, "{panel:?} {key:?}");
         }
     }
 }

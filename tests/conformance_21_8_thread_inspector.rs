@@ -48,8 +48,5 @@ mod k15_sent;
 #[path = "conformance_21_8_thread_inspector/k16_retract.rs"]
 mod k16_retract;
 
-#[path = "conformance_21_8_thread_inspector/k17_log.rs"]
-mod k17_log;
-
 #[path = "conformance_21_8_thread_inspector/k18_summary.rs"]
 mod k18_summary;

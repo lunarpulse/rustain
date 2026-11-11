@@ -188,28 +188,23 @@ fn footer_text(
             rail(KeyContext::ThreadInspector, ThreadCmd::OpenDecision)
         ));
     }
-    let log = matches!(inspector.target, ThreadTarget::Log { .. });
-    if !log {
-        push(format!(
-            "{} Copy",
-            rail(KeyContext::ThreadInspector, ThreadCmd::Copy)
-        ));
-    }
+    push(format!(
+        "{} Copy",
+        rail(KeyContext::ThreadInspector, ThreadCmd::Copy)
+    ));
     push(format!(
         "{} Search",
         rail(KeyContext::ThreadInspector, OverlayCmd::InspectorSearch)
     ));
-    if !log {
-        push(format!(
-            "{} {}",
-            rail(KeyContext::MarkdownBody, BodyCmd::ToggleMode),
-            if inspector.mode == BodyMode::Rendered {
-                "Source"
-            } else {
-                "Rendered"
-            }
-        ));
-    }
+    push(format!(
+        "{} {}",
+        rail(KeyContext::MarkdownBody, BodyCmd::ToggleMode),
+        if inspector.mode == BodyMode::Rendered {
+            "Source"
+        } else {
+            "Rendered"
+        }
+    ));
     if offers.viewport {
         push(format!(
             "{} Block viewport",
@@ -438,9 +433,6 @@ pub fn render(
         rows_of(&cache.header).min(room.saturating_sub(body_min + field_height + footer_height));
     let body_height = room - header_height - field_height - footer_height;
     let rows = cache.body.len();
-    if matches!(inspector.target, ThreadTarget::Log { .. }) && body_height >= 1 && rows > 0 {
-        inspector.log_painted.set(true);
-    }
     inspector.fit.set((rows, usize::from(body_height)));
     let top = Rect::new(inner.x, inner.y, inner.width, header_height);
     let body = Rect::new(inner.x, inner.y + header_height, inner.width, body_height);

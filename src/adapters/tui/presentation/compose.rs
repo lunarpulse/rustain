@@ -117,8 +117,16 @@ pub fn compose(
                     rect,
                     state,
                     modal.title(),
+                    host,
                 );
             }
+            Surface::ArtifactWindow => crate::adapters::tui::widgets::artifact_window::render(
+                frame,
+                rect,
+                state,
+                modal.title(),
+                show_caret,
+            ),
             Surface::Search => {
                 rect = Rect::new(
                     shell.chat_pane.x,
@@ -272,7 +280,8 @@ pub fn compose(
                 | Surface::ToolInspector(_)
                 | Surface::BlockViewer(_)
                 | Surface::ThreadInspector
-                | Surface::MissionControl => theme.colors.accent,
+                | Surface::MissionControl
+                | Surface::ArtifactWindow => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

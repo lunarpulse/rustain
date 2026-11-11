@@ -293,31 +293,3 @@ pub fn fill_sent(state: &mut TuiState, origin: &str, generation: u64, message: &
     state.needs_redraw = true;
     true
 }
-
-/// Open (or retarget) the one thread frame on the A2A log: one filterable turn per row, the
-/// closing claim kept under every filter.
-pub fn open_log(state: &mut TuiState, filtered: bool, blocks: &[String]) {
-    let same = state
-        .thread_inspector
-        .take_if(|old| matches!(old.target, ThreadTarget::Log { .. }));
-    let mut inspector = ThreadInspectorState::new(
-        ThreadTarget::Log { filtered },
-        ThreadAccess::ReadOnly,
-        crate::domain::models::SemanticMessageType::Unknown,
-    );
-    if let Some(old) = same {
-        inspector.mode = old.mode;
-        inspector.search = old.search;
-    }
-    // The display escape contract applies once at this boundary (journal and export bytes stay
-    // as they are): control and bidi characters of peer-derived scalars are visible escapes.
-    let escaped: Vec<String> = blocks
-        .iter()
-        .map(|block| super::recipient_view::escape_disclosable(block))
-        .collect();
-    let (content, segments, turns) = crate::adapters::tui::thread_body::block_page(&escaped, true);
-    inspector.content = content;
-    inspector.segments = segments;
-    inspector.turns = turns;
-    reducer::open_thread(state, inspector, thread_inspector::log_title(filtered));
-}

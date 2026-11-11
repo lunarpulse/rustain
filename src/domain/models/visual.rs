@@ -111,17 +111,8 @@ pub enum PanelType {
     Tasks,
     Agents,
     Adapters,
-    /// Story 18.2 (AC5) — `Ctrl+X, L`. Chronological A2A transparency rows
-    /// folded from the durable room journal.
-    ///
-    /// Every persistent view lives in the sidebar slot.
-    TransparencyLog,
-    /// Story 18.3a-c (AC3) — `Ctrl+X, E` (`e` for **E**vidence, FR149's own
-    /// term; the type is `EvidenceArtifact`). The durable artifact list with
-    /// one-level `depends_on` lineage and, for patches, the apply *decision*
-    /// that governs each one. (The durable Room is no sidebar panel since
-    /// Story 21.7: it is the Mission Control Room tab.)
-    Artifacts,
+    // The durable Room, the A2A log (Messages) and the artifact list are Mission Control tabs
+    // since Story 21.7: none of them is a sidebar panel.
 }
 
 /// Target of a delete confirmation dialog.

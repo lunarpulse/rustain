@@ -128,12 +128,29 @@ fn warn(state: &mut TuiState, conversation_id: &str, app_state: &AppState, messa
         });
 }
 
-/// A chord opened Mission Control on `tab` (the frame is on the stack already): run the
-/// tab's source read. Only the Room has one in this slice.
-pub async fn refresh_mission_tab(app_state: &AppState, state: &mut TuiState, tab: McTab) {
-    if tab == McTab::Room {
-        refresh_panel(app_state, state).await;
-        finalize_room_panel(state);
+/// A chord (or `Left`/`Right`) put Mission Control on `tab` (the frame is on the stack
+/// already): run the tab's source read. Room folds the journal; Artifacts folds it for the
+/// artifact list; Messages reads the A2A log only when no page is held (a held page is the
+/// view the operator opened).
+pub async fn refresh_mission_tab(
+    app_state: &AppState,
+    state: &mut TuiState,
+    conversation_id: &str,
+    tab: McTab,
+    permission_mode: crate::domain::models::PermissionMode,
+) {
+    match tab {
+        McTab::Room => {
+            refresh_panel(app_state, state).await;
+            finalize_room_panel(state);
+        }
+        McTab::Artifacts => {
+            super::artifact_bridge::refresh_panel(app_state, state, permission_mode).await;
+        }
+        McTab::Messages if state.mission_control.messages.is_none() => {
+            super::transparency_bridge::open_messages(app_state, state, conversation_id).await;
+        }
+        McTab::Messages | McTab::Probe => {}
     }
 }
 

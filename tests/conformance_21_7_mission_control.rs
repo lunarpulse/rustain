@@ -1,7 +1,9 @@
 //! Story 21.7 conformance: the Mission Control hub (S-MC). Slice 7-A — the frame, its keys,
 //! the shared list builder and the Room tab — carries the keystones K1 (open and geometry),
 //! K2 (keys and route), K3 (identity), K4 (the presented-only Room poll) and the desk-check
-//! frame export of smoke leg A; K12 clause (a) is `mission-21-7-a` in the one cutover scanner
+//! frame export of smoke leg A. Slice 7-B adds K5 (the Messages tab: 21-8's A2A log re-homed)
+//! and K6 (the Artifacts tab and the artifact window). K12 clause (a) is `mission-21-7-a` and
+//! clause (b) is `mission-21-7-b` in the one cutover scanner
 //! (`conformance_21_4_modal_stack/k6_gate.rs`). Later slices add their keystones here.
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
@@ -26,3 +28,9 @@ mod k4_room;
 
 #[path = "conformance_21_7_mission_control/smoke_frames.rs"]
 mod smoke_frames;
+
+#[path = "conformance_21_7_mission_control/k5_messages.rs"]
+mod k5_messages;
+
+#[path = "conformance_21_7_mission_control/k6_artifacts.rs"]
+mod k6_artifacts;

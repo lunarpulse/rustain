@@ -1,14 +1,14 @@
 """Story 18-2: Transparency & Visible Surfacing — TUI contract tests.
 
-Deterministic (non-API) coverage for the ``Ctrl+X, L`` Transparency Log panel
-and the ``/team log`` in-chat surface. These mirror the Story 10-4 subagent
-panel tests: real chord, real slash command, real render — no live LLM.
+Deterministic (non-API) coverage for the ``Ctrl+X, L`` Messages surface (Story 21.7: Mission
+Control's Messages tab, the A2A log's one home) and the ``/team log`` in-chat surface. These
+mirror the Story 10-4 subagent panel tests: real chord, real slash command, real render — no
+live LLM.
 
-Chord reference: ``Ctrl+X, L`` → ``OpenPanel(PanelType::TransparencyLog)``.
-Before this story the same chord was a ``ChordAction::Noop("Log panel — Epic
-14")`` that the help screen advertised as ``available: true`` — a rendered,
-documented binding backed by nothing. The first test below is what makes that
-impossible to ship again.
+Chord reference: ``Ctrl+X, L`` → ``InputAction::OpenMessages`` (local host). Before 18.2 the
+same chord was a ``ChordAction::Noop("Log panel — Epic 14")`` that the help screen advertised
+as ``available: true`` — a rendered, documented binding backed by nothing. The first test
+below is what makes that impossible to ship again.
 
 ⚠ **What these tests deliberately do NOT assert.**
 Peer-controlled text reaching the terminal without escape sequences is AC8, and
@@ -30,8 +30,11 @@ from harness import PROJECT_ROOT, RustainTUI, _resolve_binary
 from keys import CTRL_X
 
 
+MESSAGES_TITLE = "Mission Control · Messages"
+
+
 def _chord_ctrl_x_l(tui: RustainTUI) -> None:
-    """Send Ctrl+X followed by 'l' → OpenPanel(TransparencyLog)."""
+    """Send Ctrl+X followed by 'l' → OpenMessages."""
     tui.send(CTRL_X)
     tui.wait(0.2)
     tui.send("l")
@@ -43,12 +46,12 @@ def _chord_ctrl_x_l(tui: RustainTUI) -> None:
 
 @pytest.mark.story_18_2
 def test_chord_opens_transparency_log_panel(tui_monitor: RustainTUI):
-    """Ctrl+X, L at the standard 130-col terminal opens the sidebar panel."""
+    """Ctrl+X, L at the standard 130-col terminal opens Mission Control's Messages tab."""
     tui = tui_monitor
     _chord_ctrl_x_l(tui)
     tui.assert_screen_contains(
-        "Transparency Log",
-        msg="Ctrl+X, L must open the Transparency Log panel (it was a Noop before 18.2)",
+        MESSAGES_TITLE,
+        msg="Ctrl+X, L must open the Messages frame (it was a Noop before 18.2)",
     )
     screen = tui.get_screen_text()
     assert "Epic 14" not in screen, (
@@ -94,14 +97,16 @@ def test_panel_never_claims_to_be_live(tui_monitor: RustainTUI):
 
 @pytest.mark.story_18_2
 def test_chord_toggles_panel_closed(tui_monitor: RustainTUI):
-    """A second Ctrl+X, L closes the panel — the same chord, both ways."""
+    """Esc closes the Messages frame (the sidebar panel's same-chord toggle is gone: the chord
+    retargets the one Mission Control frame, and Esc is the way out)."""
     tui = tui_monitor
     _chord_ctrl_x_l(tui)
-    tui.assert_screen_contains("Transparency Log")
-    _chord_ctrl_x_l(tui)
+    tui.assert_screen_contains(MESSAGES_TITLE)
+    tui.send("\x1b")
+    tui.wait(0.5)
     screen = tui.get_screen_text()
-    assert "Transparency Log" not in screen, (
-        f"the same chord must close the panel. Screen:\n{screen}"
+    assert MESSAGES_TITLE not in screen, (
+        f"Esc must close the Messages frame. Screen:\n{screen}"
     )
 
 
@@ -217,21 +222,23 @@ def tui_with_journal(build_binary):
 
 @pytest.mark.story_18_2
 def test_panel_renders_real_rows_from_the_durable_journal(tui_with_journal: RustainTUI):
-    """The panel shows rows that are actually on disk."""
+    """The Messages tab shows rows that are actually on disk."""
     tui = tui_with_journal
     _chord_ctrl_x_l(tui)
     screen = tui.get_screen_text()
-    assert "Transparency Log" in screen, f"Screen:\n{screen}"
-    assert "as of" in screen, (
-        "the header must say 'as of <time>' — a point-in-time read, never live. "
-        f"Screen:\n{screen}"
-    )
+    assert MESSAGES_TITLE in screen, f"Screen:\n{screen}"
     # Direction and kind each carry a glyph AND a word (monochrome rule).
     assert "inbound" in screen or "unknown" in screen, f"Screen:\n{screen}"
     assert "refused" in screen or "accepted" in screen, f"Screen:\n{screen}"
     assert "no A2A interactions" not in screen, (
         "the journal has records, so the empty state is a wiring failure. "
         f"Screen:\n{screen}"
+    )
+    # The closing claim says what the rows are (a structural replay, never live); `G` jumps to it.
+    tui.send("G")
+    tui.assert_screen_contains(
+        "append-only",
+        msg="the closing structural-replay claim is the last Messages row",
     )
 
 

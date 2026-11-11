@@ -229,26 +229,55 @@ pub fn block_page(
     (content, segments, turns)
 }
 
+/// The borrowed fields every page function reads (Story 21.7 A12): the segments, the turn
+/// marks, the filter and the body mode. S-THREAD passes its own (`&ThreadInspectorState`), the
+/// Messages tab its log page (`&LogPage`); the page functions have no other input, so one
+/// layout serves both homes.
+#[derive(Clone, Copy)]
+pub struct PageView<'a> {
+    pub segments: &'a [ThreadSegment],
+    pub turns: &'a [TurnMark],
+    pub search: &'a InspectorSearch,
+    pub mode: BodyMode,
+}
+
+impl<'a> From<&'a ThreadInspectorState> for PageView<'a> {
+    fn from(inspector: &'a ThreadInspectorState) -> Self {
+        Self {
+            segments: &inspector.segments,
+            turns: &inspector.turns,
+            search: &inspector.search,
+            mode: inspector.mode,
+        }
+    }
+}
+
+impl<'a> From<&'a mut ThreadInspectorState> for PageView<'a> {
+    fn from(inspector: &'a mut ThreadInspectorState) -> Self {
+        PageView::from(&*inspector)
+    }
+}
+
 /// The segments of turn `index`.
-fn turn_range(inspector: &ThreadInspectorState, index: usize) -> Range<usize> {
-    let end = inspector
+fn turn_range(page: PageView<'_>, index: usize) -> Range<usize> {
+    let end = page
         .turns
         .get(index + 1)
-        .map_or(inspector.segments.len(), |next| next.first_segment);
-    inspector.turns[index].first_segment..end
+        .map_or(page.segments.len(), |next| next.first_segment);
+    page.turns[index].first_segment..end
 }
 
 /// Which turns the filter keeps: every kept turn, and every turn whose display text
 /// contains the query (all turns while the query is empty).
-pub fn shown_turns(inspector: &ThreadInspectorState) -> Vec<bool> {
-    let search = &inspector.search;
-    (0..inspector.turns.len())
+pub fn shown_turns<'a>(page: impl Into<PageView<'a>>) -> Vec<bool> {
+    let page = page.into();
+    (0..page.turns.len())
         .map(|index| {
-            inspector.turns[index].keep
-                || search.query.is_empty()
-                || inspector.segments[turn_range(inspector, index)]
+            page.turns[index].keep
+                || page.search.query.is_empty()
+                || page.segments[turn_range(page, index)]
                     .iter()
-                    .any(|segment| search.matches(segment.text()))
+                    .any(|segment| page.search.matches(segment.text()))
         })
         .collect()
 }
@@ -262,16 +291,17 @@ pub fn has_match(segments: &[ThreadSegment], search: &InspectorSearch) -> bool {
 }
 
 /// The segments painted now: the preamble, then every shown turn.
-pub fn visible_segments(inspector: &ThreadInspectorState) -> Vec<&ThreadSegment> {
-    let shown = shown_turns(inspector);
-    let preamble = inspector
+pub fn visible_segments<'a>(page: impl Into<PageView<'a>>) -> Vec<&'a ThreadSegment> {
+    let page = page.into();
+    let shown = shown_turns(page);
+    let preamble = page
         .turns
         .first()
-        .map_or(inspector.segments.len(), |mark| mark.first_segment);
-    let mut parts: Vec<&ThreadSegment> = inspector.segments[..preamble].iter().collect();
+        .map_or(page.segments.len(), |mark| mark.first_segment);
+    let mut parts: Vec<&ThreadSegment> = page.segments[..preamble].iter().collect();
     for (index, shown) in shown.into_iter().enumerate() {
         if shown {
-            parts.extend(inspector.segments[turn_range(inspector, index)].iter());
+            parts.extend(page.segments[turn_range(page, index)].iter());
         }
     }
     parts
@@ -312,9 +342,10 @@ fn gutter(line: Line<'static>) -> Line<'static> {
 
 /// Lay the page out for `width`: Source = the literal text; Rendered = literal local rows
 /// plus each body as markdown (links explicit) at `width - 6` behind the gutter.
-pub fn build(inspector: &ThreadInspectorState, theme: &Theme, width: usize) -> BodyRows {
-    let parts = visible_segments(inspector);
-    if inspector.mode == BodyMode::Source {
+pub fn build<'a>(page: impl Into<PageView<'a>>, theme: &Theme, width: usize) -> BodyRows {
+    let page = page.into();
+    let parts = visible_segments(page);
+    if page.mode == BodyMode::Source {
         let text = source_text(&parts);
         return BodyRows {
             lines: markdown_body::layout(&text, width, theme, BodyMode::Source, true).lines,

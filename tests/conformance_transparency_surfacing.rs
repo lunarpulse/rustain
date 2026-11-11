@@ -10,7 +10,6 @@ use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainEventPayload, DomainInputEvent, DomainKey};
 use rustain::domain::models::node_journal::{JournalEntry, JournalRecord};
-use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{Direction, PeerId, RejectReason, RoomEvent};
 use rustain::domain::services::transparency::{
     STRUCTURAL_REPLAY_CLAIM, TransparencyExport, TransparencyReport, fold_transparency,
@@ -21,9 +20,10 @@ use rustain::domain::services::transparency::{
 /// Mutant: leave `ChordAction::Noop("Log panel — Epic 14")` at
 /// `state.rs`'s chord map. A rendered, documented binding backed by a `Noop` is
 /// what shipped before this story; this keystone is what makes it impossible
-/// to ship again.
+/// to ship again. Story 21.7: the chord opens Mission Control's Messages tab (the
+/// sidebar Transparency Log panel is gone).
 #[test]
-fn ctrl_x_l_dispatches_the_transparency_log_panel() {
+fn ctrl_x_l_dispatches_the_messages_tab() {
     let mut state = TuiState::new(160, 24);
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert!(state.pending_leader.is_some());
@@ -31,8 +31,8 @@ fn ctrl_x_l_dispatches_the_transparency_log_panel() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('l'));
     assert_eq!(
         action,
-        InputAction::OpenPanel(PanelType::TransparencyLog),
-        "Ctrl+X, L must open the real panel"
+        InputAction::OpenMessages,
+        "Ctrl+X, L must open the real tab"
     );
     assert!(state.pending_leader.is_none());
     // A `Noop` chord records a Chord-source notice instead of dispatching.
@@ -47,15 +47,18 @@ fn ctrl_x_l_dispatches_the_transparency_log_panel() {
 }
 
 #[test]
-fn the_help_screen_advertises_the_panel_by_its_real_name() {
+fn the_help_screen_advertises_the_tab_by_its_real_name() {
     let binding = rustain::adapters::tui::keymap::render_help::help_rows()
         .into_iter()
         .find(|binding| binding.key == "Ctrl+X, L")
         .expect("Ctrl+X, L is documented");
     assert!(binding.available, "the binding is real, so it is available");
-    assert_eq!(
-        binding.description, "Transparency Log panel",
-        "the help text must name the spec's surface, not a stale 'Epic 14' label"
+    assert!(
+        binding.description.contains("Mission Control")
+            && binding.description.contains("Messages")
+            && binding.description.contains("A2A log"),
+        "the help text must name the real surface, not a stale 'Epic 14' or sidebar label: {}",
+        binding.description
     );
 }
 
@@ -333,79 +336,111 @@ fn a_room_event_produces_exactly_one_persistent_transcript_line() {
     );
 }
 
-// ── AC5 — panel open/toggle/narrow, through the real dispatch shape ─────────
+// ── AC5 — the A2A log is Mission Control's Messages tab, through the real open shape ─────────
 
-fn open_panel(state: &mut TuiState) {
-    // Mirrors the event_loop `InputAction::OpenPanel` generic branch.
-    state.sidebar_visible = true;
-    state.sidebar_panel = Some(PanelType::TransparencyLog);
-    state.focus = rustain::domain::models::FocusState::Sidebar {
-        panel: PanelType::TransparencyLog,
-        selected: 0,
-    };
+/// The Messages tab as `/team log` and `Ctrl+X, L` open it: one block per folded row plus the
+/// closing claim (`log_blocks`), through the production opener.
+fn open_messages(state: &mut TuiState, entries: &[JournalEntry]) {
+    let rows = fold_transparency(entries);
+    rustain::adapters::tui::mission_control::open_messages(
+        state,
+        false,
+        &rustain::adapters::tui::handlers::team_command::log_blocks(&rows, false),
+        None,
+    );
 }
 
 #[test]
-fn the_panel_renders_an_honest_empty_state_not_a_dead_screen() {
+fn the_messages_tab_renders_an_honest_empty_state_not_a_dead_screen() {
     let mut state = TuiState::new(160, 40);
-    open_panel(&mut state);
-    let buffer = render_panel(&mut state);
+    open_messages(&mut state, &[]);
+    let buffer = render_panel(&state);
     let text = buffer_text(&buffer);
-    assert!(text.contains("Transparency Log"), "{text}");
+    assert!(text.contains("Mission Control · Messages"), "{text}");
     assert!(text.contains("no A2A interactions recorded"), "{text}");
     assert!(
         !text.contains("live"),
-        "the panel must never present itself as live: {text}"
+        "the tab must never present itself as live: {text}"
     );
 }
 
+/// The deleted sidebar panel polled the journal head and counted "newer" rows it had not shown.
+/// The Messages tab is a one-read snapshot instead: nothing moves under the operator, nothing
+/// says "live", and only a new open (`/team log`, `Ctrl+X, L`) reads the journal again.
 #[test]
-fn the_panel_shows_a_newer_entries_affordance_instead_of_moving_the_viewport() {
+fn the_messages_page_is_a_snapshot_that_never_moves_until_reopened() {
     let mut state = TuiState::new(160, 40);
-    open_panel(&mut state);
     let initial_entries = (1..=25).map(hostile_entry).collect::<Vec<_>>();
-    let rows = rustain::domain::services::transparency::fold_transparency(&initial_entries);
-    state.transparency_panel.apply_read(rows, 100);
+    open_messages(&mut state, &initial_entries);
     // The operator scrolls — now they are reading.
-    state.transparency_panel.scroll_offset = 1;
-    let refreshed_entries = (1..=30).map(hostile_entry).collect::<Vec<_>>();
-    let more = rustain::domain::services::transparency::fold_transparency(&refreshed_entries);
-    state.transparency_panel.apply_read(more, 200);
-
-    assert_eq!(state.transparency_panel.scroll_offset, 1);
-    let text = buffer_text(&render_panel(&mut state));
+    state
+        .mission_control
+        .messages
+        .as_mut()
+        .expect("the Messages page is open")
+        .viewer
+        .top = 1;
+    let before = buffer_text(&render_panel(&state));
+    let rows_before = state
+        .mission_control
+        .messages
+        .as_ref()
+        .unwrap()
+        .content
+        .clone();
+    // The journal grew; no head poll exists, so a repaint changes nothing.
+    let again = buffer_text(&render_panel(&state));
+    assert_eq!(before, again, "the viewport does not move on its own");
     assert!(
-        text.contains("newer"),
-        "a panel that silently withholds rows lies about being current: {text}"
+        !before.contains("newer"),
+        "a snapshot never counts rows it has not shown: {before}"
     );
+    assert_eq!(
+        state.mission_control.messages.as_ref().unwrap().viewer.top,
+        1
+    );
+    // A fresh read retargets the one page: the new rows are in, the position starts over.
+    let refreshed_entries = (1..=30).map(hostile_entry).collect::<Vec<_>>();
+    open_messages(&mut state, &refreshed_entries);
+    let page = state.mission_control.messages.as_ref().unwrap();
+    assert!(
+        page.content.lines().count() > rows_before.lines().count(),
+        "the reopened page holds the newer rows"
+    );
+    assert_eq!(page.viewer.top, 0);
 }
 
 #[test]
-fn the_panel_states_the_scoped_integrity_claim_and_never_overclaims() {
+fn the_messages_tab_states_the_scoped_integrity_claim_and_never_overclaims() {
     let mut state = TuiState::new(200, 40);
-    open_panel(&mut state);
-    let rows = rustain::domain::services::transparency::fold_transparency(&[hostile_entry(1)]);
-    state.transparency_panel.apply_read(rows, 100);
-    let text = buffer_text(&render_panel(&mut state));
+    open_messages(&mut state, &[hostile_entry(1)]);
+    let text = buffer_text(&render_panel(&state));
     assert!(text.contains("append-only"), "{text}");
     assert!(
         !text.contains("tamper-evident") || text.contains("not cryptographically tamper-evident"),
-        "the panel must not claim cryptographic tamper-evidence: {text}"
+        "the tab must not claim cryptographic tamper-evidence: {text}"
     );
 }
 
-fn render_panel(state: &mut TuiState) -> ratatui::buffer::Buffer {
-    let area = ratatui::layout::Rect::new(0, 0, 100, 20);
-    let mut buffer = ratatui::buffer::Buffer::empty(area);
-    rustain::adapters::tui::widgets::transparency_panel::render(
-        area,
-        &mut buffer,
-        &mut state.transparency_panel,
-        0,
-        &state.focus,
-        &state.theme,
-    );
-    buffer
+/// Paint the Mission Control frame through the production widget (the shape the compositor
+/// gives it: its own rectangle and the state's title).
+fn render_panel(state: &TuiState) -> ratatui::buffer::Buffer {
+    let area = ratatui::layout::Rect::new(0, 0, 200, 20);
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+            .unwrap();
+    terminal
+        .draw(|frame| {
+            rustain::adapters::tui::widgets::mission_control::render(
+                frame,
+                area,
+                state,
+                &state.mission_control.title(),
+                rustain::adapters::tui::keymap::Host::Local,
+            );
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
 }
 
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {

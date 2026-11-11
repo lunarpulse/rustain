@@ -62,6 +62,9 @@ pub struct TeamLogInput {
     /// **before** these rows were read; `None` when it was untrusted or could
     /// not be loaded (the projection's revision is used instead).
     pub reset_revision: Option<u64>,
+    /// The whole journal report the rows were filtered from (what the Messages tab's `e`
+    /// exports): never the filtered rows, never a later read.
+    pub report: Option<crate::domain::services::transparency::TransparencyReport>,
 }
 
 /// Parse the `log` tail. Mirrors `forget_command::parse_forget_query`'s
@@ -632,6 +635,9 @@ pub(crate) fn team_command(
     let rows = match input.rows {
         Ok(rows) => rows,
         Err(error) => {
+            // A Messages frame already waiting for this read says why it has no rows.
+            state.mission_control.messages_failed = Some(error.clone());
+            state.needs_redraw = true;
             return vec![notice(
                 format!("Could not read the room journal: {error}"),
                 NoticeLevel::Error,
@@ -660,10 +666,11 @@ pub(crate) fn team_command(
         None => {}
     }
 
-    crate::infrastructure::runtime::thread_open::open_log(
+    crate::adapters::tui::mission_control::open_messages(
         state,
         args.filter.is_some(),
         &log_blocks(&rows, args.json),
+        input.report,
     );
     // Story 19.16g: the visit travels with the log it armed — a newer command discards the
     // older, unpresented one, and a filtered view is never a full visit.
@@ -1849,6 +1856,7 @@ mod tests {
                 export: None,
                 snapshot_max_seq: 0,
                 reset_revision: None,
+                report: None,
             },
         );
         assert_eq!(events.len(), 1);
@@ -1857,6 +1865,11 @@ mod tests {
         };
         assert!(matches!(level, NoticeLevel::Error));
         assert!(message.contains("disk on fire"));
+        // 7B-10: a Messages frame waiting for this read is told why it has no rows.
+        assert_eq!(
+            state.mission_control.messages_failed.as_deref(),
+            Some("disk on fire")
+        );
     }
 
     #[test]
@@ -1872,28 +1885,30 @@ mod tests {
                 export: None,
                 snapshot_max_seq: 1,
                 reset_revision: None,
+                report: None,
             },
         );
         assert_eq!(events.len(), 1, "one divergence warning");
         assert!(
             matches!(&events[0], AppEvent::SystemNotice { level: NoticeLevel::Warning, message, .. } if message.contains("sequence gap"))
         );
-        let inspector = state.thread_inspector.as_ref().expect("log window");
-        assert!(matches!(
-            inspector.target,
-            crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
-        ));
-        assert!(
-            inspector.content.contains("peer-a"),
-            "{}",
-            inspector.content
-        );
+        let page = state
+            .mission_control
+            .messages
+            .as_ref()
+            .expect("Messages page");
+        assert!(!page.filtered);
+        assert!(page.content.contains("peer-a"), "{}", page.content);
         let frame = state.modal_stack.top().expect("log frame");
         assert_eq!(
             frame.surface,
-            crate::adapters::tui::presentation::Surface::ThreadInspector
+            crate::adapters::tui::presentation::Surface::MissionControl
         );
-        assert_eq!(frame.title(), "A2A log");
+        assert_eq!(
+            state.mission_control.tab,
+            crate::adapters::tui::mission_control::McTab::Messages
+        );
+        assert_eq!(frame.title(), "Mission Control · Messages");
         assert!(state.pending_log_visit.is_some());
         assert!(!state.feedback_blocks.contains_key("team-log"));
     }
@@ -1912,6 +1927,7 @@ mod tests {
                     export: None,
                     snapshot_max_seq: 1,
                     reset_revision: None,
+                    report: None,
                 },
             );
         }
@@ -1920,15 +1936,18 @@ mod tests {
             1,
             "one log frame, not an event stream"
         );
-        let inspector = state.thread_inspector.as_ref().expect("log window");
-        assert!(matches!(
-            inspector.target,
-            crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
-        ));
-        assert!(inspector.content.contains("peer-a"));
-        assert_eq!(state.modal_stack.top().unwrap().title(), "A2A log");
+        let page = state
+            .mission_control
+            .messages
+            .as_ref()
+            .expect("Messages page");
+        assert!(!page.filtered);
+        assert!(page.content.contains("peer-a"));
+        assert_eq!(
+            state.modal_stack.top().unwrap().title(),
+            "Mission Control · Messages"
+        );
         assert!(state.pending_log_visit.is_some());
-        assert!(!state.feedback_blocks.contains_key("team-log"));
     }
 
     #[test]
@@ -1980,7 +1999,6 @@ mod tests {
     #[test]
     fn story21_8_log_window_arms_only_full_visits_and_keeps_export_notices() {
         use crate::adapters::tui::presentation::Surface;
-        use crate::adapters::tui::state::ThreadTarget;
         for (filtered, json) in [(false, false), (false, true), (true, false), (true, true)] {
             let mut state = TuiState::new(80, 24);
             let rows = vec![row(1)];
@@ -2003,27 +2021,27 @@ mod tests {
                     })),
                     snapshot_max_seq: 1,
                     reset_revision: Some(7),
+                    report: None,
                 },
             );
             assert!(
                 matches!(&events[..], [AppEvent::SystemNotice { level: NoticeLevel::Warning, message, .. }] if message.contains("report.jsonl") && message.contains("1 rows"))
             );
-            let inspector = state.thread_inspector.as_ref().expect("log window");
-            assert!(
-                matches!(&inspector.target, ThreadTarget::Log { filtered: actual } if *actual == filtered)
-            );
-            assert_eq!(
-                inspector.content.trim_end(),
-                render_rows(&rows, json).trim_end()
-            );
+            let page = state
+                .mission_control
+                .messages
+                .as_ref()
+                .expect("Messages page");
+            assert_eq!(page.filtered, filtered);
+            assert_eq!(page.content.trim_end(), render_rows(&rows, json).trim_end());
             let frame = state.modal_stack.top().expect("frame");
-            assert_eq!(frame.surface, Surface::ThreadInspector);
+            assert_eq!(frame.surface, Surface::MissionControl);
             assert_eq!(
                 frame.title(),
                 if filtered {
-                    "A2A log · filtered"
+                    "Mission Control · Messages · filtered"
                 } else {
-                    "A2A log"
+                    "Mission Control · Messages"
                 }
             );
             assert_eq!(state.pending_log_visit.is_some(), !filtered);
@@ -2044,6 +2062,7 @@ mod tests {
                 export: Some(Err("disk full".into())),
                 snapshot_max_seq: 1,
                 reset_revision: None,
+                report: None,
             },
         );
         assert!(
@@ -2051,7 +2070,8 @@ mod tests {
         );
         assert!(
             state
-                .thread_inspector
+                .mission_control
+                .messages
                 .as_ref()
                 .unwrap()
                 .content

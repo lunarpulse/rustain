@@ -179,8 +179,13 @@ pub enum InputAction {
     /// Mission Control was opened on this tab by a chord (`Ctrl+X r`): the frame is already
     /// on the stack; the event loop runs the tab's source read (the durable room fold).
     OpenMissionControl(crate::adapters::tui::mission_control::McTab),
-    /// Export the exact transparency report snapshot currently rendered by the
-    /// sidebar panel.
+    /// `Ctrl+X l` (local): read the A2A log and open it as Mission Control's Messages tab
+    /// (the same read `/team log` runs).
+    OpenMessages,
+    /// `Enter` on an Artifacts row: open the artifact's window (the same read
+    /// `/artifact show <id>` runs). Carries the full artifact id.
+    OpenArtifactWindow(String),
+    /// Export the exact transparency report snapshot the Messages tab was read from.
     ExportTransparency,
     /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
     CopyTaskResult {
@@ -528,7 +533,8 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
         return crate::adapters::tui::thread_inspector::ignores_raw_key(state, key);
     }
     if let Event::Key(key) = event
-        && crate::adapters::tui::mission_control::keys::ignores_raw_key(state, key)
+        && (crate::adapters::tui::mission_control::keys::ignores_raw_key(state, key)
+            || crate::adapters::tui::artifact_window::ignores_raw_key(state, key))
     {
         return true;
     }
@@ -759,13 +765,18 @@ pub(crate) fn handle_leader_key(
         }),
         LeaderCmd::Adapters => InputAction::OpenPanel(PanelType::Adapters),
         LeaderCmd::Agents => InputAction::OpenPanel(PanelType::Agents),
-        LeaderCmd::A2aLog => InputAction::OpenPanel(PanelType::TransparencyLog),
+        // The A2A log is Mission Control's Messages tab: the host reads the journal and opens it.
+        LeaderCmd::A2aLog => InputAction::OpenMessages,
         LeaderCmd::Room => {
             use crate::adapters::tui::mission_control::McTab;
             presentation::reducer::open_mission_control(state, McTab::Room);
             InputAction::OpenMissionControl(McTab::Room)
         }
-        LeaderCmd::Artifacts => InputAction::OpenPanel(PanelType::Artifacts),
+        LeaderCmd::Artifacts => {
+            use crate::adapters::tui::mission_control::McTab;
+            presentation::reducer::open_mission_control(state, McTab::Artifacts);
+            InputAction::OpenMissionControl(McTab::Artifacts)
+        }
         LeaderCmd::Tasks => InputAction::OpenPanel(PanelType::Tasks),
         LeaderCmd::History => InputAction::OpenPanel(PanelType::History),
         LeaderCmd::Usage => InputAction::OpenUsagePanel,
@@ -986,8 +997,6 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
                 Context::SidebarAgentInspector
             }
             PanelType::Agents => Context::SidebarAgents,
-            PanelType::TransparencyLog => Context::SidebarA2aLog,
-            PanelType::Artifacts => Context::SidebarArtifacts,
             PanelType::History => Context::SidebarHistory,
             _ => Context::Sidebar,
         },
@@ -998,9 +1007,6 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
 /// declines in the current state hands the key to its row's parent context; a key
 /// without a row takes the context's typing or default arm.
 fn dispatch(state: &mut TuiState, context: Context, key: Key, host: Host) -> InputAction {
-    if let Some(done) = typed_before_rows(state, context, key) {
-        return done;
-    }
     if matches!(
         context,
         Context::Chat | Context::ChatWave | Context::ChatReorder
@@ -1064,18 +1070,6 @@ fn chat_sequence(
     })
 }
 
-/// Sub-states where a character is text before it is a command: the A2A log search.
-fn typed_before_rows(state: &mut TuiState, context: Context, key: Key) -> Option<InputAction> {
-    match (context, key) {
-        (Context::SidebarA2aLog, Key::Char(c)) if state.transparency_panel.search_active => {
-            crate::adapters::tui::handlers::transparency::panel_key(state, c);
-            state.needs_redraw = true;
-            Some(InputAction::Consumed)
-        }
-        _ => None,
-    }
-}
-
 /// A key without a row: typing where the context is a text field, else its default
 /// (overlays consume every other key, the other contexts ignore it).
 fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
@@ -1093,8 +1087,6 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
             | Context::TasksReorder
             | Context::SidebarAgents
             | Context::SidebarAgentInspector
-            | Context::SidebarA2aLog
-            | Context::SidebarArtifacts
     );
     let Key::Char(c) = key else {
         if context == Context::Autocomplete {
@@ -1148,7 +1140,7 @@ fn execute(
         CommandId::Sidebar(cmd) => exec_sidebar(state, cmd),
         CommandId::Search(cmd) => exec_search(cmd),
         CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
-        CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
+        CommandId::Panel(cmd) => return exec_panel(state, cmd),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
         CommandId::Inspector(cmd) => exec_inspector(state, cmd),
         CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Block(_) | CommandId::Body(_) => {
@@ -1682,6 +1674,12 @@ fn edit_query(
                     Some(Surface::ThreadInspector) => {
                         crate::adapters::tui::thread_inspector::search_changed(state);
                     }
+                    Some(Surface::MissionControl) => {
+                        crate::adapters::tui::mission_control::search_changed(state);
+                    }
+                    Some(Surface::ArtifactWindow) => {
+                        crate::adapters::tui::artifact_window::search_changed(state);
+                    }
                     _ => unreachable!("only inspector frames lend the child field"),
                 }
             }
@@ -1751,8 +1749,7 @@ fn exec_bookmark(state: &mut TuiState, cmd: BookmarkCmd) -> InputAction {
 
 /// Commands of the task drill-down, the Chat sub-states, the sidebar panels and the wave
 /// overlay. `None`: the command declines in the current state (the key goes to the parent).
-fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputAction> {
-    use crate::adapters::tui::handlers::transparency::{self, PanelKeyAction};
+fn exec_panel(state: &mut TuiState, cmd: PanelCmd) -> Option<InputAction> {
     let tasks = &mut state.task_panel_state;
     Some(match cmd {
         PanelCmd::DrillCopy
@@ -1878,45 +1875,6 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
             state.needs_redraw = true;
             InputAction::AgentPauseToggle
         }
-        PanelCmd::LogSearch
-        | PanelCmd::LogTail
-        | PanelCmd::LogExport
-        | PanelCmd::LogNext
-        | PanelCmd::LogPrev => {
-            let Key::Char(c) = key else { return None };
-            match transparency::panel_key(state, c) {
-                PanelKeyAction::Consumed => {
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                PanelKeyAction::Export => InputAction::ExportTransparency,
-                PanelKeyAction::Ignored => return None,
-            }
-        }
-        PanelCmd::LogBackspace | PanelCmd::LogDrill | PanelCmd::LogClear => {
-            let special = match cmd {
-                PanelCmd::LogBackspace => DomainKey::Backspace,
-                PanelCmd::LogDrill => DomainKey::Enter,
-                _ => DomainKey::Esc,
-            };
-            if !transparency::panel_special_key(state, special) {
-                return None;
-            }
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // `Enter` drills into the selected artifact through the `/artifact show` arm.
-        PanelCmd::ArtifactShow => match state
-            .artifacts_panel
-            .selected_id_prefix(state.sidebar_selected)
-        {
-            Some(prefix) => InputAction::ExecuteCommand {
-                name: "artifact".to_owned(),
-                args: Some(format!("show {prefix}")),
-            },
-            // A zero-state panel still consumes the key (it must not reach the history).
-            None => InputAction::Consumed,
-        },
     })
 }
 
@@ -2019,6 +1977,27 @@ fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
                     thread.search.back();
                 }
                 crate::adapters::tui::thread_inspector::search_changed(state);
+            }
+            _ => {}
+        }
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+    if let Some(surface @ (Surface::MissionControl | Surface::ArtifactWindow)) =
+        state.modal_stack.top().map(|frame| frame.surface)
+    {
+        match (surface, cmd) {
+            (Surface::MissionControl, OverlayCmd::InspectorAccept) => {
+                crate::adapters::tui::mission_control::accept_search(state);
+            }
+            (Surface::MissionControl, OverlayCmd::InspectorBack) => {
+                crate::adapters::tui::mission_control::clear_search(state);
+            }
+            (_, OverlayCmd::InspectorAccept) => {
+                crate::adapters::tui::artifact_window::accept_search(state);
+            }
+            (_, OverlayCmd::InspectorBack) => {
+                crate::adapters::tui::artifact_window::clear_search(state);
             }
             _ => {}
         }
@@ -4477,16 +4456,6 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Sidebar TransparencyLog",
-                setup: sidebar(PanelType::TransparencyLog),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
-                label: "Sidebar Artifacts",
-                setup: sidebar(PanelType::Artifacts),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
                 label: "Input with autocomplete popup active (production shape)",
                 setup: Box::new(|s| {
                     s.focus = FocusState::Input;
@@ -6370,113 +6339,6 @@ mod tests {
         assert!(crate::adapters::tui::mission_control::is_top(&state));
     }
 
-    #[test]
-    fn transparency_panel_routes_special_keys_search_navigation_and_export() {
-        use crate::domain::models::visual::PanelType;
-        use crate::domain::models::{Direction as RoomDirection, FocusState};
-        use crate::domain::services::transparency::{TransparencyKind, TransparencyRow};
-
-        let row = |seq, summary: &str| TransparencyRow {
-            rail: None,
-            seq,
-            recorded_at_ms: Some(seq as i64),
-            retracted_at_ms: None,
-            direction: RoomDirection::Inbound,
-            kind: TransparencyKind::Rejected,
-            peer: "peer-a".to_owned(),
-            task: Some(format!("task-{seq}")),
-            summary: summary.to_owned(),
-            provenance: None,
-            principal_collapsed: false,
-        };
-        let mut state = TuiState::new(160, 40);
-        state.focus = FocusState::Sidebar {
-            panel: PanelType::TransparencyLog,
-            selected: 0,
-        };
-        state
-            .transparency_panel
-            .apply_read(vec![row(1, "jammed"), row(2, "known")], 10);
-        state.sidebar_entry_count = 2;
-        state
-            .transparency_panel
-            .synchronize_selection(&mut state.sidebar_selected);
-
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::KeyPress('/')),
-            InputAction::Consumed
-        );
-        assert!(state.transparency_panel.search_active);
-        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
-        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-        assert_eq!(state.transparency_panel.search.as_deref(), Some("jk"));
-        let _ = handle_input(
-            &mut state,
-            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
-        );
-        assert_eq!(state.transparency_panel.search.as_deref(), Some("j"));
-        let _ = handle_input(
-            &mut state,
-            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
-        );
-        assert_eq!(state.transparency_panel.search.as_deref(), Some(""));
-        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-        assert!(!state.transparency_panel.search_active);
-
-        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
-        assert_eq!(state.sidebar_selected, 1);
-        assert!(
-            state.transparency_panel.scroll_offset <= state.sidebar_selected
-                && state.sidebar_selected
-                    < state.transparency_panel.scroll_offset
-                        + state.transparency_panel.viewport_rows.max(1),
-            "selected row must stay within the rendered viewport"
-        );
-        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-        assert_eq!(state.transparency_panel.drill_seq, Some(2));
-
-        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-        assert!(
-            state.transparency_panel.search.is_none(),
-            "Esc clears filter first"
-        );
-        assert_eq!(state.transparency_panel.drill_seq, Some(2));
-        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-        assert!(
-            state.transparency_panel.drill_seq.is_none(),
-            "Esc then unwinds drill"
-        );
-        assert!(matches!(state.focus, FocusState::Sidebar { .. }));
-
-        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
-        assert_eq!(state.sidebar_selected, 1);
-        // 'G' SELECTS the tail; it must not ACKNOWLEDGE it. Acknowledgement is
-        // a render-time effect (`widgets::transparency_panel::render` ->
-        // `acknowledge_rendered_boundary`) because a row that was never painted
-        // was never seen — the invariant stated verbatim at
-        // `transparency_panel.rs:343-346`. Story 18.2's review moved the ack to
-        // render and updated the widget test but not this one, which kept
-        // asserting the keystroke-time value and shipped RED (repaired in 18.3
-        // Task 0.5). Mutant: move the ack back into the 'G' arm -> RED here.
-        assert_eq!(
-            state.transparency_panel.acknowledged_seq, 0,
-            "selecting the tail must not acknowledge it before render"
-        );
-        // Positive control: the mechanism can fire, through the same call the
-        // renderer makes once the rows have a viewport to be painted into.
-        state
-            .transparency_panel
-            .set_viewport_rows(2, &mut state.sidebar_selected);
-        state.transparency_panel.acknowledge_rendered_boundary();
-        assert_eq!(
-            state.transparency_panel.acknowledged_seq, 2,
-            "the rendered boundary is what acknowledges"
-        );
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::KeyPress('e')),
-            InputAction::ExportTransparency
-        );
-    }
     /// Both artifact modes share the queue's y/n dispatch.
     #[test]
     fn apply_card_keys_only_own_input_while_decision_frame_is_active() {

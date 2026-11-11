@@ -1,6 +1,7 @@
 pub mod accounts_runtime;
 pub mod agent_inspector_keys;
 pub mod app;
+pub mod artifact_window;
 pub mod block_viewer;
 pub mod clipboard;
 #[allow(dead_code)]

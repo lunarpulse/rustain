@@ -53,8 +53,17 @@ pub fn attached_panel_remedy() -> &'static str {
     });
     TEXT.as_str()
 }
-pub const ATTACHED_DENSITY: &str =
-    "Density modes are local to a standalone session; the attached view has a single layout.";
+/// The one remedy of every chord the attached host does not carry (A20): the attached hub
+/// shows Messages only; the detach chord is the registry's own.
+pub fn attached_mission_remedy() -> &'static str {
+    static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "Mission Control in an attached session shows Messages only; agents, tasks, the Room, artifacts, History, Adapters and the monitor are local to a standalone session. Detach ({}) and run rustain for them.",
+            super::render::leader_follow_up_long(LeaderCmd::Detach)
+        )
+    });
+    TEXT.as_str()
+}
 /// Local sidebar panels need the sidebar column (`layout::SIDEBAR_MIN_WIDTH`).
 pub const PANEL_NARROW: &str =
     "This panel needs a terminal at least 120 columns wide: widen the window and try again.";
@@ -183,8 +192,7 @@ fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
     match (name, args) {
         ("login" | "logout" | "accounts" | "models", _) => LocalSurface,
         ("retract-auto" | "cancel-plan" | "reorder-task", _) => LegacySurface,
-        ("room", None) => NoLegacySurface,
-        ("artifacts", None) => LegacySurface,
+        ("room" | "artifacts", None) => NoLegacySurface,
         ("artifact", Some(_)) if matches!(subcommand, Some("apply" | "resolve")) => LegacySurface,
         ("team", Some(_)) if matches!(subcommand, Some("retract")) => LegacySurface,
         ("peer", Some(_)) if matches!(subcommand, Some("add" | "reach")) => LegacySurface,
@@ -246,16 +254,28 @@ fn attached_sign_in(c: &AvailCtx) -> Availability {
     local_surface(c, ATTACHED_SIGN_IN)
 }
 fn attached_density(c: &AvailCtx) -> Availability {
-    host_gate(c, ATTACHED_DENSITY)
+    match c.host {
+        Host::Attached => Availability::Unavailable(attached_mission_remedy()),
+        Host::Local => host_gate(c, attached_mission_remedy()),
+    }
 }
 /// A sidebar panel: local only, and only where the sidebar column fits.
 fn panel(c: &AvailCtx) -> Availability {
-    if c.frame_origin {
+    if c.frame_origin && c.host == Host::Local {
         return base_target(c);
     }
     match c.host {
-        Host::Attached => Availability::Unavailable(attached_panel_remedy()),
+        Host::Attached => Availability::Unavailable(attached_mission_remedy()),
         Host::Local if c.width < SIDEBAR_MIN_WIDTH => Availability::Unavailable(PANEL_NARROW),
+        Host::Local => Availability::Available,
+    }
+}
+/// A Mission Control tab: local at every width, refused in the attached host (A20).
+fn attached_mission(c: &AvailCtx) -> Availability {
+    // The attached refusal does not depend on what is open: closing a window cannot make a
+    // capability the host does not carry available.
+    match c.host {
+        Host::Attached => Availability::Unavailable(attached_mission_remedy()),
         Host::Local => Availability::Available,
     }
 }
@@ -304,9 +324,9 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('i')], LeaderCmd::SignIn, "Sign in").avail(attached_sign_in).help(C, "Ctrl+X, I", "Sign in to a model provider (/login)").witness("Sign in"),
     l(&[Key::Char('a')], LeaderCmd::Adapters, "Adapters").avail(panel).help(C, "Ctrl+X, A", "Adapter Status panel (sidebar)").witness(NARROW_WITNESS),
     l(&[Key::Char('s')], LeaderCmd::Agents, "Agents").avail(panel).help(C, "Ctrl+X, S", "Subagent panel").witness(NARROW_WITNESS),
-    l(&[Key::Char('l')], LeaderCmd::A2aLog, "A2A log").slash("/team").avail(a2a_log).help(C, "Ctrl+X, L", "Transparency Log panel").witness(NARROW_WITNESS),
-    l(&[Key::Char('r')], LeaderCmd::Room, "Room").slash("/room").avail(attached_panel).help(C, "Ctrl+X, R", "Mission Control: Room tab (durable room replay, read-only)").witness("Mission Control · Room"),
-    l(&[Key::Char('e')], LeaderCmd::Artifacts, "Artifacts").slash("/artifacts").avail(panel).help(C, "Ctrl+X, E", "Artifacts panel (Evidence, read-only replay)").witness(NARROW_WITNESS),
+    l(&[Key::Char('l')], LeaderCmd::A2aLog, "A2A log").slash("/team").help(C, "Ctrl+X, L", "Mission Control: Messages tab (the A2A log, read-only; both hosts)").witness("Mission Control · Messages"),
+    l(&[Key::Char('r')], LeaderCmd::Room, "Room").slash("/room").avail(attached_mission).help(C, "Ctrl+X, R", "Mission Control: Room tab (durable room replay, read-only)").witness("Mission Control · Room"),
+    l(&[Key::Char('e')], LeaderCmd::Artifacts, "Artifacts").slash("/artifacts").avail(attached_mission).help(C, "Ctrl+X, E", "Mission Control: Artifacts tab (durable artifacts, read-only replay)").witness("Mission Control · Artifacts"),
     l(&[Key::Char('t')], LeaderCmd::Tasks, "Tasks").avail(panel).help(C, "Ctrl+X, T", "Task panel").witness(NARROW_WITNESS),
     l(&[Key::Char('u')], LeaderCmd::Usage, "Usage").avail(attached_panel).help(C, "Ctrl+X, U", "Usage / cost").witness("Usage & Cost"),
     l(&[Key::Char('h')], LeaderCmd::History, "History").avail(panel).help(C, "Ctrl+X, H", "History panel (past conversations)").witness(NARROW_WITNESS),
@@ -324,15 +344,6 @@ const LEADER: &[Binding] = &[
 
 /// What an 80x24 local screen shows after a sidebar-panel chord (the remedy toast).
 const NARROW_WITNESS: &str = "This panel needs a terminal at least 120";
-
-/// `Ctrl+X l` is the attached client's own `/team log` read: available in both hosts,
-/// but a local panel needs the sidebar column.
-fn a2a_log(c: &AvailCtx) -> Availability {
-    match c.host {
-        Host::Attached => Availability::Available,
-        Host::Local => panel(c),
-    }
-}
 
 /// Every row of the shipped table, groups concatenated in a fixed order.
 pub fn all_rows() -> Vec<Binding> {

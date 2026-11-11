@@ -150,8 +150,8 @@ def scene_env(stub, tmp_path) -> dict[str, str]:
 def test_standalone_reminder_discovers_clears_and_survives_restart(tmp_path, stub, scene_env):
     workspace = tmp_path / "ws"
     (workspace / ".rustain").mkdir(parents=True)
-    # Monitor density: Focus hides the sidebar, so the chord's panel would
-    # never be painted (and, correctly, never clear anything).
+    # Story 21.7: the log is Mission Control's Messages frame (any density paints it); the
+    # monitor density is kept as the fixture's pre-existing layout.
     (workspace / ".rustain" / "config.toml").write_text(
         '[permissions]\nalways_tools = ["Read"]\n\n[layout]\ndensity_mode = "monitor"\n'
     )
@@ -204,11 +204,11 @@ def test_standalone_reminder_discovers_clears_and_survives_restart(tmp_path, stu
     _append(journal, _rejection("after restart"))
     with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=scene_env) as tui:
         assert tui.wait_for_screen("log: 1", timeout=10), tui.get_screen_text()
-        # The standalone chord clears it once the panel is drawn.
+        # The standalone chord clears it once the Messages frame is drawn.
         tui.send(CTRL_X)
         tui.wait(0.2)
         tui.send("l")
-        assert tui.wait_for_screen("Transparency Log", timeout=10), tui.get_screen_text()
+        assert tui.wait_for_screen("Mission Control · Messages", timeout=10), tui.get_screen_text()
         assert _wait_for(lambda: "log:" not in _status_line(tui), timeout=10), (
             tui.get_screen_text()
         )

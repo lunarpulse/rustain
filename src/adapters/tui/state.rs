@@ -77,8 +77,8 @@ pub struct LogAwarenessView {
 }
 
 /// What the thread window shows: a received item (the journal thread), the response row of a
-/// peer node (the legacy "response" view), the thread of an item this host sent (the sent
-/// thread, read from the peer) or the A2A log.
+/// peer node (the legacy "response" view) or the thread of an item this host sent (the sent
+/// thread, read from the peer).
 #[derive(Debug, Clone)]
 pub enum ThreadTarget {
     Item(crate::domain::models::ItemAddress),
@@ -89,10 +89,7 @@ pub enum ThreadTarget {
         peer: String,
         item: String,
     },
-    /// `/team log`: `filtered` is a `--filter=` view (never a full visit).
-    Log {
-        filtered: bool,
-    },
+    // The A2A log lives in Mission Control's Messages tab (Story 21.7 A12), not here.
 }
 
 /// The facts of a sent-thread frame: which read it waits for (target + generation + issuing
@@ -223,9 +220,6 @@ pub struct ThreadInspectorState {
     pub layouts_built: std::cell::Cell<usize>,
     /// The read this sent-thread frame waits for or shows (`None` on every other target).
     pub sent: Option<SentThread>,
-    /// A completed draw painted the log body with at least one body row on top of the stack
-    /// (commit-on-present, 19.16g semantics); consumed by `TuiState::log_visits_presented`.
-    pub log_painted: std::cell::Cell<bool>,
 }
 
 impl ThreadInspectorState {
@@ -265,7 +259,6 @@ impl ThreadInspectorState {
             layout: std::cell::RefCell::new(ThreadLayoutCache::default()),
             layouts_built: std::cell::Cell::new(0),
             sent: None,
-            log_painted: std::cell::Cell::new(false),
         }
     }
 
@@ -273,7 +266,7 @@ impl ThreadInspectorState {
     pub fn item_address(&self) -> Option<&crate::domain::models::ItemAddress> {
         match &self.target {
             ThreadTarget::Item(address) => Some(address),
-            ThreadTarget::Node(_) | ThreadTarget::Sent { .. } | ThreadTarget::Log { .. } => None,
+            ThreadTarget::Node(_) | ThreadTarget::Sent { .. } => None,
         }
     }
 
@@ -283,7 +276,6 @@ impl ThreadInspectorState {
             ThreadTarget::Item(address) => address.item().as_str().to_owned(),
             ThreadTarget::Node(node) => format!("node:{node}"),
             ThreadTarget::Sent { peer, item } => format!("sent:{peer}:{item}"),
-            ThreadTarget::Log { .. } => "log".to_owned(),
         }
     }
 
@@ -1469,237 +1461,6 @@ impl Default for UsagePanelState {
     }
 }
 
-/// State for the Transparency Log sidebar panel (`Ctrl+X, L`). Story 18.2 AC5.
-///
-/// **Never presents itself as live.** `report` is one point-in-time fold of
-/// the durable room journal under a shared `flock`. It is retained so panel
-/// export writes the exact snapshot the operator is viewing rather than
-/// silently re-reading a later journal state.
-#[derive(Default)]
-pub struct TransparencyPanelState {
-    /// The exact report snapshot displayed by this panel, oldest first.
-    pub report: Option<crate::domain::services::transparency::TransparencyReport>,
-    /// Highest `seq` the operator has actually seen rendered.
-    pub acknowledged_seq: u64,
-    /// Rows newer than `acknowledged_seq`; this is always calculated from the
-    /// unfiltered snapshot so a search cannot hide unread arrivals.
-    pub newer_entries: usize,
-    /// First visible index in the current filtered view.
-    pub scroll_offset: usize,
-    /// Number of filtered rows the renderer can display. The widget refreshes
-    /// this on every draw; input transitions use it to keep selection visible.
-    pub viewport_rows: usize,
-    /// Wall-clock millis of the last report read, rendered as "as of …".
-    pub read_at_ms: Option<i64>,
-    /// A journal read that failed. The panel shows the error rather than an
-    /// empty list, which would read as "nothing happened".
-    pub error: Option<String>,
-    /// Free-text search (`/`), lower-cased.
-    pub search: Option<String>,
-    /// Whether the `/` search input is currently being typed into.
-    pub search_active: bool,
-    /// Expanded row (`Enter` drill-down), by `seq`.
-    pub drill_seq: Option<u64>,
-    /// Story 19.16g — the unpainted seen-through boundary of the report this
-    /// panel read on open. Distinct from `acknowledged_seq` (viewport-scoped):
-    /// consumed once, and discarded if a nonempty search is painted.
-    pub pending_visit: Option<crate::domain::models::LogVisitCandidate>,
-    /// A visit painted by the current frame; presented only once the draw
-    /// completes (`TuiState::log_visits_presented`).
-    pub painted_visit: Option<crate::domain::models::LogVisitCandidate>,
-}
-
-impl TransparencyPanelState {
-    /// Rows in the retained report snapshot, or no rows before the first read.
-    #[must_use]
-    pub fn rows(&self) -> &[crate::domain::services::transparency::TransparencyRow] {
-        self.report
-            .as_ref()
-            .map_or(&[], |report| report.rows.as_slice())
-    }
-
-    fn matches_search(&self, row: &crate::domain::services::transparency::TransparencyRow) -> bool {
-        self.search
-            .as_deref()
-            .filter(|term| !term.is_empty())
-            .is_none_or(|term| row.one_line().to_ascii_lowercase().contains(term))
-    }
-
-    /// Rows after the active search filter, oldest first.
-    pub fn visible_rows(&self) -> Vec<&crate::domain::services::transparency::TransparencyRow> {
-        self.rows()
-            .iter()
-            .filter(|row| self.matches_search(row))
-            .collect()
-    }
-
-    #[must_use]
-    pub fn visible_len(&self) -> usize {
-        self.rows()
-            .iter()
-            .filter(|row| self.matches_search(row))
-            .count()
-    }
-
-    #[must_use]
-    pub fn visible_row(
-        &self,
-        index: usize,
-    ) -> Option<&crate::domain::services::transparency::TransparencyRow> {
-        self.rows()
-            .iter()
-            .filter(|row| self.matches_search(row))
-            .nth(index)
-    }
-
-    fn max_scroll_offset(&self) -> usize {
-        self.visible_len().saturating_sub(self.viewport_rows.max(1))
-    }
-
-    /// Clamp the shared sidebar selection and keep it inside the rendered
-    /// viewport. Every panel input transition calls this instead of updating
-    /// selection and scroll independently.
-    pub fn synchronize_selection(&mut self, selected: &mut usize) {
-        let visible_len = self.visible_len();
-        if visible_len == 0 {
-            *selected = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        *selected = (*selected).min(visible_len - 1);
-        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
-        let viewport_rows = self.viewport_rows.max(1);
-        if *selected < self.scroll_offset {
-            self.scroll_offset = *selected;
-        } else if *selected >= self.scroll_offset.saturating_add(viewport_rows) {
-            self.scroll_offset = *selected + 1 - viewport_rows;
-        }
-    }
-
-    /// Record the renderer's actual row capacity and reconcile the viewport.
-    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
-        self.viewport_rows = viewport_rows.max(1);
-        self.synchronize_selection(selected);
-    }
-
-    fn recompute_newer_entries(&mut self) {
-        self.newer_entries = self
-            .rows()
-            .iter()
-            .filter(|row| row.seq > self.acknowledged_seq)
-            .count();
-    }
-
-    /// Store one freshly read report without marking unrendered rows seen.
-    pub fn apply_report(
-        &mut self,
-        report: crate::domain::services::transparency::TransparencyReport,
-        read_at_ms: i64,
-    ) {
-        self.report = Some(report);
-        self.read_at_ms = Some(read_at_ms);
-        self.error = None;
-        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
-        self.recompute_newer_entries();
-    }
-
-    /// Test/legacy convenience for a report without structural findings.
-    pub fn apply_read(
-        &mut self,
-        rows: Vec<crate::domain::services::transparency::TransparencyRow>,
-        read_at_ms: i64,
-    ) {
-        self.apply_report(
-            crate::domain::services::transparency::TransparencyReport {
-                rows,
-                findings: Vec::new(),
-            },
-            read_at_ms,
-        );
-    }
-
-    /// Select the newest boundary. A row is not acknowledged here: only the
-    /// renderer can prove that the selected tail was actually drawn.
-    pub fn open_at_tail(&mut self, selected: &mut usize) {
-        let visible_len = self.visible_len();
-        if visible_len == 0 {
-            *selected = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        *selected = visible_len - 1;
-        self.scroll_offset = self.max_scroll_offset();
-    }
-
-    /// Move selection by one filtered row and keep it rendered.
-    pub fn move_selection(&mut self, selected: &mut usize, down: bool) {
-        let visible_len = self.visible_len();
-        if visible_len == 0 {
-            *selected = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        *selected = if down {
-            selected.saturating_add(1).min(visible_len - 1)
-        } else {
-            selected.saturating_sub(1)
-        };
-        self.synchronize_selection(selected);
-    }
-
-    /// Enter search input and anchor the filtered list at its first row.
-    pub fn start_search(&mut self, selected: &mut usize) {
-        self.search = Some(String::new());
-        self.search_active = true;
-        self.drill_seq = None;
-        *selected = 0;
-        self.scroll_offset = 0;
-        self.synchronize_selection(selected);
-    }
-
-    /// Apply one printable search character, preserving a valid selection.
-    pub fn append_search(&mut self, selected: &mut usize, key: char) {
-        self.search
-            .get_or_insert_with(String::new)
-            .push(key.to_ascii_lowercase());
-        *selected = 0;
-        self.scroll_offset = 0;
-        self.synchronize_selection(selected);
-    }
-
-    /// Delete one search character when typing.
-    pub fn backspace_search(&mut self, selected: &mut usize) -> bool {
-        if !self.search_active {
-            return false;
-        }
-        if let Some(search) = &mut self.search {
-            search.pop();
-        }
-        *selected = 0;
-        self.scroll_offset = 0;
-        self.synchronize_selection(selected);
-        true
-    }
-
-    /// Stop editing the search while retaining its filter.
-    pub fn commit_search(&mut self, selected: &mut usize) {
-        self.search_active = false;
-        self.synchronize_selection(selected);
-    }
-
-    /// Acknowledge only through the last row currently in the viewport.
-    pub fn acknowledge_rendered_boundary(&mut self) {
-        let end = self
-            .scroll_offset
-            .saturating_add(self.viewport_rows.max(1))
-            .min(self.visible_len());
-        if let Some(row) = end.checked_sub(1).and_then(|index| self.visible_row(index)) {
-            self.acknowledged_seq = self.acknowledged_seq.max(row.seq);
-        }
-        self.recompute_newer_entries();
-    }
-}
-
 /// State for the durable-room viewer panel (`Ctrl+X, R` / `/room`).
 /// Story 18.3a, AC1.
 ///
@@ -1948,8 +1709,8 @@ pub enum ArtifactsZeroState {
     AllReviewed,
 }
 
-/// State for the durable artifact list (`Ctrl+X, E` / `/artifacts`).
-///
+/// The durable artifact fold behind Mission Control's Artifacts tab (`Ctrl+X, E` /
+/// `/artifacts`) and the artifact window.
 /// Story 18.3a-c (AC3). Deliberately shaped like [`RoomPanelState`]: one
 /// host-honest fold, an "as of" stamp, per-panel identity anchors, and no head
 /// poll. The `/room` head-poll chrome is **not** copied — it is fed by a 1 Hz
@@ -1986,14 +1747,6 @@ pub struct ArtifactsPanelState {
     /// The permission mode the fold was rendered under. Read from the same
     /// `SecurityPort` the orchestrator's apply path consults.
     pub permission_mode: crate::domain::models::PermissionMode,
-    /// First visible index in the current view.
-    pub scroll_offset: usize,
-    /// Rows the renderer can display; refreshed on every draw.
-    pub viewport_rows: usize,
-    /// Top and selected artifact from the last painted viewport. Per-panel
-    /// identities, unlike the shared numeric sidebar selection.
-    anchor_artifact: Option<crate::domain::models::ArtifactId>,
-    selected_artifact: Option<crate::domain::models::ArtifactId>,
 }
 
 impl Default for ArtifactsPanelState {
@@ -2008,10 +1761,6 @@ impl Default for ArtifactsPanelState {
             not_attached: false,
             policy: crate::domain::services::patch_review::MergeBackPolicy::default(),
             permission_mode: crate::domain::models::PermissionMode::Plan,
-            scroll_offset: 0,
-            viewport_rows: 0,
-            anchor_artifact: None,
-            selected_artifact: None,
         }
     }
 }
@@ -2031,19 +1780,6 @@ impl ArtifactsPanelState {
     #[must_use]
     pub fn visible_len(&self) -> usize {
         self.room.as_ref().map_or(0, |room| room.artifacts().len())
-    }
-
-    /// The id prefix of the artifact at `index`, for the `Enter` drill-down.
-    ///
-    /// Returns the same [`crate::adapters::tui::widgets::artifacts_panel::ID_PREFIX_LEN`]
-    /// prefix the row renders, so the key path and the typed path resolve
-    /// through the identical `resolve_artifact` rule — including its
-    /// ambiguous-prefix refusal.
-    #[must_use]
-    pub fn selected_id_prefix(&self, index: usize) -> Option<String> {
-        self.artifacts()
-            .get(index)
-            .map(|artifact| crate::adapters::tui::widgets::artifacts_panel::id_prefix(&artifact.id))
     }
 
     /// Which of the four distinguishable zero-states applies, if any.
@@ -2075,82 +1811,7 @@ impl ArtifactsPanelState {
             .then_some(ArtifactsZeroState::AllReviewed)
     }
 
-    /// Rendered lines one artifact occupies: its row plus one lineage line per
-    /// `depends_on` edge. The viewport is measured in **lines, not artifacts** —
-    /// counting artifacts lets a lineage-bearing selection sit below the
-    /// clipped area while `Enter` still acts on it.
-    fn block_lines(&self, index: usize) -> usize {
-        self.artifacts()
-            .get(index)
-            .map_or(1, |artifact| 1 + artifact.depends_on.len())
-    }
-
-    /// Smallest scroll offset whose window fully contains `selected`'s block.
-    fn first_fitting_offset(&self, selected: usize) -> usize {
-        let viewport = self.viewport_rows.max(1);
-        let mut used = 0usize;
-        let mut start = selected;
-        loop {
-            let lines = self.block_lines(start);
-            if used + lines > viewport {
-                // `start` does not fit whole; begin after it — unless it IS the
-                // selection, whose block is taller than the viewport and can
-                // only clip its top.
-                return if start == selected {
-                    selected
-                } else {
-                    start + 1
-                };
-            }
-            used += lines;
-            if start == 0 {
-                return 0;
-            }
-            start -= 1;
-        }
-    }
-
-    fn max_scroll_offset(&self) -> usize {
-        let len = self.visible_len();
-        if len == 0 {
-            return 0;
-        }
-        // The bottom-most offset with no dead space: the smallest offset whose
-        // blocks still fill (or overflow) the viewport, in lines.
-        self.first_fitting_offset(len - 1).min(len - 1)
-    }
-
-    /// Clamp the shared sidebar selection into the rendered viewport.
-    pub fn synchronize_selection(&mut self, selected: &mut usize) {
-        let len = self.visible_len();
-        if len == 0 {
-            *selected = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        *selected = (*selected).min(len - 1);
-        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
-        if *selected < self.scroll_offset {
-            self.scroll_offset = *selected;
-        } else {
-            // Line-aware: the selection's whole block (row + lineage lines)
-            // must fit inside the viewport, or navigation moves onto an
-            // artifact the operator cannot see.
-            let fitting = self.first_fitting_offset(*selected);
-            if self.scroll_offset < fitting {
-                self.scroll_offset = fitting;
-            }
-        }
-    }
-
-    /// Record the renderer's actual row capacity and reconcile the viewport.
-    pub fn set_viewport_rows(&mut self, viewport_rows: usize, selected: &mut usize) {
-        self.viewport_rows = viewport_rows.max(1);
-        self.synchronize_selection(selected);
-    }
-
-    /// Store one freshly folded durable read without moving the reader's
-    /// identity anchors.
+    /// Store one freshly folded durable read.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_read(
         &mut self,
@@ -2161,19 +1822,7 @@ impl ArtifactsPanelState {
         read_at_ms: i64,
         policy: crate::domain::services::patch_review::MergeBackPolicy,
         permission_mode: crate::domain::models::PermissionMode,
-        selected: &mut usize,
     ) {
-        let anchor_index = self.anchor_artifact.as_ref().and_then(|id| {
-            room.artifacts()
-                .keys()
-                .position(|candidate| candidate == id)
-        });
-        let selected_index = self.selected_artifact.as_ref().and_then(|id| {
-            room.artifacts()
-                .keys()
-                .position(|candidate| candidate == id)
-        });
-
         self.folded_seq = max_seq;
         self.room = Some(room);
         self.host_id = host_id;
@@ -2183,23 +1832,6 @@ impl ArtifactsPanelState {
         self.permission_mode = permission_mode;
         self.error = None;
         self.not_attached = false;
-        if let Some(index) = anchor_index {
-            self.scroll_offset = index;
-        }
-        if let Some(index) = selected_index {
-            *selected = index;
-        }
-        self.synchronize_selection(selected);
-    }
-
-    /// Remember exactly which rows the last render anchored and selected.
-    pub fn record_rendered_viewport(
-        &mut self,
-        anchor: Option<crate::domain::models::ArtifactId>,
-        selected: Option<crate::domain::models::ArtifactId>,
-    ) {
-        self.anchor_artifact = anchor;
-        self.selected_artifact = selected;
     }
 }
 
@@ -2596,8 +2228,6 @@ pub struct TuiState {
     >,
     /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
     pub usage_panel: UsagePanelState,
-    /// Transparency Log panel state (Ctrl+X, L) (Story 18.2 AC5).
-    pub transparency_panel: TransparencyPanelState,
     /// Story 19.16g — the transparency-log reminder's value state.
     pub log_awareness: LogAwarenessView,
     /// Story 19.16g — the active tab's unpresented `team-log` visit (saved
@@ -2611,6 +2241,9 @@ pub struct TuiState {
     pub room_panel: RoomPanelState,
     /// The Mission Control hub's session-global payload (Story 21.7, A1).
     pub mission_control: crate::adapters::tui::mission_control::MissionControlState,
+    /// The artifact window's payload (Story 21.7 A15): set by the reducer's opener, cleared
+    /// when the frame closes.
+    pub artifact_window: Option<crate::adapters::tui::artifact_window::ArtifactWindowState>,
     /// Durable artifact list panel state (Ctrl+X, E / `/artifacts`) (Story
     /// 18.3a-c AC3).
     pub artifacts_panel: ArtifactsPanelState,
@@ -2783,38 +2416,22 @@ pub struct TuiState {
 
 impl TuiState {
     /// Story 19.16g — before a draw: a visit painted by a frame that never completed was not
-    /// presented, so a panel visit returns to pending (unless a newer read already replaced
-    /// it) and the log frame's paint mark is cleared.
+    /// presented, so the Messages tab's paint mark is cleared and the visit stays pending.
     pub fn restore_unflushed_log_visits(&mut self) {
         self.mission_draw_started();
-        if let Some(visit) = self.transparency_panel.painted_visit.take() {
-            self.transparency_panel.pending_visit.get_or_insert(visit);
-        }
-        if let Some(inspector) = &self.thread_inspector {
-            inspector.log_painted.set(false);
-        }
     }
 
-    /// Story 19.16g, re-keyed by 21-8 (A15) — after a **successful** draw: hand the visits
-    /// this frame actually presented to the persistence shell. The panel's visit counts only
-    /// if the widget painted it with body space; the `/team log` visit only if the log frame
-    /// is on top of the stack and the widget painted its body with at least one row. Each
-    /// visit is consumed once, so rerendering cannot acknowledge later rows.
+    /// Story 19.16g, re-homed by 21-7 (A13) — after a **successful** draw: hand the visit this
+    /// frame actually presented to the persistence shell. The `/team log` visit counts only if
+    /// Messages is the top frame (no leader menu over it) and its body was painted with at
+    /// least one row; the flag is consumed once, so rerendering cannot acknowledge later rows.
     pub fn log_visits_presented(&mut self) {
         self.mission_draw_completed();
-        if let Some(visit) = self.transparency_panel.painted_visit.take() {
-            self.log_awareness.presented.push(visit);
-        }
-        let on_top = self.modal_stack.top().is_some_and(|frame| {
-            frame.surface == crate::adapters::tui::presentation::Surface::ThreadInspector
-        });
-        let painted = self.thread_inspector.as_ref().is_some_and(|inspector| {
-            matches!(inspector.target, ThreadTarget::Log { filtered: false })
-                && inspector.log_painted.take()
-        });
-        if on_top
+        let painted = self.mission_control.take_messages_painted();
+        if painted
+            && crate::adapters::tui::mission_control::is_top(self)
+            && self.mission_control.tab == crate::adapters::tui::mission_control::McTab::Messages
             && self.pending_leader.is_none()
-            && painted
             && let Some(visit) = self.pending_log_visit.take()
         {
             self.log_awareness.presented.push(visit);
@@ -3057,13 +2674,13 @@ impl TuiState {
             profile_switcher: ProfileSwitcherState::new(),
             active_profile: None,
             usage_panel: UsagePanelState::new(),
-            transparency_panel: TransparencyPanelState::default(),
             log_awareness: LogAwarenessView::default(),
             pending_log_visit: None,
             local_read_only: false,
             room_panel: RoomPanelState::default(),
             mission_control: crate::adapters::tui::mission_control::MissionControlState::default(),
             artifacts_panel: ArtifactsPanelState::default(),
+            artifact_window: None,
             daily_budget: None,
             budget_acknowledged: None,
             pending_resolved_model: None,

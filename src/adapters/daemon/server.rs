@@ -9477,28 +9477,23 @@ mod tests {
             String::from_utf8(out).expect("utf-8")
         };
 
-        let mut state = crate::adapters::tui::state::TuiState::new(200, 40);
-        state.transparency_panel.apply_read(report.rows.clone(), 1);
-        let area = ratatui::layout::Rect::new(0, 0, 200, 40);
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        crate::adapters::tui::widgets::transparency_panel::render(
-            area,
-            &mut buffer,
-            &mut state.transparency_panel,
-            0,
-            &state.focus,
-            &state.theme,
+        let blocks = crate::adapters::tui::handlers::team_command::log_blocks(&report.rows, false);
+        let page = crate::adapters::tui::mission_control::LogPage::new(false, &blocks, None);
+        let built = crate::adapters::tui::thread_body::build(
+            page.page(),
+            &crate::adapters::tui::theme::Theme::dark(),
+            200,
         );
-        let panel = buffer
-            .content()
+        let panel = built
+            .lines
             .iter()
-            .map(ratatui::buffer::Cell::symbol)
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
             .collect::<String>();
 
         vec![
             ("/team log", render(false)),
             ("/team log --json", render(true)),
-            ("the TUI transparency panel", panel),
+            ("the TUI Messages tab", panel),
         ]
     }
 

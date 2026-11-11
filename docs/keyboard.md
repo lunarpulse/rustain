@@ -25,9 +25,9 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, I` | Sign in to a model provider (/login) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, A` | Adapter Status panel (sidebar) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, S` | Subagent panel | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
-| `Ctrl+X, L` | Transparency Log panel | local, attached | portable | needs a terminal of 120+ columns |
+| `Ctrl+X, L` | Mission Control: Messages tab (the A2A log, read-only; both hosts) | local, attached | portable |  |
 | `Ctrl+X, R` | Mission Control: Room tab (durable room replay, read-only) | local, attached | portable | not available in an attached session |
-| `Ctrl+X, E` | Artifacts panel (Evidence, read-only replay) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
+| `Ctrl+X, E` | Mission Control: Artifacts tab (durable artifacts, read-only replay) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, T` | Task panel | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
 | `Ctrl+X, U` | Usage / cost | local, attached | portable | not available in an attached session |
 | `Ctrl+X, H` | History panel (past conversations) | local, attached | portable | needs a terminal of 120+ columns; not available in an attached session |
@@ -424,43 +424,37 @@ Also inherits: Sidebar.
 | `k` | Scroll the inspector up one line | local | portable |  |
 | `Esc` | Close the inspector and return to the Agents list | local | portable |  |
 
-## A2A log
-
-Also inherits: Sidebar.
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `/` | Search the log (typing filters; Enter keeps the filter) | local | portable |  |
-| `Backspace` | Delete the last search character | local | portable |  |
-| `Enter` | Open or close the selected row's details; commit the search while typing | local | portable |  |
-| `Esc` | Clear the search or details; otherwise return to the chat | local | portable |  |
-| `G` | Jump to the newest entry | local | portable |  |
-| `e` | Export the log | local | portable |  |
-| `j` | Select the next log row | local | portable |  |
-| `k` | Select the previous log row | local | portable |  |
-
 ## Mission Control
 
 Also inherits: Inspector body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Left` | Select the previous Mission Control tab (inert while only one tab exists) | local | portable |  |
-| `Right` | Select the next Mission Control tab (inert while only one tab exists) | local | portable |  |
-| `Tab` | Move between the list and its detail preview (only where the frame shows both) | local | portable |  |
-| `Esc` | Close Mission Control (back one frame) | local | portable |  |
-| `Ctrl+C` | Close Mission Control (back one frame) without cancelling work | local | portable |  |
-| `Ctrl+X` | Open the Ctrl+X menu above Mission Control | local | portable |  |
-| `Ctrl+P` | Open the command palette above Mission Control | local | portable |  |
-| `Ctrl+Q` | Ask to quit without closing Mission Control | local | portable |  |
+| `Left` | Select the previous Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
+| `Right` | Select the next Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
+| `Tab` | Move between the list and its detail preview (only where the frame shows both) | local, attached | portable |  |
+| `Enter` | Open the selected row's window (Artifacts) | local | portable |  |
+| `e` | Export the unfiltered A2A log snapshot the Messages view was read from | local | portable |  |
+| `/` | Filter the Messages rows by a case-insensitive query (the closing claim always stays) | local, attached | portable |  |
+| `Esc` | Clear a kept Messages filter, else close Mission Control (back one frame) | local, attached | portable |  |
+| `Ctrl+C` | Clear a kept Messages filter, else close Mission Control (back one frame) without cancelling work | local, attached | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above Mission Control | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above Mission Control | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing Mission Control | local, attached | portable |  |
 
-## Artifacts
+## Artifact window
 
-Also inherits: Sidebar.
+Also inherits: Markdown body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Enter` | Show the selected artifact (same as /artifact show) | local | portable |  |
+| `c` | Copy the artifact's original source bytes (refused above 8 MiB), never the sanitized display | local | portable |  |
+| `/` | Show only the body lines that contain a query | local | portable |  |
+| `Esc` | Clear a kept filter, else back to the frame beneath | local | portable |  |
+| `Ctrl+C` | Back to the frame beneath without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above the artifact window | local | portable |  |
+| `Ctrl+P` | Open the command palette above the artifact window | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the artifact window | local | portable |  |
 
 ## Wave overlay
 

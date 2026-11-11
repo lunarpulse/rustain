@@ -27,6 +27,10 @@ pub enum Surface {
     /// `TuiState.mission_control` (the tab, the selection ids) and its painted title is the
     /// frame's `tool_title` (`Mission Control · <Tab>`).
     MissionControl,
+    /// The artifact window (Story 21.7 A15): global, one at a time; its payload is
+    /// `TuiState.artifact_window` and its painted title is the frame's `tool_title`
+    /// (`Artifact · <name>`).
+    ArtifactWindow,
 }
 
 impl Surface {
@@ -51,6 +55,7 @@ impl Surface {
             Self::BlockViewer(_) => "Block",
             Self::ThreadInspector => "Thread",
             Self::MissionControl => "Mission Control",
+            Self::ArtifactWindow => "Artifact",
         }
     }
 
@@ -75,6 +80,7 @@ impl Surface {
             Self::BlockViewer(_) => Context::BlockViewer,
             Self::ThreadInspector => Context::ThreadInspector,
             Self::MissionControl => Context::MissionControl,
+            Self::ArtifactWindow => Context::ArtifactWindow,
         }
     }
 
@@ -94,6 +100,7 @@ impl Surface {
                 | Self::BlockViewer(_)
                 | Self::ThreadInspector
                 | Self::MissionControl
+                | Self::ArtifactWindow
         )
     }
 }

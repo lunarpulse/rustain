@@ -858,7 +858,7 @@ mod local_occlusion {
             );
             assert_eq!(
                 self.h.state.modal_stack.top().unwrap().surface,
-                Surface::ThreadInspector
+                Surface::MissionControl
             );
             visit
         }
@@ -900,7 +900,7 @@ mod local_occlusion {
             f.retained(visit, presented);
             assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
             let screen = f.compose_log(true);
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             assert!(screen.contains("refused"), "{screen}");
             f.acknowledged(visit);
         }
@@ -920,13 +920,13 @@ mod local_occlusion {
             ));
             // A Stage indicator no longer owns the log. A failed draw cannot commit it.
             let screen = f.compose_log(false);
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             let buffer = f.h.terminal.backend().buffer();
             assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
             assert_eq!(buffer[(rect.right() - 1, rect.bottom() - 1)].symbol(), "┘");
             f.retained(visit, presented);
             let screen = f.draw();
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             f.acknowledged(visit);
         }
     }
@@ -1592,17 +1592,33 @@ mod local_occlusion {
             f.retained(visit, presented);
             // Search moved from the Stage's Ctrl+F frame to the log's own `/` field.
             assert_eq!(press(&mut f.h.state, Key::Char('/')), InputAction::Consumed);
-            assert!(f.h.state.thread_inspector.as_ref().unwrap().search.editing);
+            assert!(
+                f.h.state
+                    .mission_control
+                    .messages
+                    .as_ref()
+                    .unwrap()
+                    .search
+                    .editing
+            );
             assert_eq!(
                 f.h.state.modal_stack.top().unwrap().surface,
-                Surface::ThreadInspector
+                Surface::MissionControl
             );
             let screen = f.compose_log(true);
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             assert!(screen.contains("Keep filter"), "{screen}");
             f.acknowledged(visit);
             assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
-            assert!(!f.h.state.thread_inspector.as_ref().unwrap().search.editing);
+            assert!(
+                !f.h.state
+                    .mission_control
+                    .messages
+                    .as_ref()
+                    .unwrap()
+                    .search
+                    .editing
+            );
         }
     }
 
@@ -1617,9 +1633,9 @@ mod local_occlusion {
                 let screen = f.draw();
                 assert!(screen.contains("Terminal too small"), "{screen}");
             } else {
-                reducer::close(&mut f.h.state, Surface::ThreadInspector);
+                reducer::close(&mut f.h.state, Surface::MissionControl);
                 let screen = f.compose_log(true);
-                assert!(!screen.contains("A2A log"), "{screen}");
+                assert!(!screen.contains("Mission Control · Messages"), "{screen}");
             }
             f.retained(visit, presented);
             if too_small {
@@ -1628,7 +1644,7 @@ mod local_occlusion {
                 assert_eq!(f.read().await, visit);
             }
             let screen = f.compose_log(true);
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             f.acknowledged(visit);
         }
     }
@@ -1666,11 +1682,11 @@ mod local_occlusion {
                 assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
                 assert_eq!(
                     f.h.state.modal_stack.top().unwrap().surface,
-                    Surface::ThreadInspector
+                    Surface::MissionControl
                 );
                 assert!(f.h.state.pending_leader.is_none());
                 let screen = f.compose_log(true);
-                assert!(screen.contains("A2A log"), "{screen}");
+                assert!(screen.contains("Mission Control · Messages"), "{screen}");
                 f.acknowledged(visit);
             }
         }
@@ -1708,7 +1724,7 @@ mod local_occlusion {
             );
             approvals.apply_resolution(&mut f.h.state, &id);
             let screen = f.compose_log(true);
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             f.acknowledged(visit);
         }
     }
@@ -1762,7 +1778,7 @@ mod local_occlusion {
             assert!(f.h.state.pending_leader.is_none());
             assert_eq!(
                 f.h.state.modal_stack.top().unwrap().surface,
-                Surface::ThreadInspector
+                Surface::MissionControl
             );
             let screen = f.compose_log(true);
             let composed = f.h.terminal.backend().buffer();
@@ -1786,7 +1802,7 @@ mod local_occlusion {
                     "the toast outside the centered frame is genuinely dimmed: {screen}"
                 );
             }
-            assert!(screen.contains("A2A log"), "{screen}");
+            assert!(screen.contains("Mission Control · Messages"), "{screen}");
             f.acknowledged(visit);
         }
     }

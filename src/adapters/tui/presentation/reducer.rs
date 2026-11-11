@@ -57,6 +57,7 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 | Surface::BlockViewer(_)
                 | Surface::ThreadInspector
                 | Surface::MissionControl
+                | Surface::ArtifactWindow
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
@@ -93,7 +94,7 @@ pub fn open_mission_control(
     tab: crate::adapters::tui::mission_control::McTab,
 ) -> Opened {
     state.mission_control.switch_to(tab);
-    let title = tab.title();
+    let title = state.mission_control.title();
     let opened = open_frame(state, Surface::MissionControl, None, Some(title.clone()));
     set_mission_title(state, title);
     state.needs_redraw = true;
@@ -108,7 +109,8 @@ pub fn set_mission_tab(state: &mut TuiState, tab: crate::adapters::tui::mission_
         return;
     }
     state.mission_control.switch_to(tab);
-    set_mission_title(state, tab.title());
+    let title = state.mission_control.title();
+    set_mission_title(state, title);
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
 }
@@ -120,6 +122,28 @@ fn set_mission_title(state: &mut TuiState, title: String) {
         .find(|frame| frame.surface == Surface::MissionControl)
         .expect("the hub frame is open")
         .tool_title = Some(title);
+}
+
+/// The artifact window is one frame at a time (A15): opening another artifact retargets its
+/// payload and title in place. The payload slot is set here and cleared by `release_payload`,
+/// never elsewhere; the opening writes no base focus, and a Mission Control frame beneath
+/// stays where it was.
+pub fn open_artifact_window(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::artifact_window::ArtifactWindowState,
+    title: String,
+) -> Opened {
+    state.artifact_window = Some(payload);
+    let opened = open_frame(state, Surface::ArtifactWindow, None, Some(title.clone()));
+    state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::ArtifactWindow)
+        .expect("the artifact frame was just opened")
+        .tool_title = Some(title);
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
+    opened
 }
 
 /// Exact-target reopen retains the frame and cache; a new target owns a fresh key.
@@ -576,7 +600,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::ToolInspector(_)
         | Surface::BlockViewer(_)
         | Surface::ThreadInspector
-        | Surface::MissionControl => {}
+        | Surface::MissionControl
+        | Surface::ArtifactWindow => {}
     }
 }
 
@@ -770,6 +795,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::MissionControl => {
             state.mission_control.closed();
+            None
+        }
+        Surface::ArtifactWindow => {
+            state.artifact_window = None;
             None
         }
     };

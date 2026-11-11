@@ -562,7 +562,7 @@ def scene_env(stub, tmp_path) -> dict[str, str]:
 
 def _c_frame(screen: str, filtered: bool = False) -> list[str]:
     """Extract a complete log frame, rejecting partial title, sides or bottom."""
-    title = "A2A log · filtered" if filtered else "A2A log"
+    title = "Mission Control · Messages · filtered" if filtered else "Mission Control · Messages"
     pattern = re.compile(r"┌[─ ]*" + re.escape(title) + r"[─ ]*┐")
     rows = screen.split("\n")
     for index, row in enumerate(rows):
@@ -613,7 +613,7 @@ def _c_warning(screen: str) -> bool:
 
 
 def _c_synthetic(cols: int, rows: int, *, filtered: bool = False, reminder: bool = False) -> str:
-    title = " A2A log · filtered " if filtered else " A2A log "
+    title = " Mission Control · Messages · filtered " if filtered else " Mission Control · Messages "
     width = cols - 2
     inner = [f"  {_c_timestamp(0)} ↑ outbound ✗ refused",
              "  — append-only, crash-safe"]
@@ -642,8 +642,9 @@ def test_leg_c_desk_log_frames_and_reminder(cols, rows):
     assert _c_log_ready(filtered, filtered=True, reminder=True)
     assert not _c_log_ready(filtered, filtered=True)
     assert not _c_log_ready(_cut_row(filtered, 0), filtered=True, reminder=True)
-    assert not _c_log_ready(filtered.replace("A2A log · filtered", "A2A log · filtere "),
-                            filtered=True, reminder=True)
+    assert not _c_log_ready(
+        filtered.replace("Mission Control · Messages · filtered", "Mission Control · Messages · filtere "),
+        filtered=True, reminder=True)
     assert not _c_row_visible(_c_frame(unfiltered), 1)
 
 
@@ -1138,7 +1139,7 @@ def test_leg_c(tmp_path, stub, scene_env, monkeypatch):
                       "last log row and append-only claim")
         assert "showing the 20 most recent" not in end
         log.send(ESC)
-        _settle(log, lambda s: "A2A log" not in s and composer_top(screen_rows(s)) is not None,
+        _settle(log, lambda s: "Mission Control · Messages" not in s and composer_top(screen_rows(s)) is not None,
                 "log closed")
         _save_final(log, "log-client")
 

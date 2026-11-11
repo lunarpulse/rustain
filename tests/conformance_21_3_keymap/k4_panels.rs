@@ -1,6 +1,6 @@
 //! Story 21.3 conformance leg K4 (panels): the task drill-down, the wave/reorder Chat
-//! sub-states, the Tasks / Agents / A2A log / Room / Artifacts sidebar panels and the
-//! wave overlay, each witnessed BY VALUE through the real local front door
+//! sub-states, the Tasks / Agents sidebar panels and the wave overlay, each witnessed BY VALUE
+//! through the real local front door
 //! (`support::press` -> `app::handle_input`) by the shared `witness::run` harness.
 
 use std::sync::Arc;
@@ -10,13 +10,7 @@ use rustain::adapters::tui::keymap::{Context, Key};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::visual::PanelType;
-use rustain::domain::models::{
-    AgentId, ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, Direction, EvidenceArtifact,
-    FocusState, HostBinding, OrchestrationRoom, OrchestrationRoomId, PermissionMode, ProvenanceTag,
-    ReviewStatus, RoomEvent,
-};
-use rustain::domain::services::patch_review::MergeBackPolicy;
-use rustain::domain::services::transparency::{TransparencyKind, TransparencyRow};
+use rustain::domain::models::{AgentId, FocusState};
 
 use super::support::{StubWave, fresh, press};
 use super::witness::{Case, W, local, run, w, wp};
@@ -302,7 +296,7 @@ fn tasks_reorder_rows_move_and_commit_the_task() {
     run(&Case { inherited: INHERITED, ..local(Context::TasksReorder, reorder_tasks_state, tasks_salient, ROWS) });
 }
 
-// ── Agents / Room / Artifacts ─────────────────────────────────────────────
+// ── Agents ────────────────────────────────────────────────────────────────
 
 /// Regression caught: `p` in the Agents list stops toggling the selected agent's pause.
 #[test]
@@ -312,107 +306,6 @@ fn sidebar_agents_p_toggles_the_selected_agent() {
     // With the inspector open `p` is consumed: it must not toggle an agent (R3).
     const OFF: &[W] = &[wp(&[Key::Char('p')], "Consumed | Sidebar { panel: Agents, selected: 0 } sel=0", |s| s.agent_panel_state.drill_down_agent = AgentId::parse("spoke-1").ok())];
     run(&Case { off: OFF, ..local(Context::SidebarAgents, || panel_state(PanelType::Agents), panel_salient, ROWS) });
-}
-
-/// One patch artifact (id `aaaaaa…`) folded into the Artifacts panel.
-fn with_artifact(state: &mut TuiState) {
-    let hex = |c: &str| ContentHash::parse_hex(&c.repeat(64)).expect("hex");
-    let artifact = EvidenceArtifact {
-        id: ArtifactId::from(hex("a")),
-        kind: ArtifactKind::Patch,
-        producer: AgentId::parse("spoke-1").expect("agent id"),
-        content_hash: hex("0"),
-        authority: CapabilityTokenId::default(),
-        provenance: vec![ProvenanceTag::UserOriginated],
-        depends_on: vec![],
-        review: Some(ReviewStatus::Pending),
-        host: HostBinding::new("host-A", "ws"),
-    };
-    let events = vec![RoomEvent::ArtifactCreated { artifact }];
-    let id = OrchestrationRoomId::parse("room-test").expect("room id");
-    let room = OrchestrationRoom::project_for_host(id, events, "host-A");
-    let (host, mut selected) = ("host-A".to_owned(), 0);
-    let policy = MergeBackPolicy::default();
-    let panel = &mut state.artifacts_panel;
-    panel.apply_read(
-        room,
-        host,
-        1,
-        0,
-        1,
-        policy,
-        PermissionMode::Plan,
-        &mut selected,
-    );
-}
-
-/// Regression caught: `Enter` on an artifact stops reaching `/artifact show <prefix>`, or an empty panel falls through to history.
-#[test]
-#[rustfmt::skip]
-fn sidebar_artifacts_enter_shows_the_selected_artifact() {
-    const ROWS: &[W] = &[
-        w(&[Key::Enter], "Consumed | Sidebar { panel: Artifacts, selected: 0 } sel=0"),
-        wp(&[Key::Enter], "ExecuteCommand { name: \"artifact\", args: Some(\"show aaaaaa\") } | Sidebar { panel: Artifacts, selected: 0 } sel=0", with_artifact),
-    ];
-    run(&local(Context::SidebarArtifacts, || panel_state(PanelType::Artifacts), panel_salient, ROWS));
-}
-
-// ── A2A log ───────────────────────────────────────────────────────────────
-
-/// The A2A log panel focused over three journal rows (`seq` 1..=3), first selected.
-fn log_state() -> TuiState {
-    let row = |seq: u64| TransparencyRow {
-        rail: None,
-        seq,
-        recorded_at_ms: Some(seq as i64),
-        retracted_at_ms: None,
-        direction: Direction::Inbound,
-        kind: TransparencyKind::Rejected,
-        peer: "peer-a".to_owned(),
-        task: Some(format!("task-{seq}")),
-        summary: format!("row {seq}"),
-        provenance: None,
-        principal_collapsed: false,
-    };
-    let mut state = panel_state(PanelType::TransparencyLog);
-    state
-        .transparency_panel
-        .apply_read((1..=3).map(row).collect(), 10);
-    state.sidebar_entry_count = 3;
-    state
-}
-
-/// The `/` search already open with the filter `ab`.
-fn searching(state: &mut TuiState) {
-    state.transparency_panel.search = Some("ab".to_owned());
-    state.transparency_panel.search_active = true;
-}
-
-fn log_salient(state: &TuiState) -> String {
-    let panel = &state.transparency_panel;
-    let (q, active, drill) = (&panel.search, panel.search_active, panel.drill_seq);
-    format!("{:?} q={q:?}/{active} drill={drill:?}", state.focus)
-}
-
-/// Regression caught: an A2A log key edits the filter, selection, drill or exit in the wrong order (`Esc` clears before it leaves).
-#[test]
-#[rustfmt::skip]
-fn sidebar_a2a_log_rows_search_select_drill_export_and_leave() {
-    const ROWS: &[W] = &[
-        w(&[Key::Char('/')], "Consumed | Sidebar { panel: TransparencyLog, selected: 0 } q=Some(\"\")/true drill=None"),
-        wp(&[Key::Backspace], "Consumed | Sidebar { panel: TransparencyLog, selected: 0 } q=Some(\"a\")/true drill=None", searching),
-        w(&[Key::Enter], "Consumed | Sidebar { panel: TransparencyLog, selected: 0 } q=None/false drill=Some(1)"),
-        wp(&[Key::Enter], "Consumed | Sidebar { panel: TransparencyLog, selected: 0 } q=Some(\"ab\")/false drill=None", searching),
-        w(&[Key::Esc], "Consumed | Chat q=None/false drill=None"),
-        wp(&[Key::Esc], "Consumed | Sidebar { panel: TransparencyLog, selected: 0 } q=None/false drill=None", searching),
-        w(&[Key::Char('G')], "Consumed | Sidebar { panel: TransparencyLog, selected: 2 } q=None/false drill=None"),
-        w(&[Key::Char('e')], "ExportTransparency | Sidebar { panel: TransparencyLog, selected: 0 } q=None/false drill=None"),
-        w(&[Key::Char('j')], "Consumed | Sidebar { panel: TransparencyLog, selected: 1 } q=None/false drill=None"),
-        wp(&[Key::Char('k')], "Consumed | Sidebar { panel: TransparencyLog, selected: 1 } q=None/false drill=None", |s| s.sidebar_selected = 2),
-    ];
-    // While searching every printable types (`q j k G e /` are not commands there): off-state (R3).
-    const OFF: &[W] = &[wp(&[Key::Char('q'), Key::Char('j'), Key::Char('k'), Key::Char('G'), Key::Char('e'), Key::Char('/')], "Consumed | Sidebar { panel: TransparencyLog, selected: 0 } q=Some(\"abqjkge/\")/true drill=None", searching)];
-    run(&Case { off: OFF, ..local(Context::SidebarA2aLog, log_state, log_salient, ROWS) });
 }
 
 // ── Adapters (no own rows) and DF-262 ─────────────────────────────────────

@@ -13,6 +13,11 @@ pub struct McRow {
     pub id: String,
     pub text: String,
     pub detail: String,
+    /// A reordering of `text` that puts what must survive truncation first (a decision before
+    /// an identifier); the painter uses it when cutting `text` to the width would lose a part
+    /// of `keep`.
+    pub compact: Option<String>,
+    pub keep: Vec<String>,
 }
 
 impl McRow {
@@ -22,7 +27,17 @@ impl McRow {
             id: id.to_owned(),
             text: text.to_owned(),
             detail: detail.to_owned(),
+            compact: None,
+            keep: Vec::new(),
         }
+    }
+
+    /// Give the row its safety-first narrow form.
+    #[must_use]
+    pub fn with_compact(mut self, compact: String, keep: Vec<String>) -> Self {
+        self.compact = Some(compact);
+        self.keep = keep;
+        self
     }
 }
 
@@ -78,6 +93,9 @@ pub fn view_pos(resolved: Resolved) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewRow<'a> {
     pub text: Cow<'a, str>,
+    /// The safety-first reordering and the parts it protects (see [`McRow::with_compact`]).
+    pub compact: Option<&'a str>,
+    pub keep: &'a [String],
     pub selected: bool,
     pub gone: bool,
 }
@@ -90,25 +108,26 @@ pub fn view_row<'a>(
     resolved: Resolved,
     index: usize,
 ) -> Option<ViewRow<'a>> {
+    let row = |row: &'a McRow, selected: bool| ViewRow {
+        text: Cow::Borrowed(row.text.as_str()),
+        compact: row.compact.as_deref(),
+        keep: &row.keep,
+        selected,
+        gone: false,
+    };
     match resolved {
         Resolved::Empty => None,
         Resolved::Gone(at) if index == at => Some(ViewRow {
             text: Cow::Owned(format!("{} is no longer available", selection.label)),
+            compact: None,
+            keep: &[],
             selected: true,
             gone: true,
         }),
         Resolved::Gone(at) => rows
             .get(if index > at { index - 1 } else { index })
-            .map(|row| ViewRow {
-                text: Cow::Borrowed(row.text.as_str()),
-                selected: false,
-                gone: false,
-            }),
-        Resolved::Found(selected) => rows.get(index).map(|row| ViewRow {
-            text: Cow::Borrowed(row.text.as_str()),
-            selected: index == selected,
-            gone: false,
-        }),
+            .map(|r| row(r, false)),
+        Resolved::Found(selected) => rows.get(index).map(|r| row(r, index == selected)),
     }
 }
 

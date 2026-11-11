@@ -17,7 +17,15 @@ async fn probe(width: u16, height: u16, ids: &[&str]) -> Rig {
         .state
         .mission_control
         .register_probe(probe_rows(ids));
-    assert_eq!(rig.f.press(Key::Right), InputAction::Consumed);
+    for tab in [
+        rustain::adapters::tui::mission_control::McTab::Artifacts,
+        rustain::adapters::tui::mission_control::McTab::Probe,
+    ] {
+        assert_eq!(
+            rig.f.press(Key::Right),
+            InputAction::OpenMissionControl(tab)
+        );
+    }
     rig.f.paint();
     assert_eq!(top_title(&rig).as_deref(), Some("Mission Control · Probe"));
     rig

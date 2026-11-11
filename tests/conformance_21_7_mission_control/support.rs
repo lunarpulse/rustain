@@ -76,7 +76,14 @@ pub async fn open_room(rig: &mut Rig) {
         rig.f.press(Key::Char('r')),
         InputAction::OpenMissionControl(McTab::Room)
     );
-    room_bridge::refresh_mission_tab(&rig.app, &mut rig.f.h.state, McTab::Room).await;
+    room_bridge::refresh_mission_tab(
+        &rig.app,
+        &mut rig.f.h.state,
+        "conv",
+        McTab::Room,
+        rustain::domain::models::PermissionMode::Normal,
+    )
+    .await;
     rig.f.paint();
 }
 

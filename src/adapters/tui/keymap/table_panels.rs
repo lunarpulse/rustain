@@ -25,9 +25,8 @@ pub enum PanelCmd {
     // Sidebar(Tasks), incl. reorder mode.
     TasksPrev, TasksNext, TasksCancelPlan, TasksPause, TasksSkip, TasksDrill,
     ReorderDown, ReorderUp, ReorderCommit,
-    // Sidebar(Agents), A2A log, Artifacts.
-    AgentPauseToggle, LogSearch, LogBackspace, LogDrill, LogClear, LogTail, LogExport,
-    LogNext, LogPrev, ArtifactShow,
+    // Sidebar(Agents).
+    AgentPauseToggle,
     // Wave overlay.
     WaveNext, WavePrev, WaveDrill, WaveClose, WaveRerun, WaveDiverge, WaveDivergeClose,
 }
@@ -49,12 +48,6 @@ const fn r(keys: &'static [Key], cmd: PanelCmd) -> Binding {
 }
 const fn a(keys: &'static [Key], cmd: PanelCmd) -> Binding {
     bind(Context::SidebarAgents, keys, CommandId::Panel(cmd), "").local()
-}
-const fn l(keys: &'static [Key], cmd: PanelCmd) -> Binding {
-    bind(Context::SidebarA2aLog, keys, CommandId::Panel(cmd), "").local()
-}
-const fn e(keys: &'static [Key], cmd: PanelCmd) -> Binding {
-    bind(Context::SidebarArtifacts, keys, CommandId::Panel(cmd), "").local()
 }
 const fn w(keys: &'static [Key], cmd: PanelCmd) -> Binding {
     bind(Context::WaveOverlay, keys, CommandId::Panel(cmd), "").local()
@@ -98,17 +91,6 @@ pub const ROWS: &[Binding] = &[
     r(&[Key::Enter], PanelCmd::ReorderCommit).does("Commit the new task order"),
     // ── Sidebar(Agents), list only (the inspector arrives with its extraction) ──
     a(&[Key::Char('p')], PanelCmd::AgentPauseToggle).does("Pause or resume the selected agent"),
-    // ── Sidebar(A2A log) ──
-    l(&[Key::Char('/')], PanelCmd::LogSearch).does("Search the log (typing filters; Enter keeps the filter)"),
-    l(&[Key::Backspace], PanelCmd::LogBackspace).does("Delete the last search character"),
-    l(&[Key::Enter], PanelCmd::LogDrill).does("Open or close the selected row's details; commit the search while typing"),
-    l(&[Key::Esc], PanelCmd::LogClear).does("Clear the search or details; otherwise return to the chat"),
-    l(&[Key::Char('G')], PanelCmd::LogTail).does("Jump to the newest entry"),
-    l(&[Key::Char('e')], PanelCmd::LogExport).does("Export the log"),
-    l(&[Key::Char('j')], PanelCmd::LogNext).does("Select the next log row"),
-    l(&[Key::Char('k')], PanelCmd::LogPrev).does("Select the previous log row"),
-    // ── Sidebar(Artifacts) ──
-    e(&[Key::Enter], PanelCmd::ArtifactShow).does("Show the selected artifact (same as /artifact show)"),
     // ── Wave overlay ──
     w(&[Key::Char('j')], PanelCmd::WaveNext).does("Select the next spoke"),
     w(&[Key::Down], PanelCmd::WaveNext).does("Select the next spoke"),

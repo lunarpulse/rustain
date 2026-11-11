@@ -2997,15 +2997,12 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
-                                InputAction::OpenMissionControl(tab) => room_bridge::refresh_mission_tab(&app_state, &mut state, tab).await,
+                                InputAction::OpenMissionControl(tab) => room_bridge::refresh_mission_tab(&app_state, &mut state, &conversation.id, tab, security.current_mode()).await,
+                                InputAction::OpenMessages => transparency_bridge::open_messages(&app_state, &mut state, &conversation.id).await,
+                                InputAction::OpenArtifactWindow(id) => artifact_bridge::open_window(&app_state, &mut state, &conversation.id, &id, security.current_mode()).await,
                                 InputAction::OpenPanel(panel_type) => {
                                     match panel_bridge::open_panel(&mut state, &conversation, panel_type) {
                                         PanelOpenOutcome::Opened => {
-                                            match panel_type {
-                                                PanelType::TransparencyLog => transparency_bridge::open_panel(&app_state, &mut state).await,
-                                                PanelType::Artifacts => artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await,
-                                                _ => {}
-                                            }
                                             state.needs_redraw = true;
                                         }
                                         PanelOpenOutcome::Notice(notice) => {
@@ -7625,26 +7622,6 @@ pub fn render(
                                 theme,
                             );
                         }
-                        Some(crate::domain::models::visual::PanelType::TransparencyLog) => {
-                            crate::adapters::tui::widgets::transparency_panel::render(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                &mut state.transparency_panel,
-                                state.sidebar_selected,
-                                &state.focus,
-                                theme,
-                            );
-                        }
-                        Some(crate::domain::models::visual::PanelType::Artifacts) => {
-                            crate::adapters::tui::widgets::artifacts_panel::render(
-                                sidebar_area,
-                                frame.buffer_mut(),
-                                &mut state.artifacts_panel,
-                                state.sidebar_selected,
-                                &state.focus,
-                                theme,
-                            );
-                        }
                     }
                 }
 
@@ -7716,21 +7693,6 @@ pub fn render(
                                 &state.session_overrides,
                                 is_focused,
                                 state.sidebar_selected,
-                                theme,
-                            );
-                        }
-                        // Hand-written, NOT compiler-surfaced: the `_` arm below makes this
-                        // match non-exhaustive, so a missing `Artifacts` arm compiles clean,
-                        // renders nothing in Dashboard density, and then falls through the
-                        // `_` arm's `Agents` re-check so the WRONG panel may paint (Story
-                        // 18.3a-c AC3, headline mutant).
-                        Some(crate::domain::models::visual::PanelType::Artifacts) => {
-                            crate::adapters::tui::widgets::artifacts_panel::render(
-                                panel_area,
-                                frame.buffer_mut(),
-                                &mut state.artifacts_panel,
-                                state.sidebar_selected,
-                                &state.focus,
                                 theme,
                             );
                         }

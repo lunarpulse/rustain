@@ -2,8 +2,9 @@
 
 The Rust conformance tests exercise input routing, journal folds and widgets in
 isolation. These PTYs also execute event_loop::run: both real panel chords and
-slash commands must paint durable rows in Monitor's Sidebar and Dashboard's
-main panel. No model turn, constructed TuiState or source-text pin is used.
+slash commands must paint durable rows in Mission Control (Story 21.7: the Room and
+Artifacts tabs replaced the sidebar panels, so the Artifacts rows are also proved at 80 columns,
+where the sidebar never fit). No model turn, constructed TuiState or source-text pin is used.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import harness
 from harness import RustainTUI
 from keys import CTRL_X, ENTER
 
@@ -66,17 +68,15 @@ def _seed_journal(journal: Path) -> None:
         os.fsync(stream.fileno())
 
 
-@pytest.fixture(params=["monitor", "dashboard"], ids=["sidebar", "dashboard"])
-def populated_panel_tui(request, tmp_path, build_binary):
+def _populated_tui(tmp_path, monkeypatch, cols: int):
     """Private config/home/workspace; harness honors RUSTAIN_TUI_BINARY too."""
+    monkeypatch.setattr(harness, "TERM_COLS", cols)
+    if cols == 80:
+        monkeypatch.setattr(harness, "TERM_ROWS", 24)
     workspace = tmp_path / "workspace"
     config = workspace / ".rustain"
     config.mkdir(parents=True)
-    (config / "config.toml").write_text(
-        '[permissions]\nalways_tools = []\n\n'
-        f'[layout]\ndensity_mode = "{request.param}"\n',
-        encoding="utf-8",
-    )
+    (config / "config.toml").write_text('[permissions]\nalways_tools = []\n', encoding="utf-8")
     home = tmp_path / "home"
     home.mkdir()
     env = {"HOME": str(home), "RUSTAIN_PROFILE": ""}
@@ -89,6 +89,18 @@ def populated_panel_tui(request, tmp_path, build_binary):
     with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=env) as tui:
         assert tui.wait_for_screen("Ready", timeout=15), tui.get_screen_text()
         yield tui
+
+
+@pytest.fixture
+def populated_panel_tui(tmp_path, monkeypatch, build_binary):
+    """The Room tab at the standard 130 columns."""
+    yield from _populated_tui(tmp_path, monkeypatch, 130)
+
+
+@pytest.fixture(params=[130, 80], ids=["130", "80"])
+def populated_artifacts_tui(request, tmp_path, monkeypatch, build_binary):
+    """The Artifacts tab at 130 columns (list + detail) and 80 (list only; the sidebar never fit)."""
+    yield from _populated_tui(tmp_path, monkeypatch, request.param)
 
 
 def _assert_rows(tui: RustainTUI, rows: tuple[str, ...], diagnostic: str) -> None:
@@ -121,11 +133,20 @@ def test_room_chord_renders_durable_rows(populated_panel_tui: RustainTUI):
                  "Room root chord must render the seeded durable nodes")
 
 
-def test_artifacts_chord_renders_durable_rows(populated_panel_tui: RustainTUI):
-    tui = populated_panel_tui
+def _assert_artifact_rows(tui: RustainTUI) -> None:
+    _assert_rows(tui, ("Mission Control · Artifacts", "evidence aaaaaa", "decision bbbbbb"),
+                 "Artifacts must render the seeded durable artifacts in Mission Control")
+    if harness.TERM_COLS >= 120:
+        # The detail preview of the selected row carries the lineage edge.
+        tui.send("j")
+        assert tui.wait_for_screen("depends on aaaaaa", timeout=10), tui.get_screen_text()
+
+
+
+def test_artifacts_chord_renders_durable_rows(populated_artifacts_tui: RustainTUI):
+    tui = populated_artifacts_tui
     tui.send(CTRL_X + "e")
-    _assert_rows(tui, ("evidence aaaaaa", "decision bbbbbb", "depends on aaaaaa"),
-                 "Artifacts root chord must render the seeded durable artifacts")
+    _assert_artifact_rows(tui)
 
 
 def test_room_slash_renders_durable_rows(populated_panel_tui: RustainTUI):
@@ -135,8 +156,7 @@ def test_room_slash_renders_durable_rows(populated_panel_tui: RustainTUI):
                  "Room root slash command must render the seeded durable nodes")
 
 
-def test_artifacts_slash_renders_durable_rows(populated_panel_tui: RustainTUI):
-    tui = populated_panel_tui
+def test_artifacts_slash_renders_durable_rows(populated_artifacts_tui: RustainTUI):
+    tui = populated_artifacts_tui
     _submit(tui, "/artifacts")
-    _assert_rows(tui, ("evidence aaaaaa", "decision bbbbbb", "depends on aaaaaa"),
-                 "Artifacts root slash command must render the seeded durable artifacts")
+    _assert_artifact_rows(tui)

@@ -310,9 +310,9 @@ pub(crate) fn identity_text(inspector: &ThreadInspectorState) -> String {
             "response actions · {node}\n{}",
             type_token(inspector.message_type),
         ),
-        // The sent thread and the log carry their identity in the first body line and the
-        // title; they pin no rows of their own.
-        ThreadTarget::Sent { .. } | ThreadTarget::Log { .. } => return String::new(),
+        // The sent thread carries its identity in the first body line and the title; it
+        // pins no rows of its own.
+        ThreadTarget::Sent { .. } => return String::new(),
     };
     if inspector.context_selected {
         heading.push_str(" · peer-tainted");
@@ -359,15 +359,6 @@ fn painted_peer(peer: &str) -> String {
 /// The frame's painted title on the thread of an item this host sent.
 pub(crate) fn sent_title(peer: &str) -> String {
     format!("Thread · sent · {}", painted_peer(peer))
-}
-
-/// The frame's painted title on the A2A log.
-pub(crate) fn log_title(filtered: bool) -> String {
-    if filtered {
-        "A2A log · filtered".to_owned()
-    } else {
-        "A2A log".to_owned()
-    }
 }
 
 /// Whether the thread's reply field holds text that quitting would lose.
@@ -610,7 +601,7 @@ pub(crate) fn retract_plan(
         ThreadTarget::Item(address) => {
             newest_retractable_reply(conversation?, address, inspector.node_id.as_deref())
         }
-        ThreadTarget::Node(_) | ThreadTarget::Log { .. } => None,
+        ThreadTarget::Node(_) => None,
     }
 }
 
@@ -660,7 +651,7 @@ pub(crate) fn offered(
         | ThreadCmd::LeaveViewport => true,
         ThreadCmd::Earlier => inspector.omitted_before > 0,
         ThreadCmd::Newer => inspector.omitted_after > 0,
-        ThreadCmd::Copy => !matches!(inspector.target, ThreadTarget::Log { .. }),
+        ThreadCmd::Copy => true,
         ThreadCmd::Toggle => inspector.can_toggle && inspector.access != ThreadAccess::LocalOnly,
         ThreadCmd::OpenDecision => open_decision_key(state, conversation).is_some(),
         ThreadCmd::Viewport => inspector.wide_fit.get().0 > 0,
@@ -808,15 +799,10 @@ pub(crate) fn on_key(
         CommandId::Body(BodyCmd::ToggleMode) => {
             if context == Context::ThreadInspector
                 && page_rail_live(state)
-                && !state
-                    .thread_inspector
-                    .as_ref()
-                    .is_some_and(|inspector| matches!(inspector.target, ThreadTarget::Log { .. }))
+                && let Some(inspector) = state.thread_inspector.as_mut()
             {
-                if let Some(inspector) = state.thread_inspector.as_mut() {
-                    inspector.mode = inspector.mode.toggled();
-                    inspector.invalidate();
-                }
+                inspector.mode = inspector.mode.toggled();
+                inspector.invalidate();
             }
             ThreadOutcome::Consumed
         }

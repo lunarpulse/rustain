@@ -8,6 +8,7 @@ use super::support::*;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::{self, Context, Host, Key, Resolved};
+use rustain::adapters::tui::mission_control::McTab;
 use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::domain::models::FocusState;
 
@@ -22,54 +23,45 @@ fn many(count: usize) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn left_and_right_are_inert_and_unpainted_with_one_tab_and_cycle_with_two() {
+async fn left_and_right_cycle_the_delivered_tabs_in_place_and_are_painted_with_a_choice() {
     let mut rig = opened(80, 24, &NODES).await;
     let cache = rig.f.cache();
-    assert!(
-        !rail_line(&rig).contains("Tab"),
-        "one tab: the tab keys are not painted: {:?}",
-        rail_line(&rig)
-    );
-    for key in [Key::Left, Key::Right] {
-        assert_eq!(rig.f.press(key), InputAction::Consumed);
-        assert_eq!(
-            top_title(&rig).as_deref(),
-            Some("Mission Control · Room"),
-            "{key:?}"
-        );
-    }
-    // A second tab: the keys are painted and act, wrapping at both ends.
-    rig.f
-        .h
-        .state
-        .mission_control
-        .register_probe(probe_rows(&["a", "b"]));
     rig.f.paint();
     assert!(
         rail_line(&rig).contains("[←/→] Tab"),
-        "{:?}",
+        "three tabs: the tab keys are painted: {:?}",
         rail_line(&rig)
     );
-    rig.f.press(Key::Right);
-    assert_eq!(top_title(&rig).as_deref(), Some("Mission Control · Probe"));
-    rig.f.press(Key::Right);
+    // Messages, Room, Artifacts in the fixed order, wrapping at both ends.
+    let step = |rig: &mut Rig, key: Key, tab: McTab| {
+        assert_eq!(rig.f.press(key), InputAction::OpenMissionControl(tab));
+    };
+    step(&mut rig, Key::Right, McTab::Artifacts);
     assert_eq!(
         top_title(&rig).as_deref(),
-        Some("Mission Control · Room"),
+        Some("Mission Control · Artifacts")
+    );
+    step(&mut rig, Key::Right, McTab::Messages);
+    assert_eq!(
+        top_title(&rig).as_deref(),
+        Some("Mission Control · Messages"),
         "wraps"
     );
-    rig.f.press(Key::Left);
+    step(&mut rig, Key::Left, McTab::Artifacts);
     assert_eq!(
         top_title(&rig).as_deref(),
-        Some("Mission Control · Probe"),
+        Some("Mission Control · Artifacts"),
         "wraps back"
     );
+    step(&mut rig, Key::Left, McTab::Room);
+    assert_eq!(top_title(&rig).as_deref(), Some("Mission Control · Room"));
     assert_eq!(
         rig.f.h.state.modal_stack.len(),
         1,
         "the tab changes in place"
     );
     assert_eq!(rig.f.cache(), cache, "the Stage is never touched");
+    rig.f.paint();
     assert!(lines(&rig)[usize::from(frame_rect(&rig).y) + 1].contains("Room"));
 }
 
@@ -161,7 +153,7 @@ async fn an_unbound_printable_key_changes_nothing_and_never_reaches_the_composer
         rig.f.h.state.input_buffer.clone(),
         rig.f.h.state.cursor_position,
     );
-    for key in ['z', 'q', 'x', 'i', 'a', '1', '?', '/', ' ', 'Z'] {
+    for key in ['z', 'q', 'x', 'i', 'a', '1', '?', ' ', 'Z'] {
         let resolved = keymap::resolve(Context::MissionControl, Host::Local, &[Key::Char(key)]);
         assert!(
             !matches!(resolved, Resolved::Hit(row) if row.context == Context::MissionControl),

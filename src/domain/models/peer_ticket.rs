@@ -75,7 +75,7 @@ const EDDSA_LABEL: &str = "EdDSA";
 
 /// Number of head and tail columns a short fingerprint renders.
 ///
-/// 12 is the shipped cap for key material in a row (`transparency_panel.rs`).
+/// 12 is the shipped cap for key material in a row (the former sidebar transparency panel).
 /// A 12-column head…tail form is a **recognition** aid; comparison uses
 /// `peer show`, which prints both keys whole.
 pub const PEER_FINGERPRINT_COLUMNS: usize = 12;

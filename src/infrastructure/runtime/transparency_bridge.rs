@@ -21,56 +21,6 @@ use crate::infrastructure::runtime::app_state::AppState;
 const NO_JOURNAL: &str =
     "this session has no orchestration journal (the subagent subsystem is not composed)";
 
-/// Refresh the panel's rows from the durable journal.
-///
-/// Awaited inline at the dispatch site rather than spawned: the read happens
-/// only when the operator opens or refreshes the panel, and a spawn would need
-/// a new `AppEvent` round trip that the event-loop line budget cannot pay for.
-/// `NodeJournal::load()` is O(whole file) with no tail read — if that ever
-/// becomes a stall, it is the journal that needs an index, not this call that
-/// needs a thread.
-///
-/// **Never live.** This is one consistent read under a shared `flock`; the
-/// panel renders "as of <time>" and counts rows it has not shown.
-pub(crate) async fn refresh_panel(app_state: &AppState, state: &mut TuiState) {
-    let Some(service) = app_state.transparency.as_ref() else {
-        state.transparency_panel.error = Some(NO_JOURNAL.to_owned());
-        state.transparency_panel.pending_visit = None;
-        return;
-    };
-    // Story 19.16h: resolved BEFORE the read (see `durable_reset_revision`).
-    let revision = durable_reset_revision(service).await;
-    match service.report().await {
-        Ok(report) => {
-            let now = chrono::Utc::now().timestamp_millis();
-            // Story 19.16g: bound to THIS report, not a later head.
-            state.transparency_panel.pending_visit =
-                Some(visit_candidate(&report.rows, revision, state));
-            state.transparency_panel.apply_report(report, now);
-        }
-        Err(error) => {
-            state.transparency_panel.error = Some(error.to_string());
-            state.transparency_panel.pending_visit = None;
-        }
-    }
-    state.sidebar_entry_count = state.transparency_panel.visible_rows().len();
-}
-
-/// Story 19.16g — the seen-through boundary a freshly read report would
-/// contribute once presented: its maximum row `seq`, bound to the reset
-/// revision loaded before the read (Story 19.16h), or to the observer's
-/// projection when that load was not trusted.
-fn visit_candidate(
-    rows: &[TransparencyRow],
-    revision: Option<u64>,
-    state: &TuiState,
-) -> crate::domain::models::LogVisitCandidate {
-    crate::domain::models::LogVisitCandidate {
-        seen_through: rows.iter().map(|row| row.seq).max().unwrap_or(0),
-        reset_revision: revision.unwrap_or(state.log_awareness.reset_revision),
-    }
-}
-
 /// Story 19.16h — the reset revision a log read about to start belongs to:
 /// the durable seen preference, loaded **before** the journal read. The
 /// observer's projection lags a fresh start and another client's confirmed
@@ -155,20 +105,6 @@ pub(crate) async fn export_report(
         .map_err(|error| error.to_string())
 }
 
-/// Open the Transparency Log panel: read the journal, park the cursor on the
-/// newest row, and size the sidebar.
-///
-/// Story 18.3 Task 0.5 pulled this out of the `InputAction::OpenPanel` arm.
-/// Same reason as the rest of this module: `EVENT_LOOP_HARD_BUDGET` is a
-/// ceiling, and Story 18.2 spent the last of its headroom (11_354 > 11_321).
-pub(crate) async fn open_panel(app_state: &AppState, state: &mut TuiState) {
-    refresh_panel(app_state, state).await;
-    state
-        .transparency_panel
-        .open_at_tail(&mut state.sidebar_selected);
-    state.sidebar_entry_count = state.transparency_panel.visible_len();
-}
-
 /// Export the snapshot the panel is currently showing, then report the outcome
 /// as an operator notice.
 ///
@@ -178,14 +114,15 @@ pub(crate) async fn open_panel(app_state: &AppState, state: &mut TuiState) {
 ///
 /// Story 18.3 Task 0.5 pulled this out of the `InputAction::ExportTransparency`
 /// arm, which was 31 inline lines of the event loop's line budget.
-pub(crate) async fn export_command(
-    app_state: &AppState,
-    state: &mut TuiState,
-    conversation_id: &str,
-) {
-    let export = match state.transparency_panel.report.as_ref() {
+pub async fn export_command(app_state: &AppState, state: &mut TuiState, conversation_id: &str) {
+    let export = match state
+        .mission_control
+        .messages
+        .as_ref()
+        .and_then(|page| page.report.as_ref())
+    {
         Some(report) => export_report(app_state, report).await,
-        None => Err("open the Transparency Log before exporting its snapshot".to_owned()),
+        None => Err("open the A2A log (Messages) before exporting its snapshot".to_owned()),
     };
     let (level, message) = match export {
         Ok(export) => (
@@ -229,6 +166,7 @@ pub(crate) async fn team_log_input_from(
         export: None,
         snapshot_max_seq: 0,
         reset_revision: None,
+        report: None,
     };
     let Some(service) = service else {
         return failed(NO_JOURNAL.to_owned(), None);
@@ -262,12 +200,29 @@ pub(crate) async fn team_log_input_from(
     } else {
         None
     };
+    let snapshot_max_seq = report.rows.iter().map(|row| row.seq).max().unwrap_or(0);
     TeamLogInput {
         rows: Ok(rows),
         divergence,
         export,
-        snapshot_max_seq: report.rows.iter().map(|row| row.seq).max().unwrap_or(0),
+        snapshot_max_seq,
         reset_revision,
+        report: Some(report),
+    }
+}
+
+/// `Ctrl+X l` in the standalone host: the same read `/team log` runs with default arguments,
+/// opened as Mission Control's Messages tab.
+pub async fn open_messages(app_state: &AppState, state: &mut TuiState, conversation_id: &str) {
+    let args = TeamLogArgs::default();
+    let input = team_log_input(app_state, &args).await;
+    for event in crate::adapters::tui::handlers::team_command::team_command(
+        state,
+        conversation_id,
+        &args,
+        input,
+    ) {
+        let _ = app_state.event_bus.emit_domain(event);
     }
 }
 
@@ -4213,12 +4168,12 @@ mod credential_tests {
 }
 
 /// Story 19.16g keystones: the standalone log visits. Each enters through the
-/// production effect shells the event loop dispatches to (`open_panel` for
-/// `InputAction::OpenPanel(TransparencyLog)`, `team_command` for `/team`),
-/// paints with the real widgets, and completes the frame with the same
-/// `TuiState` hand-off `event_loop::render` performs after a successful draw
-/// (`restore_unflushed_log_visits` before, `log_visits_presented` after). The
-/// observer is the production `log_awareness_observer`.
+/// production effect shells the event loop dispatches to (`open_messages` for the local
+/// `Ctrl+X l` chord, `team_command` for `/team`), paints Mission Control's Messages tab with
+/// the real widget, and completes the frame with the same `TuiState` hand-off
+/// `event_loop::render` performs after a successful draw (`restore_unflushed_log_visits`
+/// before, `log_visits_presented` after). The observer is the production
+/// `log_awareness_observer`.
 #[cfg(test)]
 mod log_awareness_tests {
     use std::sync::Arc;
@@ -4226,12 +4181,11 @@ mod log_awareness_tests {
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
     use super::*;
     use crate::adapters::tui::state::{LogAwareness, LogAwarenessView};
-    use crate::domain::models::{Conversation, LogVisitCandidate};
+    use crate::domain::models::LogVisitCandidate;
     use crate::infrastructure::transparency_awareness::test_support::append_rows;
     use crate::infrastructure::transparency_awareness::{
         LogAwarenessObserver, SeenBoundary, SeenLoad, SeenStore,
@@ -4261,7 +4215,6 @@ mod log_awareness_tests {
         app_state: AppState,
         state: TuiState,
         observer: LogAwarenessObserver,
-        conversation: Conversation,
         clock: Instant,
         _domain_rx: tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
     }
@@ -4280,34 +4233,10 @@ mod log_awareness_tests {
                 ),
             ));
             let observer = log_awareness_observer(&app_state);
-            let mut conversation = Conversation::default();
-            // Enough transcript that the chat can be scrolled off the bottom.
-            for index in 0..60 {
-                conversation
-                    .messages
-                    .push(crate::domain::models::ChatMessage {
-                        id: format!("m{index}"),
-                        role: crate::domain::models::MessageRole::System,
-                        content: format!("transcript line {index}"),
-                        content_blocks: vec![],
-                        tool_calls: vec![],
-                        created_at: 0,
-                        token_count: None,
-                        stop_reason: None,
-                        synthetic: true,
-                        images: vec![],
-                        origin: crate::domain::models::ChannelKind::Terminal,
-                        authorship: crate::domain::models::Authorship::HumanWritten,
-                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                        retracted_at_ms: None,
-                        history_source: Default::default(),
-                    });
-            }
             Self {
                 app_state,
                 state: TuiState::new(120, 40),
                 observer,
-                conversation,
                 clock: Instant::now(),
                 _domain_rx: domain_rx,
             }
@@ -4333,30 +4262,31 @@ mod log_awareness_tests {
             self.state.log_visits_presented();
         }
 
+        /// Paint Mission Control (Messages) the way `presentation::compose` does for a
+        /// `MissionControl` frame in the stack, into a frame of `height` rows.
         fn paint_log(&mut self, height: u16) {
+            use crate::adapters::tui::keymap::model::Host;
             use crate::adapters::tui::presentation::Surface;
             self.state.restore_unflushed_log_visits();
             let mut terminal = Terminal::new(TestBackend::new(100, height.max(1))).unwrap();
             let state = &self.state;
-            let conversation = &self.conversation;
             terminal
                 .draw(|frame| {
-                    if state
+                    if let Some(modal) = state
                         .modal_stack
-                        .top()
-                        .is_some_and(|top| top.surface == Surface::ThreadInspector)
+                        .iter()
+                        .find(|modal| modal.surface == Surface::MissionControl)
                     {
                         let area = Rect {
                             height,
                             ..frame.area()
                         };
-                        crate::adapters::tui::widgets::thread_inspector::render(
+                        crate::adapters::tui::widgets::mission_control::render(
                             frame,
                             area,
                             state,
-                            Some(conversation),
-                            "A2A log",
-                            false,
+                            modal.title(),
+                            Host::Local,
                         );
                     }
                 })
@@ -4367,26 +4297,6 @@ mod log_awareness_tests {
         /// event loop's `render` returns before the hand-off.
         fn failed_draw(&mut self) {
             self.state.restore_unflushed_log_visits();
-        }
-
-        fn draw_panel(&mut self, height: u16) {
-            self.paint_panel(height);
-            self.state.log_visits_presented();
-        }
-
-        /// The panel painted by a frame whose draw then failed.
-        fn paint_panel(&mut self, height: u16) {
-            self.state.restore_unflushed_log_visits();
-            let area = Rect::new(0, 0, 60, height);
-            let mut buffer = Buffer::empty(area);
-            crate::adapters::tui::widgets::transparency_panel::render(
-                area,
-                &mut buffer,
-                &mut self.state.transparency_panel,
-                self.state.sidebar_selected,
-                &self.state.focus,
-                &self.state.theme,
-            );
         }
     }
 
@@ -4524,13 +4434,13 @@ mod log_awareness_tests {
         // The standalone chord: open, then a painted body, then the frame.
         append_rows(workspace.path(), 2).await;
         assert_eq!(client.poll().await, LogAwareness::Unseen(2));
-        open_panel(&client.app_state, &mut client.state).await;
+        open_messages(&client.app_state, &mut client.state, "conv").await;
         assert_eq!(client.poll().await, LogAwareness::Unseen(2), "not at open");
-        client.draw_panel(2); // borders only: no body space
-        client.paint_panel(20); // painted, but the frame's draw failed
+        client.draw_chat(2, 0); // borders only: no body space
+        client.paint_log(20); // painted, but the frame's draw failed
         client.failed_draw();
         assert_eq!(client.poll().await, LogAwareness::Unseen(2));
-        client.draw_panel(20);
+        client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
     }
 
@@ -4625,28 +4535,21 @@ mod log_awareness_tests {
 
         // An inactive tab parks its frame and visit until it is presented again.
         client.slash("log").await;
-        let parked_frame = client.state.thread_inspector.take();
+        let parked_frame = client.state.mission_control.messages.take();
         let parked_visit = client.state.pending_log_visit.take();
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Unseen(2));
-        client.state.thread_inspector = parked_frame;
+        client.state.mission_control.messages = parked_frame;
         client.state.pending_log_visit = parked_visit;
         client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
 
-        // A search applied before the panel's first paint makes it a
-        // filtered view: its candidate is discarded, even once cleared.
+        // The Ctrl+X l chord reads the journal afresh; presenting its painted body is a
+        // visit.
         append_rows(workspace.path(), 1).await;
         assert_eq!(client.poll().await, LogAwareness::Unseen(1));
-        open_panel(&client.app_state, &mut client.state).await;
-        client.state.transparency_panel.search = Some("zzz".to_owned());
-        client.draw_panel(20);
-        client.state.transparency_panel.search = None;
-        client.draw_panel(20);
-        assert_eq!(client.poll().await, LogAwareness::Unseen(1));
-        // Removing the filter and explicitly reopening is a visit.
-        open_panel(&client.app_state, &mut client.state).await;
-        client.draw_panel(20);
+        open_messages(&client.app_state, &mut client.state, "conv").await;
+        client.draw_chat(20, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
     }
 
@@ -4658,8 +4561,8 @@ mod log_awareness_tests {
         let mut client = Client::launch(workspace.path());
         assert_eq!(client.poll().await, LogAwareness::Unseen(25));
 
-        // Panel export alone never clears (nothing was presented).
-        open_panel(&client.app_state, &mut client.state).await;
+        // Messages export alone never clears (nothing was presented).
+        open_messages(&client.app_state, &mut client.state, "conv").await;
         export_command(&client.app_state, &mut client.state, "conv").await;
         assert_eq!(client.poll().await, LogAwareness::Unseen(25));
         assert!(
@@ -4667,13 +4570,12 @@ mod log_awareness_tests {
                 .unwrap()
                 .exists()
         );
-        client.state.transparency_panel.pending_visit = None;
 
         // The log frame contains all 25 rows, with no in-chat truncation.
         client.slash("log").await;
-        let inspector = client.state.thread_inspector.as_ref().unwrap();
-        assert!(inspector.turns.len() >= 25);
-        assert!(!inspector.content.contains("most recent of 25 rows"));
+        let page = client.state.mission_control.messages.as_ref().unwrap();
+        assert!(page.turns.len() >= 25);
+        assert!(!page.content.contains("most recent of 25 rows"));
         assert!(!client.state.feedback_blocks.contains_key("team-log"));
         client.draw_chat(40, 0);
         assert_eq!(client.poll().await, LogAwareness::Hidden);
@@ -4725,11 +4627,11 @@ mod log_awareness_tests {
         assert_eq!(client.state.log_awareness.reset_revision, 0, "stale");
         assert_eq!(client.poll().await, LogAwareness::Hidden);
         assert_eq!(stored(ws), valid(2, 1));
-        // (b) the panel.
+        // (b) the Ctrl+X l chord.
         append_rows(ws, 1).await;
         let mut client = Client::launch(ws);
-        open_panel(&client.app_state, &mut client.state).await;
-        client.draw_panel(20);
+        open_messages(&client.app_state, &mut client.state, "conv").await;
+        client.draw_chat(20, 0);
         assert_eq!(client.observer.jobs_started(), 0, "not yet observed");
         assert_eq!(client.poll().await, LogAwareness::Hidden);
         assert_eq!(stored(ws), valid(3, 1));
@@ -4765,11 +4667,11 @@ mod log_awareness_tests {
         // Only genuinely newer rows count afterwards.
         append_rows(ws, 1).await;
         assert_eq!(a.poll().await, LogAwareness::Unseen(1));
-        // The same window on the panel.
+        // The same window on the Ctrl+X l chord.
         assert_eq!(reset_by_another_client(ws, 1).await, 3);
         assert_eq!(a.state.log_awareness.reset_revision, 2, "A lags B");
-        open_panel(&a.app_state, &mut a.state).await;
-        a.draw_panel(20);
+        open_messages(&a.app_state, &mut a.state, "conv").await;
+        a.draw_chat(20, 0);
         assert_eq!(a.poll().await, LogAwareness::Hidden);
         assert_eq!(stored(ws), valid(1, 3));
     }
@@ -4792,13 +4694,15 @@ mod log_awareness_tests {
 
         // (1) A log frame and its visit parked with its tab.
         a.slash("log").await;
-        let parked_frame = a.state.thread_inspector.take();
+        let parked_frame = a.state.mission_control.messages.take();
         let parked_visit = a.state.pending_log_visit.take();
         assert_eq!(parked_visit, Some(old));
-        // (2) A panel visit parked because the panel had no body space.
-        open_panel(&a.app_state, &mut a.state).await;
-        a.draw_panel(2);
-        assert_eq!(a.state.transparency_panel.pending_visit, Some(old));
+        // (2) A Messages visit parked because the frame had no body space.
+        open_messages(&a.app_state, &mut a.state, "conv").await;
+        a.draw_chat(2, 0);
+        assert_eq!(a.state.pending_log_visit, Some(old));
+        let parked_unpainted = a.state.mission_control.messages.take();
+        let parked_unpainted_visit = a.state.pending_log_visit.take();
         // (3) An observer visit retained across a failed save: the durable
         // head cannot be read under the preference lock.
         a.slash("log").await;
@@ -4826,13 +4730,15 @@ mod log_awareness_tests {
         assert_eq!(a.poll().await, LogAwareness::Unseen(2));
         assert_eq!(stored(ws), valid(0, 1));
         // (1) The tab comes back and presents its frame.
-        a.state.thread_inspector = parked_frame;
+        a.state.mission_control.messages = parked_frame;
         a.state.pending_log_visit = parked_visit;
         a.draw_chat(20, 0);
         assert_eq!(a.poll().await, LogAwareness::Unseen(2));
         assert_eq!(stored(ws), valid(0, 1));
-        // (2) The panel finally gets body space.
-        a.draw_panel(20);
+        // (2) The Messages frame finally gets body space.
+        a.state.mission_control.messages = parked_unpainted;
+        a.state.pending_log_visit = parked_unpainted_visit;
+        a.draw_chat(20, 0);
         assert_eq!(a.poll().await, LogAwareness::Unseen(2));
         assert_eq!(stored(ws), valid(0, 1));
 
@@ -4867,7 +4773,7 @@ mod log_awareness_tests {
         });
 
         let mut revision = 0;
-        for surface in ["team log", "panel"] {
+        for surface in ["team log", "messages chord"] {
             append_rows(ws, 3).await;
             visit_elsewhere(ws).await;
             let SeenLoad::Valid(before) = stored(ws) else {
@@ -4884,9 +4790,9 @@ mod log_awareness_tests {
                 ),
             ));
             assert_eq!(client.poll().await, LogAwareness::Hidden, "{surface}");
-            if surface == "panel" {
-                open_panel(&client.app_state, &mut client.state).await;
-                client.draw_panel(20);
+            if surface == "messages chord" {
+                open_messages(&client.app_state, &mut client.state, "conv").await;
+                client.draw_chat(20, 0);
             } else {
                 client.slash("log").await;
                 client.draw_chat(20, 0);

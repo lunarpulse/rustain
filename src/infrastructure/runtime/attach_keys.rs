@@ -447,6 +447,7 @@ fn invalid_decision_key(state: &TuiState, key: KeyEvent) -> bool {
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     if invalid_decision_key(ctx.state, key)
         || crate::adapters::tui::thread_inspector::ignores_raw_key(ctx.state, &key)
+        || crate::adapters::tui::mission_control::keys::ignores_raw_key(ctx.state, &key)
     {
         return KeyFlow::Continue;
     }
@@ -863,8 +864,7 @@ async fn thread_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
                 let node = match &inspector.target {
                     crate::adapters::tui::state::ThreadTarget::Item(_) => inspector.node_id.clone(),
                     crate::adapters::tui::state::ThreadTarget::Node(node) => Some(node.clone()),
-                    crate::adapters::tui::state::ThreadTarget::Sent { .. }
-                    | crate::adapters::tui::state::ThreadTarget::Log { .. } => None,
+                    crate::adapters::tui::state::ThreadTarget::Sent { .. } => None,
                 }?;
                 Some((
                     node,
@@ -2093,6 +2093,40 @@ pub(crate) mod tests {
         );
     }
 
+    // 7B-09: with a Messages frame on top, the attached host's one A20 remedy still answers the
+    // chords it does not carry; closing the window could never make them available.
+    #[tokio::test]
+    async fn story21_7_attached_chords_with_messages_on_top_give_the_one_a20_remedy() {
+        use crate::adapters::tui::handlers::team_command::log_blocks;
+        use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
+        for read_only in [false, true] {
+            for key in ['s', 't', 'r', 'e', 'a', 'h', 'w'] {
+                let mut rig = Rig::new(read_only);
+                crate::adapters::tui::mission_control::open_messages(
+                    &mut rig.state,
+                    false,
+                    &log_blocks(&[], false),
+                    None,
+                );
+                assert!(!rig.state.modal_stack.is_empty(), "Messages is on top");
+                let frames = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+                rig.ctrl('x').await;
+                rig.ch(key).await;
+                let message = rig
+                    .notice(NoticeSource::Chord)
+                    .unwrap_or_else(|| panic!("{read_only} {key}: no chord notice"));
+                assert!(message.contains("shows Messages only"), "{key}: {message}");
+                assert_ne!(message, CLOSE_WINDOW_FIRST, "{key}");
+                assert!(rig.frames().is_empty(), "{key}: nothing sent");
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    frames,
+                    "{key}: the frame is untouched"
+                );
+            }
+        }
+    }
+
     // ── AC6 / AC13: the leader and every A5 follow-up ────────────────────────
 
     #[tokio::test]
@@ -2105,14 +2139,14 @@ pub(crate) mod tests {
             ('p', NoticeSource::Chord, "rustain profile"),
             ('m', NoticeSource::Login, "rustain auth login"),
             ('i', NoticeSource::Login, "rustain auth login"),
-            ('a', NoticeSource::Chord, "/team status"),
-            ('s', NoticeSource::Chord, "/team status"),
-            ('r', NoticeSource::Chord, "/team status"),
-            ('e', NoticeSource::Chord, "/team status"),
-            ('t', NoticeSource::Chord, "/team status"),
+            ('a', NoticeSource::Chord, "shows Messages only"),
+            ('s', NoticeSource::Chord, "shows Messages only"),
+            ('r', NoticeSource::Chord, "shows Messages only"),
+            ('e', NoticeSource::Chord, "shows Messages only"),
+            ('t', NoticeSource::Chord, "shows Messages only"),
             ('u', NoticeSource::Chord, "/team status"),
-            ('w', NoticeSource::Chord, "single layout"),
-            ('h', NoticeSource::Chord, "/team status"),
+            ('w', NoticeSource::Chord, "shows Messages only"),
+            ('h', NoticeSource::Chord, "shows Messages only"),
         ];
         for (key, source, remedy) in unavailable {
             let mut rig = Rig::new(false);
@@ -2169,18 +2203,22 @@ pub(crate) mod tests {
         typed.enter().await;
         let log_view = |rig: &Rig| {
             let frame = rig.state.modal_stack.top().expect("log frame");
-            assert_eq!(frame.surface, Surface::ThreadInspector);
-            assert_eq!(frame.title(), "A2A log");
-            let inspector = rig.state.thread_inspector.as_ref().unwrap();
-            assert!(matches!(
-                inspector.target,
-                crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
-            ));
-            inspector.content.clone()
+            assert_eq!(frame.surface, Surface::MissionControl);
+            assert_eq!(
+                rig.state.mission_control.tab,
+                crate::adapters::tui::mission_control::McTab::Messages
+            );
+            assert_eq!(
+                rig.state.mission_control.title(),
+                "Mission Control · Messages"
+            );
+            let page = rig.state.mission_control.messages.as_ref().unwrap();
+            assert!(!page.filtered);
+            page.content.clone()
         };
         assert_eq!(log_view(&leader), log_view(&typed));
-        assert!(screen(&mut leader).contains("A2A log"));
-        assert!(screen(&mut typed).contains("A2A log"));
+        assert!(screen(&mut leader).contains("Mission Control · Messages"));
+        assert!(screen(&mut typed).contains("Mission Control · Messages"));
         assert!(leader.feedback("team-log").is_none());
         assert!(typed.feedback("team-log").is_none());
         assert!(leader.frames().is_empty(), "the log is a local read");
@@ -5373,19 +5411,20 @@ pub(crate) mod tests {
                 LeaderCmd::A2aLog => {
                     assert_eq!(
                         rig.state.modal_stack.top().map(|frame| frame.surface),
-                        Some(Surface::ThreadInspector),
+                        Some(Surface::MissionControl),
                         "{label}"
                     );
                     assert_eq!(
-                        rig.state.modal_stack.top().unwrap().title(),
-                        "A2A log",
+                        rig.state.mission_control.title(),
+                        "Mission Control · Messages",
                         "{label}"
                     );
                     assert!(
-                        matches!(
-                            rig.state.thread_inspector.as_ref().unwrap().target,
-                            crate::adapters::tui::state::ThreadTarget::Log { filtered: false }
-                        ),
+                        rig.state
+                            .mission_control
+                            .messages
+                            .as_ref()
+                            .is_some_and(|page| !page.filtered),
                         "{label}"
                     );
                     assert!(rig.frames().is_empty(), "{label}: a local read");
@@ -6745,6 +6784,11 @@ pub(crate) mod tests {
                             rig.ctrl('q').await;
                         }
                     }
+                    Surface::MissionControl => {
+                        rig.ctrl('x').await;
+                        rig.ch('l').await;
+                        assert!(presentation::is_open(&rig.state, Surface::MissionControl));
+                    }
                     Surface::Decision
                     | Surface::DecisionQueue
                     | Surface::ModelSelector
@@ -6756,7 +6800,7 @@ pub(crate) mod tests {
                     | Surface::CrossSearch
                     | Surface::ToolInspector(_)
                     | Surface::BlockViewer(_)
-                    | Surface::MissionControl
+                    | Surface::ArtifactWindow
                     | Surface::Login => unreachable!("surface not offered attached"),
                     Surface::ThreadInspector => unreachable!(
                         "the thread frame owns its keys by value: story21_8_attached_thread_frame_keys_act_by_value"
@@ -6796,6 +6840,100 @@ pub(crate) mod tests {
             base.state.input_buffer, "y",
             "positive control: base keys still reach Input"
         );
+    }
+
+    /// A20: the attached hub is Messages only. Its keys act by value: Esc closes (dropping the
+    /// page), `Left`/`Right` are inert (one tab), `/` opens the filter field, `e` (export, a
+    /// local row) is inert and sends nothing, and the Ctrl+X leader reaches its frame and
+    /// returns to the same page.
+    #[tokio::test]
+    async fn story21_7_attached_mission_control_messages_keys_act_by_value() {
+        use crate::adapters::tui::mission_control::McTab;
+        let top = |rig: &Rig| rig.state.modal_stack.top().map(|frame| frame.surface);
+        let open = || async {
+            let mut rig = Rig::at(FocusState::Input, "draft");
+            rig.ctrl('x').await;
+            rig.ch('l').await;
+            assert_eq!(top(&rig), Some(Surface::MissionControl));
+            assert!(screen(&mut rig).contains("Mission Control · Messages"));
+            rig
+        };
+
+        // Left/Right: one tab, so nothing moves.
+        let mut rig = open().await;
+        for key in [Key::Left, Key::Right] {
+            assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
+            assert_eq!(top(&rig), Some(Surface::MissionControl), "{key:?}");
+            assert_eq!(rig.state.mission_control.tab, McTab::Messages, "{key:?}");
+            assert!(rig.state.mission_control.messages.is_some(), "{key:?}");
+            assert!(rig.frames().is_empty(), "{key:?}");
+            assert_eq!(rig.state.input_buffer, "draft", "{key:?}");
+        }
+
+        // `e`: the export is local-only, inert attached.
+        let content = rig
+            .state
+            .mission_control
+            .messages
+            .as_ref()
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(rig.ch('e').await, KeyFlow::Continue);
+        assert_eq!(top(&rig), Some(Surface::MissionControl));
+        assert_eq!(rig.state.mission_control.tab, McTab::Messages);
+        assert_eq!(
+            rig.state.mission_control.messages.as_ref().unwrap().content,
+            content
+        );
+        assert!(rig.frames().is_empty(), "`e` sends nothing attached");
+        assert_eq!(rig.state.input_buffer, "draft");
+
+        // `/` opens the filter field; typing edits it, Esc clears and closes the field only.
+        screen(&mut rig);
+        assert_eq!(rig.ch('/').await, KeyFlow::Continue);
+        assert!(
+            rig.state
+                .mission_control
+                .messages
+                .as_ref()
+                .unwrap()
+                .search
+                .editing
+        );
+        rig.type_text("zq").await;
+        assert_eq!(
+            rig.state
+                .mission_control
+                .messages
+                .as_ref()
+                .unwrap()
+                .search
+                .query
+                .as_str(),
+            "zq"
+        );
+        assert_eq!(rig.state.input_buffer, "draft", "the field takes the text");
+        rig.esc().await;
+        let page = rig.state.mission_control.messages.as_ref().unwrap();
+        assert!(!page.search.editing && page.search.query.as_str().is_empty());
+        assert_eq!(top(&rig), Some(Surface::MissionControl));
+
+        // The Ctrl+X leader reaches its frame; Esc returns to the same page.
+        rig.ctrl('x').await;
+        rig.ch('?').await;
+        assert_eq!(top(&rig), Some(Surface::Help));
+        rig.esc().await;
+        assert_eq!(top(&rig), Some(Surface::MissionControl));
+        assert_eq!(rig.state.mission_control.tab, McTab::Messages);
+        assert!(rig.frames().is_empty());
+
+        // Esc closes the hub and drops the page; the composer draft is untouched.
+        assert_eq!(rig.esc().await, KeyFlow::Continue);
+        assert!(rig.state.modal_stack.is_empty());
+        assert!(rig.state.mission_control.messages.is_none());
+        assert_eq!(rig.state.input_buffer, "draft");
+        assert!(rig.frames().is_empty());
     }
 
     #[tokio::test]
@@ -8464,8 +8602,11 @@ pub(crate) mod tests {
                         let frames = rig.frames();
                         if command == "/team log" {
                             assert!(frames.is_empty(), "local log never sends");
-                            assert_eq!(rig.state.modal_stack.top().unwrap().title(), "A2A log");
-                            assert!(screen(&mut rig).contains("A2A log"));
+                            assert_eq!(
+                                rig.state.modal_stack.top().unwrap().surface,
+                                Surface::MissionControl
+                            );
+                            assert!(screen(&mut rig).contains("Mission Control · Messages"));
                             rig.esc().await;
                         } else if command == "r5 model" {
                             assert_eq!(

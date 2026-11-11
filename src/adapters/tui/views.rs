@@ -25,7 +25,6 @@ pub enum ViewKind {
     TransparencyJournal,
     RecipientContext,
     Room,
-    Artifact,
     Peer,
 }
 
@@ -43,7 +42,6 @@ impl ViewKind {
             Self::TransparencyJournal => "transparency-journal",
             Self::RecipientContext => "recipient-context",
             Self::Room => "room",
-            Self::Artifact => "artifact",
             Self::Peer => "peer",
         }
     }
@@ -155,7 +153,7 @@ mod tests {
         );
         show_view(
             &mut stash,
-            ViewKind::Artifact,
+            ViewKind::TeamBoard,
             "r1",
             FeedbackLevel::Info,
             "second",

@@ -7,7 +7,8 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use rustain::adapters::tui::keymap::table::{
-    ATTACHED_PROFILE, ATTACHED_SIGN_IN, PANEL_NARROW, attached_panel_remedy,
+    ATTACHED_PROFILE, ATTACHED_SIGN_IN, PANEL_NARROW, attached_mission_remedy,
+    attached_panel_remedy,
 };
 use rustain::adapters::tui::keymap::{AvailCtx, Key};
 use rustain::adapters::tui::notifications::NoticeSeverity;
@@ -59,11 +60,17 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         narrow.contains("[R] Room") && !narrow.contains("[R] Room (n/a)"),
         "80 cols: the Room chord is available:\n{narrow}"
     );
+    // The A2A log (Messages) and Artifacts chords (21-7, 7-B) open Mission Control tabs too:
+    // available at 80 columns, never `(n/a)` there.
+    for painted in ["[L] A2A log", "[E] Artifacts"] {
+        assert!(
+            narrow.contains(painted) && !narrow.contains(&format!("{painted} (n/a)")),
+            "80 cols: `{painted}` is available:\n{narrow}"
+        );
+    }
     for painted in [
         "[A] Adapters (n/a)",
         "[S] Agents (n/a)",
-        "[L] A2A log (n/a)",
-        "[E] Artifacts (n/a)",
         "[T] Tasks (n/a)",
         "[H] History (n/a)",
     ] {
@@ -92,7 +99,7 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         "{wide}"
     );
     // Attached: the local-only chords are (n/a); detach, log, help and the log keep working.
-    let attached = paint(130, 12, &AvailCtx::attached(130, false));
+    let attached = paint(200, 12, &AvailCtx::attached(130, false));
     for painted in [
         "[P] Profile (n/a)",
         "[M] Model (n/a)",
@@ -100,6 +107,11 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         "[A] Adapters (n/a)",
         "[W] Monitor (n/a)",
         "[U] Usage (n/a)",
+        "[S] Agents (n/a)",
+        "[T] Tasks (n/a)",
+        "[H] History (n/a)",
+        "[R] Room (n/a)",
+        "[E] Artifacts (n/a)",
     ] {
         assert!(
             attached.contains(painted),
@@ -142,6 +154,10 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
     );
     assert!(attached_panel_remedy().contains("/team status"));
     assert!(attached_panel_remedy().contains("Detach (Ctrl+X, D)"));
+    // The attached refusal of every Mission Control chord and local panel (A20) is one registry
+    // text: Messages only, with the detach chord named.
+    assert!(attached_mission_remedy().contains("Messages only"));
+    assert!(attached_mission_remedy().contains("Detach (Ctrl+X, D)"));
 }
 
 #[test]
@@ -318,12 +334,6 @@ fn every_command_a_generated_hint_names_has_a_row() {
         BookmarkCmd::Jump.into(),
         BookmarkCmd::Undo.into(),
         BookmarkCmd::Close.into(),
-        P::LogNext.into(),
-        P::LogPrev.into(),
-        P::LogDrill.into(),
-        P::LogSearch.into(),
-        P::LogExport.into(),
-        P::LogTail.into(),
         P::WaveNext.into(),
         P::WavePrev.into(),
         P::WaveRerun.into(),

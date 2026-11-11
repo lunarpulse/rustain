@@ -40,8 +40,6 @@ fn every_leader_follow_up_runs_its_command_by_value() {
     let panels = [
         ('a', PanelType::Adapters),
         ('s', PanelType::Agents),
-        ('l', PanelType::TransparencyLog),
-        ('e', PanelType::Artifacts),
         ('t', PanelType::Tasks),
         ('h', PanelType::History),
     ];
@@ -81,6 +79,49 @@ fn every_leader_follow_up_runs_its_command_by_value() {
         assert!(
             notices(&state).is_empty(),
             "r at {width}x{height}: no notice on a run"
+        );
+    }
+    // `l` (21-7, 7-B) opens the Mission Control Messages tab (the A2A log) and `e` the Artifacts
+    // tab, at any width: neither is a sidebar panel any more. `l` only asks (the effect reads
+    // the journal); `e` opens the frame at once.
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        assert_eq!(
+            leader(&mut state, Key::Char('l')),
+            InputAction::OpenMessages,
+            "l at {width}x{height}"
+        );
+        assert!(state.pending_leader.is_none());
+        assert_eq!(state.focus, FocusState::Input, "l: origin restored");
+        assert!(
+            state.modal_stack.is_empty(),
+            "l: the effect opens the frame"
+        );
+        assert!(
+            notices(&state).is_empty(),
+            "l at {width}x{height}: no notice on a run"
+        );
+        let mut state = TuiState::new(width, height);
+        assert_eq!(
+            leader(&mut state, Key::Char('e')),
+            InputAction::OpenMissionControl(
+                rustain::adapters::tui::mission_control::McTab::Artifacts
+            ),
+            "e at {width}x{height}"
+        );
+        assert_eq!(
+            state.modal_stack.top().map(|frame| frame.title()),
+            Some("Mission Control · Artifacts")
+        );
+        assert!(state.pending_leader.is_none());
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "e: the frame writes no base focus"
+        );
+        assert!(
+            notices(&state).is_empty(),
+            "e at {width}x{height}: no notice on a run"
         );
     }
     let mut state = wide();
@@ -150,7 +191,7 @@ fn every_leader_follow_up_runs_its_command_by_value() {
     let mut state = wide();
     assert_eq!(
         leader(&mut state, Key::Char('E')),
-        InputAction::OpenPanel(PanelType::Artifacts)
+        InputAction::OpenMissionControl(rustain::adapters::tui::mission_control::McTab::Artifacts)
     );
 }
 
@@ -254,8 +295,9 @@ fn escape_and_ctrl_c_cancel_the_leader_silently() {
 #[test]
 fn width_unavailable_panel_answers_with_its_remedy() {
     // 80 columns: the sidebar column cannot fit, so the panel chord is `(n/a)`
-    // and the key answers with the remedy instead of moving focus invisibly.
-    for key in ['a', 's', 'l', 'e', 't', 'h'] {
+    // and the key answers with the remedy instead of moving focus invisibly. (`l` and `e` are
+    // not here: they open Mission Control tabs and need no sidebar column.)
+    for key in ['a', 's', 't', 'h'] {
         let mut state = TuiState::new(80, 24);
         let action = leader(&mut state, Key::Char(key));
         assert!(is_inert(&action), "{key}: {action:?}");

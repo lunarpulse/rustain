@@ -64,6 +64,12 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
         }
         Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
         Surface::ThreadInspector => super::thread_inspector::frame_context(state),
+        Surface::MissionControl if super::mission_control::search_editing(state) => {
+            super::keymap::Context::InspectorSearch
+        }
+        Surface::ArtifactWindow if super::artifact_window::search_editing(state) => {
+            super::keymap::Context::InspectorSearch
+        }
         Surface::Decision => super::decision_queue::frame_context(state),
         _ => surface.context(),
     }
@@ -90,6 +96,16 @@ pub(crate) fn inspector_search_mut(
             .thread_inspector
             .as_mut()
             .map(|thread| &mut thread.search),
+        Surface::MissionControl => state
+            .mission_control
+            .messages
+            .as_mut()
+            .filter(|_| state.mission_control.tab == super::mission_control::McTab::Messages)
+            .map(|page| &mut page.search),
+        Surface::ArtifactWindow => state
+            .artifact_window
+            .as_mut()
+            .map(|window| &mut window.search),
         _ => None,
     }
 }
@@ -129,7 +145,9 @@ pub fn consistent(state: &TuiState) -> bool {
                                     == Some(block.target.conversation_id.as_str())
                             })
                     }
-                    Surface::ThreadInspector | Surface::MissionControl => frame.tool_title.is_some(),
+                    Surface::ThreadInspector | Surface::MissionControl | Surface::ArtifactWindow => {
+                        frame.tool_title.is_some()
+                    }
                     _ => frame.tool_title.is_none(),
                 }
         })
@@ -149,6 +167,7 @@ pub fn consistent(state: &TuiState) -> bool {
         && is_open(state, Surface::NotificationLog) == state.notification_log.is_some()
         && is_open(state, Surface::QuitConfirm) == state.quit_confirm.is_some()
         && is_open(state, Surface::ThreadInspector) == state.thread_inspector.is_some()
+        && is_open(state, Surface::ArtifactWindow) == state.artifact_window.is_some()
         // In-place stepping may coincide targets; each frame still owns one payload.
         && state.tool_inspectors.keys().all(|id| {
             stack

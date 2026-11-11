@@ -32,11 +32,6 @@ pub const USAGE: &str = "/artifacts | /artifact show <id> | /artifact apply <id>
                          /artifact review <id> approve|request-changes|reject | \
                          /artifact resolve <id> present|absent";
 
-/// Stable id for the in-chat `/artifact` result block. A drill-down is a
-/// **view**, not an event stream: re-running it replaces the block rather than
-/// stacking another copy under the old one.
-pub const ARTIFACT_BLOCK_ID: &str = "artifact-view";
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum ArtifactCommandArgs {
     /// Bare `/artifacts` — open the read-only list panel.
@@ -255,12 +250,11 @@ pub fn resolve_artifact<'room>(
 /// wholesale.** Apply outcome wording comes only from the room projection; an
 /// approved review is eligibility, never evidence of a workspace write.
 #[must_use]
-pub fn render_show(
+pub fn render_facts(
     artifact: &ArtifactRef,
     room: &OrchestrationRoom,
     permission_mode: PermissionMode,
     policy: &MergeBackPolicy,
-    body: Result<&[u8], String>,
 ) -> String {
     let mut out = format!(
         "{} {}\n  id        {}\n  producer  {}\n  host      {}\n  state     {}\n",
@@ -326,12 +320,23 @@ pub fn render_show(
             "  mode      permission mode = {permission_mode:?}\n"
         ));
     }
+    out
+}
+
+/// [`render_facts`] plus the body line: the byte count read from the store, or why it could
+/// not be read.
+#[must_use]
+pub fn render_show(
+    artifact: &ArtifactRef,
+    room: &OrchestrationRoom,
+    permission_mode: PermissionMode,
+    policy: &MergeBackPolicy,
+    body: Result<&[u8], String>,
+) -> String {
+    let mut out = render_facts(artifact, room, permission_mode, policy);
     match body {
         Ok(bytes) => {
-            out.push_str(&format!(
-                "  body      {} bytes (handle above)\n",
-                bytes.len()
-            ));
+            out.push_str(&format!("  body      {} bytes\n", bytes.len()));
         }
         Err(error) => {
             out.push_str(&format!("  body      unavailable: {error}\n"));
@@ -378,18 +383,6 @@ pub fn render_verdict_recorded(artifact: &ArtifactId, verdict: ReviewVerdict) ->
          Nothing was applied yet — run `/artifact apply <id>` to preview and confirm the write.",
         id_prefix(artifact)
     )
-}
-
-/// Put one `/artifact` result in the transcript as a replaceable block.
-pub(crate) fn show_artifact_message(state: &mut TuiState, message: String) {
-    crate::adapters::tui::views::show_view(
-        &mut state.feedback_blocks,
-        crate::adapters::tui::views::ViewKind::Artifact,
-        ARTIFACT_BLOCK_ID,
-        crate::domain::models::FeedbackLevel::Info,
-        message,
-    );
-    state.needs_redraw = true;
 }
 
 #[must_use]

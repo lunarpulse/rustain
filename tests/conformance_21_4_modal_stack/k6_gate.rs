@@ -325,6 +325,15 @@ const RULES: &[(&str, &str)] = &[
         "mission-21-7-a",
         r"\bactivate_room_sidebar\b|\bPanelType\s*::\s*Room\b",
     ),
+    // Story 21.7 slice 7-B (A25, clause b): the sidebar A2A-log and Artifacts panels, their
+    // contexts, the transcript artifact view and the S-THREAD log target are gone; the log is the
+    // Messages tab and the artifacts are the Artifacts tab and the artifact window. Field/type/fn
+    // accesses, never module paths: `McTab::Messages`, `McTab::Artifacts`, `transparency_bridge::`,
+    // `artifact_bridge::` and the `ArtifactWindow` surface stay legal.
+    (
+        "mission-21-7-b",
+        r"\btransparency_panel\b|\bPanelType\s*::\s*(?:TransparencyLog|Artifacts)\b|\bThreadTarget\s*::\s*Log\b|\bContext\s*::\s*Sidebar(?:A2aLog|Room|Artifacts)\b|\bactivate_artifacts_sidebar\b|\bViewKind\s*::\s*Artifact\b|\bopen_log\b|\blog_title\b|\blog_painted\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -592,6 +601,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "thread-21-8-b",
                     "thread-21-8-c",
                     "mission-21-7-a",
+                    "mission-21-7-b",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2599,8 +2609,8 @@ fn k12_story21_7_a_the_room_sidebar_is_unpinnable_and_the_hub_tab_stays_legal() 
     // Positive controls the clause must not touch: the hub's own Room tab, the bridge and widget
     // module paths, the other sidebar panels and the 21-17 class-V lifetime ids.
     let legal = "fn real() { let _ = McTab::Room; room_bridge::open_room_view(s); \
-        room_panel::render_body(a, b, c, d, e); let _ = PanelType::Artifacts; \
-        let _ = PanelType::TransparencyLog; views::retire_on_submit(s); \
+        room_panel::render_body(a, b, c, d, e); let _ = PanelType::Adapters; \
+        let _ = McTab::Messages; views::retire_on_submit(s); \
         let _ = ROOM_BLOCK_ID; let _ = PEER_BLOCK_ID; let _ = PEER_ALARM_BLOCK_ID; \
         }";
     let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
@@ -2628,4 +2638,77 @@ fn k12_story21_7_a_the_room_sidebar_is_unpinnable_and_the_hub_tab_stays_legal() 
             "the earlier rule sets stay untouched: {rule}"
         );
     }
+}
+
+// Story 21.7 slice 7-B (A25, clause b): the deleted sidebar A2A-log/Artifacts surfaces, the
+// transcript artifact view and the S-THREAD log helpers are RED on a synthetic source through
+// the same scanner function, cannot be pinned (a hard rule), and leave the legal neighbours alone.
+#[test]
+fn k12_story21_7_b_the_log_and_artifact_sidebars_are_unpinnable_and_the_hub_tabs_stay_legal() {
+    for text in [
+        "let p = s.transparency_panel;",
+        "let p = PanelType::TransparencyLog;",
+        "let p = visual::PanelType :: TransparencyLog;",
+        "let c = Context::SidebarA2aLog;",
+        "let c = keymap::Context :: SidebarRoom;",
+        "let c = Context::SidebarArtifacts;",
+        "activate_artifacts_sidebar(s);",
+        "let p = PanelType::Artifacts;",
+        "let p = PanelType :: Artifacts;",
+        "let t = ThreadTarget::Log { filtered: false };",
+        "let t = ThreadTarget :: Log { filtered: f };",
+        "let k = ViewKind::Artifact;",
+        "let k = ViewKind :: Artifact;",
+        "thread_open::open_log(s, p).await;",
+        "let t = thread_inspector::log_title(f);",
+        "s.thread_inspector.log_painted.set(true);",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("mission-21-7-b|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-8", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("mission-21-7-b|")),
+            "{text}: {errors:?}"
+        );
+    }
+    // Positive controls the clause must not touch: the hub's own tabs, the bridge module paths,
+    // the artifact window surface, the other kinds and sidebar contexts, and near-miss names.
+    let legal = "fn real() { let _ = McTab::Messages; let _ = McTab::Artifacts; \
+        transparency_bridge::open_messages(a, s, c); artifact_bridge::open_window(a, s, i, m); \
+        let _ = Surface::ArtifactWindow; let _ = ViewKind::ArtifactWindow; \
+        let _ = PanelType::Adapters; let _ = Context::SidebarAdapters; \
+        open_login(s); let _ = backlog_title; let _ = log_painted_rows; \
+        let _ = TransparencyPanelState; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("mission-21-7-b|")),
+        "{errors:?}"
+    );
+    let masked = "// transparency_panel PanelType::TransparencyLog open_log log_title\n\
+        #[cfg(test)] mod tests { fn t() { let _ = PanelType::TransparencyLog; open_log(); } }\n\
+        fn real() { let _ = 1; }";
+    assert!(
+        scan(&[("src/x.rs".into(), masked.into())], &[])
+            .iter()
+            .all(|s| !s.contains("mission-21-7-b|"))
+    );
+    assert!(PINS.is_empty());
+    assert!(
+        RULES.iter().any(|(name, _)| *name == "mission-21-7-a"),
+        "the 7-A clause stays untouched"
+    );
 }

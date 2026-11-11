@@ -69,24 +69,34 @@ fn artifact_bridge_source() -> String {
     source("src/infrastructure/runtime/artifact_bridge.rs")
 }
 
-/// Paint a panel state into a real `Buffer` and return the text.
-fn paint(state: &mut rustain::adapters::tui::state::ArtifactsPanelState, width: u16) -> String {
-    use ratatui::prelude::{Buffer, Rect};
-    use rustain::adapters::tui::theme::Theme;
-    use rustain::domain::models::FocusState;
+/// Frame width where the hub shows the list alone (no detail column): the narrow layout.
+const NARROW: u16 = 60;
+/// Wide enough that the master column (40% of the inner width) holds a whole canonical row,
+/// and the detail column sits next to it.
+const WIDE: u16 = 260;
 
+/// The text of Mission Control as painted for `state` in a frame `width` columns wide.
+fn paint_state(state: &rustain::adapters::tui::state::TuiState, width: u16) -> String {
+    use ratatui::prelude::Rect;
     let area = Rect::new(0, 0, width, 30);
-    let mut buf = Buffer::empty(area);
-    let selected = 0;
-    rustain::adapters::tui::widgets::artifacts_panel::render(
-        area,
-        &mut buf,
-        state,
-        selected,
-        &FocusState::Chat,
-        &Theme::dark(),
-    );
-    buf.content()
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+            .expect("terminal");
+    terminal
+        .draw(|frame| {
+            rustain::adapters::tui::widgets::mission_control::render(
+                frame,
+                area,
+                state,
+                &state.mission_control.title(),
+                rustain::adapters::tui::keymap::Host::Local,
+            );
+        })
+        .expect("draw");
+    terminal
+        .backend()
+        .buffer()
+        .content()
         .chunks(area.width as usize)
         .map(|row| {
             row.iter()
@@ -97,6 +107,37 @@ fn paint(state: &mut rustain::adapters::tui::state::ArtifactsPanelState, width: 
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Paint a folded panel state as Mission Control's Artifacts tab: the rows the production list
+/// builder makes from it, through the production widget. `moves` presses the real `j` key that
+/// many times first (the first row is selected by default; the detail follows the selection).
+fn paint_selecting(
+    panel: &rustain::adapters::tui::state::ArtifactsPanelState,
+    width: u16,
+    moves: usize,
+) -> String {
+    use rustain::adapters::tui::app::handle_input;
+    use rustain::adapters::tui::mission_control::{McTab, artifacts};
+    use rustain::adapters::tui::presentation::reducer;
+    use rustain::adapters::tui::state::TuiState;
+    use rustain::domain::events::DomainInputEvent;
+
+    let mut state = TuiState::new(width, 30);
+    let list = artifacts::list(panel);
+    state
+        .mission_control
+        .set_list(McTab::Artifacts, list.rows, list.empty, list.note);
+    reducer::open_mission_control(&mut state, McTab::Artifacts);
+    for _ in 0..moves {
+        handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+    }
+    paint_state(&state, width)
+}
+
+/// Paint a panel state as the Artifacts tab and return the text.
+fn paint(panel: &rustain::adapters::tui::state::ArtifactsPanelState, width: u16) -> String {
+    paint_selecting(panel, width, 0)
 }
 
 /// Fold a `RoomEvent` stream and hand the panel a real read.
@@ -111,7 +152,6 @@ fn panel_from(
         "host-A",
     );
     let mut panel = rustain::adapters::tui::state::ArtifactsPanelState::default();
-    let mut selected = 0;
     panel.apply_read(
         room,
         "host-A".to_owned(),
@@ -120,7 +160,6 @@ fn panel_from(
         1_700_000_000_000,
         policy,
         mode,
-        &mut selected,
     );
     panel
 }
@@ -215,7 +254,6 @@ async fn a_newer_builds_values_survive_the_reader_and_render_as_explicit_unknown
     );
 
     let mut panel = rustain::adapters::tui::state::ArtifactsPanelState::default();
-    let mut selected = 0;
     panel.apply_read(
         room,
         "host-A".to_owned(),
@@ -224,9 +262,8 @@ async fn a_newer_builds_values_survive_the_reader_and_render_as_explicit_unknown
         1_700_000_000_000,
         MergeBackPolicy::default(),
         PermissionMode::Yolo,
-        &mut selected,
     );
-    let painted = paint(&mut panel, 100);
+    let painted = paint(&panel, WIDE);
     assert!(
         painted.contains("unknown bbbbbb"),
         "the unknown KIND renders as an explicit unknown row: {painted}"
@@ -606,25 +643,38 @@ fn the_artifact_commands_route_as_execute_commands_not_missing_custom_commands()
 /// **AC3 input-routing guard.** The chord is real, not a `Noop`, and it is
 /// lower-case so `lookup_chord` (which lowercases) can find it.
 ///
-/// This test stops at `InputAction::OpenPanel`. The native
+/// Story 21.7: `Ctrl+X, E` opens Mission Control's Artifacts tab (the sidebar panel is gone),
+/// at 160 and at 80 columns alike (the hub has no sidebar-width floor).
+///
+/// This test stops at the chord's own effect on the stack. The native
 /// `test_artifacts_chord_renders_durable_rows` drives the production binary
-/// through the root awaited dispatch and both density-specific render routes.
+/// through the root awaited dispatch.
 #[test]
-fn ctrl_x_e_dispatches_the_artifacts_panel() {
+fn ctrl_x_e_dispatches_the_artifacts_tab() {
     use rustain::adapters::tui::app::{InputAction, handle_input};
+    use rustain::adapters::tui::mission_control::McTab;
+    use rustain::adapters::tui::presentation::Surface;
     use rustain::adapters::tui::state::TuiState;
     use rustain::domain::events::{DomainInputEvent, DomainKey};
     use rustain::domain::models::visual::PanelType;
 
-    for key in ['e', 'E'] {
-        let mut state = TuiState::new(160, 24);
-        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-        assert!(state.pending_leader.is_some());
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
-            InputAction::OpenPanel(PanelType::Artifacts),
-            "Ctrl+X, {key} must open the real panel"
-        );
+    for width in [160u16, 80u16] {
+        for key in ['e', 'E'] {
+            let mut state = TuiState::new(width, 24);
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+            assert!(state.pending_leader.is_some());
+            assert_eq!(
+                handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
+                InputAction::OpenMissionControl(McTab::Artifacts),
+                "{width}: Ctrl+X, {key} must open the real tab"
+            );
+            assert_eq!(
+                state.modal_stack.top().map(|frame| frame.surface),
+                Some(Surface::MissionControl),
+                "{width}: the chord's effect is the one hub frame"
+            );
+            assert_eq!(state.mission_control.tab, McTab::Artifacts, "{width}");
+        }
     }
     // `a` stays Adapters — the chord table has no collision.
     let mut state = TuiState::new(160, 24);
@@ -673,8 +723,8 @@ fn the_artifact_surface_is_discoverable_with_its_chord_and_every_subverb() {
 }
 
 /// **AC3 behavioural.** A real fold with real `depends_on` edges renders every
-/// artifact, its lineage, and the honest "as of" header — in both the sidebar
-/// width and the wide Dashboard width.
+/// artifact, its lineage, and the honest "as of" header — in the narrow list-only layout and
+/// the wide list-and-detail layout of Mission Control's Artifacts tab.
 ///
 /// This fold/widget test checks the host line and lineage. The native PTY
 /// controls separately prove that both production render routes reach it.
@@ -698,25 +748,36 @@ fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
             artifact: ticket.clone(),
         },
     ];
-    for width in [36u16, 120u16] {
-        let mut panel = panel_from(
+    // Narrow: the list alone. The safety-first reordering keeps the hazard whole, and every
+    // row is there.
+    let narrow_panel = panel_from(
+        panel_events.clone(),
+        MergeBackPolicy::default(),
+        PermissionMode::Yolo,
+    );
+    let painted = paint(&narrow_panel, NARROW);
+    assert!(painted.contains("as of"), "{NARROW}: {painted}");
+    assert!(
+        !painted.to_ascii_lowercase().contains(" live"),
+        "{NARROW}: never claims live: {painted}"
+    );
+    for expected in ["aaaaaa", "bbbbbb", "cccccc", "no reviewer"] {
+        assert!(
+            painted.contains(expected),
+            "{NARROW}: {expected}: {painted}"
+        );
+    }
+    // Wide: the selected row's detail carries the one-level lineage line. (Before 21-7 the
+    // sidebar painted it under the row; it now lives in the detail column of the hub.)
+    for width in [100u16, WIDE] {
+        let panel = panel_from(
             panel_events.clone(),
             MergeBackPolicy::default(),
             PermissionMode::Yolo,
         );
-        let painted = paint(&mut panel, width);
+        let painted = paint_selecting(&panel, width, 1);
         assert!(painted.contains("as of"), "{width}: {painted}");
-        assert!(
-            !painted.to_ascii_lowercase().contains(" live"),
-            "{width}: never claims live: {painted}"
-        );
-        assert!(painted.contains("aaaaaa"), "{width}: {painted}");
-        if width == 36 {
-            assert!(painted.contains("no reviewer"), "{width}: {painted}");
-        } else {
-            assert!(painted.contains("bbbbbb"), "{width}: {painted}");
-        }
-        assert!(painted.contains("cccccc"), "{width}: {painted}");
+        assert!(painted.contains("bbbbbb"), "{width}: {painted}");
         assert!(
             painted.contains("└ depends on aaaaaa"),
             "{width}: the one-level lineage line must render: {painted}"
@@ -724,12 +785,12 @@ fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
     }
 
     // Wide layout keeps the canonical grammar, including the producer.
-    let mut wide = panel_from(
+    let wide = panel_from(
         panel_events.clone(),
         MergeBackPolicy::default(),
         PermissionMode::Yolo,
     );
-    let painted = paint(&mut wide, 120);
+    let painted = paint(&wide, WIDE);
     assert!(
         painted.contains("evidence aaaaaa · unreviewed · from spoke-1"),
         "{painted}"
@@ -765,7 +826,6 @@ fn the_panel_renders_every_kind_with_real_lineage_at_both_densities() {
 async fn the_artifacts_command_reaches_a_painted_buffer_through_the_real_dispatch_path() {
     use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
     use rustain::adapters::tui::state::TuiState;
-    use rustain::domain::models::visual::PanelType;
     use rustain::infrastructure::subagent::NodeJournal;
 
     let workspace = tempfile::tempdir().expect("workspace");
@@ -813,30 +873,43 @@ async fn the_artifacts_command_reaches_a_painted_buffer_through_the_real_dispatc
     )
     .await;
 
-    assert!(state.sidebar_visible, "the panel opened");
-    assert_eq!(state.sidebar_panel, Some(PanelType::Artifacts));
     assert_eq!(
-        state.sidebar_entry_count, 3,
+        state.modal_stack.top().map(|frame| frame.surface),
+        Some(rustain::adapters::tui::presentation::Surface::MissionControl),
+        "the hub opened"
+    );
+    assert_eq!(
+        state.mission_control.tab,
+        rustain::adapters::tui::mission_control::McTab::Artifacts
+    );
+    assert_eq!(
+        state.mission_control.rows().len(),
+        3,
         "three folded artifacts listed"
     );
 
-    // Both densities: 36 columns is the production sidebar inner width at a
-    // 120-column terminal; 120 is Dashboard.
-    for width in [36u16, 120u16] {
-        let painted = paint(&mut state.artifacts_panel, width);
-        assert!(painted.contains("as of"), "{width}: {painted}");
-        assert!(painted.contains("aaaaaa"), "{width}: {painted}");
-        if width == 36 {
-            assert!(painted.contains("no reviewer"), "{width}: {painted}");
-        } else {
-            assert!(painted.contains("bbbbbb"), "{width}: {painted}");
-        }
-        assert!(painted.contains("cccccc"), "{width}: {painted}");
+    // Both layouts, painted from the state the command itself populated: narrow (list alone)
+    // and wide (list and the selected row's detail).
+    let painted = paint_state(&state, NARROW);
+    assert!(painted.contains("as of"), "{NARROW}: {painted}");
+    for expected in ["aaaaaa", "bbbbbb", "cccccc", "no reviewer"] {
         assert!(
-            painted.contains("└ depends on aaaaaa"),
-            "{width}: the one-level lineage line must render: {painted}"
+            painted.contains(expected),
+            "{NARROW}: {expected}: {painted}"
         );
     }
+    let painted = paint_state(&state, WIDE);
+    assert!(painted.contains("as of"), "{WIDE}: {painted}");
+    assert!(painted.contains("bbbbbb"), "{WIDE}: {painted}");
+    rustain::adapters::tui::app::handle_input(
+        &mut state,
+        &rustain::domain::events::DomainInputEvent::KeyPress('j'),
+    );
+    let painted = paint_state(&state, WIDE);
+    assert!(
+        painted.contains("└ depends on aaaaaa"),
+        "{WIDE}: the one-level lineage line must render: {painted}"
+    );
 }
 
 /// **AC3 truncation order is a SAFETY property.** At 60 columns the decision
@@ -852,15 +925,15 @@ fn the_decision_suffix_outranks_the_identifier_at_narrow_widths() {
     let events = vec![RoomEvent::ArtifactCreated {
         artifact: patch.clone(),
     }];
-    // 34 is the production sidebar inner width at a 120-column terminal — the
-    // narrowest layout that actually ships, not a convenient one.
-    for width in [36u16, 60u16, 120u16] {
-        let mut panel = panel_from(
+    // 60 is the narrowest frame the hub paints (the terminal floor); 80 is the common
+    // terminal; WIDE is the wide layout. The decision must survive at every one.
+    for width in [NARROW, 80u16, WIDE] {
+        let panel = panel_from(
             events.clone(),
             MergeBackPolicy::default(),
             PermissionMode::Yolo,
         );
-        let painted = paint(&mut panel, width);
+        let painted = paint(&panel, width);
         assert!(
             painted.contains("refused: self-review"),
             "at {width} cols the reason must survive truncation: {painted}"
@@ -875,14 +948,14 @@ fn the_decision_suffix_outranks_the_identifier_at_narrow_widths() {
 fn a_room_with_only_an_input_request_renders_it_plus_the_no_patches_state() {
     let mut ticket = artifact('c', ArtifactKind::InputRequest, "spoke-3");
     ticket.review = None;
-    let mut panel = panel_from(
+    let panel = panel_from(
         vec![RoomEvent::ArtifactCreated {
             artifact: ticket.clone(),
         }],
         MergeBackPolicy::default(),
         PermissionMode::Yolo,
     );
-    let painted = paint(&mut panel, 100);
+    let painted = paint(&panel, WIDE);
     assert!(painted.contains("input-request cccccc"), "{painted}");
     assert!(painted.contains("no patches in this room"), "{painted}");
 }
@@ -894,27 +967,31 @@ fn every_zero_state_says_which_one_it_is() {
     use rustain::adapters::tui::widgets::artifacts_panel::zero_state_lines;
 
     // Read failure — distinct from an empty room.
-    let mut failed = ArtifactsPanelState::default();
-    failed.error = Some("permission denied".to_owned());
-    let painted = paint(&mut failed, 100);
+    let failed = ArtifactsPanelState {
+        error: Some("permission denied".to_owned()),
+        ..Default::default()
+    };
+    let painted = paint(&failed, WIDE);
     assert!(
         painted.contains("could not read the room journal"),
         "{painted}"
     );
     assert!(
-        painted.contains("This is a read failure, not an empty room."),
+        painted.contains("this is a read failure, not an empty room."),
         "{painted}"
     );
 
     // Not attached.
-    let mut detached = ArtifactsPanelState::default();
-    detached.not_attached = true;
-    let painted = paint(&mut detached, 100);
+    let detached = ArtifactsPanelState {
+        not_attached: true,
+        ..Default::default()
+    };
+    let painted = paint(&detached, WIDE);
     assert!(painted.contains("not attached"), "{painted}");
 
     // No artifacts.
-    let mut empty = panel_from(vec![], MergeBackPolicy::default(), PermissionMode::Yolo);
-    let painted = paint(&mut empty, 100);
+    let empty = panel_from(vec![], MergeBackPolicy::default(), PermissionMode::Yolo);
+    let painted = paint(&empty, WIDE);
     assert!(painted.contains("holds no artifacts yet"), "{painted}");
 
     // All reviewed.
@@ -923,12 +1000,12 @@ fn every_zero_state_says_which_one_it_is() {
         reviewer: agent("jun"),
         verdict: ReviewVerdict::Approved,
     });
-    let mut reviewed = panel_from(
+    let reviewed = panel_from(
         vec![RoomEvent::ArtifactCreated { artifact: patch }],
         MergeBackPolicy::default(),
         PermissionMode::Yolo,
     );
-    let painted = paint(&mut reviewed, 100);
+    let painted = paint(&reviewed, WIDE);
     assert!(painted.contains("carries a recorded verdict"), "{painted}");
 
     // Four distinct headlines, no duplicates.
@@ -1025,14 +1102,14 @@ fn every_disposition_renders_its_exact_suffix_through_a_real_fold() {
     cases.push(("rejected", rejected, none, PermissionMode::Yolo));
 
     for (expected, subject, policy, mode) in cases {
-        let mut panel = panel_from(
+        let panel = panel_from(
             vec![RoomEvent::ArtifactCreated {
                 artifact: subject.clone(),
             }],
             policy,
             mode,
         );
-        let painted = paint(&mut panel, 120);
+        let painted = paint(&panel, WIDE);
         assert!(
             painted.contains(&format!("· {expected}")),
             "expected suffix `· {expected}`, got: {painted}"
@@ -1121,18 +1198,18 @@ fn flipping_the_merge_back_policy_moves_the_rendered_annotation() {
         artifact: subject.clone(),
     }];
 
-    let mut policy_on = panel_from(
+    let policy_on = panel_from(
         events.clone(),
         MergeBackPolicy {
             auto_approve_user_originated: true,
         },
         PermissionMode::Yolo,
     );
-    let on = paint(&mut policy_on, 120);
+    let on = paint(&policy_on, WIDE);
     assert!(on.contains("· auto-applies (policy)"), "{on}");
 
-    let mut policy_off = panel_from(events, MergeBackPolicy::default(), PermissionMode::Yolo);
-    let off = paint(&mut policy_off, 120);
+    let policy_off = panel_from(events, MergeBackPolicy::default(), PermissionMode::Yolo);
+    let off = paint(&policy_off, WIDE);
     assert!(!off.contains("auto-applies"), "{off}");
     assert!(off.contains("▲ no reviewer"), "{off}");
 }
@@ -1719,14 +1796,14 @@ fn the_artifact_panel_makes_no_integrity_or_apply_claim_it_cannot_back() {
         reviewer: agent("jun"),
         verdict: ReviewVerdict::Approved,
     });
-    let mut panel = panel_from(
+    let panel = panel_from(
         vec![RoomEvent::ArtifactCreated {
             artifact: applies.clone(),
         }],
         MergeBackPolicy::default(),
         PermissionMode::Yolo,
     );
-    let painted = paint(&mut panel, 120);
+    let painted = paint(&panel, WIDE);
     let lowered = painted.to_ascii_lowercase();
     for forbidden in [
         "tamper",

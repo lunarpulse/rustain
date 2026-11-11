@@ -154,16 +154,10 @@ async fn dispatch(
     };
     match command {
         ArtifactCommandArgs::List => {
-            match open_artifacts_view(app_state, state, permission_mode).await {
-                Ok(()) => {}
-                Err(message) => warn(state, conversation_id, app_state, message),
-            }
+            open_artifacts_view(app_state, state, permission_mode).await;
         }
         ArtifactCommandArgs::Show { id } => {
-            match show_artifact(app_state, &id, permission_mode).await {
-                Ok(message) => handler::show_artifact_message(state, message),
-                Err(message) => warn(state, conversation_id, app_state, message),
-            }
+            open_window(app_state, state, conversation_id, &id, permission_mode).await;
         }
         ArtifactCommandArgs::Apply { id } => {
             if let Err(message) =
@@ -175,7 +169,7 @@ async fn dispatch(
         ArtifactCommandArgs::Review { id, verdict } => {
             match review_artifact(app_state, &id, verdict, permission_mode).await {
                 Ok((message, _event)) => {
-                    handler::show_artifact_message(state, message);
+                    confirm(state, message);
                     // ⛔ NO bus emit here. `PatchMergeBack::persist` already
                     // emitted the journaled `PatchReviewed` — durable-first,
                     // bus-second — so re-emitting the returned event puts TWO
@@ -200,34 +194,18 @@ async fn dispatch(
     }
 }
 
-fn activate_artifacts_sidebar(state: &mut TuiState) -> Result<(), String> {
-    if state.terminal_width < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH {
-        return Err(format!(
-            "Panel requires terminal width >= {} cols.",
-            crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH
-        ));
-    }
-    let panel = crate::domain::models::visual::PanelType::Artifacts;
-    state.sidebar_visible = true;
-    state.sidebar_panel = Some(panel);
-    let selected = state.sidebar_selected;
-    reducer::set_base(
-        state,
-        crate::domain::models::FocusState::Sidebar { panel, selected },
-    );
-    state.needs_redraw = true;
-    Ok(())
-}
-
+/// Open the Artifacts tab (`/artifacts`): the hub opens at once, then the one durable read
+/// folds the journal for THIS host.
 async fn open_artifacts_view(
     app_state: &AppState,
     state: &mut TuiState,
     permission_mode: PermissionMode,
-) -> Result<(), String> {
-    activate_artifacts_sidebar(state)?;
+) {
+    reducer::open_mission_control(
+        state,
+        crate::adapters::tui::mission_control::McTab::Artifacts,
+    );
     refresh_panel(app_state, state, permission_mode).await;
-    finalize_artifacts_panel(state);
-    Ok(())
 }
 
 fn warn(state: &mut TuiState, conversation_id: &str, app_state: &AppState, message: String) {
@@ -241,44 +219,42 @@ fn warn(state: &mut TuiState, conversation_id: &str, app_state: &AppState, messa
         });
 }
 
-/// Open the artifact panel: fold the journal for THIS host, park the cursor,
-/// and size the sidebar.
-pub(crate) async fn open_panel(
-    app_state: &AppState,
-    state: &mut TuiState,
-    permission_mode: PermissionMode,
-) {
-    refresh_panel(app_state, state, permission_mode).await;
-    finalize_artifacts_panel(state);
+/// A result the operator asked for (a recorded verdict, an apply outcome): a success notice
+/// that the Notification Log keeps. The class-V transcript row it used to be is gone (21-7).
+fn confirm(state: &mut TuiState, message: String) {
+    crate::adapters::tui::notifications::success(
+        state,
+        crate::adapters::tui::notifications::NoticeSource::System,
+        message,
+    );
 }
 
-fn finalize_artifacts_panel(state: &mut TuiState) {
-    state.sidebar_entry_count = state.artifacts_panel.visible_len();
-    state
-        .artifacts_panel
-        .synchronize_selection(&mut state.sidebar_selected);
-    if matches!(
-        state.focus,
-        crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Artifacts,
-            ..
-        }
-    ) {
-        let selected = state.sidebar_selected;
-        reducer::update_sidebar_selection(state, selected);
-    }
-}
-
-/// Refresh the panel's fold from the durable journal.
+/// Refresh the fold from the durable journal and hand the Artifacts tab its rows.
 ///
-/// **Never live.** One consistent read under a shared `flock`; the panel
-/// renders "as of <time>" and takes no head poll
-/// (`DF-18-3a-c-ARTIFACT-HEAD-POLL`).
+/// **Never live.** One consistent read under a shared `flock`; the tab says "as of <time>"
+/// and takes no head poll (`DF-18-3a-c-ARTIFACT-HEAD-POLL`).
 pub(crate) async fn refresh_panel(
     app_state: &AppState,
     state: &mut TuiState,
     permission_mode: PermissionMode,
 ) {
+    read_fold(app_state, state, permission_mode).await;
+    publish_rows(state);
+}
+
+/// The tab shows exactly what the fold says now (selection by id survives the replacement).
+pub fn publish_rows(state: &mut TuiState) {
+    let list = crate::adapters::tui::mission_control::artifacts::list(&state.artifacts_panel);
+    state.mission_control.set_list(
+        crate::adapters::tui::mission_control::McTab::Artifacts,
+        list.rows,
+        list.empty,
+        list.note,
+    );
+    state.needs_redraw = true;
+}
+
+async fn read_fold(app_state: &AppState, state: &mut TuiState, permission_mode: PermissionMode) {
     let workspace = &app_state.compose_snapshot.workspace_path;
     let host_id = crate::infrastructure::subagent::current_host_id(workspace);
     let policy = effective_policy(app_state);
@@ -306,9 +282,7 @@ pub(crate) async fn refresh_panel(
         now,
         policy,
         permission_mode,
-        &mut state.sidebar_selected,
     );
-    state.sidebar_entry_count = state.artifacts_panel.visible_len();
 }
 
 /// Fold one durable read into the panel's inputs: the host-honest room, the
@@ -380,11 +354,39 @@ async fn load_room(app_state: &AppState) -> Result<OrchestrationRoom, String> {
     Ok(fold_artifacts_read(entries, room_id(workspace), &host_id).0)
 }
 
-async fn show_artifact(
+/// Open the artifact window for `typed` (an id prefix or a full id): resolve it against the
+/// room fold, read its stored body and open the one window frame. The facts are the
+/// drill-down's; an unreadable body is said in the window, never faked. An id the fold does
+/// not know is today's refusal text as a Warning.
+pub async fn open_window(
+    app_state: &AppState,
+    state: &mut TuiState,
+    conversation_id: &str,
+    typed: &str,
+    permission_mode: PermissionMode,
+) {
+    match build_window(app_state, typed, permission_mode).await {
+        Ok((window, title)) => {
+            reducer::open_artifact_window(state, window, title);
+        }
+        // The Warning is addressed to the conversation that asked: the runtime drops a notice
+        // addressed to none.
+        Err(message) => warn(state, conversation_id, app_state, message),
+    }
+}
+
+async fn build_window(
     app_state: &AppState,
     typed: &str,
     permission_mode: PermissionMode,
-) -> Result<String, String> {
+) -> Result<
+    (
+        crate::adapters::tui::artifact_window::ArtifactWindowState,
+        String,
+    ),
+    String,
+> {
+    use crate::adapters::tui::artifact_window::{ArtifactBody, ArtifactWindowState};
     let room = load_room(app_state).await?;
     let artifact = handler::resolve_artifact(&room, typed).map_err(|e| e.to_string())?;
     let policy = effective_policy(app_state);
@@ -392,15 +394,14 @@ async fn show_artifact(
         Some(recorder) => recorder
             .body(&artifact.id)
             .await
-            .map_err(|error| error.to_string()),
-        None => Err(NO_RECORDER.to_owned()),
+            .map(ArtifactBody::Source)
+            .unwrap_or_else(|error| ArtifactBody::Unavailable(error.to_string())),
+        None => ArtifactBody::Unavailable(NO_RECORDER.to_owned()),
     };
-    Ok(handler::render_show(
-        artifact,
-        &room,
-        permission_mode,
-        &policy,
-        body.as_deref().map_err(String::clone),
+    let facts = handler::render_facts(artifact, &room, permission_mode, &policy);
+    Ok((
+        ArtifactWindowState::new(artifact.id.as_str().to_owned(), facts, body),
+        crate::adapters::tui::mission_control::artifacts::window_title(artifact),
     ))
 }
 
@@ -714,7 +715,7 @@ pub async fn apply_confirmed_card(
         ArtifactCardMode::Resolve(finding) => confirmed_resolve(app_state, &card, finding).await,
     };
     match result {
-        Ok(message) => handler::show_artifact_message(state, message),
+        Ok(message) => confirm(state, message),
         Err(message) => warn(state, &card.conversation_id, app_state, message),
     }
     refresh_panel(app_state, state, permission_mode).await;

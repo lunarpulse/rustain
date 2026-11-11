@@ -34,7 +34,8 @@ could ever paint. Each runs in its own fresh process.
 Also asserted: `Ctrl+X j` -> `No binding for Ctrl+X j in Input`; the status
 row ends with `^X menu`, with `^X…` while the leader is open and again with
 `^X menu` after `Esc`; the local menu labels (`[E] Artifacts`, `[W] Monitor`,
-`[L] A2A log`, `(n/a)` panels, no `[F]`/`[D]`/`Dashboard`).
+`[L] A2A log`, `(n/a)` panels, no `[F]`/`[D]`/`Dashboard`); Story 21.7: `[L]` and `[E]` are Mission
+Control tabs (Messages, Artifacts) available at every width, no longer narrow-terminal remedies).
 
 Leg B (slice 3-B1, AC14): in a fresh process the six readline keys `0x01 0x05 0x17 0x15 0x0b 0x08`
 (Ctrl+A/E/W/U/K/H) are sent as raw bytes to the composer and each is asserted by the composer text it
@@ -116,13 +117,13 @@ OVERLAYS = {
     "183f": ("Keybindings", "┌ Help — Rustain Keybindings ", " j/k scroll  ? close ", None),
     "1872": ("Mission Control · Room", "┌Mission Control · Room", None, "[Esc] Back"),
     "186e": ("Notifications", harness.NOTIFICATION_LOG_TITLE, None, "[Esc] Close"),
+    "186c": ("Mission Control · Messages", "┌Mission Control · Messages", None, "[Esc] Back"),
+    "1865": ("Mission Control · Artifacts", "┌Mission Control · Artifacts", None, "[Esc] Back"),
 }
 # panels: the narrow-terminal remedy toast; the value is the menu item painted `(n/a)` for the row.
 PANELS = {
     "1861": "[A] Adapters (n/a)",
     "1873": "[S] Agents (n/a)",
-    "186c": "[L] A2A log (n/a)",
-    "1865": "[E] Artifacts (n/a)",
     "1874": "[T] Tasks (n/a)",
     "1868": "[H] History (n/a)",
 }
@@ -140,12 +141,13 @@ EXPECTED_WITNESS = {
 }
 MENU_PRESENT = (
     "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters (n/a)", "[S] Agents (n/a)",
-    "[L] A2A log (n/a)", "[R] Room", "[E] Artifacts (n/a)", "[T] Tasks (n/a)", "[U] Usage",
+    "[L] A2A log", "[R] Room", "[E] Artifacts", "[T] Tasks (n/a)", "[U] Usage",
     "[H] History (n/a)", "[W] Monitor", "[?] Help", "[N] Notifications", "[X] Clear toasts",
     "[Q] Decisions", "[Enter] Send", "[Esc] Cancel",
 )
 MENU_ABSENT = ("[F]", "[D]", "Dashboard", "Evidence", "Watch", "[L] Log", "Detach",
-               "[U] Usage (n/a)", "[W] Monitor (n/a)", "[P] Profile (n/a)", "[M] Model (n/a)")
+               "[U] Usage (n/a)", "[W] Monitor (n/a)", "[P] Profile (n/a)", "[M] Model (n/a)",
+               "[L] A2A log (n/a)", "[E] Artifacts (n/a)")
 
 # Leg B (slice 3-B1). The six readline rows, as raw PTY bytes: Ctrl+A, Ctrl+E, Ctrl+W, Ctrl+U, Ctrl+K, Ctrl+H.
 CTRL_A, CTRL_E, CTRL_W, CTRL_U, CTRL_K, CTRL_H = (bytes([code]) for code in (0x01, 0x05, 0x17, 0x15, 0x0B, 0x08))

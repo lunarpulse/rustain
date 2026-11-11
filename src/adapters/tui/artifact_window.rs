@@ -1,0 +1,536 @@
+//! The artifact window (Story 21.7 A15, AC8): one artifact's facts and body in a frame of its
+//! own, opened by `Enter` on an Artifacts row and by `/artifact show <id>`. One window at a
+//! time (global like S-THREAD): opening another retargets it. The facts are the drill-down's
+//! header rows (`artifact_command::render_show`); the body is the artifact's stored bytes laid
+//! out through `markdown_body::layout` (Rendered by default, `v` Source, explicit link URLs).
+//!
+//! Display and copy are different things. Everything painted is sanitized at the line builder
+//! (`sanitize_tool_text_block`: controls and bidi overrides never reach a cell); `c` copies the
+//! **original** bytes, refused above [`COPY_MAX_BYTES`] before any string is built. A body
+//! above that bound is not laid out either: the window says so instead.
+//!
+//! `/` is a line filter over the body: while a query is kept only the source lines containing
+//! it are shown (literal rows; the facts stay).
+
+use std::cell::{Cell, Ref, RefCell};
+
+use ratatui::text::Line;
+
+use crate::adapters::tui::app::InputAction;
+use crate::adapters::tui::keymap::table_block::BodyCmd;
+use crate::adapters::tui::keymap::table_mission::MissionCmd;
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
+use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
+use crate::adapters::tui::presentation::inspector_search::InspectorSearch;
+use crate::adapters::tui::presentation::markdown_body::{
+    self, BodyMode, RENDERED_BODY_MAX_BYTES, RENDERED_BODY_NOTICE,
+};
+use crate::adapters::tui::presentation::viewer::{self, Viewer, ViewerCmd};
+use crate::adapters::tui::presentation::{Surface, reducer};
+use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::theme::Theme;
+use crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
+use crate::domain::services::peer_text::{sanitize_display_line, sanitize_tool_text_block};
+
+/// Why a copy was refused.
+enum CopyRefusal {
+    TooLarge,
+    NotUtf8,
+    Nothing,
+}
+
+/// What the window shows under the facts.
+#[derive(Debug, Clone)]
+pub enum ArtifactBody {
+    /// The artifact's stored bytes, exactly as read (what `c` copies).
+    Source(Vec<u8>),
+    /// The body could not be read: the reason, painted literally.
+    Unavailable(String),
+}
+
+/// Which keys the last paint offered whole: a key whose hint was not painted is inert.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Live {
+    pub search: bool,
+    pub copy: bool,
+    pub view: bool,
+}
+
+#[derive(Default)]
+struct Cache {
+    key: Option<(u16, BodyMode, u64)>,
+    lines: Vec<Line<'static>>,
+    wide: Vec<std::ops::Range<usize>>,
+    widest: usize,
+}
+
+#[derive(Default)]
+struct Laid {
+    lines: Vec<Line<'static>>,
+    wide: Vec<std::ops::Range<usize>>,
+    widest: usize,
+}
+
+/// How much of a body above the copy bound is laid out (bounded per-repaint work).
+pub const DISPLAY_MAX_BYTES: usize = 1 << 20;
+
+pub struct ArtifactWindowState {
+    /// The full artifact id the window shows.
+    pub id: String,
+    pub body: ArtifactBody,
+    pub mode: BodyMode,
+    pub viewer: Viewer,
+    pub search: InspectorSearch,
+    /// Bumped by every change the painted body depends on besides the width.
+    pub generation: u64,
+    header: String,
+    fit: Cell<(usize, usize)>,
+    wide_fit: Cell<(usize, usize)>,
+    live: Cell<Live>,
+    cache: RefCell<Cache>,
+    layouts_built: Cell<usize>,
+    copy_builds: Cell<usize>,
+}
+
+impl std::fmt::Debug for ArtifactWindowState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArtifactWindowState")
+            .field("id", &self.id)
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ArtifactWindowState {
+    /// A window on artifact `id`: `header` is the facts text (one fact per line), `body` the
+    /// stored bytes.
+    #[must_use]
+    pub fn new(id: String, header: String, body: ArtifactBody) -> Self {
+        Self {
+            id,
+            body,
+            mode: BodyMode::Rendered,
+            viewer: Viewer::default(),
+            search: InspectorSearch::default(),
+            generation: 0,
+            header,
+            fit: Cell::new((0, 0)),
+            wide_fit: Cell::new((0, 0)),
+            live: Cell::new(Live::default()),
+            cache: RefCell::new(Cache::default()),
+            layouts_built: Cell::new(0),
+            copy_builds: Cell::new(0),
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.viewer = Viewer::default();
+    }
+
+    /// The window has a body that can be shown, searched, toggled and copied.
+    #[must_use]
+    pub fn has_source(&self) -> bool {
+        matches!(&self.body, ArtifactBody::Source(bytes) if !bytes.is_empty())
+    }
+
+    /// The body is longer than the window lays out: only the first [`DISPLAY_MAX_BYTES`] are
+    /// shown (with a notice naming what is not), copy is refused above [`COPY_MAX_BYTES`].
+    #[must_use]
+    pub fn display_truncated(&self) -> bool {
+        matches!(&self.body, ArtifactBody::Source(bytes) if bytes.len() > COPY_MAX_BYTES)
+    }
+
+    /// The rows for `width`: facts, a blank row, then the body. Laid out once per (width,
+    /// mode, generation) and reused by every repaint.
+    pub fn rows(&self, theme: &Theme, width: u16) -> Ref<'_, [Line<'static>]> {
+        let key = (width, self.mode, self.generation);
+        if self.cache.borrow().key != Some(key) {
+            let laid = self.build(theme, usize::from(width));
+            *self.cache.borrow_mut() = Cache {
+                key: Some(key),
+                lines: laid.lines,
+                wide: laid.wide,
+                widest: laid.widest,
+            };
+            self.layouts_built.set(self.layouts_built.get() + 1);
+        }
+        Ref::map(self.cache.borrow(), |cache| cache.lines.as_slice())
+    }
+
+    /// The rows of the last layout that scroll sideways (wide code blocks and tables of a
+    /// rendered body) and the widest block in cells.
+    pub fn wide_rows(&self) -> (Vec<std::ops::Range<usize>>, usize) {
+        let cache = self.cache.borrow();
+        (cache.wide.clone(), cache.widest)
+    }
+
+    fn build(&self, theme: &Theme, width: usize) -> Laid {
+        let width = width.max(1);
+        let literal = |text: &str| {
+            let mut lines = markdown_body::layout(text, width, theme, BodyMode::Source, true).lines;
+            if lines.last().is_some_and(|line| line.width() == 0) {
+                lines.pop();
+            }
+            lines
+        };
+        // The facts: every line passes the display sanitizer (producer and host ids come from
+        // the journal), one row group per fact.
+        let facts: String = self
+            .header
+            .lines()
+            .map(|line| format!("{}\n", sanitize_tool_text_block(line)))
+            .collect();
+        let mut out = Laid {
+            lines: literal(facts.trim_end()),
+            ..Laid::default()
+        };
+        out.lines.push(Line::default());
+        match &self.body {
+            ArtifactBody::Unavailable(reason) => {
+                out.lines.extend(literal(&format!(
+                    "body unavailable: {}",
+                    sanitize_display_line(reason)
+                )));
+            }
+            ArtifactBody::Source(bytes) if bytes.is_empty() => {
+                out.lines.extend(literal("body is empty"));
+            }
+            ArtifactBody::Source(bytes) => {
+                // Bounded per-repaint work: a body above the copy bound shows its first
+                // DISPLAY_MAX_BYTES (Source) under a notice that names what is not shown.
+                let truncated = bytes.len() > COPY_MAX_BYTES;
+                let shown = if truncated {
+                    &bytes[..DISPLAY_MAX_BYTES.min(bytes.len())]
+                } else {
+                    &bytes[..]
+                };
+                let text = String::from_utf8_lossy(shown);
+                let safe = sanitize_tool_text_block(&text);
+                if truncated {
+                    out.lines.extend(literal(&format!(
+                        "body is {} bytes: showing the first {} as source; the other {} bytes \
+                         are not shown, searched or copyable (copy limit 8 MiB)",
+                        bytes.len(),
+                        shown.len(),
+                        bytes.len() - shown.len()
+                    )));
+                }
+                if !self.search.query.is_empty() {
+                    let matching: Vec<&str> = safe
+                        .lines()
+                        .filter(|line| self.search.matches(line))
+                        .collect();
+                    if matching.is_empty() {
+                        out.lines.extend(literal("no line matches this filter"));
+                    } else {
+                        out.lines.extend(
+                            markdown_body::layout(
+                                &matching.join("\n"),
+                                width,
+                                theme,
+                                BodyMode::Source,
+                                true,
+                            )
+                            .lines,
+                        );
+                    }
+                } else if self.mode == BodyMode::Rendered
+                    && !truncated
+                    && safe.len() <= RENDERED_BODY_MAX_BYTES
+                {
+                    // Character references are decoded by the markdown parser: dangerous ones
+                    // (bidi, controls) are defused to visible escapes first (21-8's 8B-01).
+                    let defused =
+                        crate::infrastructure::runtime::recipient_view::defuse_char_references(
+                            &safe,
+                        );
+                    let laid =
+                        markdown_body::layout(&defused, width, theme, BodyMode::Rendered, true);
+                    let base = out.lines.len();
+                    out.wide = laid
+                        .wide
+                        .iter()
+                        .map(|r| base + r.start..base + r.end)
+                        .collect();
+                    out.widest = laid.widest;
+                    out.lines.extend(laid.lines);
+                } else {
+                    if self.mode == BodyMode::Rendered && !truncated {
+                        out.lines.extend(literal(RENDERED_BODY_NOTICE));
+                    }
+                    out.lines.extend(
+                        markdown_body::layout(&safe, width, theme, BodyMode::Source, true).lines,
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// How many body layouts were computed (a repaint at the same key adds none).
+    #[must_use]
+    pub fn layouts_built(&self) -> usize {
+        self.layouts_built.get()
+    }
+
+    /// How many copy strings were built (a refused copy builds none).
+    #[must_use]
+    pub fn copy_builds(&self) -> usize {
+        self.copy_builds.get()
+    }
+
+    #[must_use]
+    pub fn fit(&self) -> (usize, usize) {
+        self.fit.get()
+    }
+
+    pub fn set_fit(&self, rows: usize, viewport: usize) {
+        self.fit.set((rows, viewport));
+    }
+
+    /// `(widest wide block in cells, columns it scrolls in)` of the last paint; the widest is
+    /// 0 when no block is wider than the body.
+    #[must_use]
+    pub fn wide_fit(&self) -> (usize, usize) {
+        self.wide_fit.get()
+    }
+
+    pub fn set_wide_fit(&self, widest: usize, cols: usize) {
+        self.wide_fit.set((widest, cols));
+    }
+
+    #[must_use]
+    pub fn live(&self) -> Live {
+        self.live.get()
+    }
+
+    pub fn set_live(&self, live: Live) {
+        self.live.set(live);
+    }
+}
+
+/// The artifact window is the top frame.
+#[must_use]
+pub fn is_top(state: &TuiState) -> bool {
+    state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::ArtifactWindow)
+}
+
+/// The filter field of the window is open (a text context of the frame).
+#[must_use]
+pub fn search_editing(state: &TuiState) -> bool {
+    is_top(state)
+        && state
+            .artifact_window
+            .as_ref()
+            .is_some_and(|window| window.search.editing)
+}
+
+pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction {
+    if !is_top(state) {
+        return InputAction::Consumed;
+    }
+    let Resolved::Hit(row) = keymap::resolve(Context::ArtifactWindow, host, &[key]) else {
+        return InputAction::Consumed;
+    };
+    state.needs_redraw = true;
+    match row.command {
+        CommandId::Mission(MissionCmd::Back) => back(state),
+        CommandId::Mission(MissionCmd::CopySource) => {
+            if state
+                .artifact_window
+                .as_ref()
+                .is_some_and(|window| window.live().copy)
+            {
+                copy_source(state);
+            }
+        }
+        CommandId::Overlay(OverlayCmd::InspectorSearch) => {
+            if let Some(window) = state.artifact_window.as_mut()
+                && window.live().search
+            {
+                window.search.open();
+            }
+        }
+        CommandId::Body(BodyCmd::ToggleMode) => {
+            if let Some(window) = state.artifact_window.as_mut()
+                && window.live().view
+            {
+                window.mode = window.mode.toggled();
+                window.invalidate();
+            }
+        }
+        CommandId::Viewer(command) if !command.horizontal() => scroll(state, command),
+        // Sideways movement exists only where the last paint showed a wide block.
+        CommandId::Viewer(command) => {
+            if let Some(window) = state.artifact_window.as_mut() {
+                let (widest, cols) = window.wide_fit();
+                viewer::apply_horizontal(&mut window.viewer, command, widest, cols);
+            }
+        }
+        _ => {}
+    }
+    InputAction::Consumed
+}
+
+/// `Esc` / `Ctrl+C`: a kept filter clears first, then the window backs to what is beneath.
+fn back(state: &mut TuiState) {
+    if state
+        .artifact_window
+        .as_ref()
+        .is_some_and(|window| !window.search.query.is_empty())
+    {
+        clear_search(state);
+    } else {
+        reducer::back(state);
+    }
+}
+
+fn scroll(state: &mut TuiState, command: ViewerCmd) {
+    if let Some(window) = state.artifact_window.as_mut() {
+        let (rows, viewport) = window.fit();
+        if window.viewer.follow {
+            window.viewer.top = usize::MAX;
+        }
+        viewer::apply(&mut window.viewer, command, rows, viewport);
+    }
+}
+
+/// A wheel step scrolls the body like the line keys (state-only).
+pub(crate) fn on_wheel(
+    state: &mut TuiState,
+    delta: crate::domain::models::view_state::ScrollDelta,
+) {
+    if let Some(window) = state.artifact_window.as_mut() {
+        let (rows, viewport) = window.fit();
+        if window.viewer.follow {
+            window.viewer.top = usize::MAX;
+        }
+        viewer::apply_scroll(&mut window.viewer, delta, rows, viewport);
+        state.needs_redraw = true;
+    }
+}
+
+/// The filter was edited or cleared: the body rows depend on it.
+pub(crate) fn search_changed(state: &mut TuiState) {
+    if let Some(window) = state.artifact_window.as_mut() {
+        window.invalidate();
+    }
+    state.needs_redraw = true;
+}
+
+/// `Enter` in the filter field keeps it; a query matching no line says so and is dropped.
+pub(crate) fn accept_search(state: &mut TuiState) {
+    let Some(window) = state.artifact_window.as_mut() else {
+        return;
+    };
+    window.search.accept();
+    let query = window.search.query.as_str().to_owned();
+    let displayed = match &window.body {
+        ArtifactBody::Source(bytes) => {
+            let end = if window.display_truncated() {
+                DISPLAY_MAX_BYTES
+            } else {
+                bytes.len()
+            };
+            &bytes[..end.min(bytes.len())]
+        }
+        ArtifactBody::Unavailable(_) => &[][..],
+    };
+    let matched = query.is_empty()
+        || String::from_utf8_lossy(displayed)
+            .lines()
+            .any(|line| window.search.matches(line));
+    if !matched {
+        window.search.back();
+        crate::adapters::tui::notifications::info(
+            state,
+            crate::adapters::tui::notifications::NoticeSource::Search,
+            format!("Search: no match for \"{query}\""),
+        );
+    }
+    search_changed(state);
+}
+
+/// `Esc` / `Ctrl+C` in the filter field clears it and leaves the field.
+pub(crate) fn clear_search(state: &mut TuiState) {
+    if let Some(window) = state.artifact_window.as_mut() {
+        window.search.back();
+    }
+    search_changed(state);
+}
+
+/// `c`: copy the artifact's **original** bytes (never the sanitized display). The bound is
+/// checked on the byte length before any string is built; a refusal is a notice, never a
+/// partial copy.
+pub(crate) fn copy_source(state: &mut TuiState) {
+    use crate::adapters::tui::handlers::clipboard::{notify_copy, notify_failure};
+    use crate::adapters::tui::notifications::{self, NoticeSource};
+    let copier = state.clipboard_copier.clone();
+    // The bound is judged on the byte length; only then is the copy string built.
+    let outcome = match state.artifact_window.as_ref().map(|window| &window.body) {
+        None => return,
+        Some(ArtifactBody::Source(bytes)) if !bytes.is_empty() => {
+            if bytes.len() > COPY_MAX_BYTES {
+                Err(CopyRefusal::TooLarge)
+            } else if std::str::from_utf8(bytes).is_err() {
+                // The clipboard takes text: never copy a lossy conversion as "the original".
+                Err(CopyRefusal::NotUtf8)
+            } else {
+                let window = state.artifact_window.as_ref().expect("matched above");
+                window.copy_builds.set(window.copy_builds.get() + 1);
+                Ok(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
+        Some(_) => Err(CopyRefusal::Nothing),
+    };
+    let text = match outcome {
+        Ok(text) => text,
+        Err(CopyRefusal::TooLarge) => {
+            notify_failure(state, "artifact body exceeds the 8 MiB copy limit");
+            return;
+        }
+        Err(CopyRefusal::NotUtf8) => {
+            notify_failure(
+                state,
+                "artifact body is not valid UTF-8; nothing was copied",
+            );
+            return;
+        }
+        Err(CopyRefusal::Nothing) => {
+            notifications::info(state, NoticeSource::Clipboard, "Nothing to copy");
+            return;
+        }
+    };
+    match copier {
+        Some(copier) => notify_copy(state, &text, &*copier),
+        None => notify_copy(
+            state,
+            &text,
+            &crate::adapters::tui::clipboard::copy_to_clipboard,
+        ),
+    }
+}
+
+/// The raw press-only rule of the frame (RU-29): only a plain Press acts; a Ctrl letter acts
+/// only where the registry binds it. The open filter field is a text context: the guard stands
+/// aside there.
+pub(crate) fn ignores_raw_key(state: &TuiState, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    if !is_top(state) || search_editing(state) {
+        return false;
+    }
+    if key.kind != KeyEventKind::Press {
+        return true;
+    }
+    match key.code {
+        KeyCode::Char(c) => {
+            let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+            !plain && !(key.modifiers == KeyModifiers::CONTROL && "xpqcdu".contains(c))
+        }
+        _ => !key.modifiers.is_empty(),
+    }
+}

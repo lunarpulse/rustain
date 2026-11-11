@@ -238,7 +238,7 @@ pub fn render_roster(
 /// One roster row.
 ///
 /// **Status precedes the id in the narrow variant**, inherited from
-/// `transparency_panel.rs`: the row is ordered so the decision survives
+/// the former sidebar transparency panel: the row is ordered so the decision survives
 /// truncation. ⛔ No column for which the domain holds no fact — no last-seen,
 /// no connection state, no tier. An absent fact renders `—`, never a zero and
 /// never a fabricated date.

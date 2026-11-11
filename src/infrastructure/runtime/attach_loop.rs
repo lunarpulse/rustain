@@ -2304,8 +2304,7 @@ pub async fn run_attached(
                                         .is_some_and(|control| control.item_address.as_ref() == Some(address)),
                                     crate::adapters::tui::state::ThreadTarget::Node(node) => control
                                         .is_some_and(|control| &control.node_id == node),
-                                    crate::adapters::tui::state::ThreadTarget::Sent { .. }
-                                    | crate::adapters::tui::state::ThreadTarget::Log { .. } => false,
+                                    crate::adapters::tui::state::ThreadTarget::Sent { .. } => false,
                                 }
                             });
                             if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
@@ -2744,8 +2743,8 @@ mod tests {
             rig.paste(command).await;
             rig.key(Key::Enter).await;
             assert!(rig.frames().is_empty());
-            let inspector = rig.state.thread_inspector.as_ref().unwrap();
-            let lines = thread_body::build(inspector, &rig.state.theme, 150).lines;
+            let inspector = rig.state.mission_control.messages.as_ref().unwrap();
+            let lines = thread_body::build(inspector.page(), &rig.state.theme, 150).lines;
             let spans: String = lines
                 .iter()
                 .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
@@ -2780,15 +2779,27 @@ mod tests {
 
     #[tokio::test]
     async fn story21_8_attached_log_scrolling_filter_and_leader() {
-        use crate::adapters::tui::{keymap::Key, state::ThreadTarget};
+        use crate::adapters::tui::{keymap::Key, presentation::Surface};
         let mut rig = attach_keys::tests::Rig::new(false);
         rig.key(Key::Ctrl('x')).await;
         rig.key(Key::Char('l')).await;
-        assert!(matches!(
-            rig.state.thread_inspector.as_ref().unwrap().target,
-            ThreadTarget::Log { filtered: false }
-        ));
-        assert!(attached_screen(&rig.paint()).contains("A2A log"));
+        assert_eq!(
+            rig.state.modal_stack.top().unwrap().surface,
+            Surface::MissionControl
+        );
+        assert_eq!(
+            rig.state.mission_control.tab,
+            crate::adapters::tui::mission_control::McTab::Messages
+        );
+        assert!(
+            !rig.state
+                .mission_control
+                .messages
+                .as_ref()
+                .unwrap()
+                .filtered
+        );
+        assert!(attached_screen(&rig.paint()).contains("Mission Control · Messages"));
         rig.key(Key::Esc).await;
         let workspace = tempfile::tempdir().unwrap();
         crate::infrastructure::transparency_awareness::test_support::append_rows(
@@ -2810,17 +2821,27 @@ mod tests {
             .await
             .is_empty()
         );
-        assert!(rig.state.thread_inspector.as_ref().unwrap().turns.len() >= 25);
+        assert!(
+            rig.state
+                .mission_control
+                .messages
+                .as_ref()
+                .unwrap()
+                .turns
+                .len()
+                >= 25
+        );
         assert!(
             !rig.state
-                .thread_inspector
+                .mission_control
+                .messages
                 .as_ref()
                 .unwrap()
                 .content
                 .contains("showing the 20 most recent")
         );
         assert!(rig.state.pending_log_visit.is_some());
-        assert!(attached_screen(&rig.paint()).contains("A2A log"));
+        assert!(attached_screen(&rig.paint()).contains("Mission Control · Messages"));
         assert!(rig.state.pending_log_visit.is_none());
         let json = crate::adapters::tui::handlers::team_command::TeamLogArgs {
             json: true,
@@ -2836,7 +2857,7 @@ mod tests {
             .is_empty()
         );
         assert!(rig.state.pending_log_visit.is_some());
-        assert!(attached_screen(&rig.paint()).contains("A2A log"));
+        assert!(attached_screen(&rig.paint()).contains("Mission Control · Messages"));
         assert!(rig.state.pending_log_visit.is_none());
         let filtered_args = crate::adapters::tui::handlers::team_command::TeamLogArgs {
             filter: Some("direction=inbound".into()),
@@ -2852,13 +2873,13 @@ mod tests {
             .is_empty()
         );
         assert!(rig.state.pending_log_visit.is_none());
-        assert!(attached_screen(&rig.paint()).contains("A2A log · filtered"));
+        assert!(attached_screen(&rig.paint()).contains("Mission Control · Messages · filtered"));
         assert!(rig.state.pending_log_visit.is_none());
         rig.key(Key::Esc).await;
         rig.state.log_awareness.presented.clear();
 
         let rows: Vec<String> = (0..25).map(|n| format!("log-row-{n:02}")).collect();
-        super::super::thread_open::open_log(&mut rig.state, false, &rows);
+        crate::adapters::tui::mission_control::open_messages(&mut rig.state, false, &rows, None);
         let visit = crate::domain::models::LogVisitCandidate {
             seen_through: 25,
             reset_revision: 0,
@@ -2877,10 +2898,13 @@ mod tests {
         }
         assert_eq!(rig.state.log_awareness.presented, [visit]);
         assert!(rig.state.pending_log_visit.is_none());
-        super::super::thread_open::open_log(&mut rig.state, true, &rows);
+        crate::adapters::tui::mission_control::open_messages(&mut rig.state, true, &rows, None);
         rig.state.pending_log_visit = Some(visit);
         let filtered = attached_screen(&rig.paint());
-        assert!(filtered.contains("A2A log · filtered"), "{filtered}");
+        assert!(
+            filtered.contains("Mission Control · Messages · filtered"),
+            "{filtered}"
+        );
         assert_eq!(rig.state.pending_log_visit, Some(visit));
         assert_eq!(rig.state.log_awareness.presented, [visit]);
         rig.key(Key::Esc).await;
@@ -3131,10 +3155,11 @@ mod tests {
                 .messages
                 .push(system_message(format!("occlusion prefix {row}")));
         }
-        super::super::thread_open::open_log(
+        crate::adapters::tui::mission_control::open_messages(
             &mut rig.state,
             false,
             &["M12-ATTACHED-VISIBLE".into()],
+            None,
         );
         rig.state.pending_log_visit = Some(crate::domain::models::LogVisitCandidate {
             seen_through: 41,
@@ -3201,7 +3226,7 @@ mod tests {
                 rig.key(Key::Esc).await;
                 assert_eq!(
                     rig.state.modal_stack.top().unwrap().surface,
-                    Surface::ThreadInspector
+                    Surface::MissionControl
                 );
                 let returned = attached_screen(&rig.paint());
                 assert!(returned.contains("M12-ATTACHED-VISIBLE"), "{returned}");
@@ -3229,7 +3254,12 @@ mod tests {
                 seen_through: old.seen_through + 1,
                 reset_revision: old.reset_revision,
             };
-            super::super::thread_open::open_log(&mut rig.state, false, &["R3-new-log-row".into()]);
+            crate::adapters::tui::mission_control::open_messages(
+                &mut rig.state,
+                false,
+                &["R3-new-log-row".into()],
+                None,
+            );
             rig.state.pending_log_visit = Some(newer);
             let screen = attached_screen(&rig.paint());
             assert!(screen.contains("R3-new-log-row"), "{screen}");
@@ -3325,10 +3355,18 @@ mod tests {
         for read_only in [false, true] {
             let mut rig = attached_occlusion_rig(80, 24, read_only, 0);
             let visit = rig.state.pending_log_visit.unwrap();
-            super::super::thread_open::open_log(&mut rig.state, false, &[String::new()]);
+            crate::adapters::tui::mission_control::open_messages(
+                &mut rig.state,
+                false,
+                &[String::new()],
+                None,
+            );
             let empty = attached_screen(&rig.paint());
-            assert!(empty.contains("A2A log"), "{empty}");
-            assert_eq!(rig.state.thread_inspector.as_ref().unwrap().content, "");
+            assert!(empty.contains("Mission Control · Messages"), "{empty}");
+            assert_eq!(
+                rig.state.mission_control.messages.as_ref().unwrap().content,
+                ""
+            );
             assert_eq!(
                 rig.state.pending_log_visit,
                 Some(visit),
@@ -3336,10 +3374,11 @@ mod tests {
             );
             assert!(rig.state.log_awareness.presented.is_empty());
             rig.state.pending_log_visit = Some(visit);
-            super::super::thread_open::open_log(
+            crate::adapters::tui::mission_control::open_messages(
                 &mut rig.state,
                 false,
                 &["M12-ATTACHED-VISIBLE".into()],
+                None,
             );
             rig.state.terminal_width = 59;
             let too_small = attached_screen(&rig.paint());
@@ -3362,10 +3401,11 @@ mod tests {
         assert!(rig.state.modal_stack.is_empty());
         assert!(!attached_screen(&rig.paint()).contains("M12-ATTACHED-VISIBLE"));
         assert!(rig.state.log_awareness.presented.is_empty());
-        super::super::thread_open::open_log(
+        crate::adapters::tui::mission_control::open_messages(
             &mut rig.state,
             false,
             &["M12-ATTACHED-VISIBLE".into()],
+            None,
         );
         rig.state.pending_log_visit = Some(visit);
         assert!(attached_screen(&rig.paint()).contains("M12-ATTACHED-VISIBLE"));
@@ -9212,7 +9252,8 @@ mod tests {
         );
         assert!(
             state
-                .thread_inspector
+                .mission_control
+                .messages
                 .as_ref()
                 .unwrap()
                 .content
@@ -9221,13 +9262,13 @@ mod tests {
 
         // Painted, but the draw failed: nothing presented.
         let screen = draw_attached(&mut state);
-        assert!(screen.contains("A2A log"), "{screen}");
+        assert!(screen.contains("Mission Control · Messages"), "{screen}");
         after_attached_draw(&mut state, false);
         assert_eq!(
             poll(&mut observer, &mut state).await,
             LogAwareness::Unseen(3)
         );
-        assert!(draw_attached(&mut state).contains("A2A log"));
+        assert!(draw_attached(&mut state).contains("Mission Control · Messages"));
         after_attached_draw(&mut state, true);
         assert_eq!(poll(&mut observer, &mut state).await, LogAwareness::Hidden);
 

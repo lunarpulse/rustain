@@ -124,11 +124,22 @@ async fn k06_approved_proposal_preserves_boundary_payload_bytes() {
         proposal_board.contains("lena-po") && proposal_board.contains("jun-dev"),
         "board --last projection: {proposal_board}"
     );
-    let frame = fixture.state.thread_inspector.as_ref().expect("log frame");
-    assert!(matches!(
-        frame.target,
-        rustain::adapters::tui::state::ThreadTarget::Log { filtered: false }
-    ));
+    assert_eq!(
+        fixture.state.modal_stack.top().map(|frame| frame.surface),
+        Some(rustain::adapters::tui::presentation::Surface::MissionControl),
+        "the A2A log is Mission Control's Messages tab"
+    );
+    assert_eq!(
+        fixture.state.mission_control.tab,
+        rustain::adapters::tui::mission_control::McTab::Messages
+    );
+    let frame = fixture
+        .state
+        .mission_control
+        .messages
+        .as_ref()
+        .expect("log frame");
+    assert!(!frame.filtered);
     let proposal_log = &frame.content;
     assert_eq!(
         proposal_log.matches("[agent-composed]").count(),
@@ -327,11 +338,18 @@ async fn k06_proposal_matches_typed_send_for_representable_body() {
     );
 
     fixture.typed("/team log").await;
-    let frame = fixture.state.thread_inspector.as_ref().expect("log frame");
-    assert!(matches!(
-        frame.target,
-        rustain::adapters::tui::state::ThreadTarget::Log { filtered: false }
-    ));
+    assert_eq!(
+        fixture.state.modal_stack.top().map(|frame| frame.surface),
+        Some(rustain::adapters::tui::presentation::Surface::MissionControl),
+        "the A2A log is Mission Control's Messages tab"
+    );
+    let frame = fixture
+        .state
+        .mission_control
+        .messages
+        .as_ref()
+        .expect("log frame");
+    assert!(!frame.filtered);
     let log = &frame.content;
     assert_eq!(
         log.matches("[agent-composed]").count(),

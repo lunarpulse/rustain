@@ -46,12 +46,7 @@
 //!   `[✗] Retract` shipped as inert text. The verbs here are typed
 //!   (`/artifact review <id> <verdict>`), and the footer says so.
 
-use ratatui::prelude::*;
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
-
-use crate::adapters::tui::state::{ArtifactsPanelState, ArtifactsZeroState};
-use crate::adapters::tui::theme::Theme;
+use crate::adapters::tui::state::ArtifactsZeroState;
 use crate::domain::models::{
     ApplyOutcome, ApplyState, ArtifactId, ArtifactKind, ArtifactRef, OperatorApplyFinding,
     OrchestrationRoom, PermissionMode, ReviewStatus, ReviewVerdict,
@@ -59,9 +54,7 @@ use crate::domain::models::{
 use crate::domain::services::patch_review::{
     MergeBackPolicy, PatchDisposition, operator_patch_decision,
 };
-use crate::domain::services::transparency::{STRUCTURAL_REPLAY_CLAIM, format_unix_millis};
 
-use super::room_panel::UNKNOWN_RECORD_LABEL;
 use super::sidebar::truncate_to_width;
 
 /// Characters of an `ArtifactId` shown in a row.
@@ -328,22 +321,28 @@ pub fn visible_artifact_row(
     let parts = row_parts(artifact, room, permission_mode, policy);
     let canonical = artifact_row(artifact, room, permission_mode, policy);
     let truncated = truncate_to_width(&canonical, width);
-    let suffix_lost = parts
-        .suffix
-        .is_some_and(|suffix| !truncated.contains(suffix));
-    let apply_suffix_lost = parts
-        .apply_suffix
-        .as_ref()
-        .is_some_and(|suffix| !truncated.contains(suffix));
-    // An `AwaitingReview` row carries NO suffix by design — its `▲ no
-    // reviewer` hazard is the only signal, so a truncated hazard must trigger
-    // the fallback too, or the canonical pending row loses its warning
-    // precisely in the narrow layout this fallback exists to protect.
-    let hazard_lost = !parts.hazard.is_empty() && !truncated.contains(parts.hazard);
-    if !suffix_lost && !apply_suffix_lost && !hazard_lost {
+    if !parts_lost(&parts, &truncated) {
         return truncated;
     }
-    // Safety-first fallback: reason and hazard before identifier.
+    truncate_to_width(&reordered(&parts), width)
+}
+
+/// Whether cutting the canonical row to `shown` lost a part that must survive.
+///
+/// An `AwaitingReview` row carries NO suffix by design — its `▲ no reviewer` hazard is the
+/// only signal, so a truncated hazard must trigger the fallback too, or the canonical pending
+/// row loses its warning precisely in the narrow layout this fallback exists to protect.
+fn parts_lost(parts: &RowParts, shown: &str) -> bool {
+    parts.suffix.is_some_and(|suffix| !shown.contains(suffix))
+        || parts
+            .apply_suffix
+            .as_ref()
+            .is_some_and(|suffix| !shown.contains(suffix))
+        || (!parts.hazard.is_empty() && !shown.contains(parts.hazard))
+}
+
+/// Safety-first fallback: reason and hazard before identifier.
+fn reordered(parts: &RowParts) -> String {
     let mut reordered = format!("{} \u{b7}", parts.kind);
     if let Some(suffix) = parts.suffix {
         reordered.push_str(&format!(" {suffix}"));
@@ -355,7 +354,29 @@ pub fn visible_artifact_row(
         reordered.push_str(&format!(" \u{b7} {apply_suffix}"));
     }
     reordered.push_str(&format!(" {}", parts.prefix));
-    truncate_to_width(&reordered, width)
+    reordered
+}
+
+/// Everything the Mission Control Artifacts tab needs to paint one row at any width: the
+/// canonical row, its safety-first reordering and the parts the reordering protects (the
+/// painter reorders exactly when cutting the canonical row would lose one).
+#[must_use]
+pub fn row_forms(
+    artifact: &ArtifactRef,
+    room: &OrchestrationRoom,
+    permission_mode: PermissionMode,
+    policy: &MergeBackPolicy,
+) -> (String, String, Vec<String>) {
+    let parts = row_parts(artifact, room, permission_mode, policy);
+    let canonical = artifact_row(artifact, room, permission_mode, policy);
+    let keep = parts
+        .suffix
+        .map(str::to_owned)
+        .into_iter()
+        .chain(parts.apply_suffix.clone())
+        .chain((!parts.hazard.is_empty()).then(|| parts.hazard.to_owned()))
+        .collect();
+    (canonical, reordered(&parts), keep)
 }
 
 /// One-level lineage line per `depends_on` edge.
@@ -406,244 +427,4 @@ pub fn input_request_note() -> String {
         "answer it from the Needs-you queue ({})",
         crate::adapters::tui::decision_queue::queue_key_hint()
     )
-}
-
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
-    state: &mut ArtifactsPanelState,
-    selected: usize,
-    focus: &crate::domain::models::FocusState,
-    theme: &Theme,
-) {
-    Clear.render(area, buf);
-
-    let is_focused = matches!(
-        focus,
-        crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Artifacts,
-            ..
-        }
-    );
-    let border_style = if is_focused {
-        Style::default().fg(theme.colors.accent)
-    } else {
-        Style::default().fg(theme.colors.fg_secondary)
-    };
-    // "as of", never "live".
-    let title = match state.read_at_ms {
-        Some(ms) => format!(" Artifacts · as of {} ", format_unix_millis(ms)),
-        None => " Artifacts ".to_owned(),
-    };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title_bottom(Span::styled(
-            format!(
-                " replay · {}/{} move · {} close ",
-                crate::adapters::tui::keymap::render::key_text(
-                    crate::adapters::tui::keymap::table_nav::SidebarCmd::SelectNext
-                ),
-                crate::adapters::tui::keymap::render::key_text(
-                    crate::adapters::tui::keymap::table_nav::SidebarCmd::SelectPrev
-                ),
-                crate::adapters::tui::keymap::render::leader_follow_up_long(
-                    crate::adapters::tui::keymap::table::LeaderCmd::Artifacts
-                )
-            ),
-            Style::default().fg(theme.colors.fg_muted),
-        ));
-    let inner = block.inner(area);
-    block.render(area, buf);
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let muted = Style::default()
-        .fg(theme.colors.fg_muted)
-        .add_modifier(Modifier::ITALIC);
-    let mut rendered_selected = selected;
-
-    if let Some(error) = state.error.clone() {
-        state.set_viewport_rows(inner.height as usize, &mut rendered_selected);
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "⚠ could not read the room journal",
-                Style::default().fg(theme.colors.error),
-            )),
-            Line::from(Span::styled(error, Style::default().fg(theme.colors.error))),
-            Line::from(Span::styled(
-                "This is a read failure, not an empty room.",
-                muted,
-            )),
-        ])
-        .wrap(Wrap { trim: true })
-        .render(inner, buf);
-        return;
-    }
-
-    if state.zero_state() == Some(ArtifactsZeroState::NotAttached) {
-        state.set_viewport_rows(inner.height as usize, &mut rendered_selected);
-        let [headline, detail] = zero_state_lines(ArtifactsZeroState::NotAttached);
-        Paragraph::new(vec![
-            Line::from(Span::styled(headline, muted)),
-            Line::from(Span::styled(detail, muted)),
-        ])
-        .render(inner, buf);
-        return;
-    }
-
-    let mut chrome: Vec<Line<'static>> = Vec::new();
-    chrome.push(Line::from(Span::styled(
-        truncate_to_width(&format!("here: {}", state.host_id), inner.width as usize),
-        muted,
-    )));
-    match state.zero_state() {
-        Some(ArtifactsZeroState::NoArtifacts) => {
-            let [headline, detail] = zero_state_lines(ArtifactsZeroState::NoArtifacts);
-            chrome.push(Line::from(Span::styled(headline, muted)));
-            chrome.push(Line::from(Span::styled(detail, muted)));
-        }
-        Some(zero @ (ArtifactsZeroState::NoPatches | ArtifactsZeroState::AllReviewed)) => {
-            let [headline, _] = zero_state_lines(zero);
-            chrome.push(Line::from(Span::styled(headline, muted)));
-        }
-        _ => {}
-    }
-    if state.unknown_records > 0 {
-        chrome.push(Line::from(Span::styled(
-            truncate_to_width(
-                &format!("? {} × {UNKNOWN_RECORD_LABEL}", state.unknown_records),
-                inner.width as usize,
-            ),
-            Style::default().fg(theme.colors.warning),
-        )));
-    }
-    let has_input_requests = state.room.as_ref().is_some_and(|room| {
-        room.artifacts()
-            .values()
-            .any(|artifact| artifact.kind == ArtifactKind::InputRequest)
-    });
-    if has_input_requests {
-        chrome.push(Line::from(Span::styled(
-            truncate_to_width(&input_request_note(), inner.width as usize),
-            muted,
-        )));
-    }
-
-    let footer_text = format!("{VERB_HINT}\n{STRUCTURAL_REPLAY_CLAIM}");
-    let footer_height = (wrapped_line_count(VERB_HINT, inner.width as usize)
-        + wrapped_line_count(STRUCTURAL_REPLAY_CLAIM, inner.width as usize))
-    .min(inner.height);
-    let list_height = (inner.height as usize).saturating_sub(chrome.len() + footer_height as usize);
-    state.set_viewport_rows(list_height.max(1), &mut rendered_selected);
-
-    let permission_mode = state.permission_mode;
-    let policy = state.policy;
-    let rows: Vec<(ArtifactId, Vec<String>)> = state
-        .room
-        .as_ref()
-        .map(|room| {
-            room.artifacts()
-                .values()
-                .map(|artifact| {
-                    let mut lines = vec![visible_artifact_row(
-                        artifact,
-                        room,
-                        permission_mode,
-                        &policy,
-                        inner.width as usize,
-                    )];
-                    lines.extend(artifact.depends_on.iter().map(|dependency| {
-                        truncate_to_width(&lineage_line(dependency), inner.width as usize)
-                    }));
-                    (artifact.id.clone(), lines)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let viewport = list_height.max(1);
-    let start = state.scroll_offset.min(rows.len().saturating_sub(1));
-    // Whole blocks, measured in rendered LINES: an artifact is its row plus one
-    // lineage line per `depends_on` edge. Counting artifacts here lets a
-    // lineage-heavy list overflow the area, clipping the row the selection
-    // sits on while `Enter` still acts on it. `synchronize_selection` uses the
-    // same line math, so the window and the selection never disagree.
-    let mut end = start;
-    let mut used = 0usize;
-    while end < rows.len() {
-        let lines = rows[end].1.len();
-        if used + lines > viewport && end > start {
-            break;
-        }
-        used += lines;
-        end += 1;
-    }
-    state.record_rendered_viewport(
-        rows.get(start).map(|(id, _)| id.clone()),
-        rows.get(rendered_selected).map(|(id, _)| id.clone()),
-    );
-    let items: Vec<ListItem<'static>> = rows[start..end]
-        .iter()
-        .enumerate()
-        .flat_map(|(offset, (_, lines))| {
-            let style = if start + offset == rendered_selected {
-                Style::default()
-                    .fg(theme.colors.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.colors.fg_primary)
-            };
-            lines
-                .iter()
-                .map(move |line| ListItem::new(Line::from(Span::styled(line.clone(), style))))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let chrome_height = chrome.len() as u16;
-    let list_area = Rect {
-        y: inner.y + chrome_height,
-        height: inner.height.saturating_sub(chrome_height + footer_height),
-        ..inner
-    };
-    if list_area.height > 0 {
-        ratatui::prelude::Widget::render(List::new(items), list_area, buf);
-    }
-    if chrome_height > 0 {
-        let chrome_area = Rect {
-            height: chrome_height.min(inner.height),
-            ..inner
-        };
-        Paragraph::new(chrome).render(chrome_area, buf);
-    }
-    let footer_area = Rect {
-        y: inner.y + inner.height.saturating_sub(footer_height),
-        height: footer_height,
-        ..inner
-    };
-    Paragraph::new(footer_text)
-        .style(muted)
-        .wrap(Wrap { trim: true })
-        .render(footer_area, buf);
-}
-
-fn wrapped_line_count(text: &str, width: usize) -> u16 {
-    let width = width.max(1);
-    let mut lines = 1u16;
-    let mut used = 0usize;
-    for word in text.split_whitespace() {
-        let word_width = word.chars().count();
-        if used == 0 {
-            used = word_width;
-        } else if used + 1 + word_width <= width {
-            used += 1 + word_width;
-        } else {
-            lines = lines.saturating_add(1);
-            used = word_width;
-        }
-    }
-    lines
 }
