@@ -620,7 +620,7 @@ fn finish_input_boundary(state: &mut TuiState, owner_before: (Option<u64>, Optio
         state.current_hint = crate::adapters::tui::hints::contextual_hint(
             &state.focus,
             state.session_count,
-            state.theme.timing.status_hint_fade_sessions,
+            state.hint_fade_sessions(),
             state.is_vscode,
             &state.modal_stack,
             state.pending_leader,

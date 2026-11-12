@@ -11,10 +11,31 @@ use crate::adapters::tui::text_geometry;
 use crate::adapters::tui::tour::copy;
 
 pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str) {
-    let theme = &state.theme;
     let Some(tour) = state.tour.as_ref() else {
         return;
     };
+    let paragraphs = copy::body(tour.step, state.multiline_mode);
+    paint(
+        frame,
+        rect,
+        &state.theme,
+        title,
+        &paragraphs,
+        copy::rail_items(tour.step),
+    );
+}
+
+/// Paint a card: `title` on the frame, `paragraphs` wrapped (grapheme-safe, by cell width) at the
+/// inner width, and the rail `items` on the last row. Split from [`render`] so a fixture can feed
+/// CJK and emoji text through the one production painter.
+pub fn paint(
+    frame: &mut Frame<'_>,
+    rect: Rect,
+    theme: &crate::adapters::tui::theme::Theme,
+    title: &str,
+    paragraphs: &[String],
+    items: Vec<String>,
+) {
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Block::default()
@@ -37,11 +58,11 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str) 
     let body = Rect::new(inner.x, inner.y, inner.width, inner.height - rail_rows);
     let width = usize::from(body.width);
     let mut rows: Vec<String> = Vec::new();
-    for paragraph in copy::body(tour.step, state.multiline_mode) {
+    for paragraph in paragraphs {
         if !rows.is_empty() {
             rows.push(String::new());
         }
-        rows.extend(wrap(&paragraph, width));
+        rows.extend(wrap(paragraph, width));
     }
     for (offset, row) in rows.iter().take(usize::from(body.height)).enumerate() {
         frame.render_widget(
@@ -50,7 +71,7 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str) 
         );
     }
     if rail_rows > 0 {
-        let mut items = copy::rail_items(tour.step);
+        let mut items = items;
         let text = loop {
             let text = items.join("  ");
             if text_geometry::cells(&text) <= usize::from(inner.width) || items.len() <= 2 {

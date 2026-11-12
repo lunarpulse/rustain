@@ -322,7 +322,9 @@ denied by the tour. An attached session has no tour.
 
 ```toml
 [onboarding]
-offer_tour = true   # offer the tour on every local launch until it is finished or skipped; default false
+offer_tour = true         # offer the tour on every local launch until it is finished or skipped; default false
+persistent_hints = true   # keep the status-row key hints after the usual five sessions; default false
+team = true               # the team defaults below; default false
 ```
 
 Finishing or leaving the tour writes `tour_done = true` to `state.toml` in the config
@@ -330,6 +332,39 @@ directory (`~/.config/rustain/`, or `RUSTAIN_CONFIG_DIR`), next to the session c
 fades the status hints; `config.toml` is never written. A launch that ends while the offer is
 still open writes nothing, so the offer comes back. To see the offer again, delete the
 `tour_done` line from `state.toml`; `/tour` replays the tour without touching it.
+
+While a step waits for you, one muted row over the top of the conversation says what to
+do (`Tour 3/5 · Answer a decision with Ctrl+X, Q · /tour`) and the place to look is shown
+in reverse video: the composer's top border, the focused tool call's `[Enter] Inspect` cue (never
+a code block's or reasoning's cue, never transcript text), the decision cue in the status row,
+the mission strip (the status row's `^X menu` when the strip has given up its row on a short
+terminal) or `^X menu`. Both only add emphasis: nothing moves. The guide row is painted before
+any frame, so a frame that leaves its cells uncovered shows it dimmed; the reverse-video
+highlight appears only on the bare screen (no frame open) and only while a step is armed.
+A target that is not painted gets no highlight: at 60 columns the status row often has no room
+for `^X menu`, and at 60x16 with a full composer (the only case where the strip gives up its row)
+the mission-strip step has no highlighted target. The guide row covers the first row of the
+conversation, so a tool line on that row is not highlighted until the conversation scrolls.
+
+#### Team onboarding (`[onboarding] team = true`)
+
+A team commits this to `<repo>/.rustain/config.toml` (or sets it in the user-global file, as
+`RUSTAIN_ONBOARDING__TEAM=true`, or with `-c onboarding.team=true`):
+
+```toml
+[onboarding]
+team = true
+```
+
+It adds a **defaults layer** below every explicit setting, nothing more: sessions start in Plan
+mode (`default_plan_mode = true`), reasoning shows expanded (`[markdown] reasoning =
+"expanded"`), the status hints stay (`persistent_hints = true`) and the tour is offered
+(`offer_tour = true`). The list is closed and can only tighten or restyle, never loosen a
+permission. Any value you set yourself in a workspace, user-global, environment, `-c` or
+command-line layer wins at key level, so `default_plan_mode = false` in your own file keeps
+Normal mode. A repository that turns the switch on can only make a session start in Plan
+mode, expand reasoning, keep hints and show one offer card. A team file that still carries the
+retired `[layout]` keys loads normally (see below).
 
 ### Retired layout keys (`[layout]`)
 

@@ -100,6 +100,34 @@ fn rail_item(command: TourCmd) -> String {
     format!("{} {label}", rail(Context::Tour, command))
 }
 
+/// The coach line's instruction for an armed step (Story 21.14 D13): one short sentence with its
+/// generated key. It never carries a driver wait string, `Ready`, or the Mission strip's
+/// grammar tokens. `multiline` is the composer's multi-line mode (the send key is the chord).
+#[must_use]
+pub fn coach_instruction(step: TourStep, multiline: bool) -> String {
+    match step {
+        TourStep::Offer => String::new(),
+        TourStep::Send => {
+            let send = if multiline {
+                key_text(LeaderCmd::Send)
+            } else {
+                key_text(InputCmd::SubmitOrNewline)
+            };
+            format!("Send a message with {send}")
+        }
+        TourStep::Inspect => format!(
+            "Select a tool call and open it with {}",
+            key_text(ChatCmd::Inspect)
+        ),
+        TourStep::Decide => format!("Answer a decision with {}", key_text(LeaderCmd::Decisions)),
+        TourStep::Hub => format!(
+            "Open Mission Control with {}",
+            leader_follow_up_long(LeaderCmd::Agents)
+        ),
+        TourStep::Help => format!("Open help with {}", key_text(LeaderCmd::Help)),
+    }
+}
+
 /// The Info notice of leaving the tour.
 #[must_use]
 pub fn closed_notice() -> String {

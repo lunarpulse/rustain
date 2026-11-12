@@ -374,12 +374,19 @@ pub enum ReasoningDisplay {
     Expanded,
 }
 
-/// First-launch onboarding (`[onboarding]`). `offer_tour` offers the guided tour once on a
-/// local launch until it is answered; it is off unless a user or a team file turns it on.
+/// Onboarding (`[onboarding]`). `offer_tour` offers the guided tour once on a local launch until
+/// it is answered; `persistent_hints` keeps the contextual status hints after the usual five
+/// sessions; `team` adds the team defaults layer (Plan mode, expanded reasoning, persistent
+/// hints, the tour offer) below every explicit setting. Each is off unless a user or a team file
+/// turns it on.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OnboardingConfig {
     #[serde(default)]
+    pub team: bool,
+    #[serde(default)]
     pub offer_tour: bool,
+    #[serde(default)]
+    pub persistent_hints: bool,
 }
 
 /// Markdown presentation (`[markdown]`, Story 21.13 D5). `code_max_rows` caps a

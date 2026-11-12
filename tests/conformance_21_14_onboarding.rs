@@ -2,7 +2,8 @@
 //! (`Surface::Tour`), `/tour`, the five real-action steps, the first-launch offer and the
 //! persistence of `tour_done` — carries the keystones K1 (the offer and hermeticity), K2 (the
 //! cards and their keys), K3 (the steps), K4 (key truth) and K5 (persistence and privacy), and
-//! the desk-check frame export of smoke leg A.
+//! the desk-check frame export of smoke leg A. Slice 14-B adds K6 (the team onboarding defaults
+//! and persistent hints) and K7 (the coach line and the step highlight) and the leg-B frame export.
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
 //! through a production door: keys travel as crossterm events through the local host's decoder,
@@ -27,6 +28,12 @@ mod k4_truth;
 
 #[path = "conformance_21_14_onboarding/k5_persist.rs"]
 mod k5_persist;
+
+#[path = "conformance_21_14_onboarding/k6_team.rs"]
+mod k6_team;
+
+#[path = "conformance_21_14_onboarding/k7_coach.rs"]
+mod k7_coach;
 
 #[path = "conformance_21_14_onboarding/smoke_frames.rs"]
 mod smoke_frames;

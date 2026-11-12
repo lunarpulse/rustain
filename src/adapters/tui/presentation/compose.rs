@@ -12,8 +12,8 @@ use crate::adapters::tui::{
     state::TuiState,
     widgets::{
         autocomplete_popup, bookmark_list, command_palette, help_overlay, login_dialog,
-        mission_strip, model_selector, profile_switcher, reverse_search, toast_layer, usage_panel,
-        wave_overlay, which_key_bar,
+        mission_strip, model_selector, profile_switcher, reverse_search, toast_layer, tour_coach,
+        usage_panel, wave_overlay, which_key_bar,
     },
 };
 
@@ -69,6 +69,7 @@ pub fn compose(
         frame.render_widget(mission_strip::line(&facts, host, strip.width, theme), strip);
     }
     toast_layer::render(frame, shell.chat_pane, &state.notifications, theme, facts);
+    tour_coach::paint_coach(frame, state, shell.chat_pane);
 
     let standard_rect = geometry::frame_rect(shell.region);
     let mut pane_painted = false;
@@ -380,6 +381,16 @@ pub fn compose(
         ));
     }
     paint_status(frame);
+    if state.tour.is_some() {
+        let targets = tour_coach::Targets {
+            chat_pane: shell.chat_pane,
+            input_area: shell.input_area,
+            status_bar: shell.status_bar,
+            mission_strip: shell.mission_strip,
+        };
+        let stage = shell.stage.map(|(conversation, _)| conversation);
+        tour_coach::paint_highlight(frame, state, &targets, host, stage);
+    }
     pane_painted
 }
 

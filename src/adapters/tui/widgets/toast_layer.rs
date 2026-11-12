@@ -28,6 +28,18 @@ pub fn capacity_for(pane_height: u16) -> usize {
     MAX_VISIBLE_TOASTS.min(usize::from((pane_height / 4).max(1)))
 }
 
+/// Whether the toasts [`render`] paints into `pane` reach the pane's top row (a pane short
+/// enough for the stack to fill it). The tour's coach line owns that row and yields then.
+#[must_use]
+pub fn reaches_top_row(pane: Rect, store: &NotificationStore) -> bool {
+    if pane.width < 4 || pane.height == 0 {
+        return false;
+    }
+    let wide = pane.width >= WIDE_PANE_COLUMNS && pane.height >= WIDE_PANE_MIN_ROWS;
+    let shown = capacity_for(pane.height).min(store.visible().count());
+    shown * if wide { 3 } else { 1 } >= usize::from(pane.height)
+}
+
 fn severity_color(theme: &Theme, severity: NoticeSeverity) -> Color {
     match severity {
         NoticeSeverity::Info => theme.colors.info,

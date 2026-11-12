@@ -336,6 +336,19 @@ pub fn try_load_with_config_overrides(
     Ok(config)
 }
 
+/// The team defaults layer (Story 21.14 D16): what `[onboarding] team = true` supplies below
+/// every explicit setting. A closed list that can only tighten or restyle — a session starts in
+/// Plan mode, reasoning shows expanded, the status hints stay, and the tour is offered. It never
+/// names a retired key and never loosens a permission.
+#[must_use]
+pub fn team_defaults() -> Value {
+    serde_json::json!({
+        "default_plan_mode": true,
+        "markdown": { "reasoning": "expanded" },
+        "onboarding": { "offer_tour": true, "persistent_hints": true },
+    })
+}
+
 /// Build the full config figment chain.
 ///
 /// File-layer paths are derived from `config_layer_paths()` (the shared
@@ -355,7 +368,78 @@ fn build_figment(
             Vec::new()
         }
     };
+    layered_figment(cli, &layers, profile_resolver, cli_config_overrides, None)
+}
 
+/// Merge `layers` once; when the result says `onboarding.team = true` (from a file, the
+/// environment or `-c`), merge them again with the team defaults layer directly above the
+/// active-profile layer. One extra in-memory pass at load and reload, never per draw. `env` is
+/// the environment layer: `None` reads the process environment (production), `Some(values)` is
+/// a fixed stand-in, so a caller can build every layer explicitly.
+fn layered_figment(
+    cli: &Cli,
+    layers: &[crate::adapters::cli::config_cmd::LayerDescriptor],
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+    env: Option<&Value>,
+) -> Figment {
+    let figment = merge_layers(
+        cli,
+        layers,
+        profile_resolver,
+        cli_config_overrides,
+        env,
+        false,
+    );
+    if figment
+        .extract_inner::<bool>("onboarding.team")
+        .unwrap_or(false)
+    {
+        return merge_layers(
+            cli,
+            layers,
+            profile_resolver,
+            cli_config_overrides,
+            env,
+            true,
+        );
+    }
+    figment
+}
+
+/// Load the configuration from explicitly built layers and a fixed environment layer: nothing is
+/// read from the process environment, the user's config directory or the working directory, so a
+/// caller (a conformance test) controls every layer.
+pub fn load_from_explicit_layers(
+    cli: &Cli,
+    layers: &[crate::adapters::cli::config_cmd::LayerDescriptor],
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+    env: &Value,
+) -> Result<AppConfig, DomainError> {
+    layered_figment(
+        cli,
+        layers,
+        profile_resolver,
+        cli_config_overrides,
+        Some(env),
+    )
+    .extract()
+    .map_err(|e| {
+        DomainError::Config(ConfigError::Extract {
+            reason: e.to_string(),
+        })
+    })
+}
+
+fn merge_layers(
+    cli: &Cli,
+    layers: &[crate::adapters::cli::config_cmd::LayerDescriptor],
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+    env: Option<&Value>,
+    team: bool,
+) -> Figment {
     // Start with the lowest-priority layer and merge higher-priority layers on top.
     let mut figment = Figment::new();
     for layer in layers.iter().rev() {
@@ -367,6 +451,9 @@ fn build_figment(
             ACTIVE_PROFILE_PRIORITY => {
                 if let Some(profile_value) = profile_resolver.resolve_active_profile_defaults() {
                     figment = figment.merge(Serialized::defaults(profile_value));
+                }
+                if team {
+                    figment = figment.merge(Serialized::defaults(team_defaults()));
                 }
             }
             USER_GLOBAL_CONFIG_PRIORITY => {
@@ -384,7 +471,12 @@ fn build_figment(
                     figment = merge_json_if_valid(figment, path, "local-override");
                 }
             }
-            ENV_VARS_PRIORITY => figment = figment.merge(Env::prefixed("RUSTAIN_").split("__")),
+            ENV_VARS_PRIORITY => {
+                figment = match env {
+                    None => figment.merge(Env::prefixed("RUSTAIN_").split("__")),
+                    Some(fixed) => figment.merge(Serialized::defaults(fixed)),
+                };
+            }
             CLI_FLAGS_PRIORITY => {
                 figment = figment.merge(Serialized::globals(CliOverrides::from(cli)));
             }
@@ -1084,5 +1176,192 @@ mod tests {
             .expect("extract config");
 
         assert_eq!(config.model, "override-model");
+    }
+
+    use crate::adapters::cli::config_cmd::LayerDescriptor;
+
+    /// The eight layers `config_layer_paths` lists, with the two file layers pointed at scratch
+    /// files (`user` = user-global, `workspace`) so no real config directory is read.
+    fn layers(user: Option<&Path>, workspace: Option<&Path>) -> Vec<LayerDescriptor> {
+        let layer = |kind, path: Option<&Path>, priority| LayerDescriptor {
+            kind,
+            path: path.map(Path::to_path_buf),
+            exists: path.is_some(),
+            priority,
+        };
+        vec![
+            layer("CLI flags", None, CLI_FLAGS_PRIORITY),
+            layer("env", None, ENV_VARS_PRIORITY),
+            layer("local", None, LOCAL_OVERRIDE_PRIORITY),
+            layer("workspace", workspace, WORKSPACE_CONFIG_PRIORITY),
+            layer("user-global", user, USER_GLOBAL_CONFIG_PRIORITY),
+            layer("profile", None, ACTIVE_PROFILE_PRIORITY),
+            layer("defaults", None, BUILT_IN_DEFAULTS_PRIORITY),
+        ]
+    }
+
+    fn load_layers(
+        user: Option<&str>,
+        workspace: Option<&str>,
+        overrides: &[&str],
+        resolver: &dyn ProfileResolver,
+    ) -> AppConfig {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).expect("write the layer file");
+            path
+        };
+        let user = user.map(|body| write("user.toml", body));
+        let workspace = workspace.map(|body| write("workspace.toml", body));
+        let overrides = parse_config_overrides(
+            &overrides
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        )
+        .expect("overrides parse");
+        layered_figment(
+            &test_cli(),
+            &layers(user.as_deref(), workspace.as_deref()),
+            resolver,
+            Some(&overrides),
+            // A fixed, empty environment layer: no ambient `RUSTAIN_*` variable can reach the test.
+            Some(&serde_json::json!({})),
+        )
+        .extract()
+        .expect("extract config")
+    }
+
+    fn team_view(config: &AppConfig) -> (bool, String, bool, bool) {
+        (
+            config.default_plan_mode,
+            config.markdown.reasoning.clone(),
+            config.onboarding.offer_tour,
+            config.onboarding.persistent_hints,
+        )
+    }
+
+    #[test]
+    fn story21_14_the_team_layer_supplies_its_closed_list_from_any_layer() {
+        let team = |config: &AppConfig| team_view(config) == (true, "expanded".into(), true, true);
+        let noop = NoopProfileResolver;
+        assert!(team(&load_layers(
+            None,
+            Some("[onboarding]\nteam = true"),
+            &[],
+            &noop
+        )));
+        assert!(team(&load_layers(
+            Some("[onboarding]\nteam = true"),
+            None,
+            &[],
+            &noop
+        )));
+        assert!(team(&load_layers(
+            None,
+            None,
+            &["onboarding.team=true"],
+            &noop
+        )));
+        assert_eq!(
+            team_defaults(),
+            serde_json::json!({
+                "default_plan_mode": true,
+                "markdown": { "reasoning": "expanded" },
+                "onboarding": { "offer_tour": true, "persistent_hints": true },
+            }),
+            "the closed list of the team layer"
+        );
+    }
+
+    #[test]
+    fn story21_14_explicit_values_beat_the_team_layer_at_key_level() {
+        let noop = NoopProfileResolver;
+        let workspace = "[onboarding]\nteam = true\n\n[markdown]\nreasoning = \"folded\"";
+        let config = load_layers(None, Some(workspace), &[], &noop);
+        assert_eq!(
+            team_view(&config),
+            (true, "folded".into(), true, true),
+            "only the explicit key changes"
+        );
+        let config = load_layers(
+            Some("default_plan_mode = false\n[onboarding]\noffer_tour = false"),
+            Some("[onboarding]\nteam = true"),
+            &[],
+            &noop,
+        );
+        assert_eq!(
+            team_view(&config),
+            (false, "expanded".into(), false, true),
+            "a user-global value beats the workspace team switch"
+        );
+        let config = load_layers(
+            None,
+            Some("[onboarding]\nteam = true"),
+            &["default_plan_mode=false"],
+            &noop,
+        );
+        assert!(!config.default_plan_mode, "-c beats the team layer");
+    }
+
+    #[test]
+    fn story21_14_without_the_team_switch_the_defaults_are_untouched() {
+        let noop = NoopProfileResolver;
+        for config in [
+            load_layers(None, None, &[], &noop),
+            load_layers(None, Some("[onboarding]\nteam = false"), &[], &noop),
+        ] {
+            assert_eq!(
+                team_view(&config),
+                (false, "folded".into(), false, false),
+                "no layer leaks without `team`"
+            );
+        }
+        let plain = serde_json::to_value(load_layers(None, None, &[], &noop)).unwrap();
+        assert_eq!(
+            plain,
+            serde_json::to_value(AppConfig::default()).unwrap(),
+            "defaults are byte-for-byte what they were"
+        );
+    }
+
+    #[test]
+    fn story21_14_the_team_layer_sits_above_the_profile_and_below_the_files() {
+        struct Profile;
+        impl ProfileResolver for Profile {
+            fn resolve_active_profile_defaults(&self) -> Option<figment::value::Value> {
+                figment::value::Value::serialize(serde_json::json!({
+                    "default_plan_mode": false,
+                    "model": "profile-model",
+                }))
+                .ok()
+            }
+        }
+        let config = load_layers(None, Some("[onboarding]\nteam = true"), &[], &Profile);
+        assert!(config.default_plan_mode, "the team layer beats the profile");
+        assert_eq!(
+            config.model, "profile-model",
+            "the rest of the profile stays"
+        );
+    }
+
+    #[test]
+    fn story21_14_a_team_file_carrying_the_retired_layout_keys_loads_without_a_warning() {
+        let config = load_layers(
+            None,
+            Some("[onboarding]\nteam = true\n\n[layout]\ndensity_mode = \"focus\""),
+            &[],
+            &NoopProfileResolver,
+        );
+        assert!(config.onboarding.team && config.default_plan_mode);
+        assert!(KNOWN_TOP_LEVEL_FIELDS.contains(&"onboarding"));
+        assert!(!RETIRED_TOP_LEVEL_FIELDS.contains(&"onboarding"));
+        assert!(
+            team_defaults().get("layout").is_none(),
+            "the team layer names no retired key"
+        );
+        // `-c onboarding.team=true` is a known key: it parses without the unknown-key path.
+        assert!(parse_config_overrides(&["onboarding.team=true".to_string()]).is_ok());
     }
 }

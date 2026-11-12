@@ -825,7 +825,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         ctx.state.current_hint = crate::adapters::tui::hints::contextual_hint(
             &ctx.state.focus,
             ctx.state.session_count,
-            ctx.state.theme.timing.status_hint_fade_sessions,
+            ctx.state.hint_fade_sessions(),
             ctx.state.is_vscode,
             &ctx.state.modal_stack,
             ctx.state.pending_leader,

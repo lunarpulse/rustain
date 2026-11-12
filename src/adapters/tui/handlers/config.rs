@@ -37,6 +37,16 @@ pub fn apply_markdown_config(
     state.reasoning_display = config.reasoning();
 }
 
+/// Story 21.14 (D17): adopt `[onboarding] persistent_hints` (explicit or from the team layer).
+/// Called at startup and after every config reload; the status hints stay past the usual five
+/// sessions while it is on.
+pub fn apply_onboarding_config(
+    state: &mut crate::adapters::tui::state::TuiState,
+    config: &crate::domain::models::OnboardingConfig,
+) {
+    state.hints_persistent = config.persistent_hints;
+}
+
 pub struct ReloadContext<'a> {
     pub cli: &'a Cli,
     pub config_store: &'a dyn ConfigStorePort,

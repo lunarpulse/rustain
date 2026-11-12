@@ -2248,6 +2248,9 @@ pub struct TuiState {
     /// Used to fade contextual hints after the first N sessions.
     // Covers: UX-DR96
     pub session_count: u32,
+    /// `[onboarding] persistent_hints` (explicit or from the team layer, Story 21.14 D17): the
+    /// contextual status hints never fade with the session count.
+    pub hints_persistent: bool,
     /// Current contextual status-bar hint for discoverability.
     /// `None` once session_count > theme.timing.status_hint_fade_sessions.
     // Covers: UX-DR93
@@ -2384,6 +2387,17 @@ pub struct TuiState {
 }
 
 impl TuiState {
+    /// Sessions after which the contextual status hint fades: the theme's threshold, or never
+    /// while `[onboarding] persistent_hints` is on. The one source for every hint call site.
+    #[must_use]
+    pub fn hint_fade_sessions(&self) -> u32 {
+        if self.hints_persistent {
+            u32::MAX
+        } else {
+            self.theme.timing.status_hint_fade_sessions
+        }
+    }
+
     /// Story 19.16g — before a draw: a visit painted by a frame that never completed was not
     /// presented, so the Messages tab's paint mark is cleared and the visit stays pending.
     pub fn restore_unflushed_log_visits(&mut self) {
@@ -2661,6 +2675,7 @@ impl TuiState {
             multiplexer_detected: false,
             is_vscode: false,
             session_count: 0,
+            hints_persistent: false,
             current_hint: None,
             code_max_rows: 30,
             reasoning_display: crate::domain::models::ReasoningDisplay::Folded,

@@ -405,6 +405,7 @@ pub async fn run(
         crate::adapters::tui::login_runtime::LoginCtx::new(app_state.event_bus.clone(), live);
     state.skill_registry = skill_activator.registry_arc();
     crate::adapters::tui::handlers::config::apply_markdown_config(&mut state, &config.markdown);
+    handlers::config::apply_onboarding_config(&mut state, &config.onboarding);
     launchpad_facts::install(&mut state, &workspace_path, &app_state.provider_registry);
 
     // P-23: Initialize active_profile snapshot from resolved profile
@@ -450,7 +451,7 @@ pub async fn run(
     state.current_hint = crate::adapters::tui::hints::contextual_hint(
         &state.focus,
         state.session_count,
-        state.theme.timing.status_hint_fade_sessions,
+        state.hint_fade_sessions(),
         state.is_vscode,
         &state.modal_stack,
         state.pending_leader,
@@ -1079,7 +1080,7 @@ pub async fn run(
                                 state.current_hint = crate::adapters::tui::hints::contextual_hint(
                                     &state.focus,
                                     state.session_count,
-                                    state.theme.timing.status_hint_fade_sessions,
+                                    state.hint_fade_sessions(),
                                     state.is_vscode,
                                     &state.modal_stack,
                                     state.pending_leader,
@@ -5752,6 +5753,7 @@ pub async fn run(
                             &mut state,
                             &config.markdown,
                         );
+                        handlers::config::apply_onboarding_config(&mut state, &config.onboarding);
                         state.needs_redraw = true;
                     }
                     AppEvent::ProfileSwitched {
@@ -7098,7 +7100,7 @@ pub fn render(
                 rendered_hint = crate::adapters::tui::hints::contextual_hint(
                     focus,
                     state.session_count,
-                    theme.timing.status_hint_fade_sessions,
+                    state.hint_fade_sessions(),
                     state.is_vscode,
                     &state.modal_stack,
                     state.pending_leader,
