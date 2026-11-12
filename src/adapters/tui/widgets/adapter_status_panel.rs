@@ -136,9 +136,9 @@ pub fn build(
     }
     if overrides.is_empty() {
         rows.push(AdapterLine::Blank);
-        rows.push(AdapterLine::Note(
-            "7 ports loaded — most adapters NoOp (real adapters in Epic 12)".to_owned(),
-        ));
+        rows.push(AdapterLine::Note(format!(
+            "{PORT_COUNT} adapters loaded; most are placeholders."
+        )));
     }
     rows
 }
@@ -439,7 +439,7 @@ mod tests {
         );
         assert!(text[6].contains("channels"), "{:?}", text[6]);
         assert_eq!(text[text.len() - 2], "");
-        assert!(text.last().unwrap().contains("7 ports loaded"));
+        assert!(text.last().unwrap().contains("7 adapters loaded"));
     }
 
     #[test]
@@ -478,8 +478,18 @@ mod tests {
             "{text:?}"
         );
         assert!(
-            !text.iter().any(|row| row.contains("7 ports loaded")),
+            !text.iter().any(|row| row.contains("7 adapters loaded")),
             "overrides drop the footer"
+        );
+    }
+
+    #[test]
+    fn story21_14_the_footer_says_how_many_adapters_loaded_and_that_most_are_placeholders() {
+        let rows = build(|_| healthy("ok"), Vec::new(), None, &BTreeMap::new());
+        let text = painted(&rows, 78);
+        assert_eq!(
+            text.last().map(String::as_str),
+            Some("7 adapters loaded; most are placeholders.")
         );
     }
 }

@@ -24,9 +24,9 @@ pub mod send;
 /// `cli/session/mod.rs`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum TeamAction {
-    /// Send through the running daemon's A2A runtime (requires its writer slot).
+    /// Send through the running daemon's A2A runtime (requires the write lock).
     Send(send::SendArgs),
-    /// Show the A2A transparency log for this workspace (FR95, NFR67).
+    /// Show the A2A transparency log for this workspace.
     ///
     /// Read-only, offline-safe, non-billable: it folds the durable room
     /// journal and prints the result. It never reads
@@ -52,7 +52,7 @@ pub enum TeamAction {
     Status,
     /// Revoke a sender's standing consent in this workspace's durable room journal.
     ///
-    /// Offline; a running daemon applies the revoke at its next admission or status read.
+    /// Offline; a running daemon applies the revoke on the next message it receives or status read.
     Untrust {
         /// Roster alias with a pinned key, or a full PeerId.
         target: String,

@@ -100,7 +100,9 @@ async fn body_over_eight_mebibytes_is_refused_before_copying() {
             .last()
             .unwrap()
             .message,
-        "Copy failed: item body exceeds the 8 MiB copy limit"
+        "Could not copy to the clipboard.\n\
+         Select the text in the terminal and copy it from there.\n\
+         item body exceeds the 8 MiB copy limit"
     );
     rig.f.h.state.thread_inspector.as_mut().unwrap().original = Some("x".repeat(COPY_MAX_BYTES));
     rig.key(Key::Char('c'));

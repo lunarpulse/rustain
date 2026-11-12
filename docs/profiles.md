@@ -44,7 +44,7 @@ channels  = telegram           # feature-gated; falls back to terminal
 scheduler = cron               # feature-gated; falls back to none
 context   = daily              # alias of `default` — memory + project-context injection
 ```
-**Preview status:** Telegram and cron adapters are not yet available (coming in Epic 12).
+**Preview status:** Telegram and cron adapters are not available yet.
 The profile loads gracefully with terminal and none as fallbacks.
 
 ## Profile Resolution Order

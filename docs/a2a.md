@@ -304,7 +304,7 @@ selection line; body text cannot forge it.
 **The selection is the sending host's statement; it starts no work and grants
 nothing.** Arrival, View and Acknowledge do not select context or start a model
 turn. A received `design_update` offers `[a] Acknowledge`, a receipt only, not
-acceptance. To compare with the current implementation, choose `[c] Use as
+acceptance. To compare with the current implementation, choose `[u] Use as
 context`, then start an ordinary local turn; the peer-tainted body is treated as
 untrusted context and the answer stays in your transcript. Nothing is sent back
 silently. To ask the sender, explicitly send
@@ -410,7 +410,7 @@ In local Chat, Enter inspects the focused tool call without expanding the Stage;
 The inspector supports `/` search, `n`/`N` matches, `w` wrap (on by default) and
 `c` exact active-tab source copy. Terminal-safe display is not secret redaction:
 arguments/results may contain secrets, and copy preserves original source bytes.
-The UTF-8 copy limit is 8 MiB inclusive; larger sources report Copy failed,
+The UTF-8 copy limit is 8 MiB inclusive; larger sources report `Could not copy to the clipboard.`,
 never a truncated copy. Copy confirmation is reviewable via Ctrl+X n even when
 the sheet hides the toast. Attached sessions have no tool inspector or Stage
 Inspect hint. Ctrl+R still opens composer history search.
@@ -1456,7 +1456,7 @@ From a shell, `rustain team status` and
 commands, using the same durable room journal, active-profile/workspace roster
 and status renderer. Neither needs a daemon or provider. Status is text-only
 and creates no workspace files; an untrust with no active grant changes nothing.
-A running daemon applies a CLI revoke at its next admission or status read,
+A running daemon applies a CLI revoke on the next message it receives or status read,
 without restarting. Status and untrust refresh the journal authoritatively and
 refuse without reporting a cached success or mutating trust when that read
 fails; admission remains best-effort and may continue using the cached consent

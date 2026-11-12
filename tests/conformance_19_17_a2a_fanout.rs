@@ -516,7 +516,7 @@ fn assert_unreachable_notices(state: &TuiState) {
         ),
         (
             "peer `g` is configured but its AgentCard is not cached",
-            "g unreachable: peer `g` is configured but its AgentCard is not cached — discovery runs once at startup and may still be in flight, or the peer was unreachable when this session started. If it stays refused, restart the daemon with the peer up; on-demand discovery is `DF-18-9-CARD-REFRESH`.",
+            "g unreachable: peer `g` is configured but its AgentCard is not cached — discovery runs once at startup and may still be in flight, or the peer was unreachable when this session started. If it stays refused, restart the daemon with the peer up; the card is not refreshed while the daemon runs.",
         ),
     ] {
         let notices: Vec<_> = state

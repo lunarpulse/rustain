@@ -175,7 +175,7 @@ impl TomlProfileResolver {
                     // sees. ⛔ Never `ProfileError::Parse` — see the field doc.
                     tracing::warn!("Failed to parse workspace MCP config: {e}");
                     mcp_config_notices.push(format!(
-                        "MCP config at {} could not be read — no MCP servers were loaded from it: {e}",
+                        "MCP config at {} could not be read — no MCP servers were loaded from it: {e}. Fix or remove that file, then run /config reload.",
                         workspace_mcp_path.display()
                     ));
                     Vec::new()

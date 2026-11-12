@@ -73,7 +73,7 @@ impl WaitPolicy {
     pub const fn r1_unsupported_reason(self) -> Option<&'static str> {
         match self {
             Self::All => None,
-            Self::Quorum(_) => Some("WaitPolicy::Quorum is reserved for R3 (Story 18.6)"),
+            Self::Quorum(_) => Some("WaitPolicy::Quorum is not supported yet; use WaitPolicy::All"),
         }
     }
 }
@@ -443,6 +443,15 @@ pub enum OrchestrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story21_14_the_quorum_refusal_says_what_to_use_instead() {
+        assert_eq!(WaitPolicy::All.r1_unsupported_reason(), None);
+        assert_eq!(
+            WaitPolicy::Quorum(2).r1_unsupported_reason(),
+            Some("WaitPolicy::Quorum is not supported yet; use WaitPolicy::All")
+        );
+    }
 
     fn spoke(label: &str) -> SpokeSpec {
         SpokeSpec {

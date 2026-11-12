@@ -803,8 +803,7 @@ fn test_map_connect_result_unsupported_is_skipped_info() {
     // the reason SSE actually carries.
     let (status, tier) = map_connect_result(
         &Err(McpError::Unsupported(
-            "SSE transport is not supported (deprecated by MCP spec 2025-03-26 per ADR-06-08)"
-                .to_string(),
+            "SSE transport is not supported (the MCP spec deprecated it on 2025-03-26)".to_string(),
         )),
         0,
     );

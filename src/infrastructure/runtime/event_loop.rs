@@ -44,9 +44,7 @@ use crate::adapters::tui::decision_queue::{
 use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
 use crate::adapters::tui::notification_log;
-use crate::adapters::tui::notifications::{
-    self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
-};
+use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::presentation::{self, RouteEffect, reducer};
 use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
@@ -806,10 +804,7 @@ pub async fn run(
             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                 conversation_id: Some(conversation.id.clone()),
                 level: NoticeLevel::Warning,
-                message: format!(
-                    "Plan '{}' was mid-execution at exit (task {} was running). Plan execution was halted. Resume from the task panel (6.3) or invoke /plan resume <id> (later) to continue.",
-                    ptitle, tnum
-                ),
+                message: super::error_notices::plan_halted_at_exit(ptitle, tnum),
             });
         }
     }
@@ -915,10 +910,7 @@ pub async fn run(
                     let _ = event_bus.emit_domain(AppEvent::SystemNotice {
                         conversation_id: None,
                         level: NoticeLevel::Warning,
-                        message: format!(
-                            "⚠ {}: offline. Local LLM: not configured.",
-                            provider_name
-                        ),
+                        message: super::error_notices::provider_offline(&provider_name),
                     });
                 }
                 Err(_) => {
@@ -1070,7 +1062,7 @@ pub async fn run(
                             if tab_manager.active_tab().read_only && action.is_mutation() {
                                 state.input_buffer.clear();
                                 state.cursor_position = 0;
-                                notifications::warning(&mut state, NoticeSource::Tabs, "Tab is read-only (subagent output view)");
+                                notifications::warning(&mut state, NoticeSource::Tabs, crate::infrastructure::runtime::mission_bridge::READ_ONLY);
                                 state.needs_redraw = true;
                                 continue;
                             }
@@ -1136,7 +1128,7 @@ pub async fn run(
                                         state.resolved_mentions.clear();
                                         // P9: Show FeedbackBlock for each file resolution error
                                         for err in &file_errors {
-                                            notifications::error(&mut state, NoticeSource::Input, err.reason.clone());
+                                            super::error_notices::mention_unresolved(&mut state, &err.reason);
                                         }
                                         if !file_contexts.is_empty() {
                                             let prefix = message_builder::build_file_context_prefix(&file_contexts);
@@ -2115,7 +2107,7 @@ pub async fn run(
                                             context_prefix.push_str(&message_builder::build_command_context_prefix(&ctx));
                                         }
                                         for err in &cmd_errors {
-                                            notifications::warning(&mut state, NoticeSource::Input, format!("Command '/{}' references missing file: {}", cmd_name, err.raw_path));
+                                            notifications::warning(&mut state, NoticeSource::Input, super::error_notices::missing_command_file(cmd_name, &err.raw_path));
                                         }
                                     }
 
@@ -2126,7 +2118,7 @@ pub async fn run(
                                     }
                                     // P9: Show FeedbackBlock for each file resolution error
                                     for err in &file_errors {
-                                        notifications::error(&mut state, NoticeSource::Input, err.reason.clone());
+                                        super::error_notices::mention_unresolved(&mut state, &err.reason);
                                     }
                                     state.resolved_mentions.clear();
 
@@ -2196,7 +2188,7 @@ pub async fn run(
                                 }
                                 InputAction::OpenTaskWindow(task) => {
                                     if !crate::adapters::tui::task_window::open(&mut state, &conversation, &task) {
-                                        notifications::warning(&mut state, NoticeSource::Task, "That task is no longer available.");
+                                        notifications::warning(&mut state, NoticeSource::Task, super::error_notices::TASK_UNAVAILABLE);
                                     }
                                 }
                                 // ─── Story 6.4 / 21.7: task actions, keyed by TaskRef ───
@@ -2319,7 +2311,7 @@ pub async fn run(
 
                                 // ─── End Story 6.4 ───
                                 InputAction::ImageFormatError => {
-                                    notifications::error(&mut state, NoticeSource::Image, "Unsupported image format. Supported: PNG, JPEG, GIF, WebP");
+                                    super::error_notices::image_unsupported(&mut state);
                                 }
                                 InputAction::ImageSizeWarning { media_type, data, warning } => {
                                     // AC4: Show confirm/cancel FeedbackBlock for large images.
@@ -2348,7 +2340,7 @@ pub async fn run(
                                             // Propagate image-validation outcomes inline
                                             match inner_action {
                                                 InputAction::ImageFormatError => {
-                                                    notifications::error(&mut state, NoticeSource::Image, "Unsupported image format. Supported: PNG, JPEG, GIF, WebP");
+                                                    super::error_notices::image_unsupported(&mut state);
                                                 }
                                                 InputAction::ImageSizeWarning { media_type, data, warning } => {
                                                     let attachment = ImageAttachment { media_type, data };
@@ -2371,12 +2363,12 @@ pub async fn run(
                                                     notifications::info(&mut state, NoticeSource::Clipboard, "Clipboard is empty");
                                                 }
                                                 Err(e) => {
-                                                    notifications::error(&mut state, NoticeSource::Clipboard, format!("Could not read clipboard: {e}"));
+                                                    super::error_notices::clipboard_unreadable(&mut state, &e);
                                                 }
                                             }
                                         }
                                         Err(e) => {
-                                            notifications::error(&mut state, NoticeSource::Clipboard, format!("Could not read clipboard: {e}"));
+                                            super::error_notices::clipboard_unreadable(&mut state, &e);
                                         }
                                     }
                                 }
@@ -2633,7 +2625,7 @@ pub async fn run(
                                                 }
                                                 Err(e) => {
                                                     tracing::error!("Failed to load conversation {}: {}", conv_id, e);
-                                                    notifications::error(&mut state, NoticeSource::Session, format!("Failed to load conversation: {}", e));
+                                                    super::error_notices::conversation_load_failed(&mut state, &e);
                                                     state.needs_redraw = true;
                                                 }
                                             }
@@ -2799,8 +2791,8 @@ pub async fn run(
                                     {
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
-                                        match handlers::transcript_target::handle_fork_confirm(&*storage, &conversation, message_index).await {
-                                            Ok(new_id) => {
+                                        let result = handlers::transcript_target::handle_fork_confirm(&*storage, &conversation, message_index).await;
+                                        if let Some(new_id) = super::error_notices::fork_result(&mut state, result) {
                                                 match storage.load_conversation(&new_id).await {
                                                     Ok(Some(forked_conv)) => {
                                                         // Save current tab state before creating new tab
@@ -2841,11 +2833,6 @@ pub async fn run(
                                                     }
                                                 }
                                             }
-                                            Err(e) => {
-                                                tracing::error!("Fork failed: {}", e);
-                                                notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
-                                            }
-                                        }
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -2933,20 +2920,10 @@ pub async fn run(
                                             target_msg_idx, conversation.id
                                         );
 
-                                        let outcome = match handlers::transcript_target::handle_rewind_confirm(&*storage, &conversation, target_msg_idx).await {
-                                            Ok(outcome) => outcome,
-                                            Err(handlers::transcript_target::RewindFailure::Begin(error)) => {
-                                                tracing::error!("begin_rewind_txn failed — aborting rewind: {}", error);
-                                                notifications::error(&mut state, NoticeSource::Session, format!("Rewind aborted: could not create recovery journal ({})", error));
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            Err(handlers::transcript_target::RewindFailure::Truncate(error)) => {
-                                                tracing::error!("revert_to_checkpoint failed: {}", error);
-                                                notifications::error(&mut state, NoticeSource::Session, format!("Rewind failed: {}", error));
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
+                                        let result = handlers::transcript_target::handle_rewind_confirm(&*storage, &conversation, target_msg_idx).await;
+                                        let Some(outcome) = super::error_notices::rewind_result(&mut state, result) else {
+                                            state.needs_redraw = true;
+                                            continue;
                                         };
                                         let reverted = outcome.reverted;
                                         let restored = reverted
@@ -3023,8 +3000,7 @@ pub async fn run(
                                         let result = handlers::transcript_target::handle_rewind_fork_instead(&*storage, &conversation, message_index).await;
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
-                                        match result {
-                                            Ok(new_id) => {
+                                        if let Some(new_id) = super::error_notices::fork_result(&mut state, result) {
                                                 match storage.load_conversation(&new_id).await {
                                                     Ok(Some(forked_conv)) => {
                                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
@@ -3057,11 +3033,6 @@ pub async fn run(
                                                     }
                                                 }
                                             }
-                                            Err(e) => {
-                                                tracing::error!("Fork (from rewind) failed: {}", e);
-                                                notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
-                                            }
-                                        }
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -5229,16 +5200,7 @@ pub async fn run(
                             }
                             _ => {
                                 if is_active {
-                                    notifications::notify_draft(
-                                        &mut state,
-                                        NoticeDraft::new(
-                                            NoticeSource::Compaction,
-                                            NoticeSeverity::Error,
-                                            format!("Compaction failed: {}. Context unchanged.", reason),
-                                        )
-                                        .conversation(conversation.id.clone())
-                                        .action(NoticeAction::RetryCompaction),
-                                    );
+                                    super::error_notices::compaction_failed(&mut state, conversation.id.clone(), &reason);
                                 }
                             }
                         }
@@ -5737,7 +5699,7 @@ pub async fn run(
                             crate::adapters::tui::handlers::HandlerOutcome::Notify(
                                 AppEvent::ConfigReloaded { success: true, .. },
                             ) => "Configuration reloaded",
-                            _ => "Configuration reload failed — keeping previous config",
+                            _ => "Configuration reload failed, so the previous configuration stays active. Fix the config file, then run /config reload again.",
                         };
                         if let crate::adapters::tui::handlers::HandlerOutcome::Notify(event) = outcome {
                             let _ = app_state.event_bus.emit_domain(event);
@@ -5870,7 +5832,7 @@ pub async fn run(
                         error,
                     } => {
                         let label = crate::domain::services::adapter_overlay::port_label(port);
-                        notifications::error(&mut state, NoticeSource::Adapter, format!("Override /{} {} failed: {}", label, requested_adapter, error));
+                        super::error_notices::override_failed(&mut state, label, &requested_adapter, &error);
                         state.needs_redraw = true;
                     }
                     AppEvent::Subagent(envelope) => {
@@ -6411,11 +6373,7 @@ pub async fn apply_open_cross_search_result(
                     result.conversation_id,
                     e
                 );
-                notifications::error(
-                    state,
-                    NoticeSource::Session,
-                    format!("Failed to open conversation: {}", e),
-                );
+                super::error_notices::conversation_open_failed(state, &e);
                 state.cross_search.load_failed = true;
                 state.needs_redraw = true;
                 return;

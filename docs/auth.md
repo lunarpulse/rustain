@@ -830,7 +830,8 @@ share the same login engines, method list, success lines and discovery line.
   cleared when it closes.
 - **Esc** (or Ctrl+C) cancels a running login: `Login cancelled`, nothing is
   stored and the local callback listener closes. Ctrl+Q quits the TUI and also
-  cancels it. A failure shows `Login failed: <reason>`.
+  cancels it. A failure shows `Login failed: <reason>` followed by the next step (run
+  `/login` again, or check the provider settings).
 - **After success** the TUI shows the CLI's success line and the credential path,
   opens the model picker at the provider — already unlocked — and shows
   `↻ Discovering models for <provider>...` until the live roster arrives, then
@@ -889,7 +890,8 @@ The [common slash syntax](#signing-in-from-the-tui) applies to both commands.
   open with fresh rows and `Credential #<id> for <Provider> no longer exists.`; a
   disabled account answers `Credential #<id> for <Provider> is disabled
   (<cause>); log in again.`; a store failure closes the overlay with
-  `Account update failed: <reason>`.
+  `Could not update the account.` (next step: run `/login` again or check the provider
+  settings; the store's reason follows as the detail in the notification log).
 - **Attached sessions** answer ``Account changes are not available in an
   attached session. Run `rustain auth accounts`, `rustain auth use <provider>
   --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal.`` A CLI

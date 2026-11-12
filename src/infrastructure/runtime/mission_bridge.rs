@@ -20,7 +20,7 @@ use crate::infrastructure::runtime::agent_core::AgentCore;
 use crate::infrastructure::subagent::{NodeTree, SubagentSpool};
 
 /// The warning a mutation on a read-only (subagent output) tab gets.
-pub const READ_ONLY: &str = "Tab is read-only (subagent output view)";
+pub const READ_ONLY: &str = "This tab shows subagent output and is read-only. Switch to a conversation tab to make changes.";
 
 /// Bytes of an agent's spool the cache keeps (a transcript is its tail).
 const TAIL_READ_BYTES: usize = crate::adapters::tui::agent_window::TAIL_BYTES;

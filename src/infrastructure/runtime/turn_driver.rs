@@ -66,6 +66,9 @@ use crate::infrastructure::runtime::event_loop::{
 use crate::infrastructure::runtime::turn;
 use crate::infrastructure::telemetry::ActiveRatioWindow;
 
+/// The warning when the agent's and the skill's tool lists share no tool.
+const TOOL_FILTERS_DISJOINT: &str = "Active agent and skill tool filters are disjoint, so no tools are available for this turn. Change the active agent or skill so their tool lists overlap.";
+
 /// One user (or synthetic) turn submission — the per-call inputs that vary
 /// between the 18 origination sites. Everything *stable* (the agent-side
 /// dependencies) is owned by [`LocalTurnDriver`] instead of threaded here.
@@ -458,11 +461,13 @@ impl LocalTurnDriver {
         };
         if let Some(allowed) = &combined {
             if allowed.is_empty() {
-                domain_tx.send(AppEvent::SystemNotice {
-                    conversation_id: Some(conversation.id.clone()),
-                    level: crate::domain::models::NoticeLevel::Warning,
-                    message: "Active agent and skill tool filters are disjoint — no tools available for this turn".to_string(),
-                }).ok();
+                domain_tx
+                    .send(AppEvent::SystemNotice {
+                        conversation_id: Some(conversation.id.clone()),
+                        level: crate::domain::models::NoticeLevel::Warning,
+                        message: TOOL_FILTERS_DISJOINT.to_string(),
+                    })
+                    .ok();
             } else {
                 // Story 19.2 (FR42-a): a tool restriction this build cannot
                 // honour is disclosed on the turn it bites — never dropped
@@ -869,10 +874,18 @@ fn context_taint_for_turn(state: &TuiState) -> bool {
 
 #[cfg(test)]
 mod turn_driver_allowlist_tests {
+    #[test]
+    fn disjoint_tool_filters_say_what_to_change() {
+        assert_eq!(
+            TOOL_FILTERS_DISJOINT,
+            "Active agent and skill tool filters are disjoint, so no tools are available for this turn. Change the active agent or skill so their tool lists overlap."
+        );
+    }
+
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use super::{context_taint_for_turn, tool_survives_allowlist};
+    use super::{TOOL_FILTERS_DISJOINT, context_taint_for_turn, tool_survives_allowlist};
     use crate::adapters::tui::state::TuiState;
     use crate::domain::models::{
         ContextBundle, ContextSource, PeerId, ProvenancedEntry, Relevance, RetrievalMethod,

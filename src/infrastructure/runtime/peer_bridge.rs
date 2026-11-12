@@ -543,7 +543,7 @@ async fn run_cli_share(
             return refuse(
                 out,
                 ShareRefusal::LocalFault {
-                    reason: "another client holds this daemon's writer slot".to_owned(),
+                    reason: OneShotAttachError::WriterHeld.to_string(),
                 },
             );
         }

@@ -3517,7 +3517,7 @@ impl AttachServer {
                 {
                     RecipientActionOutcome::Refused {
                         error: ProtocolError::Malformed(
-                            "`/team context` needs the `a2a` feature; this build was compiled without it.".to_owned(),
+                            "`/team context` needs the `a2a` feature; this build was compiled without it. Use a build that includes it.".to_owned(),
                         ),
                     }
                 }
@@ -4617,9 +4617,7 @@ impl AttachServer {
                     AppEvent::SystemNotice {
                         conversation_id: None,
                         level: crate::domain::models::NoticeLevel::Warning,
-                        message:
-                            "Sender consent card admission failed: the attached writer queue is full."
-                                .to_owned(),
+                        message: super::response_modes::CONSENT_QUEUE_FULL.to_owned(),
                     },
                 );
             }
@@ -5182,7 +5180,7 @@ async fn run_approval_gate(
                             AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: crate::domain::models::NoticeLevel::Warning,
-                                message: "Sender consent card admission failed: the attached writer queue is full.".to_owned(),
+                                message: super::response_modes::CONSENT_QUEUE_FULL.to_owned(),
                             },
                         );
                         tracing::warn!(?error, "sender consent failed: writer queue full");
@@ -8278,7 +8276,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let expected = format!(
-                "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+                "[no reply possible] This channel carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
                 mode.as_str()
             );
             assert_eq!(reloaded.messages.len(), 2);
@@ -8356,7 +8354,7 @@ mod tests {
                 .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(painted.contains("[no reply over RAP]"));
+            assert!(painted.contains("[no reply possible]"));
             let visible = painted
                 .lines()
                 .flat_map(|line| line.trim_start_matches('│').split_whitespace())
@@ -8570,7 +8568,7 @@ mod tests {
                     let expected = if attempt == 0 {
                         RecipientActionOutcome::Refused {
                             error: ProtocolError::PeerVerification(
-                                "RAP carries messages one way; no reply was sent.".into(),
+                                "This channel carries messages one way; no reply was sent.".into(),
                             ),
                         }
                     } else {
@@ -8586,7 +8584,7 @@ mod tests {
                 assert_eq!(
                     persisted.messages[0].content,
                     format!(
-                        "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+                        "[no reply possible] This channel carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
                         mode.as_str()
                     )
                 );
@@ -10598,7 +10596,7 @@ mod tests {
             panic!("expected queue-full SystemNotice warning");
         };
         assert_eq!(level, crate::domain::models::NoticeLevel::Warning);
-        assert!(message.contains("Sender consent card admission failed"));
+        assert!(message.contains("Could not show the sender consent card"));
     }
 
     #[tokio::test]

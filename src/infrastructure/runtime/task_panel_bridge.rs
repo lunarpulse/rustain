@@ -3,7 +3,7 @@
 //! Every task action arrives with a [`TaskRef`] — the conversation, plan and task number the
 //! key was pressed for — and is resolved in **that** conversation (A11, PC-3): [`TaskCtx::admit`]
 //! refuses a ref whose conversation is not the active tab's (`Open <title> to change its
-//! tasks.`) and every action on a read-only tab (`Tab is read-only`), and a refused action
+//! tasks.`) and every action on a read-only tab (`This tab shows subagent output…`), and a refused action
 //! changes nothing and sends nothing. The event loop only calls these functions and runs the
 //! async follow-up they return, so a test drives the very code the loop runs.
 //!
@@ -22,6 +22,13 @@ use crate::domain::models::{
 };
 use crate::domain::services::peer_text::sanitize_display_line;
 use crate::domain::services::plan_runtime::PlanRuntime;
+
+/// The warning when the edited task text has no title line.
+const EDIT_NEEDS_TITLE: &str = "Could not read a title from the edited task, so the task is unchanged. Edit it again and keep the `title:` line filled in.";
+
+/// The warning when the edited task file cannot be read back.
+const EDIT_UNREADABLE: &str =
+    "Could not read the edited task file, so the task is unchanged. Edit the task again to retry.";
 
 pub fn parse_task_edit(content: &str) -> (String, Vec<String>) {
     let mut title = String::new();
@@ -329,10 +336,7 @@ pub fn edit(ctx: &mut TaskCtx<'_>, task: &TaskRef) -> Option<Follow> {
         return None;
     }
     let Ok(content) = std::fs::read_to_string(&path) else {
-        ctx.notice(
-            NoticeLevel::Warning,
-            "Failed to read edited file. Task unchanged.",
-        );
+        ctx.notice(NoticeLevel::Warning, EDIT_UNREADABLE);
         return None;
     };
     if content == template {
@@ -341,10 +345,7 @@ pub fn edit(ctx: &mut TaskCtx<'_>, task: &TaskRef) -> Option<Follow> {
     }
     let (new_title, new_description) = parse_task_edit(&content);
     if new_title.is_empty() {
-        ctx.notice(
-            NoticeLevel::Warning,
-            "Failed to parse edited task — missing title. Task unchanged.",
-        );
+        ctx.notice(NoticeLevel::Warning, EDIT_NEEDS_TITLE);
         return None;
     }
     if let Some(target) = ctx
@@ -447,7 +448,7 @@ pub fn enter_reorder(ctx: &mut TaskCtx<'_>, task: &TaskRef) -> bool {
         Some(reorder) => ctx.state.task_panel_state.reorder = Some(reorder),
         None => ctx.notice(
             NoticeLevel::Warning,
-            "Reorder requires a pending task selected.",
+            "Could not start reordering because no pending task is selected. Select a pending task, then try again.",
         ),
     }
     ctx.state.needs_redraw = true;
@@ -590,4 +591,19 @@ pub fn settle_reorder_origin(
     );
     state.needs_redraw = true;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn story21_14_an_edit_without_a_title_says_how_to_fix_it() {
+        assert_eq!(
+            super::EDIT_NEEDS_TITLE,
+            "Could not read a title from the edited task, so the task is unchanged. Edit it again and keep the `title:` line filled in."
+        );
+        assert_eq!(
+            super::EDIT_UNREADABLE,
+            "Could not read the edited task file, so the task is unchanged. Edit the task again to retry."
+        );
+    }
 }

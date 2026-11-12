@@ -289,7 +289,10 @@ async fn read_only_tab_task_actions_refuse_and_send_nothing() {
         bridge::cancel_plan(&mut ctx, &pending);
         assert!(!bridge::enter_reorder(&mut ctx, &pending));
     }
-    assert!(warned(&rig, "Tab is read-only"));
+    assert!(warned(
+        &rig,
+        "This tab shows subagent output and is read-only. Switch to a conversation tab to make changes."
+    ));
     assert_eq!(statuses(&conversation), statuses(&before));
     assert!(events.try_recv().is_err());
     assert_eq!(
@@ -340,6 +343,29 @@ async fn x_and_s_raise_the_decisions_and_never_mutate_directly() {
             .count_live(DecisionKind::SkipCascade),
         1
     );
+}
+
+#[tokio::test]
+async fn story21_14_reordering_a_task_that_is_not_pending_says_what_to_select() {
+    let mut rig = tasks_rig(80, 24).await;
+    let mut conversation = rig.f.conversation().clone();
+    let (bus, mut events) = EventBus::new(16);
+    let failed = task_ref(&rig, 2);
+    {
+        let mut ctx = TaskCtx::for_host(&mut rig.f.h.state, &mut conversation, &rig.f.tabs, &bus);
+        assert!(!bridge::enter_reorder(&mut ctx, &failed));
+    }
+    assert!(rig.f.h.state.task_panel_state.reorder.is_none());
+    match events.try_recv().expect("the refusal is announced") {
+        rustain::domain::events::AppEvent::SystemNotice { level, message, .. } => {
+            assert_eq!(level, rustain::domain::models::NoticeLevel::Warning);
+            assert_eq!(
+                message,
+                "Could not start reordering because no pending task is selected. Select a pending task, then try again."
+            );
+        }
+        other => panic!("expected a notice, got {other:?}"),
+    }
 }
 
 #[tokio::test]

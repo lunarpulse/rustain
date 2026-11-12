@@ -142,3 +142,80 @@ fn story21_14_smoke_frames_export_b() {
     write(&dir, "yield4", 60, 16, "", &f);
     write_mask(&dir, "yield4", 60, 16, "", &f);
 }
+
+/// Leg C (slice 14-C): a real `/export` refusal (an absolute path) entered through the export
+/// handler's public door paints an Error toast, an S-LOG row and the S-LOG Details at the three
+/// viewports; the rendered help of the root, `daemon` and `team` commands is written for the
+/// help predicate. The live leg runs the same `/export` against the binary.
+#[tokio::test]
+#[ignore = "writes the desk-check frames named by RUSTAIN_TOUR_FRAMES"]
+async fn story21_14_smoke_frames_export_c() {
+    use clap::CommandFactory;
+    use rustain::adapters::cli::commands::Cli;
+    use rustain::domain::models::SessionMeta;
+    use rustain::domain::models::conversation::Conversation;
+    use rustain::infrastructure::runtime::event_loop::apply_export_command;
+
+    let dir = std::path::PathBuf::from(
+        std::env::var("RUSTAIN_TOUR_FRAMES")
+            .expect("RUSTAIN_TOUR_FRAMES names the output directory"),
+    );
+    std::fs::create_dir_all(&dir).expect("create the frames directory");
+    let mut root = Cli::command();
+    root.build();
+    std::fs::write(
+        dir.join("help-root.txt"),
+        root.clone().render_long_help().to_string(),
+    )
+    .expect("write the root help");
+    for name in ["daemon", "team"] {
+        let mut sub = root
+            .find_subcommand(name)
+            .unwrap_or_else(|| panic!("`{name}` is a command"))
+            .clone();
+        std::fs::write(
+            dir.join(format!("help-{name}.txt")),
+            sub.render_long_help().to_string(),
+        )
+        .expect("write the subcommand help");
+    }
+    let meta = SessionMeta {
+        version: 1,
+        title: "leg C".to_string(),
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_060,
+        message_count: 0,
+        bookmarks: vec![],
+        fork_source: None,
+        imported_from: None,
+        extra: serde_json::Map::new(),
+        plan_slug: None,
+    };
+    let workspace = tempfile::tempdir().expect("scratch workspace");
+    let absolute = workspace.path().join("missing-dir").join("out.md");
+    let absolute = absolute.to_string_lossy().into_owned();
+    for (width, height, monitor) in [
+        (60u16, 16u16, false),
+        (80, 24, false),
+        (130, 30, false),
+        (130, 30, true),
+    ] {
+        let suffix = if monitor { "-monitor" } else { "" };
+        let mut f = plain(width, height);
+        f.h.state.monitor = monitor;
+        apply_export_command(
+            Some(&absolute),
+            &Conversation::default(),
+            &meta,
+            workspace.path(),
+            &mut f.h.state,
+        )
+        .await;
+        f.paint();
+        write(&dir, "errtoast", width, height, suffix, &f);
+        press_all(&mut f, &[Key::Ctrl('x'), Key::Char('n')]);
+        write(&dir, "errlog", width, height, suffix, &f);
+        press(&mut f, Key::Enter);
+        write(&dir, "errdetails", width, height, suffix, &f);
+    }
+}

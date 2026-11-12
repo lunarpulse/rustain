@@ -11,7 +11,7 @@ use clap::{
 
 pub const INVALID_PEERS: &str = "Invalid or duplicate peer id in 'rustain team send'";
 pub const NO_DAEMON: &str = "No daemon is running for this workspace, so nothing was sent. Start one with `rustain daemon start` — the daemon owns the A2A runtime and the send journal this verb uses.";
-pub const WRITER_HELD: &str = "Another client holds this daemon's writer slot, so nothing was sent. Use /team send in that session, or detach it and retry.";
+pub const WRITER_HELD: &str = "Another client holds this daemon's write lock, so nothing was sent. Use /team send in that session, or detach it and retry.";
 pub const NOT_EVERY_RECIPIENT: &str = "not every recipient received the message";
 pub const OUTCOME_UNKNOWN: &str = "The daemon stopped answering before the send outcome was known; do not assume nothing was sent.";
 

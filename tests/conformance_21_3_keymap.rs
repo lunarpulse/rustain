@@ -57,7 +57,7 @@ mod k11_decisions;
 mod k20_review_items;
 
 #[path = "conformance_21_3_keymap/k12_gate.rs"]
-mod k12_gate;
+pub(crate) mod k12_gate;
 
 #[path = "conformance_21_3_keymap/k9_dispatch.rs"]
 mod k9_dispatch;

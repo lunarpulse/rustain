@@ -149,6 +149,12 @@ async fn k6_export_result_severity_is_typed_success_or_error() {
         (source, severity),
         (NoticeSource::Export, NoticeSeverity::Error)
     );
-    assert!(message.starts_with("Export failed"), "{message}");
+    assert!(
+        message.starts_with(
+            "Could not create the exports folder.\n\
+             Check the permissions of .rustain/exports/, then run /export again.\n"
+        ),
+        "{message}"
+    );
     assert_eq!(state.status, StatusState::Idle);
 }

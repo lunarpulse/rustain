@@ -134,7 +134,10 @@ async fn local_read_only_fences_sent_retract_rail_key_and_effect() {
         .last()
         .expect("read-only warning");
     assert_eq!(notice.severity, NoticeSeverity::Warning);
-    assert_eq!(notice.message, "Tab is read-only (subagent output view)");
+    assert_eq!(
+        notice.message,
+        "This tab shows subagent output and is read-only. Switch to a conversation tab to make changes."
+    );
     assert_eq!(rig.f.h.state.decisions.items().count(), 0);
     assert!(!rig.f.h.state.feedback_blocks.contains_key("team-retract"));
     assert_eq!(rig.ws.journal_rows().await, before);

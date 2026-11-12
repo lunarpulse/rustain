@@ -173,7 +173,10 @@ pub async fn handle_apply_model_switch(
                     let _ = domain_tx.send(AppEvent::SystemNotice {
                         conversation_id: None,
                         level: NoticeLevel::Warning,
-                        message: format!("Unknown model: {}", model_id),
+                        message: format!(
+                            "Unknown model: {}. Choose a model from the model list.",
+                            model_id
+                        ),
                     });
                     if from_palette {
                         reducer::close(state, Surface::CommandPalette);
@@ -222,7 +225,10 @@ pub async fn handle_apply_model_switch(
             notifications::warning(
                 state,
                 NoticeSource::Model,
-                format!("Provider '{}' not found", resolved_pid),
+                format!(
+                    "Provider '{}' not found. Choose a provider from the model list.",
+                    resolved_pid
+                ),
             );
             state.needs_redraw = true;
             return HandlerOutcome::Quiet;
@@ -297,7 +303,13 @@ pub async fn handle_complete_model_switch(
 
     if resolved_pid != info.active_delegate_id() {
         if let Err(e) = info.set_active_provider(resolved_pid) {
-            notifications::warning(state, NoticeSource::Model, format!("Switch failed: {}", e));
+            notifications::warning(
+                state,
+                NoticeSource::Model,
+                format!(
+                    "Could not switch providers ({e}). Choose a model again, or pick another provider."
+                ),
+            );
             state.needs_redraw = true;
             return HandlerOutcome::Quiet;
         }
@@ -337,7 +349,7 @@ pub async fn handle_complete_model_switch(
                 state,
                 NoticeSource::Model,
                 format!(
-                    "{} does not support tool use. Tool execution will be unavailable.",
+                    "{} does not support tool use, so tools will not run. Choose a model with tool use to run tools.",
                     md.display_name
                 ),
             );

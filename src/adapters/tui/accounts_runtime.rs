@@ -31,7 +31,8 @@ fn unreadable(generation: u64, error: &dyn std::fmt::Display) -> LoginEvent {
         level: FeedbackLevel::Error,
         changed: false,
         lines: vec![format!(
-            "Could not read stored accounts: {}",
+            "Could not read the stored accounts.\n\
+             Run /login to sign in again, or check your provider settings.\n{}",
             display_text(&error.to_string())
         )],
         listing: None,
@@ -238,7 +239,8 @@ async fn failed(
         AccountError::Store(error) => (
             FeedbackLevel::Error,
             format!(
-                "Account update failed: {}",
+                "Could not update the account.\n\
+                 Run /login to sign in again, or check your provider settings.\n{}",
                 display_text(&error.to_string())
             ),
             false,

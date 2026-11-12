@@ -510,8 +510,8 @@ pub async fn team_command(
                 handler::show_team_board(
                     state,
                     "· `/team board` needs the `a2a` feature; this build was compiled without \
-                     it."
-                    .to_owned(),
+                     it. Use a build that includes it."
+                        .to_owned(),
                 );
             }
         }
@@ -554,7 +554,7 @@ pub async fn team_command(
                 handler::show_team_retract(
                     state,
                     "· `/team retract` needs the `a2a` feature; this build was compiled \
-                     without it. Nothing was marked."
+                     without it. Nothing was marked. Use a build that includes it."
                         .to_owned(),
                 );
             }
@@ -706,7 +706,7 @@ pub async fn retract_sent(
         crate::adapters::tui::notifications::warning(
             state,
             crate::adapters::tui::notifications::NoticeSource::Tabs,
-            "Tab is read-only (subagent output view)",
+            super::mission_bridge::READ_ONLY,
         );
         return;
     }
@@ -764,7 +764,7 @@ pub fn read_team_thread(
         notifications::warning(
             state,
             NoticeSource::Team,
-            "· `/team thread` needs the `a2a` feature; this build was compiled without it.",
+            "· `/team thread` needs the `a2a` feature; this build was compiled without it. Use a build that includes it.",
         );
     }
 }
@@ -2544,7 +2544,34 @@ mod tests {
         #[cfg(feature = "a2a")]
         assert!(notices[0].message.contains("no A2A send runtime"));
         #[cfg(not(feature = "a2a"))]
-        assert!(notices[0].message.contains("needs the `a2a` feature"));
+        assert_eq!(
+            notices[0].message,
+            "· `/team thread` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
+        );
+    }
+
+    /// Without the `a2a` feature the board, retract and send commands each say so and what to
+    /// use instead; runs only in the default (feature-off) configuration, like their producers.
+    #[cfg(not(feature = "a2a"))]
+    #[tokio::test]
+    async fn without_a2a_board_retract_and_send_say_which_build_to_use() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        team_command(&mut state, "conv", Some("board"), &app).await;
+        assert_eq!(
+            state.feedback_blocks["team-board"].message,
+            "· `/team board` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
+        );
+        team_command(&mut state, "conv", Some("retract peer ri_x"), &app).await;
+        assert_eq!(
+            state.feedback_blocks["team-retract"].message,
+            "· `/team retract` needs the `a2a` feature; this build was compiled without it. Nothing was marked. Use a build that includes it."
+        );
+        assert_eq!(
+            crate::adapters::tui::handlers::team_command::team_send_unavailable(),
+            "`/team send` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
+        );
     }
 
     /// Story 21.1 AC4 — the board's background path is an attributed Warning

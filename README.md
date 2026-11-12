@@ -389,7 +389,7 @@ Wrap defaults on; `w` toggles clipping with `→` on overflowing rows, keeping t
 top logical line anchored. `c` copies the active tab's original source, not its
 sanitized display or wrap markers (the live tail while Output is running).
 Copies up to and including 8 MiB of UTF-8 source are exact; larger sources are
-refused with `Copy failed`, never silently truncated. Empty source reports
+refused with `Could not copy to the clipboard.`, never silently truncated. Empty source reports
 `Nothing to copy`. Display sanitization removes terminal/bidi controls, not
 secrets: tool arguments and results can contain sensitive data, and exact copy
 preserves it. Copy confirmation remains in Notifications (`Ctrl+X n`), even

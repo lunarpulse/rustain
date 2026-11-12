@@ -36,7 +36,7 @@ impl AttachServer {
             super::recipient_command_gate(mode, tier, "reply", true).and_then(|()| {
                 Err(ProtocolError::Malformed(
                     "retrospective sharing needs the `a2a` feature; this build was compiled \
-                     without it."
+                     without it. Use a build that includes it."
                         .to_owned(),
                 ))
             })
@@ -783,8 +783,8 @@ async fn retro_share_without_a2a_keeps_the_reply_gate_and_never_writes_a_turn() 
             ConnectionTier::TrustedLocal,
             ProtocolError::Malformed(
                 "retrospective sharing needs the `a2a` feature; this build was compiled without \
-                 it."
-                .to_owned(),
+                 it. Use a build that includes it."
+                    .to_owned(),
             ),
         ),
     ] {

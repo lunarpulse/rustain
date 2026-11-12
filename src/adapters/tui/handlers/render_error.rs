@@ -34,10 +34,12 @@ pub fn handle_render_error(
     streaming.current_blocks.clear();
     streaming.active_tool_calls.clear();
 
-    notifications::error(
+    notifications::failure(
         state,
         NoticeSource::System,
-        format!("Render failed: {}", err),
+        "Could not draw the screen.",
+        "Resize the terminal, or restart rustain if the display stays broken.",
+        Some(err.to_string()),
     );
     state.needs_redraw = true;
 

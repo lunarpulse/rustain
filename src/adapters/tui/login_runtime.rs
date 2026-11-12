@@ -89,7 +89,10 @@ pub async fn run_login(
         Err(error) => {
             let outcome = match error {
                 FlowError::Cancelled => LoginFailure::Cancelled,
-                other => LoginFailure::Failed(display_text(&other.to_string())),
+                other => LoginFailure::Failed(format!(
+                    "{}\nRun /login to try again, or check your provider settings.",
+                    display_text(&other.to_string())
+                )),
             };
             ctx.emit(LoginEvent::Finished {
                 login_id,

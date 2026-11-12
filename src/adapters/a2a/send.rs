@@ -60,8 +60,8 @@ impl std::fmt::Display for SendError {
                 "peer `{peer}` is configured but its AgentCard is not cached — discovery \
                  runs once at startup and may still be in flight, or the peer was \
                  unreachable when this session started. If it stays refused, restart \
-                 the daemon with the peer up; on-demand discovery is \
-                 `DF-18-9-CARD-REFRESH`."
+                 the daemon with the peer up; the card is not refreshed while the \
+                 daemon runs."
             ),
             Self::Endpoint { peer, source } => {
                 write!(f, "peer `{peer}` has no usable A2A endpoint: {source}")
@@ -1474,6 +1474,17 @@ pub(crate) fn parse_thread(result: &serde_json::Value) -> Option<ServedThread> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn story21_14_a_peer_without_a_cached_card_is_told_to_restart_the_daemon() {
+        let error = super::SendError::CardNotCached {
+            peer: "alpha".to_owned(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "peer `alpha` is configured but its AgentCard is not cached — discovery runs once at startup and may still be in flight, or the peer was unreachable when this session started. If it stays refused, restart the daemon with the peer up; the card is not refreshed while the daemon runs."
+        );
+    }
+
     fn parse_status_turn(
         kind: Option<&str>,
         status: Option<serde_json::Value>,
@@ -2011,7 +2022,10 @@ mod tests {
         };
         assert!(text.contains("AgentCard is not cached"), "{text}");
         assert!(text.contains("may still be in flight"), "{text}");
-        assert!(text.contains("DF-18-9-CARD-REFRESH"), "{text}");
+        assert!(
+            text.contains("the card is not refreshed while the daemon runs"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

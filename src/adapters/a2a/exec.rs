@@ -723,8 +723,8 @@ pub const START_FAILURE_DETAIL: &str =
 /// Kept textually distinct from [`CANCEL_DETAIL`]: a remote peer distinguishing
 /// "the host died" from "my cancel was honored" is the difference between
 /// retrying and not (AC5b restart scope).
-pub const RESTART_DETAIL: &str = "the host restarted while this task was in flight; durable host-side resumption is not \
-     implemented (DF-18-1-HOSTRECONCILE) — resubmit if the work is still wanted";
+pub const RESTART_DETAIL: &str = "the host restarted while this task was in flight; the host cannot resume \
+     tasks after a restart — resubmit if the work is still wanted";
 
 /// The reason a task resolves `canceled`.
 pub const CANCEL_DETAIL: &str = "canceled at the submitter's request via tasks/cancel";
@@ -1224,6 +1224,14 @@ mod tests {
         assert_ne!(RESTART_DETAIL, CANCEL_DETAIL);
         assert!(RESTART_DETAIL.contains("restart"));
         assert!(CANCEL_DETAIL.contains("cancel"));
+    }
+
+    #[test]
+    fn story21_14_the_restart_reason_says_what_happened_and_what_to_do() {
+        assert_eq!(
+            RESTART_DETAIL,
+            "the host restarted while this task was in flight; the host cannot resume tasks after a restart — resubmit if the work is still wanted"
+        );
     }
 
     #[test]

@@ -15,6 +15,8 @@ mod commands;
 pub(crate) mod common;
 #[path = "conformance_20_1e_tui_login/device.rs"]
 mod device;
+#[path = "conformance_20_1e_tui_login/failure.rs"]
+mod failure;
 #[path = "conformance_20_1e_tui_login/inherited.rs"]
 mod inherited;
 #[path = "conformance_20_1e_tui_login/picker.rs"]

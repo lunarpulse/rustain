@@ -871,6 +871,12 @@ fn ac3_the_reach_refresh_changes_only_the_address() {
     assert!(card.contains("this key is unchanged"), "{card}");
     assert!(card.contains("203.0.113.20:55001"), "{card}");
     assert!(
+        card.contains(
+            "This changes only where this host dials them. Their key stays pinned\nexactly as it is, and its access is unchanged."
+        ),
+        "{card}"
+    );
+    assert!(
         !card.contains("Confirm and pin"),
         "a refresh must not present itself as a pin: {card}"
     );

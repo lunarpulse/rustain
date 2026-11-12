@@ -492,7 +492,7 @@ pub fn ping_single_text(alias: &str, peer_id: &PeerId, outcome: FrameOutcome) ->
         ),
         FrameOutcome::Unanswered => format!(
             "Sent 1 frame to {alias} ({fp}) — outcome unknown; the peer did not answer. Check \
-             the peer's transport-admission log."
+             the peer's transport log."
         ),
     }
 }
@@ -650,7 +650,7 @@ pub fn reach_refresh_card_text(alias: &str, ticket: &PeerTicket, peer_id: &PeerI
     let _ = write!(
         out,
         "\nThis changes only where this host dials them. Their key stays pinned\n\
-         exactly as it is, and admission is unchanged.\n\n\
+         exactly as it is, and its access is unchanged.\n\n\
          Awaiting your decision.  [y] Update the address  [n] Cancel\n",
     );
     out

@@ -24,7 +24,7 @@ from fixtures.scene_provider import SceneStub
 from decision_frame_helpers import open_decision
 from harness import RustainTUI
 
-NOTICE = "[no reply over RAP]"
+NOTICE = "[no reply possible]"
 FORBIDDEN = "Received. Reviewing."
 
 
@@ -224,7 +224,7 @@ def _exercise(binary, evidence, root, monkeypatch, after_delivery=None):
         (evidence / "assertions.txt").write_text(
             "PASS: real reciprocal tickets/rosters and foreground p2p listeners.\n"
             "PASS: sender peer ping returned accepted.\n"
-            "PASS: attached 80x24 screen shows [no reply over RAP].\n"
+            "PASS: attached 80x24 screen shows [no reply possible].\n"
             "PASS: no observed screen contains Received. Reviewing.; no provider turn.\n"
             f"Consent card answered: {consent_answered}\n")
         if after_delivery is not None:

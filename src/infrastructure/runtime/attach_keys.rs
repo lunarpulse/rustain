@@ -1214,11 +1214,7 @@ async fn enter_key(ctx: &mut KeyCtx<'_>, command: InputCmd) -> KeyFlow {
 fn ctrl_c(ctx: &mut KeyCtx<'_>) -> KeyFlow {
     if let Some(frame) = ctx.interrupt.interrupt_frame() {
         if ctx.frame_tx.send(frame).is_err() {
-            notifications::error(
-                ctx.state,
-                NoticeSource::Attached,
-                "attach socket closed — stop request not sent",
-            );
+            crate::infrastructure::runtime::error_notices::attach_stop_not_sent(ctx.state);
         }
         return KeyFlow::Continue;
     }
@@ -5067,7 +5063,12 @@ pub(crate) mod tests {
     async fn story21_1_attached_ctrl_x_n_and_x_dispatch_through_the_chord_arms() {
         let mut rig = Rig::new(false);
         rig.state.focus = FocusState::Chat;
-        notifications::error(&mut rig.state, NoticeSource::Attached, "an error");
+        notifications::notify(
+            &mut rig.state,
+            NoticeSource::Attached,
+            NoticeSeverity::Error,
+            "an error",
+        );
         notifications::info(&mut rig.state, NoticeSource::Attached, "an info");
         assert_eq!(rig.state.notifications.visible().count(), 2);
 
@@ -5130,7 +5131,11 @@ pub(crate) mod tests {
         rig.rx.close();
         assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
         let dead = rig.state.notifications.visible().next().expect("a toast");
-        assert_eq!(dead.message, "attach socket closed — stop request not sent");
+        assert_eq!(
+            dead.message,
+            "Lost the connection to the daemon, so the stop request was not sent.\n\
+             Reattach with `rustain daemon attach`, then stop the turn again."
+        );
         assert_eq!(dead.severity, NoticeSeverity::Error);
         assert_eq!(rig.state.status, StatusState::Idle, "no sticky status");
         assert!(rig.domain_tab.conversation.messages.is_empty());
@@ -7964,7 +7969,7 @@ pub(crate) mod tests {
             );
             let cleared = footer_text(&paint(&rig.state, width));
             assert!(
-                !cleared.contains("close the window first"),
+                !cleared.contains("Close the open window first"),
                 "{width}: {cleared}"
             );
             assert_eq!(
@@ -8017,7 +8022,7 @@ pub(crate) mod tests {
                 assert!(
                     rig.notice(NoticeSource::Palette)
                         .unwrap()
-                        .contains("close the window first")
+                        .contains("Close the open window first")
                 );
             } else {
                 assert!(rig.state.modal_stack.is_empty());
@@ -8081,7 +8086,12 @@ pub(crate) mod tests {
                     rig.state.terminal_width = width;
                     rig.state.terminal_height = height;
                     notifications::info(&mut rig.state, NoticeSource::Attached, "info control");
-                    notifications::error(&mut rig.state, NoticeSource::Attached, "error control");
+                    notifications::notify(
+                        &mut rig.state,
+                        NoticeSource::Attached,
+                        NoticeSeverity::Error,
+                        "error control",
+                    );
                     let stage = (
                         rig.domain_tab.view_state.scroll_offset,
                         matches!(
@@ -8220,7 +8230,12 @@ pub(crate) mod tests {
                 rig.read_only = read_only;
                 rig.state.terminal_width = 60;
                 rig.state.terminal_height = 16;
-                notifications::error(&mut rig.state, NoticeSource::Attached, "retained failure");
+                notifications::notify(
+                    &mut rig.state,
+                    NoticeSource::Attached,
+                    NoticeSeverity::Error,
+                    "retained failure",
+                );
                 let retained = rig.state.notifications.records().next_back().unwrap().id;
                 notifications::info(&mut rig.state, NoticeSource::Attached, "ordinary arrival");
                 rig.ctrl('x').await;

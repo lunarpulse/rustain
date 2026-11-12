@@ -136,7 +136,9 @@ fn block_copy_is_bounded_at_eight_mebibytes_and_never_calls_the_copier_above_it(
             );
             assert_eq!(
                 toast(&f),
-                "Copy failed: block source exceeds the 8 MiB copy limit"
+                "Could not copy to the clipboard.\n\
+                 Select the text in the terminal and copy it from there.\n\
+                 block source exceeds the 8 MiB copy limit"
             );
         }
         // The bound bounds the work: above it no block is built at all, and at it

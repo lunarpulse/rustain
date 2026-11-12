@@ -23,6 +23,21 @@ use crate::infrastructure::runtime::event_bus::EventBus;
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 
+/// The warning when a provider cannot be built; the step differs by when it happened
+/// (`restart` at startup, otherwise a live refresh).
+pub(crate) fn provider_setup_failed(
+    id: &str,
+    error: impl std::fmt::Display,
+    restart: bool,
+) -> String {
+    let step = if restart {
+        "restart rustain"
+    } else {
+        "try again"
+    };
+    format!("Could not set up provider '{id}': {error}. Check its settings, then {step}.")
+}
+
 /// The outcome of gating one enabled effective entry against a store snapshot.
 pub(crate) enum Gated {
     Locked {
@@ -286,10 +301,9 @@ impl LiveProviders {
                             ));
                         }
                     }
-                    Gated::Failed(error) => notices.push(format!(
-                        "Failed to construct provider '{}': {error}",
-                        entry.id
-                    )),
+                    Gated::Failed(error) => {
+                        notices.push(provider_setup_failed(&entry.id, error, false))
+                    }
                 }
             }
             self.discovery.store(Arc::new(discovery));
@@ -398,5 +412,22 @@ impl crate::domain::ports::ProviderInfoPort for LiveProviders {
     }
     fn today_start_unix_ms(&self) -> i64 {
         crate::infrastructure::clock_util::today_start_unix_ms()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_setup_failed;
+
+    #[test]
+    fn a_provider_that_cannot_be_set_up_names_it_and_the_next_step() {
+        assert_eq!(
+            provider_setup_failed("acme", "missing key", false),
+            "Could not set up provider 'acme': missing key. Check its settings, then try again."
+        );
+        assert_eq!(
+            provider_setup_failed("acme", "missing key", true),
+            "Could not set up provider 'acme': missing key. Check its settings, then restart rustain."
+        );
     }
 }

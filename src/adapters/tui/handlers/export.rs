@@ -147,16 +147,24 @@ pub async fn apply_confirm_export_overwrite(state: &mut TuiState, payload: Expor
         Ok(Ok(false)) => notifications::warning(
             state,
             NoticeSource::Export,
-            "This decision is no longer pending. The export file changed; nothing was written.",
+            "This decision is no longer pending. The export file changed; nothing was written. Run the export again.",
         ),
         Ok(Err(e)) => {
-            notifications::error(state, NoticeSource::Export, format!("Export failed: {}", e));
-        }
-        Err(join_err) => {
-            notifications::error(
+            notifications::failure(
                 state,
                 NoticeSource::Export,
-                format!("Export failed: {}", join_err),
+                "Could not overwrite the export file.",
+                "Check the file name and permissions, then run /export again.",
+                Some(e.to_string()),
+            );
+        }
+        Err(join_err) => {
+            notifications::failure(
+                state,
+                NoticeSource::Export,
+                "Could not finish the export.",
+                "Run /export again.",
+                Some(join_err.to_string()),
             );
         }
     }
@@ -208,19 +216,23 @@ pub async fn apply_export_command(
         match create_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                notifications::error(
+                notifications::failure(
                     state,
                     NoticeSource::Export,
-                    format!("Export failed: cannot create exports dir: {}", e),
+                    "Could not create the exports folder.",
+                    "Check the permissions of .rustain/exports/, then run /export again.",
+                    Some(e.to_string()),
                 );
                 state.needs_redraw = true;
                 return;
             }
             Err(join_err) => {
-                notifications::error(
+                notifications::failure(
                     state,
                     NoticeSource::Export,
-                    format!("Export failed: {}", join_err),
+                    "Could not finish the export.",
+                    "Run /export again.",
+                    Some(join_err.to_string()),
                 );
                 state.needs_redraw = true;
                 return;
@@ -254,10 +266,12 @@ pub async fn apply_export_command(
         Some(name) => {
             let raw = std::path::PathBuf::from(name);
             if raw.is_absolute() {
-                notifications::error(
+                notifications::failure(
                     state,
                     NoticeSource::Export,
-                    "Export failed: absolute paths are not allowed (use a name relative to .rustain/exports/)",
+                    "Could not export to an absolute path.",
+                    "Run /export again with a name relative to .rustain/exports/.",
+                    None,
                 );
                 state.needs_redraw = true;
                 return;
@@ -266,10 +280,12 @@ pub async fn apply_export_command(
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
             {
-                notifications::error(
+                notifications::failure(
                     state,
                     NoticeSource::Export,
-                    "Export failed: path contains '..' — not allowed",
+                    "Could not export to a path containing '..'.",
+                    "Run /export again with a name inside .rustain/exports/.",
+                    None,
                 );
                 state.needs_redraw = true;
                 return;
@@ -283,10 +299,12 @@ pub async fn apply_export_command(
                 .await
                 {
                     if !canonical_parent.starts_with(&canonical_exports) {
-                        notifications::error(
+                        notifications::failure(
                             state,
                             NoticeSource::Export,
-                            "Export failed: target escapes .rustain/exports/",
+                            "Could not export outside .rustain/exports/.",
+                            "Run /export again with a name inside .rustain/exports/.",
+                            None,
                         );
                         state.needs_redraw = true;
                         return;
@@ -357,13 +375,21 @@ pub async fn apply_export_command(
             );
         }
         Ok(Err(e)) => {
-            notifications::error(state, NoticeSource::Export, format!("Export failed: {}", e));
-        }
-        Err(join_err) => {
-            notifications::error(
+            notifications::failure(
                 state,
                 NoticeSource::Export,
-                format!("Export failed: {}", join_err),
+                "Could not write the export file.",
+                "Check the file name and permissions, then run /export again.",
+                Some(e.to_string()),
+            );
+        }
+        Err(join_err) => {
+            notifications::failure(
+                state,
+                NoticeSource::Export,
+                "Could not finish the export.",
+                "Run /export again.",
+                Some(join_err.to_string()),
             );
         }
     }
@@ -415,7 +441,7 @@ mod tests {
             "changed externally"
         );
         assert!(state.notifications.visible().any(|notice|
-            notice.message == "This decision is no longer pending. The export file changed; nothing was written."
+            notice.message == "This decision is no longer pending. The export file changed; nothing was written. Run the export again."
         ));
 
         let fresh = ExportOverwritePayload {

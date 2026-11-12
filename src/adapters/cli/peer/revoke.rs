@@ -16,7 +16,7 @@ use crate::adapters::cli::peer::rows::sanitize_for_terminal;
 /// What `--now` means, printed when it is passed so the operator is not left
 /// believing it did something.
 pub const NOW_IS_A_NO_OP: &str = concat!(
-    "note: --now is accepted for compatibility and changes nothing. Admission is ",
+    "note: --now is accepted for compatibility and changes nothing. Access is ",
     "already checked per frame, so every revocation takes effect on the next frame."
 );
 
@@ -27,7 +27,7 @@ pub const NOW_IS_A_NO_OP: &str = concat!(
 #[must_use]
 pub fn nothing_recorded_text(target: &str) -> String {
     format!(
-        "No transport admission recorded for {:?}; nothing changed.\n\
+        "No peer entry recorded for {:?}; nothing changed.\n\
          `rustain peer list` shows what is configured. A well-formed peer id that\n\
          no configured entry derives is not a target — nothing is written for it.",
         sanitize_for_terminal(target)

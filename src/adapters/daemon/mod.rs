@@ -175,7 +175,7 @@ pub async fn run_daemon(
 fn windows_not_supported() -> Result<()> {
     Err(DaemonRefusal(
         "Error: `rustain daemon` requires Unix sockets (Linux or macOS). \
-         Windows daemon support (named pipes) is deferred to a future release (NFR33). \
+         Windows daemon support (named pipes) is not available yet. \
          Run rustain in interactive (TUI) mode instead."
             .to_string(),
     )

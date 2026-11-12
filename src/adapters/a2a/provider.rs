@@ -61,7 +61,7 @@ impl A2aProvider {
         let Some(runtime) = self.delegation.get() else {
             return Err(CapabilityError::InvocationFailed(
                 capability_id.to_string(),
-                "A2A task delegation is intentionally unavailable until Story 17.4b".to_owned(),
+                "A2A task delegation is not available yet; peer discovery still works.".to_owned(),
             ));
         };
 
@@ -390,5 +390,31 @@ mod tests {
             title_hits.is_empty(),
             "the human skill title is not a filter key — only the raw id and description are"
         );
+    }
+
+    #[tokio::test]
+    async fn story21_14_delegation_without_a_runtime_says_it_is_not_available_yet() {
+        let provider = A2aProvider::new(Vec::new());
+        let id = CapabilityId {
+            protocol: "a2a".to_owned(),
+            server: "alpha".to_owned(),
+            tool: "scan".to_owned(),
+        };
+        let error = provider
+            .invoke_with_permission_resolution(
+                &id,
+                serde_json::json!({}),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect_err("no delegation runtime is installed");
+        match error {
+            CapabilityError::InvocationFailed(_, text) => assert_eq!(
+                text,
+                "A2A task delegation is not available yet; peer discovery still works."
+            ),
+            other => panic!("expected InvocationFailed, got {other:?}"),
+        }
     }
 }

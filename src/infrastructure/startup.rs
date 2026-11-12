@@ -385,10 +385,7 @@ pub async fn run() -> Result<()> {
 
     // AC-10: preview warning notice (once per process lifetime)
     if let Some(preview_name) = toml_resolver.take_preview_warning() {
-        accumulated_notices.push(format!(
-            "Profile '{} (preview)' partially loaded: telegram, cron adapters not yet available (coming in Epic 12)",
-            preview_name
-        ));
+        accumulated_notices.push(preview_profile_notice(preview_name));
     }
 
     // AC-10: warn if custom (non-built-in) profile sets preview=true
@@ -1415,7 +1412,7 @@ pub async fn run() -> Result<()> {
         let _ = event_bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
-            message: format!("auth.json unreadable; stored credentials ignored: {error}"),
+            message: auth_store_warning(&error),
         });
     }
 
@@ -1495,7 +1492,7 @@ pub async fn run() -> Result<()> {
         let _ = domain_tx.send(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
-            message: format!("Failed to construct provider '{}': {}", id, e),
+            message: crate::infrastructure::live_providers::provider_setup_failed(id, e, true),
         });
     }
 
@@ -2922,6 +2919,22 @@ pub fn spawn_periodic_catalog_refresh(
     })
 }
 
+/// The startup notice for a profile that only partly loads.
+#[must_use]
+pub fn preview_profile_notice(profile_name: &str) -> String {
+    format!(
+        "Profile '{profile_name} (preview)' partially loaded: the telegram and cron adapters are not available yet"
+    )
+}
+
+/// The startup warning when `auth.json` cannot be read.
+#[must_use]
+pub fn auth_store_warning(error: &str) -> String {
+    format!(
+        "auth.json unreadable; stored credentials ignored: {error}. Fix or remove auth.json, then sign in again with /login."
+    )
+}
+
 /// Story 9.6 — validate the `skill_exposure.kind` config value at startup.
 ///
 /// Phase A accepts ONLY `"l1-metadata"` (the DEFAULT) and `"static-full"`.
@@ -2932,7 +2945,7 @@ pub fn validate_skill_exposure(kind: &str) -> Result<(), crate::domain::errors::
         return Err(DomainError::Config(ConfigError::Invalid {
             field: "skill_exposure.kind".into(),
             value: "empty exposure strategy value is invalid. \
-                    Phase A accepts `\"l1-metadata\"` (the default) or `\"static-full\"` \
+                    Accepts `\"l1-metadata\"` (the default) or `\"static-full\"` \
                     (codex-parity opt-in)."
                 .to_string(),
         }));
@@ -2944,8 +2957,7 @@ pub fn validate_skill_exposure(kind: &str) -> Result<(), crate::domain::errors::
         #[cfg(not(feature = "meta-search"))]
         "meta-search" => Err(DomainError::Config(ConfigError::Invalid {
             field: "skill_exposure.kind".into(),
-            value: "`meta-search` skill exposure strategy requires the `meta-search` cargo feature; \
-                     see ADR-09-02 §Phase B Prerequisites. \
+            value: "`meta-search` skill exposure strategy requires the `meta-search` cargo feature. \
                      Compile with `--features meta-search` or set `[skill_exposure].kind = \"l1-metadata\"` \
                      (the default) or remove the key entirely."
                 .to_string(),
@@ -2953,9 +2965,9 @@ pub fn validate_skill_exposure(kind: &str) -> Result<(), crate::domain::errors::
         other => Err(DomainError::Config(ConfigError::Invalid {
             field: "skill_exposure.kind".into(),
             value: format!(
-                "unknown skill exposure strategy `{}`. Phase A accepts only `\"l1-metadata\"` \
+                "unknown skill exposure strategy `{}`. Accepts only `\"l1-metadata\"` \
                  (default) and `\"static-full\"` (codex-parity opt-in fallback). \
-                 Reserved values: `\"meta-search\"` (Story 9.7 Phase B, currently deferred).",
+                 Reserved value: `\"meta-search\"` (requires `--features meta-search`).",
                 other
             ),
         })),
@@ -2977,7 +2989,7 @@ pub fn validate_assembler_strategy(
         "" => Err(DomainError::Config(ConfigError::Invalid {
             field: "assembler.strategy".into(),
             value: "empty assembler strategy is invalid. Accepts `\"passthrough\"` (the \
-                    default) or `\"windowing\"` (Story 11.6 Algorithm A+). Remove the \
+                    default) or `\"windowing\"` (within-session windowing). Remove the \
                     `[assembler]` block to use the default."
                 .to_string(),
         })),
@@ -2985,8 +2997,8 @@ pub fn validate_assembler_strategy(
             field: "assembler.strategy".into(),
             value: format!(
                 "unknown assembler strategy `{other}`. Accepts only `\"passthrough\"` \
-                 (default, behaviour-preserving) and `\"windowing\"` (Story 11.6 \
-                 within-session grouped windowing, Algorithm A+)."
+                 (default, behaviour-preserving) and `\"windowing\"` (within-session \
+                 grouped windowing)."
             ),
         })),
     }
@@ -3003,7 +3015,7 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
             field: "tools.exposure".into(),
             value: "\
                 empty exposure strategy value is invalid. \
-                Phase A accepts only `\"static-full\"` (the default). \
+                Accepts only `\"static-full\"` (the default). \
                 Remove `[tools]` block or set `[tools].exposure = \"static-full\"`."
                 .to_string(),
         }));
@@ -3015,8 +3027,7 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
         #[cfg(not(feature = "meta-search"))]
         "meta-search" => Err(DomainError::Config(ConfigError::Invalid {
             field: "tools.exposure".into(),
-            value: "`meta-search` exposure strategy requires the `meta-search` cargo feature; \
-                     see ADR-09-01 v2.2 §Phase B Prerequisites. \
+            value: "`meta-search` exposure strategy requires the `meta-search` cargo feature. \
                      Compile with `--features meta-search` or set `[tools].exposure = \"static-full\"` \
                      (the default) or remove the key entirely."
                 .to_string(),
@@ -3024,8 +3035,8 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
         other => Err(DomainError::Config(ConfigError::Invalid {
             field: "tools.exposure".into(),
             value: format!(
-                "unknown exposure strategy `{}`. Phase A accepts only `\"static-full\"`. \
-                 Reserved values: `\"meta-search\"` (Story 9.7 Phase B, requires `--features meta-search`).",
+                "unknown exposure strategy `{}`. Accepts only `\"static-full\"`. \
+                 Reserved value: `\"meta-search\"` (requires `--features meta-search`).",
                 other
             ),
         })),
@@ -3044,7 +3055,7 @@ pub fn validate_sandbox_adapter(adapter: &str) -> Result<(), crate::domain::erro
         return Err(DomainError::Config(ConfigError::Invalid {
             field: "sandbox.adapter".into(),
             value: "empty sandbox adapter value is invalid. \
-                    Phase A accepts `\"noop\"` (the default on all platforms) \
+                    Accepts `\"noop\"` (the default on all platforms) \
                     or `\"landlock\"` (Linux only, requires `sandbox` cargo feature)."
                 .to_string(),
         }));
@@ -3058,8 +3069,7 @@ pub fn validate_sandbox_adapter(adapter: &str) -> Result<(), crate::domain::erro
                     field: "sandbox.adapter".into(),
                     value: "`landlock` sandbox adapter requires the `sandbox` cargo feature \
                              AND a Linux build. Rebuild with `--features sandbox` or set \
-                             `[sandbox].adapter = \"noop\"` (the default). \
-                             See ADR-06-04 §Decision."
+                             `[sandbox].adapter = \"noop\"` (the default)."
                         .to_string(),
                 }));
             }
@@ -3069,7 +3079,7 @@ pub fn validate_sandbox_adapter(adapter: &str) -> Result<(), crate::domain::erro
         other => Err(DomainError::Config(ConfigError::Invalid {
             field: "sandbox.adapter".into(),
             value: format!(
-                "unknown sandbox adapter `{}`. Phase A accepts only `\"noop\"` \
+                "unknown sandbox adapter `{}`. Accepts only `\"noop\"` \
                  (the default) and `\"landlock\"` (Linux + `sandbox` feature only).",
                 other
             ),

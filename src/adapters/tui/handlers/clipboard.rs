@@ -1,7 +1,7 @@
 //! The one copy-to-clipboard notice every copy key shares (Story 21.1 AC4).
 
 use crate::adapters::tui::clipboard::ClipboardResult;
-use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource, notify};
+use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource, notify};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::Conversation;
 
@@ -34,11 +34,12 @@ pub fn requested_in(
 
 /// Share the existing failure formatter without inventing a clipboard attempt.
 pub(crate) fn notify_failure(state: &mut TuiState, reason: &str) {
-    notify(
+    notifications::failure(
         state,
         NoticeSource::Clipboard,
-        NoticeSeverity::Error,
-        format!("Copy failed: {reason}"),
+        "Could not copy to the clipboard.",
+        "Select the text in the terminal and copy it from there.",
+        Some(reason.to_string()),
     );
 }
 
@@ -142,7 +143,7 @@ mod tests {
                 "x",
                 ClipboardResult::Failed("no tty".into()),
                 NoticeSeverity::Error,
-                "Copy failed: no tty",
+                "Could not copy to the clipboard.\nSelect the text in the terminal and copy it from there.\nno tty",
             ),
             (
                 "",

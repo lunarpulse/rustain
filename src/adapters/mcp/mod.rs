@@ -191,6 +191,13 @@ pub fn merge_mcp_specs(
     merged.into_values().collect()
 }
 
+/// Why an `sse` server never connects. One text for the connect refusal and the startup warning.
+pub(crate) const SSE_UNSUPPORTED: &str = "SSE transport is not supported (the MCP spec deprecated it on 2025-03-26). Use a proxy like mcp-proxy, or update the server to Streamable HTTP.";
+
+fn sse_warning(server_id: &str) -> String {
+    format!("MCP server '{server_id}': {SSE_UNSUPPORTED}")
+}
+
 /// Emit startup warnings for transports that will not connect.
 ///
 /// ⚠ Story 9.9 (ruling A10) corrected this doc comment. It used to read *"Emit
@@ -208,12 +215,7 @@ pub fn merge_mcp_specs(
 pub fn emit_transport_warnings(specs: &[McpServerSpec]) {
     for spec in specs {
         match spec.transport {
-            McpTransport::Sse => {
-                tracing::warn!(
-                    "MCP server '{}': SSE transport is not supported (deprecated by MCP spec 2025-03-26 per ADR-06-08). Use a proxy like mcp-proxy, or update the server to Streamable HTTP.",
-                    spec.id
-                );
-            }
+            McpTransport::Sse => tracing::warn!("{}", sse_warning(&spec.id)),
             McpTransport::Stdio | McpTransport::Http => {}
         }
     }
@@ -272,5 +274,17 @@ mod tests {
     fn test_merge_empty() {
         let merged = merge_mcp_specs(vec![], vec![]);
         assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn story21_14_the_sse_refusal_and_warning_texts_are_pinned() {
+        assert_eq!(
+            SSE_UNSUPPORTED,
+            "SSE transport is not supported (the MCP spec deprecated it on 2025-03-26). Use a proxy like mcp-proxy, or update the server to Streamable HTTP."
+        );
+        assert_eq!(
+            sse_warning("docs"),
+            "MCP server 'docs': SSE transport is not supported (the MCP spec deprecated it on 2025-03-26). Use a proxy like mcp-proxy, or update the server to Streamable HTTP."
+        );
     }
 }

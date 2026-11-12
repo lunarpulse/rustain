@@ -109,10 +109,12 @@ pub async fn handle_apply_bookmark_toggle(
         }
         Err(e) => {
             tab_manager.active_tab_mut().session_meta = old_meta;
-            notifications::error(
+            notifications::failure(
                 state,
                 NoticeSource::Bookmark,
-                format!("Failed to save bookmark: {}", e),
+                "Could not save the bookmark.",
+                "Check the session file permissions, then try again.",
+                Some(e.to_string()),
             );
         }
     }
@@ -280,10 +282,12 @@ pub async fn handle_apply_delete_bookmark(
         }
         Err(e) => {
             tab_manager.active_tab_mut().session_meta = old_meta;
-            notifications::error(
+            notifications::failure(
                 state,
                 NoticeSource::Bookmark,
-                format!("Failed to delete bookmark: {}", e),
+                "Could not delete the bookmark.",
+                "Check the session file permissions, then try again.",
+                Some(e.to_string()),
             );
         }
     });
@@ -344,10 +348,12 @@ pub async fn handle_apply_undo_bookmark_delete(
         }
         Err(e) => {
             tab_manager.active_tab_mut().session_meta = old_meta;
-            notifications::error(
+            notifications::failure(
                 state,
                 NoticeSource::Bookmark,
-                format!("Failed to restore bookmark: {}", e),
+                "Could not restore the bookmark.",
+                "Check the session file permissions, then try again.",
+                Some(e.to_string()),
             );
         }
     });

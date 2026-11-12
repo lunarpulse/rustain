@@ -190,7 +190,7 @@ fn warnings(rig: &Rig) -> Vec<String> {
         .collect()
 }
 
-const READ_ONLY: &str = "Tab is read-only (subagent output view)";
+const READ_ONLY: &str = "This tab shows subagent output and is read-only. Switch to a conversation tab to make changes.";
 
 async fn rig(width: u16, height: u16) -> Rig {
     Rig::plain(Workspace::new().await, width, height).await

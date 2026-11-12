@@ -108,6 +108,8 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCEL_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_TASK_ID_BYTES: usize = 256;
+/// The reason recorded when the access policy declines an inbound task.
+const POLICY_DECLINED: &str = "the access policy declined this task";
 const PENDING_TASK_FILE: &str = "a2a-pending.json";
 
 /// The one message a non-owner or unknown task id ever receives.
@@ -1563,7 +1565,7 @@ async fn setup_task(
             if consent_parked {
                 runtime.discard_pending_consent_node(&task.node_id).await;
             }
-            let reason = "admission policy declined this task".to_owned();
+            let reason = POLICY_DECLINED.to_owned();
             let _ = state
                 .transparency
                 .record(InboundOutcome::Refused {
@@ -3821,5 +3823,10 @@ mod tests {
                 assert!(!lower.contains(banned), "{banned:?} in {line:?}");
             }
         }
+    }
+
+    #[test]
+    fn story21_14_a_declined_inbound_task_names_the_access_policy() {
+        assert_eq!(POLICY_DECLINED, "the access policy declined this task");
     }
 }

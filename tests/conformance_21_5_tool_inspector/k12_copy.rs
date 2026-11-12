@@ -358,7 +358,10 @@ fn typed_copy_success_fallback_and_failure_use_the_existing_notices() {
         (
             ClipboardResult::Failed("platform unavailable".into()),
             NoticeSeverity::Error,
-            "Copy failed: platform unavailable".into(),
+            "Could not copy to the clipboard.\n\
+             Select the text in the terminal and copy it from there.\n\
+             platform unavailable"
+                .into(),
         ),
     ];
     for (result, severity, message) in cases {
@@ -455,7 +458,9 @@ fn output_input_raw_and_diff_accept_exactly_eight_mib_and_refuse_one_more_byte()
                 notice(
                     &f,
                     NoticeSeverity::Error,
-                    "Copy failed: tool source exceeds the 8 MiB copy limit",
+                    "Could not copy to the clipboard.\n\
+                     Select the text in the terminal and copy it from there.\n\
+                     tool source exceeds the 8 MiB copy limit",
                 );
             }
         }
@@ -488,7 +493,9 @@ fn prepaint_derived_diff_is_bounded_and_never_truncated() {
         notice(
             &f,
             NoticeSeverity::Error,
-            "Copy failed: tool source exceeds the 8 MiB copy limit",
+            "Could not copy to the clipboard.\n\
+             Select the text in the terminal and copy it from there.\n\
+             tool source exceeds the 8 MiB copy limit",
         );
     }
 }

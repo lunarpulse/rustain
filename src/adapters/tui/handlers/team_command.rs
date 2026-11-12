@@ -609,7 +609,7 @@ fn raw_remainder_after_tokens(arg: &str, tokens: usize) -> Option<String> {
 
 #[cfg(not(feature = "a2a"))]
 pub(crate) const fn team_send_unavailable() -> &'static str {
-    "`/team send` needs the `a2a` feature; this build was compiled without it."
+    "`/team send` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
 }
 
 /// Open the rows in the thread window (S-THREAD's log view). Returns the `AppEvent`s the

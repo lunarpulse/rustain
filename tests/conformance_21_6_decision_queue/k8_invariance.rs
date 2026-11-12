@@ -34,6 +34,10 @@ const CONTROLS: [char; 5] = ['\u{1b}', '\u{7}', '\u{85}', '\u{9b}', '\u{202e}'];
 /// `HOSTILE` after sanitation, spelled out here, not computed: whole CSI/OSC sequences
 /// (`ESC[2J`, `ESC]8;;…BEL`), the C1 controls (0x85, 0x9b with its final byte) and the bidi override go.
 const CLEANED: &str = "xyzwv";
+/// The whole refusal a decision text over `COPY_MAX_BYTES` posts: what, next step, detail.
+const COPY_REFUSED: &str = "Could not copy to the clipboard.\n\
+                            Select the text in the terminal and copy it from there.\n\
+                            decision text exceeds the 8 MiB copy limit";
 
 fn draft() -> String {
     (0..12)
@@ -775,7 +779,12 @@ fn c_on_every_frame_copies_the_original_bytes_through_the_injected_copier() {
         .records()
         .last()
         .expect("a failure notice");
-    assert_eq!(notice.message, "Copy failed: boom");
+    assert_eq!(
+        notice.message,
+        "Could not copy to the clipboard.\n\
+         Select the text in the terminal and copy it from there.\n\
+         boom"
+    );
     assert_eq!(notice.severity, NoticeSeverity::Error);
 }
 
@@ -875,7 +884,7 @@ fn copy_at_the_limit_succeeds_and_one_byte_over_refuses_with_the_failure_notice(
                 !state
                     .notifications
                     .records()
-                    .any(|r| r.message.contains("Copy failed")),
+                    .any(|r| r.message.contains("Could not copy to the clipboard.")),
                 "no failure notice at the limit"
             );
         } else {
@@ -884,9 +893,10 @@ fn copy_at_the_limit_succeeds_and_one_byte_over_refuses_with_the_failure_notice(
                 "one byte over refuses"
             );
             assert!(
-                state.notifications.records().any(|r| r
-                    .message
-                    .contains("Copy failed: decision text exceeds the 8 MiB copy limit")),
+                state
+                    .notifications
+                    .records()
+                    .any(|r| r.message.contains(COPY_REFUSED)),
                 "the existing failure notice is posted"
             );
         }
@@ -1138,9 +1148,10 @@ fn k8_six_d_copy_exact_limit_and_one_byte_over() {
             } else {
                 assert!(recorded.is_empty(), "{kind:?}");
                 assert!(
-                    state.notifications.records().any(|r| r
-                        .message
-                        .contains("Copy failed: decision text exceeds the 8 MiB copy limit")),
+                    state
+                        .notifications
+                        .records()
+                        .any(|r| r.message.contains(COPY_REFUSED)),
                     "{kind:?}"
                 );
             }
@@ -1205,10 +1216,12 @@ fn k8_rewind_many_files_copy_at_limit_and_refuse_one_byte_over() {
             assert_eq!(recorded[0].len(), COPY_MAX_BYTES);
         } else {
             assert!(recorded.is_empty());
-            assert!(state.notifications.records().any(|r| {
-                r.message
-                    .contains("Copy failed: decision text exceeds the 8 MiB copy limit")
-            }));
+            assert!(
+                state
+                    .notifications
+                    .records()
+                    .any(|r| { r.message.contains(COPY_REFUSED) })
+            );
         }
         assert!(state.decisions.take_resolved().is_none());
     }
@@ -1257,11 +1270,12 @@ fn k8_oversized_artifact_and_rewind_lists_post_copy_refusal() {
             Some(RouteEffect::Consumed)
         );
         assert!(copies.lock().unwrap().is_empty());
-        assert!(state.notifications.records().any(|record| {
-            record
-                .message
-                .contains("Copy failed: decision text exceeds the 8 MiB copy limit")
-        }));
+        assert!(
+            state
+                .notifications
+                .records()
+                .any(|record| { record.message.contains(COPY_REFUSED) })
+        );
     }
 }
 
@@ -1477,11 +1491,12 @@ fn story21_6_ticket_and_reply_copy_exact_limit_and_refuse_one_more() {
                 assert_eq!(copied.as_slice(), &[expected]);
             } else {
                 assert!(copied.is_empty());
-                assert!(state.notifications.records().any(|notice| {
-                    notice
-                        .message
-                        .contains("Copy failed: decision text exceeds the 8 MiB copy limit")
-                }));
+                assert!(
+                    state
+                        .notifications
+                        .records()
+                        .any(|notice| { notice.message.contains(COPY_REFUSED) })
+                );
             }
         }
     }

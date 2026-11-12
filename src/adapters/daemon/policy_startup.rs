@@ -41,13 +41,13 @@ use crate::domain::services::team_policy::{PolicyExplanation, PolicyNotice};
 /// Unconditional so an operator can always confirm the check ran: "no output"
 /// would be indistinguishable from "validation was skipped", which is exactly the
 /// no-op mutant this AC guards against.
-pub(crate) const STARTUP_BANNER: &str = "interaction policy resolved (NFR66)";
+pub(crate) const STARTUP_BANNER: &str = "interaction policy resolved";
 pub(crate) const AUTO_AUTHORITY_WARNING: &str = "server.admission=\"allow\" authorizes inbound \
     execution and at least one notify-and-auto sender lacks journaled or TOML-implied consent; \
     grant that sender, use admission=\"ask\", or lower its effective response mode";
-pub(crate) const UNKNOWN_ADMISSION_WARNING: &str = "could not determine server admission posture \
-    from .rustain/a2a.json; treating the unknown posture as an authority-widening hazard until \
-    the configuration is repaired";
+pub(crate) const UNKNOWN_ADMISSION_WARNING: &str = "could not read the `server.admission` setting \
+    from .rustain/a2a.json; treating inbound access as unrestricted until the configuration is \
+    repaired";
 
 /// Resolve both policy files and report the outcome through the daemon's log.
 ///
@@ -168,6 +168,15 @@ mod tests {
         let rustain = dir.join(".rustain");
         std::fs::create_dir_all(&rustain).unwrap();
         std::fs::write(rustain.join(name), body).unwrap();
+    }
+
+    #[test]
+    fn story21_14_the_startup_log_texts_are_plain_words() {
+        assert_eq!(STARTUP_BANNER, "interaction policy resolved");
+        assert_eq!(
+            UNKNOWN_ADMISSION_WARNING,
+            "could not read the `server.admission` setting from .rustain/a2a.json; treating inbound access as unrestricted until the configuration is repaired"
+        );
     }
 
     /// The startup shell resolves and returns; a conflict does not stop it.

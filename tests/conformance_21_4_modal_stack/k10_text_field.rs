@@ -974,11 +974,16 @@ fn accepted_help_filter_scrolls_its_own_list_and_restores_the_original_pixels() 
 
 #[test]
 fn clearing_log_filter_keeps_the_retained_selected_record_in_the_fitted_window() {
-    use rustain::adapters::tui::notifications::{self, NoticeSource};
+    use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
     let (mut h, mut tabs) = stage(60, 16);
     h.state.input_buffer = ["retained draft"; 8].join("\n");
     let owning_view = view(&tabs);
-    notifications::error(&mut h.state, NoticeSource::System, "retained failure");
+    notifications::notify(
+        &mut h.state,
+        NoticeSource::System,
+        NoticeSeverity::Error,
+        "retained failure",
+    );
     let retained = h.state.notifications.records().next_back().unwrap().id;
     notifications::info(&mut h.state, NoticeSource::System, "ordinary arrival");
     key(&mut h, &mut tabs, Key::Ctrl('x'));

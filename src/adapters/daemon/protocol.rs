@@ -445,7 +445,7 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::ReadOnly => {
                 write!(
                     f,
-                    "this attachment is read-only; another client holds the writer slot"
+                    "this attachment is read-only; another client already has write access"
                 )
             }
             ProtocolError::Malformed(m) => write!(f, "malformed attach frame: {m}"),
@@ -2198,5 +2198,18 @@ mod selection_started_tests {
         raw["teamSendStarted"]["recipients"] = serde_json::json!(["jun", "aisha"]);
         let frame: DaemonFrame = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(serde_json::to_value(frame).unwrap(), raw);
+    }
+}
+
+#[cfg(test)]
+mod read_only_text_tests {
+    use super::*;
+
+    #[test]
+    fn story21_14_a_read_only_attachment_says_who_has_write_access() {
+        assert_eq!(
+            ProtocolError::ReadOnly.to_string(),
+            "this attachment is read-only; another client already has write access"
+        );
     }
 }

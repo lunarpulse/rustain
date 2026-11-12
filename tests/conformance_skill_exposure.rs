@@ -219,13 +219,13 @@ fn test_meta_search_config_rejected_with_actionable_error() {
 
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.contains("Story 9.7") || err_msg.contains("ADR-09-02"),
-        "error must cite Story 9.7 or ADR-09-02: got '{}'",
+        err_msg.contains("requires the `meta-search` cargo feature"),
+        "error must name the cargo feature: got '{}'",
         err_msg
     );
     assert!(
-        err_msg.contains("Phase B"),
-        "error must mention Phase B: got '{}'",
+        err_msg.contains("--features meta-search") && err_msg.contains("remove the key"),
+        "error must say how to enable it or remove the key: got '{}'",
         err_msg
     );
 }

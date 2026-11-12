@@ -321,6 +321,11 @@ fn ac2_a_syntactically_broken_mcp_config_still_starts_and_surfaces_a_notice() {
         notices[0]
     );
     assert!(
+        notices[0].ends_with(". Fix or remove that file, then run /config reload."),
+        "the notice must end with the repair step: {:?}",
+        notices[0]
+    );
+    assert!(
         resolver.take_mcp_config_notices().is_empty(),
         "draining is once — a second flush must not duplicate the notice"
     );

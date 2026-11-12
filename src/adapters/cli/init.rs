@@ -437,15 +437,15 @@ fn prompt_response_mode<R: BufRead, W: Write>(
     writeln!(output)?;
     writeln!(
         output,
-        "  1. notify-and-wait   — show me, wait for my response   (recommended)"
+        "  1. notify-and-wait   — show you the message and wait for your response   (recommended)"
     )?;
     writeln!(
         output,
-        "  2. notify-and-draft  — draft a reply for my approval"
+        "  2. notify-and-draft  — draft a reply for your approval"
     )?;
     writeln!(
         output,
-        "  3. notify-and-auto   — reply for me; I always see what was sent"
+        "  3. notify-and-auto   — send the reply automatically and show you what was sent"
     )?;
     Ok(match prompt_choice(input, output)? {
         2 => crate::domain::models::ResponseMode::NotifyAndDraft,
@@ -559,6 +559,25 @@ fn prompt_yes_no<R: BufRead, W: Write>(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn story21_14_the_response_mode_menu_describes_each_choice_in_plain_words() {
+        let mut input = std::io::Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        prompt_response_mode(&mut input, &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for expected in [
+            "  1. notify-and-wait   — show you the message and wait for your response   (recommended)",
+            "  2. notify-and-draft  — draft a reply for your approval",
+            "  3. notify-and-auto   — send the reply automatically and show you what was sent",
+        ] {
+            assert!(
+                lines.contains(&expected),
+                "{expected:?} missing from {lines:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_write_config_toml_creates_valid_file() {

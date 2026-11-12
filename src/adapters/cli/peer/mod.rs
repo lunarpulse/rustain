@@ -163,8 +163,8 @@ pub enum PeerAction {
     Revoke {
         /// An alias, or a peer id that a configured entry derives.
         target: String,
-        /// Accepted for compatibility with the planning text; changes nothing,
-        /// because admission is already checked per frame.
+        /// Accepted for compatibility; changes nothing, because every frame is
+        /// checked on arrival.
         #[arg(long)]
         now: bool,
     },

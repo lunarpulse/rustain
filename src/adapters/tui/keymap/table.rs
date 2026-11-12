@@ -47,7 +47,7 @@ pub const ATTACHED_PROFILE: &str = "Profile switching is not available in an att
 pub fn attached_panel_remedy() -> &'static str {
     static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
-            "This panel is local to a standalone session and is not projected to an attached client. Detach ({}) and run `rustain` for the panels, or use `/team status`, `/team board` and `/team log` here.",
+            "This panel is local to a standalone session and is not available in an attached session. Detach ({}) and run `rustain` for the panels, or use `/team status`, `/team board` and `/team log` here.",
             super::render::leader_follow_up_long(LeaderCmd::Detach)
         )
     });
@@ -65,7 +65,7 @@ pub fn attached_mission_remedy() -> &'static str {
     TEXT.as_str()
 }
 /// Interim ownership remedy, shared by leader rows and nested palette actions.
-pub const CLOSE_WINDOW_FIRST: &str = "Please close the window first to open this surface.";
+pub const CLOSE_WINDOW_FIRST: &str = "Close the open window first, then try again.";
 /// The local refusal of `Ctrl+X w` below the monitor's minimum width (A16).
 pub const MONITOR_NARROW: &str =
     "The monitor needs a terminal at least 120 columns wide: widen the window and try again.";

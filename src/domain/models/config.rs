@@ -746,7 +746,7 @@ impl SearchConfig {
         for (field, val) in [("skills", &self.skills), ("tools", &self.tools)] {
             if val != "on" && val != "off" {
                 return Err(format!(
-                    "[search].{} = '{}' is invalid — must be \"on\" or \"off\" per ADR-09-02 v2 §Audience Split",
+                    "[search].{} = '{}' is invalid — must be \"on\" or \"off\"",
                     field, val
                 ));
             }
@@ -1054,6 +1054,18 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story21_14_an_invalid_search_switch_names_the_field_and_the_allowed_values() {
+        let config = SearchConfig {
+            skills: "maybe".to_owned(),
+            tools: "on".to_owned(),
+        };
+        assert_eq!(
+            config.validate().expect_err("only on and off are accepted"),
+            "[search].skills = 'maybe' is invalid — must be \"on\" or \"off\""
+        );
+    }
 
     #[test]
     fn daemon_config_defaults_are_valid() {

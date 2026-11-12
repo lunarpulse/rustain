@@ -184,7 +184,7 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
                             return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
                                 success: false,
                                 error: Some(format!(
-                                    "Profile reload completed but adapter composition failed: {}. Previous adapters remain active.",
+                                    "The profile reloaded, but its adapters could not be set up: {}. The previous adapters stay active. Fix the profile settings, then run /config reload again.",
                                     e
                                 )),
                             });
@@ -203,7 +203,7 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
             HandlerOutcome::Notify(AppEvent::ConfigReloaded {
                 success: false,
                 error: Some(format!(
-                    "Configuration reload failed — keeping previous config and profile. Reason: {}",
+                    "Configuration reload failed, so the previous configuration and profile stay active. Fix the config file, then run /config reload again. Reason: {}",
                     short_reason(&e)
                 )),
             })
@@ -445,5 +445,23 @@ mod tests {
                 assert_eq!(g, F, "fragment in {reason:?}");
             }
         }
+    }
+
+    #[test]
+    fn story21_14_a_failed_reload_says_what_stays_active_and_what_to_do_next() {
+        let overrides = serde_json::json!({ "log_max_size_mb": "not a number" });
+        let HandlerOutcome::Notify(AppEvent::ConfigReloaded { success, error, .. }) =
+            reload_outcome(Some(&overrides))
+        else {
+            panic!("expected Notify(ConfigReloaded)");
+        };
+        assert!(!success);
+        let error = error.expect("a failed reload carries its reason");
+        assert!(
+            error.starts_with(
+                "Configuration reload failed, so the previous configuration and profile stay active. Fix the config file, then run /config reload again. Reason: "
+            ),
+            "{error}"
+        );
     }
 }

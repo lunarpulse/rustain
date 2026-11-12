@@ -122,7 +122,9 @@ pub fn on_action(state: &mut TuiState, action: AccountAction) -> HandlerOutcome 
 /// One notice for an account result. A logout/selection that itself succeeded
 /// (`changed`, a typed fact of the result event) is a Success notice (A2); the
 /// other severities are today's feedback level. The multi-line `/logout` text
-/// stays ONE notice.
+/// stays ONE notice. An Error result arrives with its fact, next step and detail
+/// already on separate lines (the account runtime builds it); the auth-handler
+/// boundary admits only `notifications::notify` here.
 fn feedback(state: &mut TuiState, level: FeedbackLevel, changed: bool, message: String) {
     let severity = match (level, changed) {
         (FeedbackLevel::Error, _) => NoticeSeverity::Error,
@@ -298,5 +300,35 @@ mod tests {
         assert_eq!(state.help_overlay.scroll_offset, 7);
         reducer::back(&mut state);
         assert_eq!(state.focus, FocusState::Input);
+    }
+
+    /// An Error result is posted as an Error notice with the message the account runtime
+    /// built (fact, next step, detail); a Warning stays the plain message.
+    #[test]
+    fn an_error_result_keeps_the_runtimes_fact_next_step_and_detail() {
+        let mut state = TuiState::new(80, 24);
+        feedback(
+            &mut state,
+            FeedbackLevel::Error,
+            false,
+            "Could not update the account.\n\
+             Run /login to sign in again, or check your provider settings.\n\
+             disk full"
+                .into(),
+        );
+        let record = state.notifications.records().last().expect("a notice");
+        assert_eq!(record.severity, NoticeSeverity::Error);
+        assert_eq!(
+            record.message,
+            "Could not update the account.\n\
+             Run /login to sign in again, or check your provider settings.\n\
+             disk full"
+        );
+        feedback(&mut state, FeedbackLevel::Warning, false, "heads up".into());
+        let record = state.notifications.records().last().expect("a notice");
+        assert_eq!(
+            (record.severity, record.message.as_str()),
+            (NoticeSeverity::Warning, "heads up")
+        );
     }
 }

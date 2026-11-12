@@ -209,6 +209,10 @@ where
 
 // ── Per-port factories ──
 
+/// The log line for an adapter name that composes but is still a stand-in.
+const PLACEHOLDER_ADAPTER_WARNING: &str =
+    "Using a placeholder adapter; the real adapter is not available yet";
+
 pub fn build_persona(
     name: &str,
     _config: Option<&toml::Value>,
@@ -221,7 +225,7 @@ pub fn build_persona(
             tracing::warn!(
                 port = ?PortDimension::Persona,
                 adapter = %name,
-                "Placeholder adapter — real implementation deferred to Epic 12+"
+                "{PLACEHOLDER_ADAPTER_WARNING}"
             );
             Ok(Arc::new(crate::adapters::noop::NoOpPersona))
         }
@@ -487,7 +491,7 @@ pub fn build_session(
                 tracing::warn!(
                     port = ?PortDimension::Session,
                     adapter = %name,
-                    "Placeholder adapter — real implementation deferred to Epic 12+"
+                    "{PLACEHOLDER_ADAPTER_WARNING}"
                 );
             }
             Ok(Arc::new(NoOpSession))
@@ -1000,7 +1004,7 @@ pub fn build_skill_exposure(
         #[cfg(not(feature = "meta-search"))]
         "meta-search" => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Skills,
-            name: "meta-search skill exposure requires the `meta-search` cargo feature; see ADR-09-02 §Phase B".into(),
+            name: "meta-search skill exposure requires the `meta-search` cargo feature; rebuild with `--features meta-search`".into(),
             available: vec!["l1-metadata".into(), "static-full".into()],
         }),
         other => Err(AdapterCompositionError::UnknownAdapter {
@@ -2147,6 +2151,26 @@ mod tests {
                 assert_eq!(port, PortDimension::Memory);
             }
             _ => panic!("expected UnknownAdapter"),
+        }
+    }
+
+    #[test]
+    fn story21_14_the_placeholder_warning_and_the_meta_search_rebuild_advice_are_pinned() {
+        assert_eq!(
+            PLACEHOLDER_ADAPTER_WARNING,
+            "Using a placeholder adapter; the real adapter is not available yet"
+        );
+        #[cfg(not(feature = "meta-search"))]
+        {
+            let mut ctx = test_compose_ctx();
+            ctx.skill_exposure = "meta-search".into();
+            match build_skill_exposure(&ProfileSelection::default(), &ctx) {
+                Err(AdapterCompositionError::UnknownAdapter { name, .. }) => assert_eq!(
+                    name,
+                    "meta-search skill exposure requires the `meta-search` cargo feature; rebuild with `--features meta-search`"
+                ),
+                _ => panic!("expected UnknownAdapter"),
+            }
         }
     }
 

@@ -193,6 +193,24 @@ impl NoticeDraft {
         self.action = Some(action);
         self
     }
+
+    /// The only way production code builds an Error draft (AC17): the message is
+    /// `what` (one line, a fact: the toast and the S-LOG row paint it), `next`
+    /// (one line, an imperative next step) and an optional `detail` (source text,
+    /// possibly many lines). The S-LOG Details view wraps all three.
+    #[must_use]
+    pub fn failure(
+        source: NoticeSource,
+        what: impl AsRef<str>,
+        next: impl AsRef<str>,
+        detail: Option<String>,
+    ) -> Self {
+        Self::new(
+            source,
+            NoticeSeverity::Error,
+            failure_message(what.as_ref(), next.as_ref(), detail.as_deref()),
+        )
+    }
 }
 
 /// Where a record is in its presentation life.
@@ -650,9 +668,112 @@ pub fn warning(state: &mut TuiState, source: NoticeSource, message: impl Into<St
     notify(state, source, NoticeSeverity::Warning, message);
 }
 
-/// Error-severity shorthand.
-pub fn error(state: &mut TuiState, source: NoticeSource, message: impl Into<String>) {
-    notify(state, source, NoticeSeverity::Error, message);
+/// Record an Error notice: `what` happened, `next` is what to do about it,
+/// `detail` is optional source text. The one Error producer entry (AC17).
+pub fn failure(
+    state: &mut TuiState,
+    source: NoticeSource,
+    what: impl AsRef<str>,
+    next: impl AsRef<str>,
+    detail: Option<String>,
+) {
+    notify_draft(state, NoticeDraft::failure(source, what, next, detail));
+}
+
+/// The authored next step takes at most this many bytes of the record cap; it is ALWAYS kept.
+const NEXT_MAX_BYTES: usize = 1024;
+
+/// The largest char boundary of `text` at or below `max`.
+fn floor_boundary(text: &str, max: usize) -> usize {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// Append `text`, cut on a char boundary to `max` bytes with a trailing `…`.
+fn push_clipped(out: &mut String, text: &str, max: usize) {
+    if text.len() <= max {
+        out.push_str(text);
+        return;
+    }
+    out.push_str(&text[..floor_boundary(text, max.saturating_sub('…'.len_utf8()))]);
+    out.push('…');
+}
+
+/// `what` + `\n` + `next` [+ `\n` + `detail`] within [`MAX_MESSAGE_BYTES`].
+///
+/// Source text is kept whole whenever the whole envelope fits the record cap. Only when it would
+/// not fit is something cut: the next step is always kept (clipped only past 1 KiB), and the
+/// fact and the detail share the remaining room, the LONGER one cut first. The fact is copied
+/// at most up to that room, so an oversized provider line is never copied whole. `what` may embed
+/// source text, so its line breaks are flattened; `next` is authored copy and must already be one
+/// non-empty line.
+fn failure_message(what: &str, next: &str, detail: Option<&str>) -> String {
+    debug_assert!(
+        !next.trim().is_empty() && !next.contains(['\n', '\r']),
+        "a failure's next step is one non-empty line: {next:?}"
+    );
+    let next = next.trim();
+    let next_len = if next.len() <= NEXT_MAX_BYTES {
+        next.len()
+    } else {
+        floor_boundary(next, NEXT_MAX_BYTES - '…'.len_utf8()) + '…'.len_utf8()
+    };
+    let room = MAX_MESSAGE_BYTES - 2 - next_len;
+    let detail = detail.map(str::trim).unwrap_or("");
+
+    // Flatten the fact straight into the destination, never past `room` bytes.
+    let mut fact = String::with_capacity(what.len().min(room));
+    let mut overflow = false;
+    for line in what.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let sep = usize::from(!fact.is_empty());
+        let free = room.saturating_sub(fact.len() + sep);
+        if free == 0 {
+            overflow = true;
+            break;
+        }
+        if sep == 1 {
+            fact.push(' ');
+        }
+        let take = floor_boundary(line, free);
+        fact.push_str(&line[..take]);
+        if take < line.len() {
+            overflow = true;
+            break;
+        }
+    }
+    debug_assert!(!fact.is_empty(), "a failure states what happened");
+
+    let fact_len = if overflow { room + 1 } else { fact.len() };
+    let (fact_room, detail_room) = if fact_len + detail.len() <= room {
+        (fact.len(), detail.len())
+    } else {
+        let half = room / 2;
+        if fact_len <= half {
+            (fact_len, room - fact_len)
+        } else if detail.len() <= half {
+            (room - detail.len(), detail.len())
+        } else {
+            (half, room - half)
+        }
+    };
+    if overflow || fact.len() > fact_room {
+        let end = floor_boundary(&fact, fact_room.saturating_sub('…'.len_utf8()));
+        fact.truncate(end);
+        fact.push('…');
+    }
+
+    let mut message = fact;
+    message.reserve(2 + next_len + detail_room.min(detail.len()));
+    message.push('\n');
+    push_clipped(&mut message, next, NEXT_MAX_BYTES);
+    if !detail.is_empty() && (detail_room >= 8 || detail.len() <= detail_room) {
+        message.push('\n');
+        push_clipped(&mut message, detail, detail_room);
+    }
+    message
 }
 
 /// Wall-clock `HH:MM:SS` (local time) of a unix-millisecond stamp.

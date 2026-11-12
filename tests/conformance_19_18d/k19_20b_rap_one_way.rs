@@ -19,7 +19,7 @@ const AUTO_TOML: &str =
     "[interaction.defaults]\nresponse_mode = \"notify-and-auto\"\nnotification = \"immediate\"\n";
 const TEMPLATE: &str = "Received. Reviewing.";
 // Pin the public-facing copy independently of the crate-private renderer.
-const NOTICE: &str = "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your notify-and-auto response setting does not apply here.";
+const NOTICE: &str = "[no reply possible] This channel carries messages one way: nothing can be sent back, so your notify-and-auto response setting does not apply here.";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn k01_two_rap_frames_persist_notices_and_a2a_still_returns_the_template() {

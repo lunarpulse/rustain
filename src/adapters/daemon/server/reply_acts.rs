@@ -152,7 +152,7 @@ impl AttachServer {
                 target,
                 RecipientActionOutcome::Refused {
                     error: ProtocolError::Malformed(
-                        "`/team reply` needs the `a2a` feature; this build was compiled without it."
+                        "`/team reply` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
                             .to_owned(),
                     ),
                 },
@@ -401,7 +401,7 @@ impl AttachServer {
                 target,
                 RecipientActionOutcome::Refused {
                     error: ProtocolError::Malformed(
-                        "`/team defer` needs the `a2a` feature; this build was compiled without it."
+                        "`/team defer` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
                             .to_owned(),
                     ),
                 },
@@ -517,7 +517,7 @@ impl AttachServer {
             let _ = decline;
             super::recipient_command_gate(mode, tier, "reply", true).and_then(|()| {
                 Err(ProtocolError::Malformed(
-                    "status sharing needs the `a2a` feature; this build was compiled without it."
+                    "status sharing needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
                         .to_owned(),
                 ))
             })
@@ -2233,7 +2233,7 @@ async fn status_share_without_a2a_keeps_the_reply_gate_and_never_writes_a_turn()
             AttachMode::ReadWrite,
             ConnectionTier::TrustedLocal,
             ProtocolError::Malformed(
-                "status sharing needs the `a2a` feature; this build was compiled without it."
+                "status sharing needs the `a2a` feature; this build was compiled without it. Use a build that includes it."
                     .to_owned(),
             ),
         ),
@@ -2258,4 +2258,54 @@ async fn status_share_without_a2a_keeps_the_reply_gate_and_never_writes_a_turn()
         ));
         assert!(journal.events.lock().await.is_empty());
     }
+}
+
+#[cfg(all(test, not(feature = "a2a")))]
+#[tokio::test]
+async fn defer_without_a2a_says_which_build_to_use_and_never_writes_a_turn() {
+    use super::tests::{RecordingJournal, journaled_server, mock_core};
+    use super::{Conn, Conversation};
+    use crate::adapters::daemon::protocol::{ClientFrame, DaemonFrame};
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, mpsc, watch};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _) = mock_core(tmp.path(), vec![]);
+    let journal = Arc::new(RecordingJournal::default());
+    let (domain_tx, _) = mpsc::unbounded_channel();
+    let server = journaled_server(
+        core,
+        Arc::new(Mutex::new(Conversation::default())),
+        domain_tx,
+        journal.clone(),
+    );
+    let (tx, mut frames) = mpsc::channel(8);
+    server.registry.lock().await.conns.push(Conn {
+        id: 1,
+        tx,
+        terminal_tx: watch::channel(None).0,
+        mode: AttachMode::ReadWrite,
+        tier: ConnectionTier::TrustedLocal,
+        approval_ready: true,
+    });
+    server
+        .handle_client_frame_tiered(
+            ClientFrame::DeferRecipientItem {
+                item_id: "ri_unknown".to_owned(),
+            },
+            AttachMode::ReadWrite,
+            ConnectionTier::TrustedLocal,
+            1,
+        )
+        .await;
+    assert!(matches!(
+        frames.try_recv().unwrap(),
+        DaemonFrame::RecipientActionResult {
+            action: RecipientAction::Defer,
+            outcome: RecipientActionOutcome::Refused {
+                error: ProtocolError::Malformed(detail)
+            }, ..
+        } if detail == "`/team defer` needs the `a2a` feature; this build was compiled without it. Use a build that includes it.",
+    ));
+    assert!(journal.events.lock().await.is_empty());
 }

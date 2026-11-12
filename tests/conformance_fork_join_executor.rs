@@ -973,7 +973,7 @@ async fn ac9_wait_policy_quorum_is_rejected_in_r1() {
     let err = exe.run_fork_join(req).await.unwrap_err();
     assert!(
         matches!(err, OrchestrationError::WaitPolicyUnsupported(_)),
-        "Quorum is reserved for R3 (Story 18.6): {err:?}"
+        "Quorum is not supported yet: {err:?}"
     );
 }
 

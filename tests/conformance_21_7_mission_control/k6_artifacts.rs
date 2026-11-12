@@ -426,7 +426,7 @@ async fn artifact_copy_above_the_bound_builds_nothing() {
     rig.key(Key::Char('c'));
     let notice = last_notice(&rig);
     assert!(
-        notice.contains("Copy failed") && notice.contains("8 MiB"),
+        notice.contains("Could not copy to the clipboard.") && notice.contains("8 MiB"),
         "the refusal is a notice: {notice}"
     );
     assert!(

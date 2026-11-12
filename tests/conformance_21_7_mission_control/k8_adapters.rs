@@ -153,15 +153,15 @@ async fn a_frame_too_short_for_every_row_scrolls_by_value_and_clamps() {
     adapters_window::open(&mut rig.f.h.state, rows);
     rig.paint();
     assert!(rail_line(&rig).contains("Scroll"), "{}", rail_line(&rig));
-    assert!(!lines(&rig).join("\n").contains("7 ports loaded"));
+    assert!(!lines(&rig).join("\n").contains("7 adapters loaded"));
     // `G` reaches the last row (the NoOp footer) and `g` the first; a further move is clamped.
     rig.key(Key::Char('G'));
     rig.paint();
-    assert!(lines(&rig).join("\n").contains("7 ports loaded"));
+    assert!(lines(&rig).join("\n").contains("7 adapters loaded"));
     rig.key(Key::Char('j'));
     rig.paint();
     assert!(
-        lines(&rig).join("\n").contains("7 ports loaded"),
+        lines(&rig).join("\n").contains("7 adapters loaded"),
         "clamped at the end"
     );
     rig.key(Key::Char('g'));

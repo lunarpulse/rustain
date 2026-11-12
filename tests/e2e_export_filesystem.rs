@@ -219,7 +219,8 @@ async fn test_e2e_export_rejects_absolute_path() {
     // The flash message must indicate rejection.
     let flash = flash_message(&s).unwrap_or("");
     assert!(
-        flash.contains("absolute paths are not allowed"),
+        flash.starts_with("Could not export to an absolute path.\n")
+            && flash.contains("relative to .rustain/exports/"),
         "expected absolute-path rejection flash, got: {}",
         flash
     );
@@ -456,7 +457,9 @@ async fn test_e2e_confirm_export_overwrite_changed_target_is_not_written() {
     );
     assert_eq!(
         flash_message(&s),
-        Some("This decision is no longer pending. The export file changed; nothing was written.")
+        Some(
+            "This decision is no longer pending. The export file changed; nothing was written. Run the export again."
+        )
     );
     assert!(s.decisions.take_resolved().is_none());
 }
@@ -525,7 +528,7 @@ async fn overwrite_rejects_same_stat_replacement_and_rewrite() {
             assert_eq!(
                 flash_message(&s),
                 Some(
-                    "This decision is no longer pending. The export file changed; nothing was written."
+                    "This decision is no longer pending. The export file changed; nothing was written. Run the export again."
                 )
             );
         }

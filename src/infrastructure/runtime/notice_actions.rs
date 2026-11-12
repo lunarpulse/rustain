@@ -81,7 +81,11 @@ pub(crate) fn retry_last_turn(
 ) {
     let attempt = state.retry_state.as_ref().map_or(0, |r| r.attempt);
     if attempt >= MAX_RETRY_ATTEMPTS {
-        notifications::warning(state, NoticeSource::System, "Max retries reached");
+        notifications::warning(
+            state,
+            NoticeSource::System,
+            "Stopped retrying because the retry limit was reached. Send your message again to try once more.",
+        );
         state.retry_state = None;
         state.needs_redraw = true;
         return;
@@ -306,7 +310,10 @@ mod tests {
         retry_last_turn(&mut state, &mut conversation, &tx);
         assert!(state.retry_state.is_none());
         let record = state.notifications.visible().next().expect("a notice");
-        assert_eq!(record.message, "Max retries reached");
+        assert_eq!(
+            record.message,
+            "Stopped retrying because the retry limit was reached. Send your message again to try once more."
+        );
         assert_eq!(record.severity, NoticeSeverity::Warning);
     }
 

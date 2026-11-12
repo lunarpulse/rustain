@@ -15,7 +15,7 @@ pub mod rows;
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionAction {
     /// List persisted sessions in the current workspace, or across all
-    /// registered workspaces with `--all` (Stories 13.5a / 13.5a-1, FR125).
+    /// registered workspaces with `--all`.
     /// Read-only, offline-safe, and non-billable.
     List {
         /// Machine-readable JSON output instead of human table.
@@ -25,7 +25,7 @@ pub enum SessionAction {
         #[arg(long)]
         all: bool,
     },
-    /// Delete persisted sessions (Story 13.5b, FR125).
+    /// Delete persisted sessions.
     ///
     /// This is an irreversible, scriptable destructive operation. The guard can
     /// only detect sessions held by a running daemon; open TUIs/foreground

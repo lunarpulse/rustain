@@ -216,13 +216,18 @@ pub(crate) fn apply_action_result(
             }
         }
         RecipientActionOutcome::Refused { error } => {
-            if let Some(text) = submitted {
+            let step = if let Some(text) = submitted {
                 state.cursor_position = text.chars().count();
                 state.input_buffer = text;
+                " Your text is back in the input; change it and send it again."
             } else if let (Some(text), Some(thread)) = (reply, &thread_key) {
                 state.thread_outcomes.retain_reply(thread, text);
-            }
-            format!("[daemon error] {error}")
+                " Your reply is kept; open the thread and send it again."
+            } else {
+                ""
+            };
+            let error = error.to_string();
+            format!("[daemon error] {}.{step}", error.trim_end_matches('.'))
         }
     };
     show_notice(state, Some(target), message);
@@ -542,6 +547,51 @@ mod tests {
         assert_eq!(state.input_buffer, "line one\n  line two");
         assert_eq!(state.cursor_position, state.input_buffer.chars().count());
         assert!(pending_composition(&state).is_none());
+        let notice = state
+            .notifications
+            .records()
+            .last()
+            .expect("the refusal is recorded")
+            .message
+            .clone();
+        assert_eq!(
+            notice,
+            "[daemon error] this attachment is read-only; another client already has write access. Your text is back in the input; change it and send it again."
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_daemon_reason_then_the_step_for_what_was_kept() {
+        let reason =
+            "[daemon error] this attachment is read-only; another client already has write access.";
+        let item = || RecipientActionTarget::Item {
+            item_id: "ri-a".to_owned(),
+        };
+        let refused = || RecipientActionOutcome::Refused {
+            error: ProtocolError::ReadOnly,
+        };
+
+        let mut state = TuiState::new(80, 24);
+        let reply = ClientFrame::ReplyToRecipientItem {
+            item_id: "ri-a".to_owned(),
+            text: "my reply".to_owned(),
+            verdict: None,
+        };
+        assert!(begin_action(&mut state, &reply, false));
+        apply_action_result(&mut state, RecipientAction::Reply, item(), refused());
+        assert_eq!(
+            state.thread_outcomes.lines("ri-a").collect::<Vec<_>>(),
+            [format!(
+                "{reason} Your reply is kept; open the thread and send it again."
+            )]
+        );
+
+        let mut state = TuiState::new(80, 24);
+        apply_action_result(&mut state, RecipientAction::Reply, item(), refused());
+        assert_eq!(
+            state.thread_outcomes.lines("ri-a").collect::<Vec<_>>(),
+            [reason]
+        );
     }
 
     #[test]

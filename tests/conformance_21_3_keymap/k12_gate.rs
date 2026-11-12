@@ -72,7 +72,7 @@ const OWNERS: &[&str] = &[OWNER_21_4, OWNER_PERMANENT];
 /// the pinned prefixes (one pin per hit) and every pin must still match a hit, so a new
 /// literal in an allowlisted file fails and a pin never outlives its literal
 /// (DF-21-3-K12-LITERAL-PINNING). 3-C leaves no card row: every card rail is generated.
-type Allow = (
+pub(crate) type Allow = (
     &'static str,
     &'static [&'static str],
     &'static str,
@@ -94,7 +94,7 @@ const ALLOWLIST: &[Allow] = &[
     ("src/domain/services/approval_presentation.rs", &["… more not shown — [r] Review first"], OWNER_PERMANENT, "domain `MORE_MARKER` (TM-09 T5), truth-checked by the card tests against the `r` row"),
     ("src/domain/services/team_policy.rs", &["Standing trust is granted from a sender's consent card ([a] Always allow)"], OWNER_PERMANENT, "standing-trust doctrine text, truth-checked against the consent card"),
     // `Tab` here is a browser-style tab (P2 matches the word), not a key
-    ("src/infrastructure/runtime/event_loop.rs", &["Tab is read-only (subagent output view)", "Tab save timed out"], OWNER_PERMANENT, "two tab warnings, not keys"),
+    ("src/infrastructure/runtime/event_loop.rs", &["Tab save timed out"], OWNER_PERMANENT, "a tab warning, not a key"),
     ("src/adapters/cli/peer/rows.rs", &["         Awaiting your decision.  [y] Confirm and pin", "         Awaiting your decision.  [y] Update the address"], OWNER_PERMANENT, "shared CLI/TUI peer-add card copy: `cli` may not import `tui` (adapter ratchet); the keys are truth-checked against the Confirm rows by K11"),
     // `[x]` / `[ ]` are checkbox markers, not keys
     ("src/adapters/tui/widgets/consolidation_card.rs", &["  [x] "], OWNER_PERMANENT, "checkbox markers, not keys"),
@@ -114,7 +114,7 @@ const ALLOWLIST: &[Allow] = &[
 
 /// A column-0 `#[cfg(test)]` item is blanked (attribute run, header, body up to the first
 /// column-0 `}`); line numbers are preserved. A one-line item (`...;` or `...}`) ends at its header.
-fn production_part(source: &str) -> String {
+pub(crate) fn production_part(source: &str) -> String {
     enum St {
         Prod,
         Attrs,
@@ -160,7 +160,7 @@ fn production_part(source: &str) -> String {
 /// The text of the string literals on each physical line (1-based). Comments, char literals,
 /// lifetimes and all other tokens are skipped; escapes other than `\"`, `\\`, `\'` become a space;
 /// a `\`-newline continuation joins nothing; raw strings (`r#"…"#`) are literal text.
-fn literal_lines(source: &str) -> Vec<(usize, String)> {
+pub(crate) fn literal_lines(source: &str) -> Vec<(usize, String)> {
     // One entry per literal and physical line: several literals on one line never merge
     // (DF-21-3-K12-ONE-LITERAL-PER-LINE).
     fn push(
@@ -307,17 +307,30 @@ fn field_edit_hits(_path: &str, source: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Pinned violations of `hit_fn`'s hits over `files` against `allow` (see [`Allow`]).
+/// Pinned violations of `hit_fn`'s hits over `files` against `allow` (see [`Allow`]); the
+/// keymap dir is not scanned.
 fn pinned_violations(
     files: &[(String, String)],
     allow: &[Allow],
     hit_fn: fn(&str, &str) -> Vec<(usize, String)>,
     what: &str,
 ) -> Vec<String> {
+    pinned_violations_scanning(files, allow, hit_fn, what, Some(KEYMAP_DIR))
+}
+
+/// [`pinned_violations`] with the skipped directory named by the caller (`None` scans every
+/// file): the 21-14 voice gate also covers the keymap dir, whose remedies are user copy.
+pub(crate) fn pinned_violations_scanning(
+    files: &[(String, String)],
+    allow: &[Allow],
+    hit_fn: fn(&str, &str) -> Vec<(usize, String)>,
+    what: &str,
+    skip_dir: Option<&str>,
+) -> Vec<String> {
     let mut violations = Vec::new();
     let mut hits_by_file: BTreeMap<&str, Vec<(usize, String)>> = BTreeMap::new();
     for (path, source) in files {
-        if path.starts_with(KEYMAP_DIR) {
+        if skip_dir.is_some_and(|dir| path.starts_with(dir)) {
             continue;
         }
         let hits = hit_fn(path, source);
@@ -454,7 +467,7 @@ const SKIPPED_TEST_FILES: &[&str] = &[
 ];
 
 /// `(files scanned as ("src/…", source), the skipped test-only paths)`.
-fn production_sources() -> (Vec<(String, String)>, Vec<String>) {
+pub(crate) fn production_sources() -> (Vec<(String, String)>, Vec<String>) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut paths = Vec::new();
     rust_files(&root.join("src"), &mut paths);
@@ -478,7 +491,7 @@ fn production_sources() -> (Vec<(String, String)>, Vec<String>) {
     (files, skipped)
 }
 
-fn assert_whole_tree_scanned(files: &[(String, String)], skipped: &[String]) {
+pub(crate) fn assert_whole_tree_scanned(files: &[(String, String)], skipped: &[String]) {
     assert_eq!(
         skipped, SKIPPED_TEST_FILES,
         "only the named test-only files may be skipped"

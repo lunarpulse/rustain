@@ -1114,7 +1114,7 @@ async fn ac10_sse_is_still_unsupported_while_http_connects() {
         .await
         .expect_err("SSE must still be refused");
     assert!(
-        matches!(&error, McpError::Unsupported(reason) if reason.contains("ADR-06-08")),
+        matches!(&error, McpError::Unsupported(reason) if reason.contains("SSE transport is not supported")),
         "SSE keeps its existing reason string, got {error:?}"
     );
     assert!(matches!(

@@ -305,7 +305,8 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
             let Some(record) = current.filter(|r| compact_eligible(r, facts)) else {
                 return LogOutcome::Consumed;
             };
-            let message = record.message.clone();
+            // The decision states the fact only; a failure record's next step is S-LOG copy.
+            let message = record.message.lines().next().unwrap_or_default().to_owned();
             let conversation_id = record.conversation_id.clone().unwrap_or_default();
             close(state);
             // Raises the decision; nothing is compacted until the pane's own `K`.

@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long)]
     pub snapshot_retention: Option<usize>,
 
-    /// Override the default model (Story 8.1 AC-2 — highest-priority config layer)
+    /// Override the default model. This has the highest priority of all config layers.
     #[arg(long)]
     pub model: Option<String>,
 
@@ -64,19 +64,18 @@ pub struct Cli {
     /// Override context adapter for this session.
     #[arg(long, global = true)]
     pub context: Option<String>,
-    /// Override per-turn tool exposure strategy (Story 9.4). Phase A: only
-    /// `"static-full"` is accepted (the default). Reserved Phase B: `"meta-search"`
-    /// (Story 9.7).
+    /// Choose how tools are exposed to the model each turn. Only `"static-full"` is
+    /// accepted today (the default).
     #[arg(long, global = true, value_parser = ["static-full"])]
     pub tool_exposure: Option<String>,
-    /// Override per-turn skill exposure strategy (Story 9.6). Phase A: `"l1-metadata"`
-    /// (the DEFAULT per ADR-09-02 — INVERTED from Tools track default per evidence
-    /// asymmetry) or `"static-full"` (codex-parity opt-in). Reserved Phase B:
-    /// `"meta-search"` (Story 9.7).
+    // Skill exposure defaults to "l1-metadata" (ADR-09-02) because skills, unlike tools,
+    // gain from a metadata-first listing.
+    /// Choose how skills are exposed to the model each turn: `"l1-metadata"` (the
+    /// default) or `"static-full"` (lists every skill in full, like codex).
     #[arg(long, global = true, value_parser = ["l1-metadata", "static-full"])]
     pub skill_exposure: Option<String>,
-    /// Override sandbox adapter (Story 9.5). Phase A: `"noop"` (default on all
-    /// platforms) or `"landlock"` (Linux + `sandbox` cargo feature only).
+    /// Choose the sandbox adapter: `"noop"` (the default on all platforms) or
+    /// `"landlock"` (Linux builds with the `sandbox` cargo feature only).
     #[arg(long, global = true, value_parser = ["noop", "landlock"])]
     pub sandbox_adapter: Option<String>,
     /// Serve this instance as a loopback-only A2A endpoint. An explicit address
@@ -101,10 +100,10 @@ pub enum Command {
         /// Show detailed terminal diagnostics
         #[arg(long)]
         terminal: bool,
-        /// Run adapter conformance smoke-checks (NFR44)
+        /// Run adapter conformance smoke-checks
         #[arg(long)]
         adapters: bool,
-        /// Machine-readable JSON output (Story 13.2 AC9)
+        /// Machine-readable JSON output
         #[arg(long)]
         json: bool,
     },
@@ -126,7 +125,7 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Fetch latest models from providers and update models_variants.json (Story 7.7 AC4)
+    /// Fetch the latest models from providers and update models_variants.json
     UpdateCatalog {
         /// Output path for the updated catalog JSON (default: ./models_variants.json)
         #[arg(long, short)]
@@ -135,37 +134,37 @@ pub enum Command {
         #[arg(long)]
         provider: Vec<String>,
     },
-    /// Configuration management commands (Story 8.1 AC-9)
+    /// Configuration management commands
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Profile management commands (Story 8.4 — switch only; remaining commands ship in Story 8.6a)
+    /// Profile management commands (list, show, create, edit, switch, validate)
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
     },
-    /// Inspect the merged BM25 capability index (developer tool — not a user feature; per ADR-09-02 v2 §Audience Split)
+    /// Inspect the merged BM25 capability index (developer tool, not for everyday use)
     #[cfg(feature = "meta-search")]
     Catalog {
         #[command(subcommand)]
         action: CatalogAction,
     },
-    /// Run rustain as a background daemon (Story 12.1a — start/stop/status).
-    /// Unix only (Linux P0, macOS P1); Windows daemon support (named pipes) is
-    /// deferred to P2 (NFR33).
+    /// Run rustain as a background daemon (start, stop, status).
+    /// Unix only: Linux and macOS are supported; Windows daemon support (named
+    /// pipes) is not available yet.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Run rustain as an Agent Client Protocol server over stdio (Story 14.7).
+    /// Run rustain as an Agent Client Protocol server over stdio.
     Acp {
         /// Client compatibility profile. R1 profiles are behavior-identical; `auto` inspects initialize.clientInfo for future decoration hooks.
         #[arg(long, value_enum, default_value_t = AcpClientProfile::Auto)]
         client: AcpClientProfile,
     },
 
-    /// Run a one-shot query and print the assistant's response to stdout (Story 13.1a).
+    /// Run a one-shot query and print the assistant's response to stdout.
     /// Non-interactive: no TUI launched. Composable with pipes and scripts.
     Ask {
         /// The query to send to the LLM
@@ -179,15 +178,15 @@ pub enum Command {
         /// Print only the final assistant text block; quiet stderr
         #[arg(long)]
         final_message_only: bool,
-        /// Output format for the rendered response (Story 13.1b)
+        /// Output format for the rendered response
         #[arg(long, value_parser = ["text", "json", "stream-json"], default_value = "text")]
         output_format: String,
-        /// Dry-run plan mode: generate a plan without executing state-mutating tools (Story 13.1c, FR101).
+        /// Dry-run plan mode: generate a plan without executing state-mutating tools.
         /// No session state is written. Conflicts with --yolo (opposite permission posture).
         #[arg(long, conflicts_with = "yolo")]
         dry_run: bool,
     },
-    /// Check for updates or update rustain to the latest version (Story 13.3a, FR103).
+    /// Check for updates or update rustain to the latest version.
     /// Verifies cryptographic signatures and checksums before replacing the binary.
     Update {
         /// Check for updates without downloading or replacing (script-safe; exit 0 always).
@@ -197,11 +196,11 @@ pub enum Command {
         #[arg(long, value_parser = ["text", "json"], default_value = "text")]
         output_format: String,
     },
-    /// Generate a shell completion script and print it to stdout (Story 13.3b, FR104).
+    /// Generate a shell completion script and print it to stdout.
     /// Pipe into your shell config, e.g. `rustain completions bash > ~/.local/share/bash-completion/completions/rustain`.
     /// Completions reflect the subcommands compiled into THIS binary — re-run after upgrading.
     Completions {
-        /// Target shell. bash/zsh/fish/powershell are supported (FR104); others
+        /// Target shell. bash/zsh/fish/powershell are supported; others
         /// that clap_complete knows (e.g. elvish) also work but are unadvertised.
         #[arg(value_enum)]
         shell: clap_complete::aot::Shell,
@@ -210,14 +209,13 @@ pub enum Command {
         #[arg(long)]
         bin_name: Option<String>,
     },
-    /// Manage provider authentication credentials (Story 13.4a, FR123).
+    /// Manage provider authentication credentials.
     /// `auth login` validates and stores API keys; env vars remain highest-priority.
     Auth {
         #[command(subcommand)]
         action: AuthAction,
     },
-    /// List and manage conversation sessions (Stories 13.5a / 13.5a-1 list,
-    /// 13.5b delete, FR125).
+    /// List and manage conversation sessions.
     /// `session list` shows persisted sessions; `session delete` removes them.
     /// The delete guard can detect a daemon-held session, but open TUIs cannot
     /// be detected — close any session windows you care about first.
@@ -228,13 +226,12 @@ pub enum Command {
     /// Inspect A2A team activity, manage consent, or send through the daemon.
     /// `team log`, `team status`, and `team untrust` operate offline on the
     /// durable room journal. `team send` requires a running daemon and its
-    /// free writer slot; the daemon owns A2A egress and the send journal.
+    /// free write lock; the daemon owns A2A egress and the send journal.
     Team {
         #[command(subcommand)]
         action: TeamAction,
     },
-    /// Control which peers may reach this host over the QUIC transport
-    /// (Story 18.4b, FR157 / FR158).
+    /// Control which peers may reach this host over the QUIC transport.
     ///
     /// `peer invite` mints a ticket, `peer add` imports one after a fingerprint
     /// confirm, `peer list` and `peer show` read the roster, and `peer revoke`
@@ -245,7 +242,7 @@ pub enum Command {
         #[command(subcommand)]
         action: PeerAction,
     },
-    /// Run the relay this host offers to its peers (Story 18.4c-b, FR159).
+    /// Run the relay this host offers to its peers.
     ///
     /// `relay serve` binds the relay `rustain relay serve` names and prints the
     /// URL peers add to their own `.rustain/relay.json`;
@@ -273,11 +270,11 @@ pub enum AuthLoginMethod {
     Device,
 }
 
-/// Auth subcommand actions (Story 13.4a login; 13.4b status; 13.4c adds list).
+/// Auth subcommand actions: login, status, list, logout, accounts, use.
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthAction {
     /// Configure API credentials for an AI provider via interactive masked entry
-    /// with pre-storage validation (Story 13.4a, FR123).
+    /// with pre-storage validation.
     Login {
         /// Provider id (e.g. "anthropic", "openai", "ollama").
         provider: String,
@@ -288,15 +285,14 @@ pub enum AuthAction {
         #[arg(long)]
         json: bool,
     },
-    /// Report configured provider credential status without network validation
-    /// (Story 13.4b, FR123).
+    /// Report configured provider credential status without network validation.
     Status {
         /// Machine-readable JSON output instead of human text.
         #[arg(long)]
         json: bool,
     },
     /// List all supported providers with auth methods, configured status,
-    /// and signup URLs (Story 13.4c, FR123).
+    /// and signup URLs.
     List {
         /// Machine-readable JSON output instead of human text.
         #[arg(long)]
@@ -337,7 +333,7 @@ pub enum DaemonAction {
     /// Start a background (detached) daemon for this workspace.
     Start {
         /// Run the lifecycle loop in the foreground (do not detach). Useful for
-        /// `systemd`/`launchd` supervision (Story 12.1b) and debugging.
+        /// `systemd`/`launchd` supervision and debugging.
         #[arg(long)]
         foreground: bool,
     },
@@ -350,7 +346,7 @@ pub enum DaemonAction {
         json: bool,
     },
     /// Install a service-manager unit (systemd on Linux, launchd on macOS) so the
-    /// daemon is supervised + auto-restarts on crash (Story 12.1b, NFR50).
+    /// daemon is supervised and restarts automatically after a crash.
     Install {
         /// Render the unit/plist to stdout only — no filesystem write (for
         /// inspection / piping).
@@ -362,20 +358,20 @@ pub enum DaemonAction {
         system: bool,
     },
     /// Remove the service-manager unit for this workspace (idempotent — a missing
-    /// file is a no-op success). Touches no daemon runtime state (Story 12.1b).
+    /// file is not an error). Touches no daemon runtime state.
     Uninstall {
         /// Match the `--system` scope used at install time.
         #[arg(long)]
         system: bool,
     },
-    /// Attach an interactive client to the running daemon over its Unix socket
-    /// (Story 12.2b/12.2c). The default is the rich multi-channel TUI
-    /// (`run_attached`): unified scrollback with dimmed channel prefixes, history,
-    /// read-only multi-attach, and `Ctrl+X d` (or `/detach`) to detach (the daemon and any in-flight
-    /// turn keep running). `--plain` selects the line-based client for scripting.
+    /// Attach an interactive client to the running daemon over its Unix socket.
+    /// The default is the rich multi-channel TUI: unified scrollback with dimmed
+    /// channel prefixes, history, read-only multi-attach, and `Ctrl+X d` (or
+    /// `/detach`) to detach (the daemon and any in-flight turn keep running).
+    /// `--plain` selects the line-based client for scripting.
     Attach {
         /// Use the minimal line-based stdin/stdout client instead of the rich TUI
-        /// (scripting / non-TTY contexts; Story 12.2b `run_attach`).
+        /// (scripting / non-TTY contexts).
         #[arg(long)]
         plain: bool,
     },
@@ -390,27 +386,27 @@ pub enum DaemonAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ConfigAction {
-    /// Reload configuration in the running TUI (cross-process reload stub — see AC-9)
+    /// Reload configuration in the running TUI
     Reload,
-    /// Display the fully-resolved configuration (Story 13.2a AC2, FR124)
+    /// Display the fully-resolved configuration
     Show {
         /// Machine-readable JSON output instead of TOML
         #[arg(long)]
         json: bool,
     },
-    /// Open the active config file in $EDITOR (Story 13.2a AC3, FR124)
+    /// Open the active config file in $EDITOR
     Edit {
         /// Edit the user-global config (~/.config/rustain/config.toml) instead of workspace
         #[arg(long)]
         global: bool,
     },
-    /// Show config file locations and their precedence order (Story 13.2a AC4, FR124)
+    /// Show config file locations and their precedence order
     Path {
         /// Machine-readable JSON output
         #[arg(long)]
         json: bool,
     },
-    /// Validate configuration without launching the TUI (Story 13.2a AC5, FR124)
+    /// Validate configuration without launching the TUI
     Validate {
         /// Machine-readable JSON output
         #[arg(long)]
@@ -457,7 +453,7 @@ pub enum ProfileAction {
         #[arg(long)]
         no_validate: bool,
     },
-    /// Switch the active profile (Story 8.4 — TUI must be running)
+    /// Switch the active profile (the TUI must be running)
     Switch {
         /// Target profile name
         name: String,

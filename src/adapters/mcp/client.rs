@@ -378,7 +378,7 @@ impl McpClientAdapter {
         // pair the MCP spec deprecated in 2025-03-26. ⚑ Streamable HTTP's SSE
         // *response stream* is a different thing and is fully supported below.
         if self.spec.transport == McpTransport::Sse {
-            let reason = "SSE transport is not supported (deprecated by MCP spec 2025-03-26 per ADR-06-08). Use a proxy like mcp-proxy, or update the server to Streamable HTTP.";
+            let reason = super::SSE_UNSUPPORTED;
             self.set_state(McpConnectionState::Unsupported {
                 reason: reason.to_string(),
             });
@@ -927,6 +927,32 @@ mod tests {
         assert!(
             service.adapter.upgrade().is_none(),
             "weak ref should fail to upgrade after strong ref dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_14_an_sse_server_is_refused_with_the_plain_proxy_advice() {
+        let spec = McpServerSpec {
+            id: "legacy".to_string(),
+            transport: McpTransport::Sse,
+            command: None,
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        };
+        let reason = "SSE transport is not supported (the MCP spec deprecated it on 2025-03-26). Use a proxy like mcp-proxy, or update the server to Streamable HTTP.";
+        let client = McpClientAdapter::new(spec, None);
+        let error = client.connect().await.expect_err("sse is refused");
+        assert_eq!(
+            error.to_string(),
+            format!("Unsupported transport: {reason}")
+        );
+        assert!(
+            matches!(client.state(), McpConnectionState::Unsupported { reason: ref r } if r == reason),
+            "the state keeps the same text, got {:?}",
+            client.state()
         );
     }
 }

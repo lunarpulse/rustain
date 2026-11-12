@@ -301,7 +301,14 @@ async fn disabled_row_notice_and_store_failure() {
     assert_eq!(tui.state.focus, FocusState::Input);
     let (level, message) = block(&tui);
     assert_eq!(level, NoticeSeverity::Error);
-    assert!(message.starts_with("Account update failed: "), "{message}");
+    assert!(
+        message.starts_with("Could not update the account.\n"),
+        "{message}"
+    );
+    assert!(
+        message.contains("\nRun /login to sign in again, or check your provider settings."),
+        "{message}"
+    );
 
     tui.submit("/logout");
     tui.until("unreadable store", |tui| {
@@ -312,7 +319,11 @@ async fn disabled_row_notice_and_store_failure() {
     let (level, message) = block(&tui);
     assert_eq!(level, NoticeSeverity::Error);
     assert!(
-        message.starts_with("Could not read stored accounts: "),
+        message.starts_with("Could not read the stored accounts.\n"),
+        "{message}"
+    );
+    assert!(
+        message.contains("\nRun /login to sign in again, or check your provider settings."),
         "{message}"
     );
 }

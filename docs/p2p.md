@@ -190,7 +190,7 @@ unique nonce per frame and a 60-second validity window.
 
 The outcome vocabulary is exact: **accepted** or **refused** only when this
 host actually received and validated a verdict; an unanswered frame reports
-**outcome unknown** and points at the peer's transport-admission log. Never
+**outcome unknown** and points at the peer's transport log. Never
 "delivered", never "verified". A separate line reports how the frame that
 produced the verdict travelled: carried directly, carried through a relay
 (which therefore saw the exchange), or over a transport this build does not

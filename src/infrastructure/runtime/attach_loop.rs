@@ -127,11 +127,7 @@ impl TurnDriver for SocketTurnDriver {
             .is_err()
         {
             let _ = turn_cancel;
-            notifications::error(
-                view.state,
-                NoticeSource::Attached,
-                "attach socket closed — message not sent",
-            );
+            super::error_notices::attach_message_not_sent(view.state);
             return;
         }
 
@@ -567,6 +563,9 @@ fn seed_mirror_waiting(state: &mut TuiState, snapshot: &AttachSnapshot, read_onl
     }
 }
 
+/// The warning when the daemon closes the attach connection.
+const DAEMON_CLOSED: &str = "— daemon closed the connection — attach again to continue.";
+
 /// Story 21.1 AC6: the daemon frames that are notices (an oversized frame, a
 /// daemon error or read-only refusal, the answer to a stop request) become
 /// store notices with the same TTL, S-LOG and badge as the local host. None is
@@ -587,11 +586,9 @@ fn apply_notice_frame(
         DaemonFrame::Error(ProtocolError::ReadOnly) => notifications::warning(
             state,
             NoticeSource::Daemon,
-            "⚠ read-only — the daemon refused your input (another client holds write).",
+            "⚠ read-only — the daemon refused your input (another client holds write). Detach the other client to take over.",
         ),
-        DaemonFrame::Error(e) => {
-            notifications::error(state, NoticeSource::Daemon, format!("[daemon error] {e}"))
-        }
+        DaemonFrame::Error(e) => super::error_notices::daemon_reported_error(state, &e),
         DaemonFrame::ActiveTurn { .. } | DaemonFrame::InterruptResult { .. } => {
             if let Some(notice) = interrupt.apply(frame) {
                 notifications::notify(
@@ -1378,7 +1375,9 @@ fn paint_team_request_failure(state: &mut TuiState, pending: AttachedTeamRequest
     use crate::adapters::tui::handlers::team_command::{
         show_team_board, show_team_send, show_team_status,
     };
-    let text = format!("[daemon error] {message}");
+    let text = format!(
+        "[daemon error] {message}. The connection to the daemon is closed; attach to the session again, then retry."
+    );
     match pending {
         AttachedTeamRequest::Send { block_id, .. } => {
             state.team_send_blocks.remove(&block_id);
@@ -2414,11 +2413,7 @@ pub async fn run_attached(
                     // AttachAck/History are not expected post-handshake; ignore.
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        notifications::warning(
-                            &mut state,
-                            NoticeSource::Daemon,
-                            "— daemon closed the connection —",
-                        );
+                        notifications::warning(&mut state, NoticeSource::Daemon, DAEMON_CLOSED);
                         break Ok(());
                     }
                     // Forward-compat: an undecodable / future-shaped frame body is
@@ -8533,10 +8528,9 @@ mod tests {
             },
             &tx,
         ));
-        assert!(
-            state.feedback_blocks["team-send-1"]
-                .message
-                .contains("could not enqueue")
+        assert_eq!(
+            state.feedback_blocks["team-send-1"].message,
+            "[daemon error] could not enqueue command. The connection to the daemon is closed; attach to the session again, then retry."
         );
         assert_eq!(state.feedback_blocks["team-status"].message, "prior status");
         assert!(state.team_send_blocks.is_empty());
@@ -8950,7 +8944,7 @@ mod tests {
                 Some((
                     NoticeSource::Daemon,
                     NoticeSeverity::Error,
-                    "[daemon error]",
+                    "The daemon reported an error.",
                 )),
             ),
             (
@@ -8994,6 +8988,31 @@ mod tests {
             "every warning/error occurrence counts toward the badge"
         );
         assert!(conversation.messages.is_empty(), "never a transcript row");
+    }
+
+    #[test]
+    fn the_read_only_refusal_and_the_closed_connection_say_what_to_do_next() {
+        let mut state = TuiState::new(80, 24);
+        let mut interrupt =
+            crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(false);
+        apply_notice_frame(
+            &mut state,
+            &mut interrupt,
+            &DaemonFrame::Error(ProtocolError::ReadOnly),
+        );
+        let record = state.notifications.records().last().expect("a record");
+        assert_eq!(
+            (record.source, record.severity),
+            (NoticeSource::Daemon, NoticeSeverity::Warning)
+        );
+        assert_eq!(
+            record.message,
+            "⚠ read-only — the daemon refused your input (another client holds write). Detach the other client to take over."
+        );
+        assert_eq!(
+            DAEMON_CLOSED,
+            "— daemon closed the connection — attach again to continue."
+        );
     }
 
     /// K9 — the attached tick and draw expire toasts on the injected clock:
@@ -9070,7 +9089,8 @@ mod tests {
         );
         let first = painted(&mut state);
         assert!(first.contains("info-marker") && first.contains("read-only"));
-        assert!(first.contains("error-marker"));
+        // The toast paints the fact line; the daemon's own text is in the Details.
+        assert!(first.contains("The daemon reported an error."));
 
         // 1 ms before the Info deadline (4 s): the tick stays quiet and the frame keeps it.
         clock.advance(Duration::from_secs(4) - Duration::from_millis(1));
@@ -9085,15 +9105,15 @@ mod tests {
         assert!(state.needs_redraw, "the deadline passed: redraw");
         let frame = painted(&mut state);
         assert!(!frame.contains("info-marker"), "{frame}");
-        assert!(frame.contains("read-only") && frame.contains("error-marker"));
+        assert!(frame.contains("read-only") && frame.contains("The daemon reported an error."));
 
         // Warning at 10 s, Error at 60 s; the records stay in the log.
         clock.advance(Duration::from_secs(6));
         let frame = painted(&mut state);
-        assert!(!frame.contains("read-only") && frame.contains("error-marker"));
+        assert!(!frame.contains("read-only") && frame.contains("The daemon reported an error."));
         clock.advance(Duration::from_secs(50));
         let frame = painted(&mut state);
-        assert!(!frame.contains("error-marker"), "{frame}");
+        assert!(!frame.contains("The daemon reported an error."), "{frame}");
         assert_eq!(state.notifications.len(), 3, "S-LOG keeps every record");
     }
 

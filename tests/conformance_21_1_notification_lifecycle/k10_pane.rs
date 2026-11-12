@@ -1085,6 +1085,13 @@ fn k10_the_context_warning_producer_raises_a_decision_and_a_log_record() {
         NoticeSeverity::Error,
         "95 % and over is an Error"
     );
+    let message = &state.notifications.records().last().unwrap().message;
+    assert!(
+        message.starts_with("Running low on context (96%).\nOpen the notification log with "),
+        "{message}"
+    );
+    assert!(message.ends_with(" to start fresh."), "{message}");
+    assert_eq!(message.lines().count(), 2, "what and next step: {message}");
 }
 
 #[test]

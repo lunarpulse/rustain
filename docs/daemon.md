@@ -617,11 +617,11 @@ cross-host retract command.
 
 RAP application messages are one-way, regardless of the configured response
 mode. Each accepted message is shown with a host-generated notice:
-`[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your <mode> response setting does not apply here.`
+`[no reply possible] This channel carries messages one way: nothing can be sent back, so your <mode> response setting does not apply here.`
 Here `<mode>` is `notify-and-wait`, `notify-and-draft` or `notify-and-auto`.
 No template, draft, agent turn or pending response is created. A pending RAP
 card saved by an older build refuses resolution with
-`RAP carries messages one way; no reply was sent.` and settles as the same
+`This channel carries messages one way; no reply was sent.` and settles as the same
 notice. The sender still receives only the truthful accepted/refused verdict,
 never response text. Conversational replies use A2A.
 

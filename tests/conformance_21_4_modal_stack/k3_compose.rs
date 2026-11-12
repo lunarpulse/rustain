@@ -1171,7 +1171,7 @@ fn pane_model_effect_paints_its_destination_and_restores_the_caller() {
         );
         assert!(
             !(rect.y..rect.bottom())
-                .any(|y| row(&painted, rect, y).contains("Please close the window first"))
+                .any(|y| row(&painted, rect, y).contains("Close the open window first"))
         );
         assert!(!state.decisions.holds(DecisionKind::Budget));
         assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);

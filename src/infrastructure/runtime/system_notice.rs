@@ -8,6 +8,10 @@
 //! the same warning row but leaves the live stream, its cancellation token and
 //! its tool blocks untouched.
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::{key_text, rail_key};
+use crate::adapters::tui::keymap::table::LeaderCmd;
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::notifications::{
     NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource, notify_draft,
 };
@@ -44,29 +48,54 @@ pub(crate) fn apply_active_notice(
         );
     }
 
-    // Story 13-2 AC5: rewrite offline provider errors with user-friendly copy
-    // instead of raw error strings.
-    let msg = if matches!(level, NoticeLevel::Error) && msg.starts_with("Offline:") {
-        "✗ No provider available. Configure a local LLM for offline use, or check your connection."
-            .to_string()
-    } else {
-        msg
-    };
-
     // Story 21.1 AC4: every level is one store notice attributed to its
     // conversation. No block, no flash, no queue, and never a focus move: the
-    // notice appears as a toast and stays reviewable in S-LOG. An Error carries
-    // the retry handle of the turn that failed.
-    let mut draft = NoticeDraft::new(NoticeSource::System, NoticeSeverity::from_level(level), msg)
-        .conversation(conversation.id.clone());
-    if matches!(level, NoticeLevel::Error) {
-        draft = draft.action(NoticeAction::RetryTurn {
-            messages: conversation.messages.len(),
-        });
+    // notice appears as a toast and stays reviewable in S-LOG. An Error states
+    // what failed and the way forward, and carries the retry handle of the turn
+    // that failed.
+    let retry = NoticeAction::RetryTurn {
+        messages: conversation.messages.len(),
+    };
+    let draft = if matches!(level, NoticeLevel::Error) {
         state.status = StatusState::Idle;
-    }
-    notify_draft(state, draft);
+        failure_draft(&msg, true).action(retry)
+    } else {
+        NoticeDraft::new(NoticeSource::System, NoticeSeverity::from_level(level), msg)
+    };
+    notify_draft(state, draft.conversation(conversation.id.clone()));
     state.needs_redraw = true;
+}
+
+/// The Error draft of a failed turn: the provider's first line is what
+/// happened (further lines stay as the detail), and the next step names the
+/// keys that retry it, generated from the registry. An offline failure is
+/// rewritten into plain words. `retry` says whether the record carries a
+/// retry handle.
+fn failure_draft(msg: &str, retry: bool) -> NoticeDraft {
+    if msg.starts_with("Offline:") {
+        return NoticeDraft::failure(
+            NoticeSource::System,
+            "No provider available.",
+            "Configure a local model for offline use, or check your connection.",
+            None,
+        );
+    }
+    let mut lines = msg.lines().map(str::trim).filter(|line| !line.is_empty());
+    let what = lines.next().unwrap_or("The turn failed.");
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    let log = key_text(LeaderCmd::Notifications);
+    let next = if retry {
+        let key = rail_key(Context::NotificationLog, OverlayCmd::NotifRetry);
+        format!("Retry: open the log with {log} and press {key}.")
+    } else {
+        format!("Send the message again, or open the log with {log} for details.")
+    };
+    NoticeDraft::failure(
+        NoticeSource::System,
+        what,
+        next,
+        (!rest.is_empty()).then_some(rest),
+    )
 }
 
 /// Apply a notice addressed to a BACKGROUND tab: its stored streaming state
@@ -89,12 +118,14 @@ pub(crate) fn apply_background_notice(
     }
     // Story 21.1 AC4: a notice addressed to a background conversation is an
     // attributed store record (no per-tab stash): it survives the switch in
-    // S-LOG with the conversation named, and it paints as a toast now.
-    notify_draft(
-        state,
+    // S-LOG with the conversation named, and it paints as a toast now. Its
+    // Error carries no retry handle, so the next step says to send again.
+    let draft = if matches!(level, NoticeLevel::Error) {
+        failure_draft(&msg, false)
+    } else {
         NoticeDraft::new(NoticeSource::System, NoticeSeverity::from_level(level), msg)
-            .conversation(conversation_id),
-    );
+    };
+    notify_draft(state, draft.conversation(conversation_id));
     state.needs_redraw = true;
 }
 
@@ -274,7 +305,9 @@ mod tests {
             records(&f),
             vec![(
                 NoticeSeverity::Error,
-                "provider failed".to_owned(),
+                "provider failed\n\
+                 Retry: open the log with Ctrl+X, N and press r."
+                    .to_owned(),
                 Some(id),
                 Some(NoticeAction::RetryTurn {
                     messages: f.conversation.messages.len()
@@ -318,7 +351,9 @@ mod tests {
             records(&f),
             vec![(
                 NoticeSeverity::Error,
-                "late failure".to_owned(),
+                "late failure\n\
+                 Send the message again, or open the log with Ctrl+X, N for details."
+                    .to_owned(),
                 Some(id),
                 None
             )],
@@ -328,6 +363,124 @@ mod tests {
             f.tabs.active_tab().feedback_blocks.is_empty(),
             "no bgfb stash"
         );
+    }
+
+    /// 21-14 AC17 (K10, M12): a turn failure keeps the provider text as the fact, names the
+    /// generated retry path as the next step, and keeps the retry handle.
+    #[tokio::test]
+    async fn story21_14_turn_failure_names_the_retry_path() {
+        let mut f = live_stream();
+        apply(&mut f, NoticeLevel::Error, "provider failed");
+        let record = f.state.notifications.records().next().expect("one record");
+        assert_eq!(
+            record.message.lines().collect::<Vec<_>>(),
+            vec![
+                "provider failed",
+                "Retry: open the log with Ctrl+X, N and press r."
+            ]
+        );
+        assert!(matches!(
+            record.action,
+            Some(NoticeAction::RetryTurn { .. })
+        ));
+        // The keys come from the registry rows, not from literals.
+        assert!(record.message.contains(&key_text(LeaderCmd::Notifications)));
+        assert!(
+            record
+                .message
+                .contains(&rail_key(Context::NotificationLog, OverlayCmd::NotifRetry))
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_14_provider_text_beyond_the_first_line_is_kept_as_the_detail() {
+        let mut f = live_stream();
+        apply(
+            &mut f,
+            NoticeLevel::Error,
+            "Provider returned 529\n  overloaded_error: try later\n",
+        );
+        let record = f.state.notifications.records().next().expect("one record");
+        assert_eq!(
+            record.message,
+            "Provider returned 529\n\
+             Retry: open the log with Ctrl+X, N and press r.\n\
+             overloaded_error: try later"
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_14_an_offline_failure_is_rewritten_into_plain_words_with_its_retry_handle() {
+        let mut f = live_stream();
+        apply(&mut f, NoticeLevel::Error, "Offline: no route to host");
+        let record = f.state.notifications.records().next().expect("one record");
+        assert_eq!(
+            record.message,
+            "No provider available.\n\
+             Configure a local model for offline use, or check your connection."
+        );
+        assert!(matches!(
+            record.action,
+            Some(NoticeAction::RetryTurn { .. })
+        ));
+    }
+
+    /// 14-C-01: an oversized provider error (one huge line, ASCII or multibyte, with or without
+    /// a long continuation) can never push the mandatory next step out of the stored record.
+    #[tokio::test]
+    async fn story21_14_an_oversized_provider_error_keeps_its_next_step_line() {
+        use crate::adapters::tui::notifications::MAX_MESSAGE_BYTES;
+        let retry = "Retry: open the log with Ctrl+X, N and press r.";
+        let huge_ascii = "x".repeat(2 * MAX_MESSAGE_BYTES);
+        let huge_cjk = "界".repeat(MAX_MESSAGE_BYTES);
+        let with_detail = format!("{}\n{}", "e".repeat(40_000), "d".repeat(40_000));
+        for text in [huge_ascii, huge_cjk, with_detail] {
+            let mut f = live_stream();
+            apply(&mut f, NoticeLevel::Error, &text);
+            let record = f.state.notifications.records().next().expect("one record");
+            assert!(
+                record.message.len() <= MAX_MESSAGE_BYTES,
+                "{}",
+                record.message.len()
+            );
+            let lines: Vec<&str> = record.message.lines().collect();
+            assert!(lines.len() >= 2, "the next step survives the cap");
+            assert_eq!(lines[1], retry, "line two is the retry path");
+            assert!(
+                lines[0].ends_with('…'),
+                "the fact is clipped with an ellipsis"
+            );
+            assert!(matches!(
+                record.action,
+                Some(NoticeAction::RetryTurn { .. })
+            ));
+            // The background arm keeps its own next step the same way.
+            let id = f.conversation.id.clone();
+            apply_background_notice(&mut f.state, &mut f.tabs, &id, NoticeLevel::Error, text);
+            let last = f.state.notifications.records().last().expect("a record");
+            assert_eq!(
+                last.message.lines().nth(1),
+                Some("Send the message again, or open the log with Ctrl+X, N for details.")
+            );
+        }
+    }
+
+    /// R2-01: a provider diagnostic that fits the record cap with its next step is stored
+    /// INTACT (no arbitrary smaller quota), ASCII and multibyte.
+    #[tokio::test]
+    async fn story21_14_a_provider_error_below_the_cap_is_kept_whole() {
+        let retry = "Retry: open the log with Ctrl+X, N and press r.";
+        for text in ["p".repeat(10 * 1024), "界".repeat(3_000), "é".repeat(5_000)] {
+            let mut f = live_stream();
+            apply(&mut f, NoticeLevel::Error, &text);
+            let record = f.state.notifications.records().next().expect("one record");
+            let lines: Vec<&str> = record.message.lines().collect();
+            assert_eq!(
+                lines,
+                vec![text.as_str(), retry],
+                "the whole provider text survives"
+            );
+        }
     }
 
     /// AC1 through the consumer: the deadline comes from the injected clock.
@@ -355,7 +508,11 @@ mod tests {
             .visible()
             .map(|r| r.message.clone())
             .collect();
-        assert_eq!(left, ["error"], "info expired at 4 s; the error lives 60 s");
+        assert_eq!(
+            left,
+            ["error\nRetry: open the log with Ctrl+X, N and press r."],
+            "info expired at 4 s; the error lives 60 s"
+        );
         clock.advance(Duration::from_secs(56));
         begin_draw(&mut f.state);
         assert_eq!(f.state.notifications.visible().count(), 0);
@@ -708,7 +865,10 @@ mod tests {
                 1,
             ),
             ("Compaction failed: provider error", 1),
-            ("Provider failed: 503", 5),
+            (
+                "Provider failed: 503\nRetry: open the log with Ctrl+X, N and press r.",
+                5,
+            ),
         ] {
             assert!(
                 facts_in_log.contains(&(message.to_owned(), count)),

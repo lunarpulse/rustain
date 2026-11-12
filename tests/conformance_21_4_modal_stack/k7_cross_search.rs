@@ -1143,7 +1143,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_legacy_ta
         CLOSE_WINDOW_FIRST
     );
     let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
-    assert!(screen.contains("Please close the window first"), "{screen}");
+    assert!(screen.contains("Close the open window first"), "{screen}");
     assert_eq!(press(&mut h.state, Key::Ctrl('q')), InputAction::Quit);
     quit_confirm::request(
         &mut h.state,
@@ -1193,7 +1193,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_legacy_ta
                 Surface::CommandPalette
             );
             let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs);
-            assert!(screen.contains("Please close the window first"), "{screen}");
+            assert!(screen.contains("Close the open window first"), "{screen}");
             press(&mut h.state, Key::Esc);
         } else {
             assert_eq!(

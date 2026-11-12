@@ -513,9 +513,22 @@ mod tests {
                                 } else {
                                     assert!(matches!(outcome, RecipientActionOutcome::Refused {
                                         error: crate::adapters::daemon::protocol::ProtocolError::Malformed(detail)
-                                    } if detail.contains("needs the `a2a` feature")));
+                                    } if detail == "`/team reply` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."));
                                 }
                                 break;
+                            }
+                        }
+                        if !cfg!(feature = "a2a") {
+                            write_frame(&mut client, &ClientFrame::SetRecipientContext { item_id: "ri_restart".into(), selected: true }).await.unwrap();
+                            loop {
+                                if let Some(DaemonFrame::RecipientActionResult {
+                                    action: RecipientAction::ContextSelect, outcome, ..
+                                }) = read_frame::<_, DaemonFrame>(&mut client).await.unwrap() {
+                                    assert!(matches!(outcome, RecipientActionOutcome::Refused {
+                                        error: crate::adapters::daemon::protocol::ProtocolError::Malformed(detail)
+                                    } if detail == "`/team context` needs the `a2a` feature; this build was compiled without it. Use a build that includes it."));
+                                    break;
+                                }
                             }
                         }
                         let events = journal.events.lock().await;

@@ -21,6 +21,13 @@ pub fn backoff_for_attempt(retry: u32) -> Duration {
     Duration::from_millis(1000 * 2u64.pow(retry.saturating_sub(1)))
 }
 
+/// What the log says once every attempt has failed.
+fn gave_up_text(max_attempts: u32) -> String {
+    format!(
+        "MCP server connection failed after {max_attempts} attempts. Use /mcp reconnect <name> to retry or restart rustain."
+    )
+}
+
 /// Spawn a reconnect task for a single MCP client.
 ///
 /// Owns the ONLY retry loop on the initial-connect path — which is why the rmcp
@@ -68,10 +75,7 @@ pub fn spawn_reconnect_task(client: Arc<McpClientAdapter>) -> tokio::task::JoinH
             }
         }
 
-        tracing::error!(
-            server = %client.server_id(),
-            "MCP server connection failed after {max_attempts} attempts. Use /mcp reconnect <name> to retry (Story 9.2) or restart rustain."
-        );
+        tracing::error!(server = %client.server_id(), "{}", gave_up_text(max_attempts));
     })
 }
 
@@ -91,5 +95,13 @@ mod tests {
         assert_eq!(schedule, vec![1, 2, 4, 8]);
         assert_eq!(1 + schedule.len(), MAX_RECONNECT_ATTEMPTS as usize);
         assert_eq!(schedule.iter().sum::<u64>(), 15);
+    }
+
+    #[test]
+    fn story21_14_the_gave_up_text_names_the_retry_and_restart_paths() {
+        assert_eq!(
+            gave_up_text(5),
+            "MCP server connection failed after 5 attempts. Use /mcp reconnect <name> to retry or restart rustain."
+        );
     }
 }

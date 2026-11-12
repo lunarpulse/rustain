@@ -8,6 +8,7 @@ pub(crate) mod attach_interrupt;
 #[cfg(unix)]
 pub mod attach_loop;
 pub mod decision_effects;
+pub(crate) mod error_notices;
 pub mod event_bus;
 pub mod event_loop;
 pub mod history_bridge;

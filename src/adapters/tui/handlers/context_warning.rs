@@ -13,9 +13,11 @@
 #![allow(dead_code)]
 
 use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
-use crate::adapters::tui::notifications::{
-    self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
-};
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::{key_text, rail_key};
+use crate::adapters::tui::keymap::table::LeaderCmd;
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
+use crate::adapters::tui::notifications::{self, NoticeAction, NoticeDraft, NoticeSource};
 use crate::adapters::tui::state::TuiState;
 
 use super::HandlerOutcome;
@@ -29,14 +31,24 @@ pub fn handle_upsert_context_warning(
     pct: u32,
 ) -> HandlerOutcome {
     let message = format!("Running low on context ({pct}%).");
-    let severity = if pct >= 95 {
-        NoticeSeverity::Error
+    let draft = if pct >= 95 {
+        let next = format!(
+            "Open the notification log with {}, then press {} to compact or {} to start fresh.",
+            key_text(LeaderCmd::Notifications),
+            rail_key(Context::NotificationLog, OverlayCmd::NotifCompact),
+            rail_key(Context::NotificationLog, OverlayCmd::NotifFresh),
+        );
+        NoticeDraft::failure(NoticeSource::Context, &message, next, None)
     } else {
-        NoticeSeverity::Warning
+        NoticeDraft::new(
+            NoticeSource::Context,
+            notifications::NoticeSeverity::Warning,
+            message.clone(),
+        )
     };
     notifications::notify_draft(
         state,
-        NoticeDraft::new(NoticeSource::Context, severity, message.clone())
+        draft
             .conversation(conversation_id)
             .action(NoticeAction::ContextDecision),
     );

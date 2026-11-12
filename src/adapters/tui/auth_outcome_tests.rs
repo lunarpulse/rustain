@@ -674,4 +674,34 @@ mod ba_login_lifetime {
             }
         }
     }
+
+    /// 21-14 AC17: a failed login keeps the checker-pinned `Login failed: {message}` shape; the
+    /// login runtime supplies the next step on the second line, the handler passes it through.
+    #[test]
+    fn story21_14_a_failed_login_passes_the_next_step_line_through() {
+        let (mut state, _cancel, _received, login_id) = prompted(1);
+        event(
+            &mut state,
+            LoginEvent::Finished {
+                login_id,
+                provider: "deepseek".into(),
+                outcome: Err(LoginFailure::Failed(
+                    "provider said no\nRun /login to try again, or check your provider settings."
+                        .into(),
+                )),
+            },
+        );
+        let record = state
+            .notifications
+            .records()
+            .find(|record| {
+                record.severity == crate::adapters::tui::notifications::NoticeSeverity::Error
+            })
+            .expect("an Error notice");
+        assert_eq!(
+            record.message,
+            "Login failed: provider said no\n\
+             Run /login to try again, or check your provider settings."
+        );
+    }
 }

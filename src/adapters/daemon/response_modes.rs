@@ -110,11 +110,15 @@ pub(crate) const AWAITING_RESPONSE_PLACEHOLDER: &str = "[awaiting your response]
 pub(crate) const DRAFT_APPROVAL_PREFIX: &str =
     "[y] Approve  [e] Edit  [n] Reject  [write] My own\n";
 
-pub(crate) const RAP_ONE_WAY_REFUSAL: &str = "RAP carries messages one way; no reply was sent.";
+pub(crate) const RAP_ONE_WAY_REFUSAL: &str =
+    "This channel carries messages one way; no reply was sent.";
+
+/// The notice when the attached client cannot take another sender consent card.
+pub(crate) const CONSENT_QUEUE_FULL: &str = "Could not show the sender consent card because the attached client's queue is full, so the request was rejected. Ask the sender to send it again.";
 
 pub(crate) fn rap_one_way_notice(mode: crate::domain::models::ResponseMode) -> String {
     format!(
-        "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+        "[no reply possible] This channel carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
         mode.as_str()
     )
 }
@@ -131,14 +135,14 @@ fn rap_one_way_copy_pins_every_mode() {
         assert_eq!(
             rap_one_way_notice(mode),
             format!(
-                "[no reply over RAP] RAP carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
+                "[no reply possible] This channel carries messages one way: nothing can be sent back, so your {} response setting does not apply here.",
                 mode.as_str()
             )
         );
     }
     assert_eq!(
         RAP_ONE_WAY_REFUSAL,
-        "RAP carries messages one way; no reply was sent."
+        "This channel carries messages one way; no reply was sent."
     );
 }
 
@@ -610,6 +614,15 @@ mod tests {
         assert_eq!(
             controller.resolve("retro", DraftResolution::Reject).await,
             Some(sent)
+        );
+    }
+
+    #[test]
+    fn story21_14_the_consent_card_queue_full_notice_names_the_card_the_rejection_and_the_next_step()
+     {
+        assert_eq!(
+            super::CONSENT_QUEUE_FULL,
+            "Could not show the sender consent card because the attached client's queue is full, so the request was rejected. Ask the sender to send it again."
         );
     }
 }

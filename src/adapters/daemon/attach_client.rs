@@ -35,7 +35,7 @@ use crate::adapters::tui::widgets::delimited_body::approval_body_rows;
 pub(crate) enum OneShotAttachError {
     #[error("no daemon is running for this workspace")]
     NoDaemon,
-    #[error("another client holds this daemon's writer slot")]
+    #[error("another client already has write access to this daemon")]
     WriterHeld,
     #[error("attach protocol version mismatch: daemon speaks v{daemon}, client speaks v{client}")]
     VersionMismatch { daemon: u32, client: u32 },
@@ -543,6 +543,14 @@ mod tests {
         assert!(parse_approval_command("approve").is_none());
         assert!(parse_approval_command("approve req extra").is_none());
         assert!(parse_approval_command("hello daemon").is_none());
+    }
+
+    #[test]
+    fn story21_14_a_held_write_lock_is_reported_as_write_access() {
+        assert_eq!(
+            OneShotAttachError::WriterHeld.to_string(),
+            "another client already has write access to this daemon"
+        );
     }
 }
 

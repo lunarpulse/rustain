@@ -9,7 +9,7 @@ pub enum EditorSuspendError {
 impl std::fmt::Display for EditorSuspendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EditorSuspendError::Io(e) => write!(f, "I/O error: {}", e),
+            EditorSuspendError::Io(e) => write!(f, "Could not run the editor: {}", e),
             EditorSuspendError::EditorNonZeroExit => {
                 write!(f, "Editor exited with non-zero status")
             }
@@ -124,4 +124,15 @@ pub async fn run_editor_on_plan(
     edited_plan.created_at = plan.created_at;
 
     Ok(Some(edited_plan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn story21_14_an_editor_io_failure_says_the_editor_could_not_run() {
+        let error = EditorSuspendError::Io(std::io::Error::other("disk full"));
+        assert_eq!(error.to_string(), "Could not run the editor: disk full");
+    }
 }

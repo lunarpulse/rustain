@@ -521,3 +521,172 @@ def test_leg_b_coach_line_highlight_and_team_defaults_at_80x24(monkeypatch):
             {"viewport": [80, 24], "binary": str(binary),
              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
              "state_toml": text}) + "\n", encoding="utf-8")
+
+
+# ── Leg C: the voice pass ────────────────────────────────────────────────────────────────────
+# Leg C (slice 14-C, 80x24): `rustain --help`, `rustain daemon --help` and `rustain team --help`
+# (non-PTY, bounded) exit 0 and carry no internal identifier and no first person; in the TUI,
+# `/export <abs path>` (an absolute path is refused by the export handler without a provider) paints
+# an Error toast whose row is the fact line, `Ctrl+X n` opens the notification log whose row shows
+# the fact and not the next step, and `Enter` opens Details that show the fact AND the next step.
+# Offline first: the frames of `story21_14_smoke_frames_export_c` (toast, log list, details at
+# 60x16, 80x24, 130x30 and 130x30 with the monitor column) and the rendered help texts.
+ID_RE = re.compile(r"\b(?:(?:Story|Stories|Epic)\s+\d|(?:FR|NFR|UX-DR|ADR|AD|RU|DF|KG|MW|LR|OD|TM|AC)-?\d)")
+FP_RE = re.compile(r"(?:^|[^\w/])(?:I|I'm|I'll|I've|I'd)\b(?!/O)", re.M)
+ERR_WHAT = "Could not export to an absolute path."
+ERR_NEXT = "Run /export again with a name relative to .rustain/exports/."
+HELP_COMMANDS = ((), ("daemon",), ("team",))
+
+
+def help_clean(text):
+    """A rendered help text: non-empty, no internal identifier, no first person."""
+    return bool(text.strip()) and ID_RE.search(text) is None and FP_RE.search(text) is None
+
+
+def _flat(screen):
+    """Whitespace-normalised text of a frame, borders dropped (a wrapped sentence is found whole)."""
+    return " ".join(re.sub(r"[│┌┐└┘─]", " ", screen).split())
+
+
+def err_toast_ok(screen, monitor=False, rows=1, mode="Normal"):
+    """The Error toast is on the strip-aware toast rows and shows only the fact (+ `…`)."""
+    text = ERR_WHAT + "…"
+    if monitor:
+        toast = any(f"Error {text}" in row for row in harness.toast_rows(screen, rows))
+    else:
+        toast = harness.toast_present(screen, text, "Error", rows=rows)
+    return toast and ERR_NEXT not in _flat(screen) and chrome_ok(screen, mode)
+
+
+def err_log_ok(screen, full=True):
+    """The S-LOG list: the newest row is the Error row carrying the export fact (whole, with its
+    ellipsis, from 80 columns; a clipped prefix of at least 20 characters at 60), and no next step."""
+    rows = harness.notification_log_rows(screen)
+    if not rows or ERR_NEXT in harness.notification_log_text(screen):
+        return False
+    found = re.match(r"Error · \d\d:\d\d:\d\d · export · (.*)$", rows[0])
+    if found is None:
+        return False
+    body = found.group(1).rstrip()
+    fact = ERR_WHAT + "…"
+    if body == fact:
+        return True
+    return not full and body.endswith("…") and len(body) > 20 and fact.startswith(body[:-1])
+
+
+def err_details_ok(screen):
+    """The S-LOG Details: the fact and the next step, wrapped or not."""
+    text = harness.notification_log_text(screen)
+    return ERR_WHAT in text and ERR_NEXT in text
+
+
+def _deskcheck_c():
+    for name in ("root", "daemon", "team"):
+        text = (Path(os.environ["RUSTAIN_TOUR_FRAMES"]) / f"help-{name}.txt").read_text(encoding="utf-8")
+        assert help_clean(text), f"help {name}:\n{text}"
+        assert len(text.splitlines()) > 4, f"help {name} is not empty"
+        for control in (text + "\n  (Story 9.4)", text + "\nI will draft it for you", text.replace("Usage", "Usage (FR12)", 1),
+                        text + "\nSee ADR-09-02.", ""):
+            assert not help_clean(control), f"help {name}: torn control passed:\n{control[-80:]!r}"
+    assert help_clean("Say I/O errors out loud") and not help_clean("Say: I think so")
+    for width, height, suffix in [(w, h, "") for w, h in SIZES] + [(130, 30, "-monitor")]:
+        frames = _frames(width, height, suffix)
+        label = f"{width}x{height}{suffix}"
+        monitor, rows = suffix == "-monitor", (3 if width >= 100 else 1)
+        toast, log, details = frames["errtoast"], frames["errlog"], frames["errdetails"]
+        assert err_toast_ok(toast, monitor, rows), f"{label} toast:\n{toast}"
+        full = width >= 80
+        assert err_log_ok(log, full), f"{label} log:\n{log}"
+        # Torn LOG-row facts: truncated to `Could not`, another export fact, a leaked next step.
+        row = next(r for r in _rows(log) if "export · Could not" in r)
+        body = row[row.index("export · ") + len("export · "):].rstrip(" │")
+        torn = ["Could not…", "Could not export the conversation.…", "Could not export to an a"]
+        if width >= 130:  # the row has room to carry a leaked next step inside the frame
+            torn.append(body + " " + ERR_NEXT)
+        for torn_body in torn:
+            assert not err_log_ok(log.replace(body, torn_body, 1), full), f"{label}: torn log row `{torn_body}` passed"
+        assert not err_log_ok("\n".join(r for r in _rows(log) if "export ·" not in r), full)
+        assert err_details_ok(details), f"{label} details:\n{details}"
+        # Torn controls: each predicate fails when its fact is gone, moved or merged.
+        assert not err_toast_ok(toast.replace(ERR_WHAT, "Could not exp"), monitor, rows)
+        assert not err_toast_ok(toast.replace("Error " + ERR_WHAT, "Error " + ERR_WHAT + " " + ERR_NEXT), monitor, rows)
+        assert not err_toast_ok("\n".join(r for r in _rows(toast) if ERR_WHAT not in r), monitor, rows)
+        moved = [r.replace("Error " + ERR_WHAT, "") if ERR_WHAT in r else r for r in _rows(toast)]
+        moved[2] = (moved[2] + "  Error " + ERR_WHAT + "…").rstrip()
+        assert not err_toast_ok("\n".join(moved), monitor, rows), f"{label}: a toast moved into the Stage passed"
+        assert not err_toast_ok(toast, monitor, rows, mode="PLAN")
+        assert not err_log_ok(toast) and not err_log_ok(details)
+        assert not err_log_ok(log.replace("Error ·", "Info  ·"))
+        assert not err_details_ok(log) and not err_details_ok(toast)
+        assert not err_details_ok(details.replace("Run /export", "Run /expo"))
+        assert not err_details_ok(details.replace("absolute path", "abso"))
+        assert not err_details_ok("\n".join(r for r in _rows(details) if "Run" not in r))
+
+
+@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
+def test_voice_predicates_accept_real_saved_frames_and_reject_torn_ones():
+    _deskcheck_c()
+
+
+@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_leg_c_help_is_plain_and_an_error_states_its_next_step_at_80x24(monkeypatch):
+    import hashlib
+    import json
+    import subprocess
+    import time
+
+    monkeypatch.setattr(harness, "TERM_COLS", 80)
+    monkeypatch.setattr(harness, "TERM_ROWS", 24)
+    binary = harness._resolve_binary()[0]
+    with tempfile.TemporaryDirectory(prefix="21-14-c-") as root:
+        root = Path(root)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        home = root / "home"
+        home.mkdir()
+        env = {"HOME": str(home), "RUSTAIN_PROFILE": "", "RUSTAIN_CLIPBOARD": "file"}
+        evidence = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())) / "21-14-leg-c"
+        evidence.mkdir(parents=True, exist_ok=True)
+        helps = {}
+        clean_env = {**os.environ, "HOME": str(home), "RUSTAIN_DATA_DIR": str(root / "data"),
+                     "RUSTAIN_CONFIG_DIR": str(root / "config")}
+        for command in HELP_COMMANDS:
+            done = subprocess.run([str(binary), *command, "--help"], capture_output=True, text=True,
+                                  timeout=60, cwd=str(workspace), env=clean_env, stdin=subprocess.DEVNULL)
+            label = " ".join(("rustain", *command, "--help"))
+            assert done.returncode == 0, f"{label}: exit {done.returncode}\n{done.stderr}"
+            assert help_clean(done.stdout), f"{label}:\n{done.stdout}"
+            helps[label] = done.returncode
+            (evidence / ("help-" + (command[0] if command else "root") + ".txt")).write_text(done.stdout, encoding="utf-8")
+        target = workspace / "missing-dir" / "out.md"
+        real_spawn = harness.pexpect.spawn
+        with (evidence / "raw.pty").open("w", encoding="utf-8", newline="") as raw:
+            def spawn(*args, **kwargs):
+                child = real_spawn(*args, **kwargs)
+                child.logfile_read = raw  # attached at spawn: the first bytes are captured too
+                return child
+
+            monkeypatch.setattr(harness.pexpect, "spawn", spawn)
+            with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=env) as tui:
+                assert tui.wait_for_screen("Type a message to start.", timeout=15), tui.get_screen_text()
+                tui.send(f"/export {target}")
+                tui.wait_until(lambda s: "out.md" in s, "the typed command", timeout=10)
+                tui.send(ENTER)
+                deadline = time.monotonic() + 4
+                while time.monotonic() < deadline and not err_toast_ok(tui.get_screen_text()):
+                    pass
+                if not err_toast_ok(tui.get_screen_text()):
+                    tui.send(ENTER)  # the autocomplete popup took the first Enter
+                toast = tui.wait_until(err_toast_ok, "the Error toast (the fact line only)", timeout=15)
+                tui.send(CTRL_X + "n")
+                log = tui.wait_until(err_log_ok, "the notification log row", timeout=10)
+                assert ERR_NEXT not in harness.notification_log_text(log)
+                tui.send(ENTER)
+                details = tui.wait_until(err_details_ok, "the Details with the next step", timeout=10)
+        (evidence / "run.json").write_text(json.dumps(
+            {"viewport": [80, 24], "binary": str(binary),
+             "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+             "help_exit_codes": helps, "toast_row": harness.toast_rows(toast)[0].strip(),
+             "details": harness.notification_log_text(details)}) + "\n", encoding="utf-8")

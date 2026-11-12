@@ -145,13 +145,13 @@ fn test_meta_search_config_rejected_with_actionable_error() {
     let err = rustain::infrastructure::startup::validate_tools_exposure("meta-search");
     let msg = format!("{}", err.unwrap_err());
     assert!(
-        msg.contains("deferred to Story 9.7"),
-        "error must mention Story 9.7 deferral: {}",
+        msg.contains("requires the `meta-search` cargo feature"),
+        "error must name the cargo feature: {}",
         msg
     );
     assert!(
-        msg.contains("ADR-09-01"),
-        "error must cite ADR-09-01: {}",
+        msg.contains("--features meta-search") && msg.contains("remove the key"),
+        "error must say how to enable it or remove the key: {}",
         msg
     );
 }

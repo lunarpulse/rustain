@@ -214,7 +214,7 @@ pub enum A2aPeerSpecError {
     )]
     ReservedId { id: String },
     #[error(
-        "unsupported pinned-key algorithm {algorithm:?}; remove the pin to accept this peer unverified, or wait for DF-17-4a-2"
+        "unsupported pinned-key algorithm {algorithm:?}; remove the pin to accept this peer unverified, or pin an Ed25519 key"
     )]
     UnsupportedPinnedAlgorithm { algorithm: String },
     #[error("pinned Ed25519 JWK x value must not be empty")]
@@ -239,6 +239,16 @@ impl A2aPeerSpecError {
 mod tests {
     use super::*;
     use crate::domain::models::PinnedKeyAlgorithm;
+
+    #[test]
+    fn story21_14_an_unsupported_pin_algorithm_says_how_to_fix_the_roster() {
+        let error = PinnedKey::parse("RS256", "x".to_owned(), None)
+            .expect_err("only EdDSA pins are accepted");
+        assert_eq!(
+            error.to_string(),
+            "unsupported pinned-key algorithm \"RS256\"; remove the pin to accept this peer unverified, or pin an Ed25519 key"
+        );
+    }
 
     // Pins as an operator writes them: unpadded base64url of a 32-byte Ed25519 key.
     //
