@@ -537,7 +537,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 51); // 48 + 1 agents + 1 adapters + 1 tasks surface entry (21-7, 7-C/7-D); /detach is attached-only
+        assert_eq!(reg.all_entries().len(), 52); // 48 + 1 agents + 1 adapters + 1 tasks surface entry (21-7, 7-C/7-D) + /tour (21-14); /detach is attached-only
         assert!(reg.all_entries().iter().any(|e| e.name == "/notifications"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/login"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/models"));
@@ -560,7 +560,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 51); // 48 + the agents, adapters and tasks surface entries (21-7)
+        assert_eq!(reg.all_entries().len(), 52); // 48 + the agents, adapters and tasks surface entries (21-7) + /tour (21-14)
     }
 
     #[test]
@@ -576,20 +576,20 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 51); // 48 + the agents, adapters and tasks surface entries (21-7)
+        assert_eq!(reg.slash_entries.len(), 52); // 48 + the agents, adapters and tasks surface entries (21-7) + /tour (21-14)
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 52);
+        assert_eq!(reg.all_entries().len(), 53);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 52);
+        assert_eq!(reg.all_entries().len(), 53);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 53);
+        assert_eq!(reg.all_entries().len(), 54);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 53);
+        assert_eq!(reg.all_entries().len(), 54);
     }
 
     fn populated() -> PaletteRegistry {

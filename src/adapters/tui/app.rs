@@ -544,7 +544,8 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
             || crate::adapters::tui::agent_window::ignores_raw_key(state, key)
             || crate::adapters::tui::task_window::ignores_raw_key(state, key)
             || crate::adapters::tui::adapters_window::ignores_raw_key(state, key)
-            || crate::adapters::tui::history_window::ignores_raw_key(state, key))
+            || crate::adapters::tui::history_window::ignores_raw_key(state, key)
+            || crate::adapters::tui::tour::ignores_raw_key(state, key))
     {
         return true;
     }
@@ -1166,7 +1167,8 @@ fn execute(
         | CommandId::Permission(_)
         | CommandId::Card(_)
         | CommandId::Thread(_)
-        | CommandId::Mission(_) => InputAction::Consumed,
+        | CommandId::Mission(_)
+        | CommandId::Tour(_) => InputAction::Consumed,
     })
 }
 
@@ -2342,6 +2344,10 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             command_args: args.map(str::to_owned),
         };
     }
+
+    // A plain-text message: the tour's first step is done (slash commands and `@Agents/`
+    // returned above).
+    crate::adapters::tui::tour::observe_submit(state);
 
     // If there are resolved file mentions, use SubmitWithContext so the event loop
     // can read state.resolved_mentions before clearing them.

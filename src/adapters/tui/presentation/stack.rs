@@ -47,6 +47,11 @@ pub enum Surface {
     /// `TuiState.history_window` (a snapshot of the session index, re-read when the index
     /// changed). Local only: the attached host has no session index.
     History,
+    /// The onboarding tour card (Story 21.14): one at a time, opened only through
+    /// `reducer::open_tour` and only on an empty stack; its payload is `TuiState.tour` (the step
+    /// and phase, which outlive the frame) and its painted title is the frame's `tool_title`
+    /// (`Tour` for the offer, `Tour · <k> of 5` for a step). Local only.
+    Tour,
 }
 
 impl Surface {
@@ -76,6 +81,7 @@ impl Surface {
             Self::TaskWindow => "Task",
             Self::Adapters => "Adapters",
             Self::History => "History",
+            Self::Tour => "Tour",
         }
     }
 
@@ -105,6 +111,7 @@ impl Surface {
             Self::TaskWindow => Context::TaskWindow,
             Self::Adapters => Context::Adapters,
             Self::History => Context::History,
+            Self::Tour => Context::Tour,
         }
     }
 
@@ -129,6 +136,7 @@ impl Surface {
                 | Self::TaskWindow
                 | Self::Adapters
                 | Self::History
+                | Self::Tour
         )
     }
 }

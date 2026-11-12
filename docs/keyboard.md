@@ -431,6 +431,18 @@ Also inherits: Markdown body.
 | `Ctrl+P` | Open the command palette above the artifact window | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing the artifact window | local | portable |  |
 
+## Tour card
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Start the tour, or begin the step the card describes | local | portable |  |
+| `n` | Skip this tour step (not on the first offer card) | local | portable |  |
+| `Esc` | Leave the tour; /tour takes it again | local | portable |  |
+| `Ctrl+C` | Leave the tour without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above the tour card | local | portable |  |
+| `Ctrl+P` | Open the command palette above the tour card | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the tour card | local | portable |  |
+
 ## Wave overlay
 
 | Keys | Does | Hosts | Reach | Notes |

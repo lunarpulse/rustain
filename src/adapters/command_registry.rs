@@ -90,6 +90,8 @@ const MODE_USAGE: &[UsageRow] = &[("PERMISSIONS", "/mode", "Switch permission mo
 const PLAN_USAGE: &[UsageRow] = &[(COMMANDS, "/plan on|off|toggle", "Toggle Plan mode", true)];
 #[rustfmt::skip]
 const ML_USAGE: &[UsageRow] = &[("INPUT", "/ml", "Toggle multi-line mode via slash command", true)];
+#[rustfmt::skip]
+const TOUR_USAGE: &[UsageRow] = &[(COMMANDS, "/tour", "Take the two-minute tour", true)];
 static NOTIFICATIONS_DESC: LazyLock<String> = LazyLock::new(|| {
     format!(
         "Open the Notification Log (also {})",
@@ -384,6 +386,13 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
                 usage: NOTIFICATIONS_USAGE.as_slice(),
+            },
+            SlashCommandDef {
+                name: "tour".to_string(),
+                description: "Take the two-minute tour".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+                usage: TOUR_USAGE,
             },
             SlashCommandDef {
                 name: "detach".to_string(),

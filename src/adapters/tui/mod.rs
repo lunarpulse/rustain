@@ -39,6 +39,7 @@ pub mod theme;
 pub mod thread_body;
 pub mod thread_inspector;
 pub mod tool_inspector;
+pub mod tour;
 pub mod version_info;
 pub mod views;
 pub mod widgets;

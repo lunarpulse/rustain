@@ -22,6 +22,7 @@ pub mod table_panels;
 pub mod table_permission;
 pub mod table_thread;
 pub mod table_tool;
+pub mod table_tour;
 pub mod table_viewer;
 pub mod text_edit;
 

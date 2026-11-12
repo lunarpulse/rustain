@@ -66,5 +66,6 @@ pub mod toast_layer;
 pub mod tool_block;
 pub mod tool_inspector;
 pub mod tool_line;
+pub mod tour_card;
 pub mod usage_panel;
 pub mod which_key_bar;

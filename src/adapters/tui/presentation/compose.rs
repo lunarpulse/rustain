@@ -162,6 +162,9 @@ pub fn compose(
                 state,
                 modal.title(),
             ),
+            Surface::Tour => {
+                crate::adapters::tui::widgets::tour_card::render(frame, rect, state, modal.title())
+            }
             Surface::Search => {
                 rect = Rect::new(
                     shell.chat_pane.x,
@@ -320,7 +323,8 @@ pub fn compose(
                 | Surface::AgentWindow
                 | Surface::TaskWindow
                 | Surface::Adapters
-                | Surface::History => theme.colors.accent,
+                | Surface::History
+                | Surface::Tour => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

@@ -65,6 +65,7 @@ pub const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &[
     "fanout_spawn_gate_threshold",
     "notifications",
     "markdown",
+    "onboarding",
 ];
 
 /// Top-level keys whose settings were retired: old files and `-c` overrides that still carry

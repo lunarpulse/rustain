@@ -323,9 +323,14 @@ pub fn route(
         Surface::History if host == Host::Local => RouteEffect::Action(
             crate::adapters::tui::history_window::on_key(state, key, host),
         ),
-        Surface::AgentWindow | Surface::TaskWindow | Surface::Adapters | Surface::History => {
-            RouteEffect::Consumed
+        Surface::Tour if host == Host::Local => {
+            RouteEffect::Action(crate::adapters::tui::tour::on_key(state, key, host))
         }
+        Surface::AgentWindow
+        | Surface::TaskWindow
+        | Surface::Adapters
+        | Surface::History
+        | Surface::Tour => RouteEffect::Consumed,
         Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
             Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
                 RouteEffect::Decision(effect)

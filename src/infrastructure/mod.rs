@@ -29,4 +29,5 @@ pub mod telemetry;
 pub mod terminal_info;
 pub mod transparency;
 pub mod transparency_awareness;
+pub mod tui_state_file;
 pub mod utils;

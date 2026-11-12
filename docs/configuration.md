@@ -310,6 +310,27 @@ error_ttl_secs = 60    # default 60
 
 Notifications are session-local and are never written to disk.
 
+### First-launch tour (`[onboarding]`)
+
+`/tour` starts a two-minute tour at any time in a local session: five steps (send a
+message, inspect a tool call, answer a decision, open Mission Control or the command
+palette, and open help), each shown on a card that names the real key and finishes only
+when you really do the thing. `Enter` on a card starts the step and closes the card, `n`
+skips a step, `Esc` or `Ctrl+C` leaves the tour; while a step waits for you every key keeps
+its normal meaning and `/tour` brings the card back. Nothing is ever sent, approved or
+denied by the tour. An attached session has no tour.
+
+```toml
+[onboarding]
+offer_tour = true   # offer the tour on every local launch until it is finished or skipped; default false
+```
+
+Finishing or leaving the tour writes `tour_done = true` to `state.toml` in the config
+directory (`~/.config/rustain/`, or `RUSTAIN_CONFIG_DIR`), next to the session counter that
+fades the status hints; `config.toml` is never written. A launch that ends while the offer is
+still open writes nothing, so the offer comes back. To see the offer again, delete the
+`tour_done` line from `state.toml`; `/tour` replays the tour without touching it.
+
 ### Retired layout keys (`[layout]`)
 
 `[layout] density_mode` and `[layout.auto_panels] on_task_plan` are **retired and

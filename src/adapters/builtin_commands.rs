@@ -89,6 +89,8 @@ pub const BUILTINS: &[BuiltinCommand] = &[
     cmd("quit", true, Offered, false),
     // Story 21.1 AC5: the Notification Log, offered in both hosts (same store).
     cmd("notifications", true, Offered, false),
+    // Story 21.14: the onboarding tour, local only (the attached host has no tour).
+    cmd("tour", true, Unavailable, false),
     // Attached-only: cleanly detach (never cancels daemon work).
     cmd("detach", false, Offered, false),
 ];

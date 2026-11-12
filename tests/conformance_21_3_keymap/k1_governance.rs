@@ -45,7 +45,7 @@ fn shipped_table_passes_governance() {
 #[test]
 fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
-    assert_eq!(Context::ALL.len(), 60);
+    assert_eq!(Context::ALL.len(), 61);
     assert_eq!(Context::Permission.parents(), &[Context::Decision]);
     assert_eq!(Context::Consent.parents(), &[Context::Decision]);
     assert_eq!(Context::DecisionCompose.parents(), &[Context::CaretField]);

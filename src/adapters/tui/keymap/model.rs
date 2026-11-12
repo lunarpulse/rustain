@@ -19,6 +19,7 @@ use super::table_panels::PanelCmd;
 use super::table_permission::PermissionCmd;
 use super::table_thread::ThreadCmd;
 use super::table_tool::ToolCmd;
+use super::table_tour::TourCmd;
 use crate::adapters::tui::presentation::viewer::ViewerCmd;
 
 // ── keys ──────────────────────────────────────────────────────────────────
@@ -390,6 +391,9 @@ pub enum Context {
     /// The artifact window (Story 21.7 A15): one artifact's facts and body, `v` rendered or
     /// source, `c` copies the original source.
     ArtifactWindow,
+    /// The onboarding tour card (Story 21.14): `Enter` continues, `n` skips the step, `Esc`
+    /// leaves the tour; a frame of its own, never the composer.
+    Tour,
     WaveOverlay,
     Help,
     CommandPalette,
@@ -447,7 +451,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 60] = [
+    pub const ALL: [Context; 61] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -472,6 +476,7 @@ impl Context {
         Context::Adapters,
         Context::MissionControl,
         Context::ArtifactWindow,
+        Context::Tour,
         Context::WaveOverlay,
         Context::Help,
         Context::CommandPalette,
@@ -537,6 +542,7 @@ impl Context {
             Context::Adapters => "Adapters",
             Context::MissionControl => "Mission Control",
             Context::ArtifactWindow => "Artifact window",
+            Context::Tour => "Tour card",
             Context::WaveOverlay => "Wave overlay",
             Context::Help => "Help",
             Context::CommandPalette => "Command palette",
@@ -595,7 +601,8 @@ impl Context {
             | Context::NotificationLog
             | Context::QuitConfirm
             | Context::Decision
-            | Context::Login => &[],
+            | Context::Login
+            | Context::Tour => &[],
             // The decision frames: the parent owns Esc (defer), Ctrl+C (back), Ctrl+Q
             // (quit), `c` (copy) and PgUp/PgDn (scroll).
             Context::Permission
@@ -783,6 +790,7 @@ pub enum CommandId {
     Mission(MissionCmd),
     Block(BlockCmd),
     Body(BodyCmd),
+    Tour(TourCmd),
 }
 
 macro_rules! command_from {
@@ -812,6 +820,7 @@ command_from!(
     Mission(MissionCmd),
     Block(BlockCmd),
     Body(BodyCmd),
+    Tour(TourCmd),
 );
 
 // ── rows ──────────────────────────────────────────────────────────────────

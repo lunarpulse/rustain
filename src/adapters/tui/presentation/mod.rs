@@ -166,7 +166,8 @@ pub fn consistent(state: &TuiState) -> bool {
                     Surface::ThreadInspector
                     | Surface::MissionControl
                     | Surface::ArtifactWindow
-                    | Surface::AgentWindow => frame.tool_title.is_some(),
+                    | Surface::AgentWindow
+                    | Surface::Tour => frame.tool_title.is_some(),
                     _ => frame.tool_title.is_none(),
                 }
         })
@@ -191,6 +192,7 @@ pub fn consistent(state: &TuiState) -> bool {
         && is_open(state, Surface::TaskWindow) == state.task_window.is_some()
         && is_open(state, Surface::Adapters) == state.adapters_window.is_some()
         && is_open(state, Surface::History) == state.history_window.is_some()
+        && (!is_open(state, Surface::Tour) || state.tour.is_some())
         // In-place stepping may coincide targets; each frame still owns one payload.
         && state.tool_inspectors.keys().all(|id| {
             stack

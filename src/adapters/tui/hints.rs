@@ -33,56 +33,6 @@ pub fn contextual_hint(
     }
 }
 
-/// Read the session count from `~/.config/rustain/state.toml`.
-/// Returns 0 if the file is missing or unparseable (caller should add 1).
-fn read_session_count() -> u32 {
-    let path = match crate::infrastructure::paths::config_dir() {
-        Ok(dir) => dir.join("state.toml"),
-        Err(_) => return 0,
-    };
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-    parse_session_count(&contents).unwrap_or(0)
-}
-
-/// Write `session_count` to `~/.config/rustain/state.toml`, preserving other keys.
-fn write_session_count(count: u32) {
-    let path = match crate::infrastructure::paths::config_dir() {
-        Ok(dir) => dir.join("state.toml"),
-        Err(_) => return,
-    };
-    // Read-modify-write: preserve any existing keys in the file
-    let mut table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.parse::<toml::Table>().ok())
-        .unwrap_or_default();
-    table.insert(
-        "session_count".to_string(),
-        toml::Value::Integer(count as i64),
-    );
-    let _ = std::fs::write(&path, table.to_string());
-}
-
-/// Parse a `session_count = N` TOML fragment. Returns `None` on parse error.
-fn parse_session_count(contents: &str) -> Option<u32> {
-    let value: toml::Value = contents.parse().ok()?;
-    value
-        .get("session_count")?
-        .as_integer()
-        .and_then(|n| u32::try_from(n).ok())
-}
-
-/// Load the persisted session count, increment it, persist the new value, and return it.
-/// On any I/O or parse error the count resets to 1.
-pub fn load_and_increment_session_count() -> u32 {
-    let previous = read_session_count();
-    let new_count = previous.saturating_add(1);
-    write_session_count(new_count);
-    new_count
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,28 +220,6 @@ mod tests {
         );
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("j/k"));
-    }
-
-    // ── parse_session_count ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_session_count_valid() {
-        assert_eq!(parse_session_count("session_count = 3\n"), Some(3));
-    }
-
-    #[test]
-    fn test_parse_session_count_zero() {
-        assert_eq!(parse_session_count("session_count = 0\n"), Some(0));
-    }
-
-    #[test]
-    fn test_parse_session_count_invalid() {
-        assert_eq!(parse_session_count("not toml @@@"), None);
-    }
-
-    #[test]
-    fn test_parse_session_count_missing_key() {
-        assert_eq!(parse_session_count("other_key = 5\n"), None);
     }
 
     // ── Story 21.3 A10: the text is the registry's tip, the fade stays here ──

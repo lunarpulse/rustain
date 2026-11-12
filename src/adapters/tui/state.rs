@@ -2268,6 +2268,13 @@ pub struct TuiState {
     /// and the preference is kept when the terminal narrows.
     // Covers: FR107, UX-DR20
     pub monitor: bool,
+    /// The onboarding tour (Story 21.14 D1): session-global, survives tab switches. `None`
+    /// unless the local event loop installed it (`TuiState::new` and the attached host never
+    /// have a tour).
+    pub tour: Option<crate::adapters::tui::tour::TourState>,
+    /// Where the tour's "done" mark is written (`<config_dir>/state.toml`): installed only by
+    /// the event loop at startup, `None` in tests, so no test can touch a real config directory.
+    pub tour_persist: Option<crate::adapters::tui::tour::TourPersist>,
     /// Story 6-3: the task actions' state (the plan the Tasks tab resolves first, the reorder).
     pub task_panel_state: TaskPanelState,
     pub agent_panel_state: AgentPanelState,
@@ -2661,6 +2668,8 @@ impl TuiState {
             session_overrides: std::collections::BTreeMap::new(),
             shadows_announced: std::collections::BTreeSet::new(),
             monitor: false,
+            tour: None,
+            tour_persist: None,
             task_panel_state: TaskPanelState::default(),
             agent_panel_state: AgentPanelState::default(),
             bookmark_list_selected: 0,

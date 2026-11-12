@@ -43,6 +43,9 @@ mod conformance_21_7_mission_control;
 #[path = "../conformance_21_8_thread_inspector.rs"]
 mod conformance_21_8_thread_inspector;
 
+#[path = "../conformance_21_14_onboarding.rs"]
+mod conformance_21_14_onboarding;
+
 #[path = "../conformance_21_1_notification_lifecycle.rs"]
 mod conformance_21_1_notification_lifecycle;
 

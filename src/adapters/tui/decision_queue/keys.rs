@@ -862,6 +862,8 @@ pub fn settle_sent(state: &mut TuiState, facts: &LogFacts, key: &DecisionKey) {
 /// answered from the base (nothing beneath) and has a not-deferred item of the
 /// same kind waiting is mid-sequence, so that item opens at once.
 fn after_answer(state: &mut TuiState, facts: &LogFacts, answered: &DecisionKey) {
+    // The one "answered" seam (defer and stale-close never reach it): the tour's step 3.
+    crate::adapters::tui::tour::observe_answer(state);
     let nothing_beneath = state.modal_stack.len() <= 1;
     let next = nothing_beneath
         .then(|| state.decisions.next_of_kind(answered.kind, facts))

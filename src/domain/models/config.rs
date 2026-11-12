@@ -374,6 +374,14 @@ pub enum ReasoningDisplay {
     Expanded,
 }
 
+/// First-launch onboarding (`[onboarding]`). `offer_tour` offers the guided tour once on a
+/// local launch until it is answered; it is off unless a user or a team file turns it on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OnboardingConfig {
+    #[serde(default)]
+    pub offer_tour: bool,
+}
+
 /// Markdown presentation (`[markdown]`, Story 21.13 D5). `code_max_rows` caps a
 /// fenced code block on the local Stage; the rest is reached in the block
 /// viewer. Read as an `i64` so a negative or zero value clamps instead of
@@ -795,6 +803,9 @@ pub struct AppConfig {
     /// Markdown presentation (`[markdown]`). Story 21.13 D5.
     #[serde(default)]
     pub markdown: MarkdownConfig,
+    /// First-launch onboarding (`[onboarding]`).
+    #[serde(default)]
+    pub onboarding: OnboardingConfig,
     /// Tiered model router configuration. Story 7.1c, AC2.
     #[serde(default)]
     pub router: crate::domain::models::router::RouterConfig,
@@ -1016,6 +1027,7 @@ impl Default for AppConfig {
             tool_progress: ToolProgressConfig::default(),
             notifications: NotificationsConfig::default(),
             markdown: MarkdownConfig::default(),
+            onboarding: OnboardingConfig::default(),
             router: crate::domain::models::router::RouterConfig::default(),
             pricing: Self::default_pricing_catalog(),
             budget: BudgetConfig::default(),

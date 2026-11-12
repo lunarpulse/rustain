@@ -356,6 +356,12 @@ that opens Mission Control (`^X s`, attached `^X l`). It has no focus and no key
 under a window or toast, and gives its row back to the Stage when keeping it would leave the
 Stage under five rows (a long draft at 60×16).
 
+**Tour.** `/tour` starts a two-minute walk through the five things you actually do: send a
+message, inspect a tool call, answer a decision, open Mission Control (or the command palette)
+and open help. Each card names the real key, and a step finishes only when you really do it;
+`n` skips a step and `Esc` leaves. A team can have the tour offered on each launch until it
+is finished (`[onboarding] offer_tour = true`, see `docs/configuration.md`).
+
 Local sessions and `rustain daemon attach` share the composer, caret editing
 (`Ctrl+A/E/K`, arrows and paste), transcript view state and window compositor.
 Read-only attachments start in Input for local slash commands; ordinary text

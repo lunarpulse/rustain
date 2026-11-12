@@ -52,6 +52,7 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 | Surface::TaskWindow
                 | Surface::Adapters
                 | Surface::History
+                | Surface::Tour
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
@@ -213,6 +214,28 @@ pub fn open_history(
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
     opened
+}
+
+/// The Tour card (Story 21.14 D3): one frame at a time; opening it again truncates to it and
+/// retitles it in place. The step and phase live in `state.tour`, which outlives the frame; the
+/// opening writes no base focus.
+pub fn open_tour(state: &mut TuiState, title: String) -> Opened {
+    let opened = open_frame(state, Surface::Tour, None, Some(title.clone()));
+    set_tour_title(state, title);
+    debug_assert!(super::consistent(state));
+    opened
+}
+
+/// Retitle the open card in place (its step changed): the frame keeps its identity.
+pub fn set_tour_title(state: &mut TuiState, title: String) {
+    if let Some(frame) = state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::Tour)
+    {
+        frame.tool_title = Some(title);
+        state.needs_redraw = true;
+    }
 }
 
 /// Exact-target reopen retains the frame and cache; a new target owns a fresh key.
@@ -546,6 +569,9 @@ fn open_frame(
         if let Some(key) = decision {
             state.modal_stack.frames[index].decision = Some(key);
         }
+        if truncated {
+            crate::adapters::tui::tour::observe_open(state, surface);
+        }
         if truncated || retargeted {
             transition(state);
         }
@@ -582,6 +608,7 @@ fn open_frame(
     let frame = fresh_frame(state, surface, decision, tool_title);
     state.modal_stack.frames.push(frame);
     transition(state);
+    crate::adapters::tui::tour::observe_open(state, surface);
     debug_assert!(super::consistent(state));
     opened
 }
@@ -678,7 +705,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::AgentWindow
         | Surface::TaskWindow
         | Surface::Adapters
-        | Surface::History => {}
+        | Surface::History
+        | Surface::Tour => {}
     }
 }
 
@@ -894,6 +922,7 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
             state.history_window = None;
             None
         }
+        Surface::Tour => None,
     };
     if was_top && let Some(focus) = caller_focus {
         state.focus = focus;

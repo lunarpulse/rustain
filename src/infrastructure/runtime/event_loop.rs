@@ -442,7 +442,10 @@ pub async fn run(
     }
 
     // Load and increment session count for contextual hint fading (UX-DR96)
-    state.session_count = crate::adapters::tui::hints::load_and_increment_session_count();
+    let (state_file, persisted) = crate::infrastructure::tui_state_file::start_session();
+    state.session_count = persisted.session_count;
+    let (offer_tour, done) = (config.onboarding.offer_tour, persisted.tour_done);
+    crate::adapters::tui::tour::install_at_startup(&mut state, offer_tour, state_file, done);
     // Compute initial hint
     state.current_hint = crate::adapters::tui::hints::contextual_hint(
         &state.focus,
@@ -1899,6 +1902,8 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     } else if cmd_name == "notifications" {
                                         notification_log::open(&mut state);
+                                    } else if cmd_name == "tour" {
+                                        crate::adapters::tui::tour::command(&mut state);
                                     } else if cmd_name == "quit" {
                                         // Story 21.2 AC7: `/quit` takes the SAME guarded decision as
                                         // `q` / Ctrl+Q / idle Ctrl+C. The typed command was already
@@ -6084,6 +6089,7 @@ pub async fn run(
                     &mut state, &conversation, tick_ms,
                 );
                 crate::infrastructure::runtime::panel_bridge::tick_live_reasoning(&mut state, &streaming);
+                crate::adapters::tui::tour::tick(&mut state, streaming.is_streaming);
 
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
