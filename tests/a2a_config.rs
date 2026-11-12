@@ -44,7 +44,7 @@ fn unsupported_pinned_algorithm_is_a_typed_actionable_error() {
     assert_eq!(error.algorithm(), Some("ES256"));
     let message = error.to_string();
     assert!(message.contains("remove the pin"), "{message}");
-    assert!(message.contains("DF-17-4a-2"), "{message}");
+    assert!(message.contains("or pin an Ed25519 key"), "{message}");
 }
 
 #[test]

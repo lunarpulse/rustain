@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use rustain::adapters::a2a::client::A2aClientAdapter;
 use rustain::adapters::a2a::provider::A2aProvider;
-use rustain::domain::models::{A2aPeerSource, A2aPeerSpec, CapabilityId, RedactedUrl, TrustTier};
+use rustain::domain::models::{
+    A2aPeerSource, A2aPeerSpec, CapabilityError, CapabilityId, RedactedUrl, TrustTier,
+};
 use rustain::domain::ports::CapabilityProvider;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
@@ -96,5 +98,17 @@ async fn invocation_is_an_explicit_story_17_4b_refusal() {
         .await
         .expect_err("17.4a is discovery-only");
 
-    assert!(error.to_string().contains("17.4b"));
+    let CapabilityError::InvocationFailed(capability, message) = &error else {
+        panic!("delegation without a runtime is an invocation refusal: {error:?}");
+    };
+    let expected = CapabilityId {
+        protocol: "a2a".to_owned(),
+        server: "peer".to_owned(),
+        tool: "scan".to_owned(),
+    };
+    assert_eq!(capability, &expected.to_string(), "{error:?}");
+    assert!(
+        message.contains("A2A task delegation is not available yet; peer discovery still works."),
+        "{message}"
+    );
 }
