@@ -37,4 +37,26 @@ mod tests {
         let v = version_string();
         assert!(v.starts_with("rustain "), "should start with 'rustain '");
     }
+
+    /// The `build:` line is `unknown` or an ISO-8601 UTC timestamp (`DDDD-DD-DDTDD:DD:DDZ`).
+    #[test]
+    fn build_line_is_a_utc_timestamp_or_unknown() {
+        let v = version_string();
+        let build = v
+            .lines()
+            .find_map(|l| l.strip_prefix("build: "))
+            .expect("a `build:` line");
+        let shaped = build.len() == 20
+            && build.bytes().enumerate().all(|(i, b)| match i {
+                4 | 7 => b == b'-',
+                10 => b == b'T',
+                13 | 16 => b == b':',
+                19 => b == b'Z',
+                _ => b.is_ascii_digit(),
+            });
+        assert!(
+            build == "unknown" || shaped,
+            "unexpected build date: {build:?}"
+        );
+    }
 }

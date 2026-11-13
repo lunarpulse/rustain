@@ -8,8 +8,8 @@
 //! value type. `IsolationProvider` models *filesystem* CoW scratch copies and
 //! produces a serializable `UnifiedDiff`; `ExecutionSandbox` models a
 //! *syscall/memory* boundary and produces execution *outcomes* (output bytes,
-//! traps). The `tests/trybuild_execution_sandbox.rs` compile-fail + pass-twin
-//! pair proves the sibling relationship structurally (DF-14-5-3).
+//! traps). The compile-fail + pass-twin pair in `tests/trybuild_type_walls.rs`
+//! proves the sibling relationship structurally (DF-14-5-3).
 //!
 //! The trait is intentionally minimal (party ruling F2, 17-2c "no dead
 //! methods"): a single `invoke`. There is no `load`/`compile`/`warm_up` method

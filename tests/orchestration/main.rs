@@ -136,12 +136,6 @@ mod integration_task_tool_concurrent;
 #[path = "../integration_task_tool_dispatch.rs"]
 mod integration_task_tool_dispatch;
 
-#[path = "../trybuild_execution_sandbox.rs"]
-mod trybuild_execution_sandbox;
-
-#[path = "../trybuild_orchestration.rs"]
-mod trybuild_orchestration;
-
 #[path = "../turn_scheduler_migration.rs"]
 mod turn_scheduler_migration;
 

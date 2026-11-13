@@ -399,7 +399,7 @@ predicates = "3"
 tracing-test = "0.2"
 rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Story 9-7c)
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
-trybuild = "1"  # Story 14.3 AC5: Window<Handle> inlining-mutant compile_fail + pass-twin pair
+trybuild = "1"  # compile-time type walls, tests/trybuild_type_walls.rs
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
 
 # Story 18.1b — self-signed certificates for the non-loopback TLS keystone.

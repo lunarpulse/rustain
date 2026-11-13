@@ -22,6 +22,9 @@ mod anthropic_streaming;
 #[path = "../autocomplete.rs"]
 mod autocomplete;
 
+#[path = "../build_metadata.rs"]
+mod build_metadata;
+
 #[path = "../color_detect.rs"]
 mod color_detect;
 
@@ -124,11 +127,8 @@ mod terminal_lifecycle;
 #[path = "../title_generation.rs"]
 mod title_generation;
 
-#[path = "../trybuild_identity.rs"]
-mod trybuild_identity;
-
-#[path = "../trybuild_ownership.rs"]
-mod trybuild_ownership;
+#[path = "../trybuild_type_walls.rs"]
+mod trybuild_type_walls;
 
 #[path = "../turn_origin.rs"]
 mod turn_origin;

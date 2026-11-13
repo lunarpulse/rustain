@@ -288,10 +288,10 @@ fn ac4_node_checkpoint_roundtrip_no_self() {
     );
 }
 
-// Real compile-time guard for this invariant lives in `trybuild_ownership.rs`
-// (`ac4_domain_kind_not_deserializable_type_wall`, AI-12.3 post-review closure
-// 2026-07-02) — a `compile_fail` proving `serde_json::from_str::<OwnershipKind>`
-// does not type-check. The prior version of this test (`let _ =
+// Real compile-time guard for this invariant lives in `trybuild_type_walls.rs`
+// (AI-12.3 post-review closure 2026-07-02): a compile-pass negative assertion
+// (`domain_kind_not_deserializable.rs`), not a `compile_fail` — re-adding
+// `Deserialize` makes its marker ambiguous. The prior version of this test (`let _ =
 // OwnershipKind::Owned;`) asserted nothing and was removed as vacuous.
 
 // ═══════════════════════════════════════════════════════════════════════
