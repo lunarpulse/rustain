@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
@@ -18,15 +19,15 @@ use serde_json;
 use crate::domain::models::{
     AppConfig, CompletionOptions, ContentBlockType, FileContextProvenance, MessageRole, Plan,
     SkillActivationSet, StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin,
-    UsageInfo,
+    UsageInfo, UsageLedgerEntry,
 };
-use crate::domain::ports::StreamingProvider;
+use crate::domain::ports::{StreamingProvider, UsageLedgerPort};
 use crate::domain::services::message_builder::{self, ResolvedFileContext};
 use crate::domain::services::model_router::{ModelResolutionRequest, resolve_effective_model};
 use crate::infrastructure::composition::CliCore;
 use crate::infrastructure::runtime::turn;
 
-use crate::domain::errors::ProviderError;
+use crate::domain::errors::{ProviderError, StorageError};
 
 /// Parse a `ProviderError` from its `Display` string representation.
 /// Used at the two string boundaries (StreamChunk::Error and SystemNotice)
@@ -74,8 +75,9 @@ impl OutputFormat {
     }
 }
 
-/// Schema version string. Bumped 1.0 → 1.1 in Story 13.1c (additive: dry_run, plan, tools_would_use).
-const SCHEMA_VERSION: &str = "1.1";
+/// Schema version string. Bumped 1.0 → 1.1 in Story 13.1c (additive: dry_run, plan, tools_would_use)
+/// and 1.1 → 1.2 for the additive `call_usage` stream event.
+const SCHEMA_VERSION: &str = "1.2";
 
 /// Output-only snake_case DTO for token usage (boundary coercion, AC1/O6).
 #[derive(Debug, Clone, Serialize)]
@@ -287,6 +289,9 @@ struct StreamEvent {
     result: Option<ToolResultOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<UsageOut>,
+    /// Present on `call_usage` events: the model that served the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,6 +363,7 @@ impl<'a> AskRenderer<'a> {
                 input: None,
                 result: None,
                 usage: None,
+                model: None,
                 stop_reason: None,
                 deny_count: None,
                 dry_run: None,
@@ -374,6 +380,7 @@ impl<'a> AskRenderer<'a> {
                 input: Some(input.clone()),
                 result: None,
                 usage: None,
+                model: None,
                 stop_reason: None,
                 deny_count: None,
                 dry_run: None,
@@ -398,6 +405,7 @@ impl<'a> AskRenderer<'a> {
                     is_error: *is_error,
                 }),
                 usage: None,
+                model: None,
                 stop_reason: None,
                 deny_count: None,
                 dry_run: None,
@@ -408,6 +416,32 @@ impl<'a> AskRenderer<'a> {
             // Operator-private replay state is persisted, never printed.
             StreamChunk::ProviderReplay { .. } => return Ok(()),
             _ => return Ok(()),
+        };
+        let line = serde_json::to_string(&event)?;
+        writeln!(self.out, "{}", line)
+    }
+
+    /// Emit a stream-json `call_usage` line for one finished provider call.
+    fn on_call_usage(&mut self, model: &str, usage: &UsageInfo) -> Result<(), std::io::Error> {
+        if self.fmt != OutputFormat::StreamJson {
+            return Ok(());
+        }
+        let event = StreamEvent {
+            schema_version: SCHEMA_VERSION,
+            event_type: "call_usage",
+            content: None,
+            id: None,
+            name: None,
+            input: None,
+            result: None,
+            usage: Some(usage.into()),
+            model: Some(model.to_string()),
+            stop_reason: None,
+            deny_count: None,
+            dry_run: None,
+            plan: None,
+            tools_would_use: None,
+            error: None,
         };
         let line = serde_json::to_string(&event)?;
         writeln!(self.out, "{}", line)
@@ -530,6 +564,7 @@ impl<'a> AskRenderer<'a> {
                         input: None,
                         result: None,
                         usage: Some(usage.into()),
+                        model: None,
                         stop_reason: None,
                         deny_count: None,
                         dry_run: None,
@@ -551,6 +586,7 @@ impl<'a> AskRenderer<'a> {
                         input: None,
                         result: None,
                         usage: None,
+                        model: None,
                         stop_reason: None,
                         deny_count: None,
                         dry_run: Some(outcome.dry_run),
@@ -570,6 +606,7 @@ impl<'a> AskRenderer<'a> {
                     input: None,
                     result: None,
                     usage: None,
+                    model: None,
                     stop_reason: Some(stop_reason_str(&outcome.turn_stop_reason).to_string()),
                     deny_count: Some(outcome.deny_count),
                     dry_run: Some(outcome.dry_run),
@@ -617,6 +654,7 @@ impl<'a> AskRenderer<'a> {
                     input: None,
                     result: None,
                     usage: None,
+                    model: None,
                     stop_reason: None,
                     deny_count: None,
                     dry_run: Some(dry_run),
@@ -631,6 +669,83 @@ impl<'a> AskRenderer<'a> {
             }
         }
     }
+}
+
+/// One finished provider call, as the ledger tap reports it to `ask`.
+struct CallBoundary {
+    /// Model that served the call.
+    model: String,
+    /// Lets the turn go on to its next provider call.
+    resume: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Tells the `ask` event loop that a provider call has ended, then forwards
+/// the entry to the wrapped ledger. `run_turn` appends exactly one entry per
+/// provider call, after that call's stream ends; it is the only per-call
+/// boundary `ask` can observe.
+struct CallUsageTap {
+    inner: Arc<dyn UsageLedgerPort>,
+    tx: tokio::sync::mpsc::UnboundedSender<CallBoundary>,
+}
+
+#[async_trait]
+impl UsageLedgerPort for CallUsageTap {
+    async fn append(&self, entry: UsageLedgerEntry) -> Result<(), StorageError> {
+        // Hold the turn until `ask` has taken the boundary: a usage chunk of
+        // the next call must not arrive first and be counted for this one.
+        // `ask` dropping the receiver ends the wait.
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        let boundary = CallBoundary {
+            model: entry.model.clone(),
+            resume,
+        };
+        if self.tx.send(boundary).is_ok() {
+            let _ = resumed.await;
+        }
+        self.inner.append(entry).await
+    }
+
+    async fn read_session(&self, session_id: &str) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        self.inner.read_session(session_id).await
+    }
+
+    async fn read_since(&self, since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        self.inner.read_since(since_unix_ms).await
+    }
+}
+
+fn add_tokens(total: Option<u32>, call: Option<u32>) -> Option<u32> {
+    match (total, call) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+    }
+}
+
+/// Fold one provider call into the turn total and emit its `call_usage` line.
+fn record_call_usage(
+    renderer: &mut AskRenderer<'_>,
+    total: &mut Option<UsageInfo>,
+    model: &str,
+    call: UsageInfo,
+) -> Result<(), std::io::Error> {
+    let written = renderer.on_call_usage(model, &call);
+    *total = Some(match total.take() {
+        None => call,
+        Some(sum) => UsageInfo {
+            input_tokens: sum.input_tokens.saturating_add(call.input_tokens),
+            output_tokens: sum.output_tokens.saturating_add(call.output_tokens),
+            cache_creation_input_tokens: add_tokens(
+                sum.cache_creation_input_tokens,
+                call.cache_creation_input_tokens,
+            ),
+            cache_read_input_tokens: add_tokens(
+                sum.cache_read_input_tokens,
+                call.cache_read_input_tokens,
+            ),
+            reasoning_tokens: add_tokens(sum.reasoning_tokens, call.reasoning_tokens),
+        },
+    });
+    written
 }
 
 /// Helper: write an error to stderr (all formats) and, for json/stream-json,
@@ -692,6 +807,14 @@ pub async fn run_ask_core(
         event_rx,
         ledger,
     } = core;
+
+    // `run_turn` appends one ledger entry per provider call. Tap that boundary:
+    // it yields the turn total and the per-call `call_usage` lines.
+    let (call_usage_tx, mut call_usage_rx) = tokio::sync::mpsc::unbounded_channel();
+    let ledger: Arc<dyn UsageLedgerPort> = Arc::new(CallUsageTap {
+        inner: ledger,
+        tx: call_usage_tx,
+    });
 
     // Story 13.1c: enter Plan mode when dry_run so the permission_chain gate
     // denies all state-mutating (Standard/Elevated-risk) tools.
@@ -917,7 +1040,12 @@ pub async fn run_ask_core(
     let mut turn_error: Option<ProviderError> = None;
     let mut turn_stop_reason = StopReason::EndTurn;
     let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
-    let mut turn_usage: Option<UsageInfo> = None;
+    // Usage chunk of the provider call that is still open. The ledger tap
+    // closes the call; a call that sent no usage is not reported.
+    let mut open_call_usage: Option<UsageInfo> = None;
+    // Sum over every provider call of the turn that reported usage. Without
+    // one, `usage` stays `null`.
+    let mut usage_total: Option<UsageInfo> = None;
     // Story 20.1d1b: replay items persist on the assistant row, never on stdout.
     let mut provider_replay = Vec::new();
     // Story 20.1d4a T2: one span per provider response, closed at each
@@ -934,6 +1062,26 @@ pub async fn run_ask_core(
             msg = deny_msg_rx.recv() => {
                 if let Some(msg) = msg {
                     let _ = writeln!(err, "{}", msg);
+                }
+                continue;
+            }
+            Some(boundary) = call_usage_rx.recv() => {
+                // Events are polled first and the turn waits in `append`, so
+                // every chunk of this call has been handled and none of the
+                // next call exists yet.
+                let written = match open_call_usage.take() {
+                    Some(usage) => record_call_usage(
+                        &mut renderer,
+                        &mut usage_total,
+                        &boundary.model,
+                        usage,
+                    ),
+                    None => Ok(()),
+                };
+                let _ = boundary.resume.send(());
+                if let Err(e) = written {
+                    let _ = writeln!(err, "Error: failed to write stream output: {}", e);
+                    return ExitCode::FAILURE;
                 }
                 continue;
             }
@@ -1031,7 +1179,8 @@ pub async fn run_ask_core(
                     }
                 }
                 StreamChunk::Usage { usage, .. } => {
-                    turn_usage = Some(usage.clone());
+                    // The last usage chunk of a call wins, as in the ledger.
+                    open_call_usage = Some(usage.clone());
                 }
                 StreamChunk::ProviderReplay { item } => {
                     if !turn_complete {
@@ -1067,6 +1216,26 @@ pub async fn run_ask_core(
             // Story 13.1c (AC6): benign no-op — no approval card in headless.
             AppEvent::PlanApprovalRequested { .. } => {}
             _ => {}
+        }
+    }
+
+    // A turn that ended has had every boundary taken above. A turn cut short
+    // by an error can leave a call open: its entry is appended only when the
+    // provider stream ends, which may be never. Report the usage that call
+    // already sent. At most one boundary is waiting, because the turn holds
+    // in `append`; it names the model when the stream did end.
+    let open_call_model = match call_usage_rx.try_recv() {
+        Ok(boundary) => {
+            let _ = boundary.resume.send(());
+            boundary.model
+        }
+        Err(_) => model_used.clone(),
+    };
+    if let Some(usage) = open_call_usage.take() {
+        if let Err(e) = record_call_usage(&mut renderer, &mut usage_total, &open_call_model, usage)
+        {
+            let _ = writeln!(err, "Error: failed to write stream output: {}", e);
+            return ExitCode::FAILURE;
         }
     }
 
@@ -1115,7 +1284,7 @@ pub async fn run_ask_core(
         last_block_start,
         tool_calls,
         turn_stop_reason,
-        turn_usage,
+        turn_usage: usage_total,
         model: model_used,
         session_id: conversation
             .session_id

@@ -168,3 +168,5 @@ These manual tests complement the automated suite:
 | All integration roots | 272 roots in 12 area binaries + 4 standalone (`autotests = false`) | Full feature coverage |
 
 Run all automated targets: `cargo test --all-targets --no-fail-fast`
+
+Coding-task evaluation (Terminal-Bench through Harbor: pass rate, tokens and cost per task) is separate from this gate: see `evals/harbor/README.md`.

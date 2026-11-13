@@ -950,6 +950,116 @@ impl StreamingProvider for ChunkProvider {
     }
 }
 
+/// Serves one scripted chunk list per provider call; a call past the script fails.
+struct ScriptedProvider {
+    calls: Vec<Vec<StreamChunk>>,
+    served: std::sync::atomic::AtomicUsize,
+    /// Keep each call's stream open after its last chunk, as a connection
+    /// that never closes does.
+    never_ends: bool,
+}
+
+impl ScriptedProvider {
+    fn new(calls: Vec<Vec<StreamChunk>>) -> Self {
+        Self {
+            calls,
+            served: std::sync::atomic::AtomicUsize::new(0),
+            never_ends: false,
+        }
+    }
+
+    fn never_ending(calls: Vec<Vec<StreamChunk>>) -> Self {
+        Self {
+            never_ends: true,
+            ..Self::new(calls)
+        }
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for ScriptedProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        let n = self
+            .served
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match self.calls.get(n) {
+            Some(chunks) if self.never_ends => Ok(Box::pin(futures::StreamExt::chain(
+                stream::iter(chunks.clone()),
+                stream::pending(),
+            ))),
+            Some(chunks) => Ok(Box::pin(stream::iter(chunks.clone()))),
+            None => Err(rustain::domain::errors::ProviderError::ConnectionFailed(
+                "script exhausted".into(),
+            )),
+        }
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "mock-scripted".into()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+}
+
+fn usage_chunk(input_tokens: u32, output_tokens: u32, cache_read: Option<u32>) -> StreamChunk {
+    StreamChunk::Usage {
+        usage: UsageInfo {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: cache_read,
+            reasoning_tokens: None,
+        },
+        session_id: None,
+    }
+}
+
+/// One provider call that asks for a tool, so the turn needs another call.
+fn tool_requesting_call(usage: StreamChunk) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::ToolUse {
+            id: "t1".into(),
+            name: "dummy_tool".into(),
+            input: serde_json::json!({}),
+        },
+        usage,
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ]
+}
+
+fn parse_ndjson(out: &str) -> Vec<serde_json::Value> {
+    out.lines()
+        .map(|line| serde_json::from_str(line).expect("every stdout line is JSON"))
+        .collect()
+}
+
 fn make_opts_with_format(query: &str, fmt: OutputFormat) -> rustain::adapters::cli::ask::AskOpts {
     rustain::adapters::cli::ask::AskOpts {
         query: query.to_string(),
@@ -1038,7 +1148,7 @@ async fn p0_13_1b_json_shape() {
     assert_eq!(exit, ExitCode::SUCCESS);
 
     let doc: serde_json::Value = serde_json::from_str(&out).expect("stdout must be valid JSON");
-    assert_eq!(doc["schema_version"], "1.1");
+    assert_eq!(doc["schema_version"], "1.2");
     assert_eq!(doc["response"], "JSON shape response");
     assert!(
         !doc["model"].as_str().unwrap().is_empty(),
@@ -1210,6 +1320,180 @@ async fn p0_13_1b_g1_usage_matrix() {
     }
 }
 
+/// A turn that takes several provider calls reports their sum as `usage`, and
+/// stream-json carries one `call_usage` line per call.
+#[tokio::test]
+async fn ask_usage_sums_every_provider_call() {
+    let script = || {
+        vec![
+            tool_requesting_call(usage_chunk(100, 10, Some(40))),
+            vec![
+                StreamChunk::Text {
+                    content: "done".into(),
+                    parent_tool_use_id: None,
+                },
+                usage_chunk(150, 20, None),
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]
+    };
+
+    let opts = make_opts_with_format("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_core_test(Arc::new(ScriptedProvider::new(script())), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["usage"]["input_tokens"], 250);
+    assert_eq!(doc["usage"]["output_tokens"], 30);
+    assert_eq!(doc["usage"]["cache_read_input_tokens"], 40);
+
+    let mut opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    opts.model_override = Some("probe-model".into());
+    let (exit, out, _) = run_ask_core_test(Arc::new(ScriptedProvider::new(script())), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let events = parse_ndjson(&out);
+
+    let calls: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 2, "one call_usage line per provider call");
+    assert_eq!(calls[0]["usage"]["input_tokens"], 100);
+    assert_eq!(calls[0]["usage"]["output_tokens"], 10);
+    assert_eq!(calls[1]["usage"]["input_tokens"], 150);
+    assert_eq!(calls[1]["usage"]["output_tokens"], 20);
+    assert!(calls.iter().all(|c| c["model"] == "probe-model"));
+    let first_call = events.iter().position(|e| e["type"] == "call_usage");
+    let second_call_text = events.iter().position(|e| e["type"] == "text");
+    assert!(
+        first_call < second_call_text,
+        "a call's usage is written before the next call's output"
+    );
+
+    let totals: Vec<&serde_json::Value> = events.iter().filter(|e| e["type"] == "usage").collect();
+    assert_eq!(totals.len(), 1, "the turn total is emitted once");
+    assert_eq!(totals[0]["usage"]["input_tokens"], 250);
+    assert_eq!(totals[0]["usage"]["output_tokens"], 30);
+    assert_eq!(events.last().unwrap()["type"], "turn_complete");
+}
+
+/// When a later provider call fails, the calls that completed are still
+/// reported before the terminal `error` line.
+#[tokio::test]
+async fn ask_usage_reports_calls_completed_before_a_failure() {
+    let provider = Arc::new(ScriptedProvider::new(vec![tool_requesting_call(
+        usage_chunk(100, 10, None),
+    )]));
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, out, _) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    let events = parse_ndjson(&out);
+
+    let calls: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 1, "the failed call reports no usage");
+    assert_eq!(calls[0]["usage"]["input_tokens"], 100);
+    assert_eq!(calls[0]["usage"]["output_tokens"], 10);
+    assert_eq!(events.last().unwrap()["type"], "error");
+}
+
+/// A call that reports usage and then fails mid-stream is still counted, and
+/// `ask` does not wait for a provider stream that never ends.
+#[tokio::test]
+async fn ask_usage_counts_a_call_that_fails_after_reporting_usage() {
+    let provider = Arc::new(ScriptedProvider::never_ending(vec![vec![
+        usage_chunk(100, 0, None),
+        StreamChunk::Error {
+            content: "boom".into(),
+        },
+    ]]));
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, out, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        run_ask_core_test(provider, opts),
+    )
+    .await
+    .expect("ask must not wait for the provider stream to end");
+    assert_eq!(exit, ExitCode::FAILURE);
+    let events = parse_ndjson(&out);
+
+    let calls: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 1, "the failed call's usage is reported");
+    assert_eq!(calls[0]["usage"]["input_tokens"], 100);
+    assert_eq!(events.last().unwrap()["type"], "error");
+}
+
+/// A report of zero tokens is a report; a call that sent no usage is not one.
+#[tokio::test]
+async fn ask_usage_reports_exactly_the_calls_that_sent_usage() {
+    let silent_tool_call = vec![
+        StreamChunk::ToolUse {
+            id: "t2".into(),
+            name: "dummy_tool".into(),
+            input: serde_json::json!({}),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let script = vec![
+        tool_requesting_call(usage_chunk(0, 0, Some(0))),
+        silent_tool_call,
+        vec![
+            StreamChunk::Text {
+                content: "done".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+            // OpenAI-style streams send usage after the stop reason.
+            usage_chunk(5, 7, None),
+        ],
+    ];
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, out, _) = run_ask_core_test(Arc::new(ScriptedProvider::new(script)), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let events = parse_ndjson(&out);
+
+    let calls: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 2, "the silent second call writes no line");
+    assert_eq!(calls[0]["usage"]["input_tokens"], 0);
+    assert_eq!(calls[0]["usage"]["cache_read_input_tokens"], 0);
+    assert_eq!(calls[1]["usage"]["input_tokens"], 5);
+    let total = events.iter().find(|e| e["type"] == "usage").unwrap();
+    assert_eq!(total["usage"]["input_tokens"], 5);
+    assert_eq!(total["usage"]["output_tokens"], 7);
+    assert_eq!(total["usage"]["cache_read_input_tokens"], 0);
+
+    // A single call that reports zero keeps a usage object.
+    let zero_only = vec![vec![
+        StreamChunk::Text {
+            content: "a".into(),
+            parent_tool_use_id: None,
+        },
+        usage_chunk(0, 0, None),
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]];
+    let opts = make_opts_with_format("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_core_test(Arc::new(ScriptedProvider::new(zero_only)), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["usage"]["input_tokens"], 0);
+    assert_eq!(doc["usage"]["output_tokens"], 0);
+}
+
 /// P0-13.1b-G3-stream-ndjson + mid-stream error.
 #[tokio::test]
 async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
@@ -1272,7 +1556,7 @@ async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
             line
         );
         let ev: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(ev["schema_version"], "1.1");
+        assert_eq!(ev["schema_version"], "1.2");
     }
     let types: Vec<String> = lines
         .iter()
@@ -1426,7 +1710,7 @@ async fn p0_13_1b_json_error() {
 
     let doc: serde_json::Value =
         serde_json::from_str(&out).expect("json error must be parseable stdout");
-    assert_eq!(doc["schema_version"], "1.1");
+    assert_eq!(doc["schema_version"], "1.2");
     assert!(
         doc["response"].is_null(),
         "error envelope: response must be null"
@@ -1496,10 +1780,11 @@ fn collect_field_paths(
     }
 }
 
-/// P0-13.1b/c-G4-schema-fingerprint — the v1.1 field set is pinned.
+/// P0-13.1b/c-G4-schema-fingerprint — the v1.2 field set is pinned.
 /// Story 13.1c additive bump 1.0→1.1: dry_run, plan, tools_would_use (always-present, O3).
 /// turn_complete now carries dry_run + tools_would_use.
-const SCHEMA_FINGERPRINT: &str = "9287240bc07389a3dddf14ecbe68d36fdd12d37c7ec8a80b34c880b6fe847f9f";
+/// Additive bump 1.1→1.2: the `call_usage` stream event (`usage`, `model`).
+const SCHEMA_FINGERPRINT: &str = "112b6076580916c050311a3fd91a433946528f2c64dfbbab96455efb3da921d5";
 #[tokio::test]
 async fn p0_13_1b_g4_schema_fingerprint() {
     let usage = UsageInfo {
@@ -1787,7 +2072,7 @@ fn p0_13_1b_json_error_unreadable_file() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let doc = serde_json::from_str::<serde_json::Value>(&stdout)
         .expect("stdout must contain structured error document");
-    assert_eq!(doc["schema_version"], "1.1");
+    assert_eq!(doc["schema_version"], "1.2");
     assert!(
         doc["error"]["message"]
             .as_str()
@@ -2157,7 +2442,7 @@ async fn p0_13_1c_json_plan_and_schema_1_1() {
     assert_eq!(exit, ExitCode::SUCCESS);
 
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(doc["schema_version"], "1.1");
+    assert_eq!(doc["schema_version"], "1.2");
     assert_eq!(doc["dry_run"], true);
     assert!(!doc["plan"].is_null(), "plan must be non-null");
     assert_eq!(doc["plan"]["title"], "Refactor auth module");
@@ -2354,11 +2639,11 @@ async fn p0_13_1c_stream_plan() {
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
 
-    // Every line has schema_version 1.1
+    // Every line has schema_version 1.2
     for line in &lines {
         assert_eq!(
-            line["schema_version"], "1.1",
-            "every line must have schema 1.1"
+            line["schema_version"], "1.2",
+            "every line must have schema 1.2"
         );
     }
 
@@ -2793,7 +3078,7 @@ async fn p0_13_1c_13_1b_regression() {
 
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
     // Schema version bumped
-    assert_eq!(doc["schema_version"], "1.1");
+    assert_eq!(doc["schema_version"], "1.2");
     // All existing fields still present
     assert!(doc.get("response").is_some());
     assert!(doc.get("model").is_some());

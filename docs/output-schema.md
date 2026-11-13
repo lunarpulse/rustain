@@ -16,10 +16,10 @@ The `--format` alias does **not** exist and was intentionally dropped (it never 
 Every JSON document and NDJSON event carries:
 
 ```json
-"schema_version": "1.1"
+"schema_version": "1.2"
 ```
 
-(v1.0 shipped in Story 13.1b; v1.1 adds the dry-run fields in Story 13.1c.)
+(v1.0 shipped in Story 13.1b; v1.1 adds the dry-run fields in Story 13.1c; v1.2 adds the `call_usage` stream event.)
 
 The version is a **string** following `major.minor` semantics:
 
@@ -39,11 +39,11 @@ A single pretty-printed JSON object on stdout.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | string | Always `"1.1"`. |
+| `schema_version` | string | Always `"1.2"`. |
 | `response` | string \| null | Assistant text. `null` in the error envelope. |
 | `model` | string | The resolved concrete model used for the turn. |
 | `stop_reason` | string | One of: `end_turn`, `tool_use`, `max_tokens`, `cancelled`. |
-| `usage` | object \| null | Token usage, or explicit `null` if the provider emitted no `Usage` chunk. |
+| `usage` | object \| null | Token usage summed over every provider call of the turn, or explicit `null` if the provider emitted no `Usage` chunk. |
 | `usage.input_tokens` | number | Input tokens. |
 | `usage.output_tokens` | number | Output tokens. |
 | `usage.cache_creation_input_tokens` | number \| null | Optional cache-creation tokens. |
@@ -71,7 +71,7 @@ A single pretty-printed JSON object on stdout.
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "response": null,
   "model": "",
   "stop_reason": "",
@@ -90,14 +90,15 @@ A single pretty-printed JSON object on stdout.
 
 ## `--output-format stream-json` events
 
-One compact JSON object per line. Every line carries `schema_version: "1.1"` and a `type` discriminator.
+One compact JSON object per line. Every line carries `schema_version: "1.2"` and a `type` discriminator.
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
 | `text` | `schema_version`, `content` | Assistant text delta. |
 | `tool_use` | `schema_version`, `id`, `name`, `input` | A tool call was requested. |
 | `tool_result` | `schema_version`, `id`, `result` | A tool result arrived. `result` has the same shape as `tool_calls[].result` in `json` mode: `{ content: string, is_error: boolean }`. |
-| `usage` | `schema_version`, `usage` | Token usage (same shape as the `json` `usage` object). Emitted once near the end of the stream, not per-chunk. |
+| `call_usage` | `schema_version`, `usage`, `model` | Token usage of one provider call (same shape as the `json` `usage` object) and the model that served it. One line per call that reported usage; a report of zero tokens is still a report. |
+| `usage` | `schema_version`, `usage` | Turn total (same shape as the `json` `usage` object). Emitted once near the end of the stream, not per-chunk. Not emitted when the turn fails. |
 | `turn_complete` | `schema_version`, `stop_reason`, `deny_count`, `dry_run`, `tools_would_use` | Terminal event; the turn finished. `deny_count` is the number of auto-denied tool calls. `dry_run` and `tools_would_use` carry the same values as the `json` envelope. |
 | `plan_proposed` | `schema_version`, `dry_run`, `plan` | Emitted before `turn_complete` when a plan was proposed. `plan` has the same `PlanOut` shape as in `json` mode. |
 | `error` | `schema_version`, `error` | Terminal event; the turn failed. Prior events remain valid. `error` has the same shape as the `json` error: `{ message: string }`. |
@@ -174,6 +175,17 @@ deny_count == denied_tools.length
 
 The array will always be present (empty-safe) and the count will be the derived length of the array.
 
+## v1.2 — Per-call usage
+
+A turn takes one provider call per tool round, so a turn that uses tools makes several.
+
+- `usage` (the `json` field and the `stream-json` `usage` event) is the **sum over every provider call of the turn**. Before v1.2 it carried the last call only, which under-reported every turn that used tools. For a single-call turn the value is unchanged.
+- `stream-json` gained the `call_usage` event (additive minor bump). It is written when a provider call finishes, so a run that is killed part-way still leaves the usage of the calls it completed.
+
+`call_usage` lines appear in call order. A call's line is written after the last chunk of that call and before the first event of the next call.
+
+When the turn fails, the calls that reported usage are written before the terminal `error` and no `usage` total follows. That includes a call that reported usage and then failed. Sum the `call_usage` lines to get the cost of a failed turn.
+
 ## Stdout/stderr discipline
 
 - **stdout** carries only the rendered output for the selected format.
@@ -183,7 +195,7 @@ Under `--final-message-only`, the JSON `response` field is narrowed to the final
 
 ## Version-bump enforcement
 
-A schema fingerprint test pins the v1.1 field-path set. If the fingerprint changes, the failure message instructs the maintainer to decide whether the change is additive (bump minor) or breaking (bump major) and then update the recorded fingerprint. This makes schema changes loud and intentional.
+A schema fingerprint test pins the v1.2 field-path set. If the fingerprint changes, the failure message instructs the maintainer to decide whether the change is additive (bump minor) or breaking (bump major) and then update the recorded fingerprint. This makes schema changes loud and intentional.
 
 ## See also
 
