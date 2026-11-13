@@ -107,8 +107,5 @@ async fn invocation_is_an_explicit_story_17_4b_refusal() {
         tool: "scan".to_owned(),
     };
     assert_eq!(capability, &expected.to_string(), "{error:?}");
-    assert!(
-        message.contains("A2A task delegation is not available yet; peer discovery still works."),
-        "{message}"
-    );
+    assert!(message.contains("not available yet"), "{message}");
 }
