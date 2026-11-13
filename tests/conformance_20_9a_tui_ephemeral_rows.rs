@@ -711,6 +711,7 @@ async fn plan_host_renders_and_real_save_reload_discards_display_only() {
             created_at: 1,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         handle_plan_proposed(
             &mut conversation,
@@ -1027,6 +1028,7 @@ async fn real_submission_excludes_cancelled_display_from_next_request_and_rebuil
                         created_at: 1,
                         resolved_at: None,
                         host_message_id: None,
+                        origin_restrictions: None,
                     };
                     handle_plan_proposed(
                         &mut conversation,

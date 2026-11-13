@@ -250,10 +250,14 @@ the old blocking wait on product text `cannot be honoured in` was REMOVED when
   example that fires DF-19-9-DRIVER-GATES-ON-SERVED-PROSE; the DF stays open
   with the Epic 19 close.
 
-redirect targets are NOT workspace-checked for Bash. For example,
-  `kubectl config view --raw > /tmp/x` still reaches a shell redirect because
-  `extract_file_path` handles file tools, not Bash command text. The pattern
-  matcher restricts command prefixes; it is not a filesystem security boundary.
+redirect targets under a Bash command pattern ARE workspace-checked (Story
+  19.29). A literal path inside the workspace is admitted; `kubectl config view
+  --raw > /tmp/x` is refused before the shell runs, in every permission mode,
+  with `redirect refused by skill`; `~`, `$HOME` and other expansion targets and
+  a relative target after `cd` are refused rather than guessed. No J3 scene
+  command contains a redirect, so the gate's markers are unaffected. Bare
+  `Bash` / `Bash(*)` keep no redirect check, and what an admitted program does
+  with its own arguments stays outside the matcher.
 
 invocation-form bypasses remain: `/bin/kubectl`, `bash -c '…'`, flag reordering
   and variable indirection can evade argument-shaped prefix intent. The

@@ -80,6 +80,14 @@ expressed under a prefix pattern):
 - heredocs (`<<`, `<<-`, `<<'W'`): every body line would otherwise be a
   non-matching segment;
 - unbalanced quotes, and a dangling `&&`/`||` with nothing after it;
+- a **comment** (`#` at the start of a word) and constructs whose quoting the
+  scanner does not mirror exactly: ANSI-C quoting `$'…'`, arithmetic `$[…]` /
+  `((…))`, and `${…}` inside double quotes. Each can change what Bash treats as
+  quoted and so hide a later redirect; `echo ok # it's` is refused, while
+  `echo 'a # b'`, `echo a#b` and `$"…"` are scanned exactly. A backslash-newline
+  is deleted by Bash before it recognises these openers, so a *continued*
+  opener (`$\⏎'`, `$\⏎(`, `(\⏎(`, `<\⏎(`, a double-quoted `$\⏎{`) is refused
+  the same way. Every construct is either modelled exactly or refused;
 - a leading `NAME=value` assignment (`KUBECONFIG=/tmp/x kubectl get pods`):
   skipping it would admit `KUBECONFIG=/evil kubectl …`, where the assignment
   controls what the command *does*;
@@ -89,21 +97,70 @@ expressed under a prefix pattern):
 
 Matching is intentionally textual, not a shell policy engine. `Bash(ls*)`
 matches `lsof`; `/bin/kubectl`, `bash -c 'kubectl …'`, flag reordering, and
-variable indirection can evade argument-shaped intent. Redirect targets are
-not workspace-checked as file operations: for example,
-`kubectl config view --raw > /tmp/x` still reaches the shell — including in
-auto-approval modes, where no human sees the card. Use a dedicated tool or
-stronger sandbox when those boundaries matter.
+variable indirection can evade argument-shaped intent.
+
+### Redirects under a command pattern
+
+A prefix pattern limits the command, not the files the shell opens for it. So
+where a restriction admits `Bash` **only through patterns** (an agent's or a
+skill's `Bash(kubectl:*)`), a shell redirect inside an admitted command is held
+to the same workspace boundary as a file tool — in **every** permission mode,
+including auto-approval, and before any approval card:
+
+- `>`, `>>`, `>|`, `&>`, `&>>`, `<>` and `>&word` write; `<` and `<&word` read.
+  The target is workspace-checked exactly like a `Write`/`Read` file path
+  (relative paths are the workspace, `..` and paths that resolve out of the
+  workspace are refused, `/etc/`, `/usr/`, `/dev/`… are blocked). ⚠ **Known
+  limitation, shared with the file tools:** a *dangling* symlink inside the
+  workspace whose target does not exist yet (`link -> /outside/new-file`) is
+  not recognised by the workspace check, so a redirect to `link` can create the
+  file outside the workspace. Existing symlinks that resolve outside are
+  refused; the dangling-leaf case is tracked as
+  `DF-SECURITY-ADAPTER-DANGLING-LEAF-SYMLINK`.
+- `2>&1`, `>&2`, `2>&-` and similar descriptor duplications have no file and
+  are admitted. `/dev/null` (the exact string) is admitted, so `2>/dev/null`
+  works; `/dev/shm/x` and every other `/dev/` path are not.
+- A target that needs shell expansion is **refused, never guessed**: `$`
+  (parameter or arithmetic expansion, `$'…'`), `~`, `*`, `?`, `[`, `]`, `{`,
+  `}`, and an extended-glob opener `(` right after the target (`@(`, `+(`, `!(`)
+  — and a backslash inside double quotes. `kubectl version > ~/.bashrc`
+  and `>> $HOME/.bashrc` are refused for this reason. Quote removal follows
+  bash (`> "/abs"`, `> \/abs`, `> ''/abs` are all `/abs`), so a quoted spelling
+  cannot hide an absolute path.
+- A **relative** target in a command that contains an unquoted `cd`, `pushd` or
+  `popd` word is refused (the shell's directory may no longer be the
+  workspace); an absolute in-workspace target is still admitted.
+- A redirect with no target (`kubectl version >`) is refused.
+
+The refusal is a tool error the model and the operator both see:
+
+> Tool 'Bash' redirect refused by skill 'safe-deploy': '> /tmp/x' writes to a
+> path the workspace check refuses (Workspace violation: …). Redirect to a
+> literal path inside the workspace, or drop the redirect. To run it
+> unrestricted, the operator can deactivate skill 'safe-deploy'.
+
+The origin reads `agent 'x'`, `skill 'a'` / `skills 'a, b'`, or `agent 'x' and
+skill 'a'`; an agent-only refusal ends "…the operator can run it without agent
+'x'." Deactivate a skill with `/deactivate`.
+
+Not changed, and still the pattern matcher's honest limits: bare `Bash` and
+`Bash(*)` impose no redirect check (unrestricted Bash can already write
+anywhere with `tee` or `cp`); what the admitted program does with its own
+arguments (`kubectl cp pod:/x /etc/y`, `helm --output-dir`) is outside the
+matcher; a symlink an earlier admitted segment of the same command creates is
+not seen (the check is pre-execution); a redirect into the workspace is as
+allowed as a `Write` there. Here-docs and here-strings stay refused. Use a
+dedicated tool or a stronger sandbox when those boundaries matter.
 
 This expansion is **`Bash`-only**: `Bash` is the one tool whose commands
 carry an execution-time gate. A pattern on any other tool (`Read(docs/*)`,
 `Write(/tmp/*)`, `mcp__db__query(SELECT:*)`) has no command gate, so it is
 **not** widened to the bare tool — the item stays unoffered and is disclosed
-as unmatched below. An agent's `Bash(kubectl:*)` is disclosed the same way:
-agent `allowed-tools` accepts the same syntax but has no command-level
-execution backstop, so an agent pattern stays unoffered rather than widened
-unsafely (`DF-19-11-AGENT-PATTERN-NO-EXEC-GATE`). A bare `Bash` item still
-grants all Bash commands, subject to the normal blocklist and approval mode.
+as unmatched below. An agent's `Bash(kubectl:*)` follows the same rules as a
+skill's: since Story 19.28 the one matcher is also the execution gate for an
+agent's own restriction and for delegated children, so an agent pattern is
+offered and command-enforced. A bare `Bash` item still grants all Bash
+commands, subject to the normal blocklist and approval mode.
 
 ⚠ **Two active skills intersect their declarations as raw strings.** A skill
 declaring `Bash(kubectl:*)` co-active with one declaring `Bash(helm:*)`
@@ -122,9 +179,20 @@ Two tools survive every allowlist at **offer** time:
   subagents (ADR-10-5 S3).
 
 At **execution** time the permission chain carves out only `activate_skill`:
-under an active skill's allowlist, a `task` call is denied even though the tool
-was offered. The result is fail-closed — a restricted skill cannot escape its
-restriction through delegation — and both behaviours are pinned by tests.
+under an active skill's allowlist, a `task` call is denied unless the skill
+declares `task` itself. A skill that does declare `task` may delegate, and the
+child carries that skill's restriction as well as its own agent restriction
+(Story 19.29): the child is offered only tools the
+skill's items name, a command outside the skill's patterns is denied with
+`(inherited from the delegating turn)` in the text, and a refused redirect is
+denied by the same inherited restriction. The two restrictions are separate
+gates — a command must satisfy both. A plan a restricted turn proposes
+(`propose_plan`) carries that call's restrictions, so its children are
+narrowed the same way whether the plan is auto-approved (YOLO) or approved
+through the cards; approving a plan never widens a declared restriction. Plans
+saved before this change carry no restriction and keep their old behaviour if
+resumed. Operator-started `/fanout` waves are not model-originated and are
+unchanged.
 
 ## What the unmatched-items warning means
 

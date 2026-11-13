@@ -21,6 +21,11 @@ pub struct ToolInvocation<'a> {
     pub conversation_id: &'a str,
     pub route: Option<super::turn::TurnRoute>,
     pub permission_resolution: Option<super::approval::PermissionResolution>,
+    /// The agent-origin restriction this call was judged against (Story 19.29).
+    /// Travels with the call so delegation never reads shared adapter state.
+    pub agent_restriction: Option<&'a super::agent::AgentToolRestriction>,
+    /// The skill-origin restriction this call was judged against.
+    pub skill_restriction: Option<&'a super::skill_restriction::SkillToolRestriction>,
 }
 
 /// Tracking info for an in-progress or completed tool call.

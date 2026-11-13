@@ -4205,6 +4205,7 @@ mod tests {
                 created_at: 1700000000,
                 resolved_at: None,
                 host_message_id: Some("msg-1".to_string()),
+                origin_restrictions: None,
             },
         );
         plans.insert(
@@ -4218,6 +4219,7 @@ mod tests {
                 created_at: 1700000005,
                 resolved_at: None,
                 host_message_id: Some("msg-3".to_string()),
+                origin_restrictions: None,
             },
         );
 
@@ -4343,6 +4345,7 @@ mod tests {
                 created_at: 1700000000,
                 resolved_at: None,
                 host_message_id: Some("msg-1".to_string()),
+                origin_restrictions: None,
             },
         );
         plans.insert(
@@ -4356,6 +4359,7 @@ mod tests {
                 created_at: 1700000005,
                 resolved_at: None,
                 host_message_id: Some("msg-3".to_string()),
+                origin_restrictions: None,
             },
         );
 

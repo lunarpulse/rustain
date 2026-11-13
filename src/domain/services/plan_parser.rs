@@ -187,6 +187,7 @@ fn parse_plan_input_inner(input: &serde_json::Value, plan_id: &str) -> Result<Pl
         created_at: now,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     };
 
     validate_plan(&plan).map_err(|e| ToolError::InvalidInput(format!("propose_plan: {}", e)))?;
@@ -499,6 +500,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let err = validate_plan(&plan).unwrap_err();
         assert!(err.contains("plan title cannot be empty"));
@@ -540,6 +542,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let err = validate_plan(&plan).unwrap_err();
         assert!(err.contains("has 11 sub-tasks"));

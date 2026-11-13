@@ -36,6 +36,7 @@ fn make_plan(tasks: Vec<PlanTask>) -> Plan {
         created_at: 1000,
         resolved_at: Some(2000),
         host_message_id: None,
+        origin_restrictions: None,
     }
 }
 
@@ -93,7 +94,14 @@ fn integration_launch_spec_builder_uses_agent_model() {
         isolated: false,
     };
 
-    let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "default-model", 0, None);
+    let spec = LaunchSpecBuilder::from_plan_task(
+        &task,
+        &agent,
+        "default-model",
+        0,
+        None,
+        &rustain::domain::models::DelegationRestrictions::default(),
+    );
 
     assert_eq!(spec.effective_model, "gpt-4");
     assert!(spec.prompt.contains("Build"));
@@ -113,7 +121,14 @@ fn integration_launch_spec_builder_fallback_model() {
         isolated: false,
     };
 
-    let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "fallback-model", 0, None);
+    let spec = LaunchSpecBuilder::from_plan_task(
+        &task,
+        &agent,
+        "fallback-model",
+        0,
+        None,
+        &rustain::domain::models::DelegationRestrictions::default(),
+    );
 
     assert_eq!(spec.effective_model, "fallback-model");
 }

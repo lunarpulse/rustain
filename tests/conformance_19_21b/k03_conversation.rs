@@ -174,10 +174,9 @@ impl ToolSetPort for GatedCompositePort {
         &self,
         parent_ctx_tokens: u32,
         parent_trace: Option<rustain::domain::models::TraceContext>,
-        parent_tool_restriction: Option<rustain::domain::models::AgentToolRestriction>,
     ) {
         self.composite
-            .set_parent_context(parent_ctx_tokens, parent_trace, parent_tool_restriction)
+            .set_parent_context(parent_ctx_tokens, parent_trace)
             .await;
         match self.gate.contexts_seen.fetch_add(1, Ordering::SeqCst) {
             0 => {

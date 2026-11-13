@@ -79,6 +79,7 @@ async fn summary_message(earlier: Vec<Done>, last_title: &str, last_text: &str) 
         created_at: 1_700_000_000,
         resolved_at: None,
         host_message_id: Some("host".to_owned()),
+        origin_restrictions: None,
     };
     let mut conversation = Conversation {
         id: generate_conversation_id(),

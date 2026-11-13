@@ -961,6 +961,7 @@ mod tests {
             created_at: 1,
             resolved_at: None,
             host_message_id: Some(host.into()),
+            origin_restrictions: None,
         };
         let mut conv = Conversation::default();
         conv.messages = vec![
@@ -1380,6 +1381,7 @@ mod tests {
             created_at: 1700000000,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         conv.plans.insert(plan.id.clone(), plan.clone());
 

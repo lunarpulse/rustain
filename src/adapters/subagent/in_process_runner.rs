@@ -186,10 +186,13 @@ impl SubagentRunner for InProcessSubagentRunner {
             })?;
 
         // 5. Construct ChildState (before spawn so it can be cloned into closure)
-        let child_state = Arc::new(crate::adapters::subagent::ChildState::new(
-            spec.effective_model.clone(),
-            spec.tools_allow.clone(),
-        ));
+        let child_state = Arc::new(
+            crate::adapters::subagent::ChildState::new(
+                spec.effective_model.clone(),
+                spec.tools_allow.clone(),
+            )
+            .with_inherited_skill_restriction(spec.inherited_skill_restriction.clone()),
+        );
         let metrics_rx_for_register = child_state.metrics.subscribe();
         let mut metrics_rx_for_bridge = child_state.metrics.subscribe();
         let (parent_disconnect_tx, parent_disconnect_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1401,9 +1404,19 @@ async fn run_child(
         // restriction stopped the call.
         let agent_restriction =
             restriction_from_policy(&policy, &all_tool_names, subagent_type.as_str());
+        let inherited_skill_restriction = child_state.inherited_skill_restriction.as_ref();
         let filtered_tools = all_tools
             .into_iter()
             .filter(|tool| tool_policy_allows_offer(&policy, &tool.name))
+            .filter(|tool| {
+                inherited_skill_restriction.is_none_or(|restriction| {
+                    restriction.items.iter().any(|item| {
+                        crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(
+                            item, &tool.name,
+                        )
+                    })
+                })
+            })
             .collect();
         let options = CompletionOptions {
             session_id: Some(agent_id.as_str().to_owned()),
@@ -1822,19 +1835,12 @@ async fn run_child(
                         source,
                         requests,
                         cancel.clone(),
-                        // `active_skills: None` — Story 19.28 T0.3 discovery 1,
-                        // proven-correct and re-measured at the 2026-09-13 code
-                        // review: `grep -n "SkillActivationSet\|skill_activator\|
-                        // ActiveSkill\|active_skills\|activate_skill"` over this
-                        // file returns ZERO hits outside this line, and the
-                        // child's `CompletionOptions.system_prompt` is
-                        // `String::new()`, so no skill body or activation set can
-                        // reach a child at all. ⛔ Not an oversight — children
-                        // hold no skill state, so there is nothing to thread.
-                        // ⚠ The skill axis therefore does NOT cross the
-                        // delegation boundary; that gap is filed, not fixed, as
-                        // `DF-19-28-SKILL-RESTRICTION-NOT-INHERITED-BY-CHILDREN`.
-                        None,
+                        // Story 19.29: the delegating turn's skill restriction
+                        // is the child's SECOND axis — the same Step 1 skill
+                        // gate and Step 2.5 redirect step the foreground uses.
+                        // Children hold no skill activation state of their own,
+                        // so the only skill restriction is the inherited one.
+                        child_state.inherited_skill_restriction.as_ref(),
                         agent_restriction.as_ref(),
                         provenance,
                         Some(crate::domain::models::turn::TurnRoute::Subagent),
@@ -2308,6 +2314,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2454,6 +2461,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2568,6 +2576,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2680,6 +2689,7 @@ mod tests {
                             isolated: false,
                             delegation:
                                 crate::domain::models::launch_spec::DelegationProfile::Child,
+                            inherited_skill_restriction: None,
                         },
                         CancellationToken::new(),
                         None,
@@ -2732,6 +2742,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2769,6 +2780,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2807,6 +2819,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2888,6 +2901,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -2963,6 +2977,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3068,6 +3083,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3236,6 +3252,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3278,6 +3295,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3323,6 +3341,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3371,6 +3390,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3444,6 +3464,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3514,6 +3535,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3563,6 +3585,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let handle = runner
@@ -3727,6 +3750,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let handle = runner
             .launch(
@@ -3831,6 +3855,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let cancel = CancellationToken::new();
         let mut handle = runner
@@ -3905,6 +3930,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let result = runner
             .launch(
@@ -4087,6 +4113,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let result = runner
             .launch(
@@ -4145,6 +4172,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let deterministic_id = crate::domain::models::AgentId::from_validated("retry-scope-id");
 
@@ -4693,6 +4721,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         }
     }
 
@@ -4751,6 +4780,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let mut h = runner_a
             .launch(
@@ -4786,6 +4816,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let mut h2 = runner_b
             .launch(
@@ -4843,6 +4874,7 @@ mod tests {
                     parent_trace: None,
                     isolated: true,
                     delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+                    inherited_skill_restriction: None,
                 },
                 CancellationToken::new(),
                 None,
@@ -4863,6 +4895,7 @@ mod tests {
                     parent_trace: None,
                     isolated: false,
                     delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+                    inherited_skill_restriction: None,
                 },
                 CancellationToken::new(),
                 Some(&parent),
@@ -4899,6 +4932,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let parent = parent_runner
             .launch(
@@ -4929,6 +4963,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let mut nested = runner
             .launch(
@@ -7382,6 +7417,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
 
         let depth_one = runner
@@ -7598,6 +7634,7 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction: None,
         };
         let mut handle = runner
             .launch(
@@ -8680,13 +8717,14 @@ mod tests {
         calls: std::sync::atomic::AtomicU32,
         requested: Vec<(String, serde_json::Value)>,
         offered: Arc<tokio::sync::Mutex<Vec<String>>>,
+        results: Arc<tokio::sync::Mutex<Vec<(String, String, bool)>>>,
     }
 
     #[async_trait::async_trait]
     impl StreamingProvider for PolicyProbeProvider {
         async fn stream_completion(
             &self,
-            _messages: Vec<Message>,
+            messages: Vec<Message>,
             options: CompletionOptions,
         ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -8706,6 +8744,17 @@ mod tests {
                 });
                 Ok(Box::pin(futures::stream::iter(chunks)))
             } else {
+                *self.results.lock().await = messages
+                    .iter()
+                    .flat_map(|message| message.tool_results.iter())
+                    .map(|result| {
+                        (
+                            result.tool_use_id.clone(),
+                            result.content.clone(),
+                            result.is_error,
+                        )
+                    })
+                    .collect();
                 Ok(Box::pin(futures::stream::iter(vec![
                     StreamChunk::Text {
                         content: "done".into(),
@@ -8786,14 +8835,32 @@ mod tests {
         policy: crate::domain::models::ToolPolicy,
         requested: Vec<(String, serde_json::Value)>,
     ) -> (Vec<String>, Vec<(String, serde_json::Value)>) {
-        use crate::domain::ports::{SecurityPort as _, SubagentRunner as _};
+        let (offered, executed, _) = run_policy_probe_with(policy, None, requested).await;
+        (offered, executed)
+    }
+
+    /// The real runner, scheduler and security over a scripted provider.
+    struct ProbeRig {
+        runner: Arc<InProcessSubagentRunner>,
+        /// Held so the domain-event channel stays open for the child's life.
+        _event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
+        offered: Arc<tokio::sync::Mutex<Vec<String>>>,
+        results: Arc<tokio::sync::Mutex<Vec<(String, String, bool)>>>,
+        tools: Arc<PolicyProbeTools>,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn probe_rig(requested: Vec<(String, serde_json::Value)>) -> ProbeRig {
+        use crate::domain::ports::SecurityPort as _;
 
         let tmp = tempfile::tempdir().unwrap();
         let offered = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let results = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let provider = Arc::new(PolicyProbeProvider {
             calls: std::sync::atomic::AtomicU32::new(0),
             requested,
             offered: offered.clone(),
+            results: results.clone(),
         }) as Arc<dyn StreamingProvider>;
         let storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
             as Arc<dyn crate::domain::ports::StoragePort>;
@@ -8806,25 +8873,50 @@ mod tests {
         let scheduler =
             ToolScheduler::new(security.clone(), tool_port.clone(), approval.clone(), 32);
         let (event_bus, event_rx) = EventBus::new(32);
-        std::mem::forget(event_rx);
+        let event_bus = Arc::new(event_bus);
         let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
         let (authority, root_authority) = authority_pair();
-        let runner = InProcessSubagentRunner::new(
+        let runner = Arc::new(InProcessSubagentRunner::new(
             provider,
             storage,
             security,
             tool_port,
             approval,
             scheduler,
-            Arc::new(event_bus),
+            event_bus.clone(),
             Arc::new(NodeTree::new()),
             Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::SandboxPolicy::Permissive,
             )),
-            spool,
+            spool.clone(),
             authority,
             root_authority,
-        );
+        ));
+        ProbeRig {
+            runner,
+            _event_rx: event_rx,
+            offered,
+            results,
+            tools,
+            _tmp: tmp,
+        }
+    }
+
+    /// As `run_policy_probe`, with the child's inherited skill restriction and
+    /// the tool results the child's provider saw as `(tool_use_id, content,
+    /// is_error)`.
+    async fn run_policy_probe_with(
+        policy: crate::domain::models::ToolPolicy,
+        inherited_skill_restriction: Option<crate::domain::models::SkillToolRestriction>,
+        requested: Vec<(String, serde_json::Value)>,
+    ) -> (
+        Vec<String>,
+        Vec<(String, serde_json::Value)>,
+        Vec<(String, String, bool)>,
+    ) {
+        use crate::domain::ports::SubagentRunner as _;
+
+        let rig = probe_rig(requested).await;
         let spec = AgentLaunchSpec {
             prompt: "exercise delegated policy".into(),
             effective_model: "test-model".into(),
@@ -8835,8 +8927,10 @@ mod tests {
             parent_trace: None,
             isolated: false,
             delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            inherited_skill_restriction,
         };
-        let handle = runner
+        let handle = rig
+            .runner
             .launch(
                 spec,
                 CancellationToken::new(),
@@ -8857,9 +8951,10 @@ mod tests {
         })
         .await
         .expect("child completed");
-        let offered = offered.lock().await.clone();
-        let executed = tools.executed.lock().await.clone();
-        (offered, executed)
+        let offered = rig.offered.lock().await.clone();
+        let executed = rig.tools.executed.lock().await.clone();
+        let results = rig.results.lock().await.clone();
+        (offered, executed, results)
     }
 
     #[tokio::test]
@@ -8916,7 +9011,7 @@ mod tests {
                 crate::domain::models::ModelTier::CheapAgentic,
                 0,
                 None,
-                Some(&parent),
+                &crate::domain::models::DelegationRestrictions::new(Some(parent.clone()), None),
             )
             .tools_allow;
         let (offered, executed) = run_policy_probe(
@@ -8951,7 +9046,7 @@ mod tests {
                 crate::domain::models::ModelTier::CheapAgentic,
                 0,
                 None,
-                Some(&parent),
+                &crate::domain::models::DelegationRestrictions::new(Some(parent.clone()), None),
             )
             .tools_allow;
         let (offered, executed) = run_policy_probe(
@@ -8991,7 +9086,7 @@ mod tests {
                 crate::domain::models::ModelTier::CheapAgentic,
                 0,
                 None,
-                Some(&parent),
+                &crate::domain::models::DelegationRestrictions::new(Some(parent.clone()), None),
             )
             .tools_allow;
         let (offered, executed) = run_policy_probe(
@@ -9019,6 +9114,191 @@ mod tests {
         .await;
         assert!(unrestricted_offered.contains(&"Bash".to_string()));
         assert_eq!(unrestricted_executed.len(), 1);
+    }
+
+    // ---- Story 19.29: the skill axis crosses delegation as a second axis ----
+
+    fn inherited_kube(items: &[&str]) -> crate::domain::models::SkillToolRestriction {
+        crate::domain::models::SkillToolRestriction {
+            skill_names: vec!["kube".to_string()],
+            items: items.iter().map(|item| (*item).to_string()).collect(),
+            inherited: false,
+        }
+    }
+
+    /// The launch spec the production `task` path builds for `agent` carrying
+    /// the parent's skill restriction — through `LaunchSpecBuilder`, never a
+    /// hand-built spec.
+    fn task_spec_with_parent_skill(
+        agent: &crate::domain::models::AgentDef,
+        parent_skill: Option<&crate::domain::models::SkillToolRestriction>,
+    ) -> AgentLaunchSpec {
+        crate::domain::services::launch_spec_builder::LaunchSpecBuilder::from_task_tool(
+            "probe",
+            agent,
+            "model",
+            crate::domain::models::ModelTier::CheapAgentic,
+            0,
+            None,
+            &crate::domain::models::DelegationRestrictions::new(None, parent_skill.cloned()),
+        )
+    }
+
+    fn result_for(results: &[(String, String, bool)], index: usize) -> &(String, String, bool) {
+        results
+            .iter()
+            .find(|(id, _, _)| *id == format!("policy-{index}"))
+            .unwrap_or_else(|| panic!("no result for request {index}: {results:?}"))
+    }
+
+    #[tokio::test]
+    async fn story_19_29_child_is_never_wider_than_the_parents_skills() {
+        let outside = tempfile::tempdir().unwrap();
+        let witness = outside.path().join("x");
+        let skill = inherited_kube(&["Bash(echo:*)", "Read"]);
+        // The DF's escape: the target agent is unrestricted (`InheritFromParent`).
+        let spec = task_spec_with_parent_skill(
+            &crate::domain::models::AgentDef::default_worker(),
+            Some(&skill),
+        );
+        assert_eq!(
+            spec.tools_allow,
+            crate::domain::models::ToolPolicy::InheritFromParent
+        );
+        let (offered, executed, results) = run_policy_probe_with(
+            spec.tools_allow,
+            spec.inherited_skill_restriction,
+            vec![
+                ("Bash".into(), serde_json::json!({"command": "echo ok"})),
+                ("Bash".into(), serde_json::json!({"command": "printf x"})),
+                (
+                    "Write".into(),
+                    serde_json::json!({"file_path": "w.txt", "content": "x"}),
+                ),
+                (
+                    "Bash".into(),
+                    serde_json::json!({"command": format!("echo x > {}", witness.display())}),
+                ),
+            ],
+        )
+        .await;
+
+        assert_eq!(offered, vec!["Bash", "Read"]);
+        assert_eq!(
+            executed.len(),
+            1,
+            "only `echo ok` may execute: {executed:?}"
+        );
+        assert_eq!(executed[0].1["command"], "echo ok");
+        assert!(!result_for(&results, 0).2);
+        assert_eq!(
+            result_for(&results, 1).1,
+            "Tool 'Bash' command not allowed by skill 'kube' (inherited from the delegating turn). Allowed: [Bash(echo:*), Read]"
+        );
+        assert_eq!(
+            result_for(&results, 2).1,
+            "Tool 'Write' not allowed by skill 'kube' (inherited from the delegating turn). Allowed: [Bash(echo:*), Read]"
+        );
+        assert_eq!(
+            result_for(&results, 3).1,
+            format!(
+                "Tool 'Bash' redirect refused by skill 'kube' (inherited from the delegating turn): '> {}' writes to a path the workspace check refuses (Workspace violation: Parent directory resolves outside workspace). Redirect to a literal path inside the workspace, or drop the redirect. To run it unrestricted, the operator can deactivate skill 'kube'.",
+                witness.display()
+            )
+        );
+        assert!(!witness.exists());
+    }
+
+    /// Positive control and offer discriminator for the test above: without an
+    /// inherited restriction the same child offers everything and runs
+    /// `printf x`; with `[Read]` the offer itself narrows.
+    #[tokio::test]
+    async fn story_19_29_inherited_restriction_narrows_the_offer_and_none_does_not() {
+        let free =
+            task_spec_with_parent_skill(&crate::domain::models::AgentDef::default_worker(), None);
+        assert!(free.inherited_skill_restriction.is_none());
+        let (offered, executed, _) = run_policy_probe_with(
+            free.tools_allow,
+            free.inherited_skill_restriction,
+            vec![("Bash".into(), serde_json::json!({"command": "printf x"}))],
+        )
+        .await;
+        assert_eq!(offered, vec!["Bash", "Read"]);
+        assert_eq!(executed.len(), 1);
+
+        let read_only = inherited_kube(&["Read"]);
+        let narrowed = task_spec_with_parent_skill(
+            &crate::domain::models::AgentDef::default_worker(),
+            Some(&read_only),
+        );
+        let (offered, executed, _) = run_policy_probe_with(
+            narrowed.tools_allow,
+            narrowed.inherited_skill_restriction,
+            vec![("Bash".into(), serde_json::json!({"command": "printf x"}))],
+        )
+        .await;
+        assert_eq!(offered, vec!["Read"]);
+        assert!(executed.is_empty());
+    }
+
+    /// The inherited restriction is a SECOND axis: merging it into the agent
+    /// policy by raw intersection would drop `Bash` when one side says `Bash`
+    /// and the other `Bash(echo:*)`.
+    #[tokio::test]
+    async fn story_19_29_inherited_axis_is_not_merged_into_the_agent_policy() {
+        let agent = crate::domain::models::AgentDef {
+            allowed_tools: Some(vec!["Bash".into()]),
+            ..crate::domain::models::AgentDef::default_worker()
+        };
+        let skill = inherited_kube(&["Bash(echo:*)"]);
+        let spec = task_spec_with_parent_skill(&agent, Some(&skill));
+        let (offered, executed, results) = run_policy_probe_with(
+            spec.tools_allow,
+            spec.inherited_skill_restriction,
+            vec![
+                ("Bash".into(), serde_json::json!({"command": "echo ok"})),
+                ("Bash".into(), serde_json::json!({"command": "printf x"})),
+            ],
+        )
+        .await;
+        assert_eq!(offered, vec!["Bash"]);
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].1["command"], "echo ok");
+        assert!(
+            result_for(&results, 1)
+                .1
+                .contains("skill 'kube' (inherited from the delegating turn)")
+        );
+    }
+
+    /// Children get the redirect step on the AGENT axis too.
+    #[tokio::test]
+    async fn story_19_29_child_own_agent_pattern_refuses_an_outside_redirect() {
+        use std::collections::BTreeSet;
+
+        let outside = tempfile::tempdir().unwrap();
+        let witness = outside.path().join("x");
+        let policy = crate::domain::models::ToolPolicy::Allowlist {
+            tools: BTreeSet::from(["Bash(echo:*)".to_string()]),
+        };
+        let (_, executed, results) = run_policy_probe_with(
+            policy,
+            None,
+            vec![(
+                "Bash".into(),
+                serde_json::json!({"command": format!("echo x > {}", witness.display())}),
+            )],
+        )
+        .await;
+        assert!(executed.is_empty());
+        assert_eq!(
+            result_for(&results, 0).1,
+            format!(
+                "Tool 'Bash' redirect refused by agent 'in-process': '> {}' writes to a path the workspace check refuses (Workspace violation: Parent directory resolves outside workspace). Redirect to a literal path inside the workspace, or drop the redirect. To run it unrestricted, the operator can run it without agent 'in-process'.",
+                witness.display()
+            )
+        );
+        assert!(!witness.exists());
     }
 
     #[tokio::test]
@@ -9062,7 +9342,15 @@ mod tests {
             delegated_to: None,
         };
         let policies = [
-            LaunchSpecBuilder::from_plan_task(&task, &agent, "model", 0, None).tools_allow,
+            LaunchSpecBuilder::from_plan_task(
+                &task,
+                &agent,
+                "model",
+                0,
+                None,
+                &crate::domain::models::DelegationRestrictions::default(),
+            )
+            .tools_allow,
             LaunchSpecBuilder::from_task_tool(
                 "child",
                 &agent,
@@ -9070,11 +9358,19 @@ mod tests {
                 crate::domain::models::ModelTier::CheapAgentic,
                 0,
                 None,
-                None,
+                &crate::domain::models::DelegationRestrictions::default(),
             )
             .tools_allow,
-            LaunchSpecBuilder::from_sub_task(&task, &sub_task, &agent, "model", 0, None)
-                .tools_allow,
+            LaunchSpecBuilder::from_sub_task(
+                &task,
+                &sub_task,
+                &agent,
+                "model",
+                0,
+                None,
+                &crate::domain::models::DelegationRestrictions::default(),
+            )
+            .tools_allow,
         ];
 
         for policy in policies {

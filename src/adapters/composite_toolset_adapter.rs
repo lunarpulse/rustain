@@ -142,6 +142,58 @@ impl CompositeToolsetAdapter {
         }
     }
 
+    /// The subagent provider and capability id when `tool_name` names a
+    /// registered subagent capability.
+    fn subagent_target(
+        &self,
+        tool_name: &str,
+    ) -> Option<(
+        Arc<crate::adapters::subagent::SubagentProvider>,
+        crate::domain::models::CapabilityId,
+    )> {
+        let provider = self.subagent_provider.get()?;
+        self.capability_registry
+            .snapshot()
+            .into_iter()
+            .find(|cap| cap.protocol == "subagent" && cap.name == tool_name)
+            .map(|cap| (provider.clone(), cap.id))
+    }
+
+    /// Dispatch a subagent capability. The per-turn context is injected from
+    /// the slot; the two restriction rail keys come ONLY from the arguments
+    /// (the call's own invocation) and are always written — `null` when
+    /// absent — so a model-supplied key never reaches the provider.
+    async fn invoke_subagent(
+        &self,
+        provider: &crate::adapters::subagent::SubagentProvider,
+        capability_id: &crate::domain::models::CapabilityId,
+        mut input: serde_json::Value,
+        cancel: CancellationToken,
+        agent_restriction: Option<&crate::domain::models::AgentToolRestriction>,
+        skill_restriction: Option<&crate::domain::models::SkillToolRestriction>,
+    ) -> Result<ToolResult, ToolError> {
+        crate::domain::models::DelegationRestrictions::write_to_rail(
+            &mut input,
+            agent_restriction,
+            skill_restriction,
+        );
+        if let Some(obj) = input.as_object_mut() {
+            if let Some(ctx) = &*self.parent_ctx.read().await {
+                obj.insert(
+                    "__parent_ctx_tokens".into(),
+                    serde_json::json!(ctx.parent_ctx_tokens),
+                );
+                obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
+            }
+            let conv_id = self.conversation_id.read().await;
+            obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
+        }
+        provider
+            .invoke(capability_id, input, cancel)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+    }
+
     /// Story 9.3a — access the capability registry.
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         &self.capability_registry
@@ -704,36 +756,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
         }
 
         // Story 10.7 — route subagent capabilities to SubagentProvider::invoke().
-        // D1 fix: inject per-turn context into input JSON before dispatch.
-        if let Some(subagent_provider) = self.subagent_provider.get() {
-            for cap in self.capability_registry.snapshot() {
-                if cap.protocol == "subagent" && cap.name == tool_name {
-                    let mut enriched_input = input;
-                    if let Some(obj) = enriched_input.as_object_mut() {
-                        let ctx = self.parent_ctx.read().await;
-                        if let Some(ref ctx) = *ctx {
-                            obj.insert(
-                                "__parent_ctx_tokens".into(),
-                                serde_json::json!(ctx.parent_ctx_tokens),
-                            );
-                            obj.insert(
-                                "__parent_trace".into(),
-                                serde_json::json!(ctx.parent_trace),
-                            );
-                            obj.insert(
-                                "__parent_tool_restriction".into(),
-                                serde_json::json!(ctx.parent_tool_restriction),
-                            );
-                        }
-                        let conv_id = self.conversation_id.read().await;
-                        obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
-                    }
-                    return subagent_provider
-                        .invoke(&cap.id, enriched_input, cancel)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
-                }
-            }
+        // No invocation here, so no restriction can be attached: both rail keys
+        // are written `null`, overwriting anything the model supplied.
+        if let Some((provider, capability_id)) = self.subagent_target(tool_name) {
+            return self
+                .invoke_subagent(&provider, &capability_id, input, cancel, None, None)
+                .await;
         }
 
         // Story 17.4b (R-D) — route a2a__<peer>__<skill> wire names to the A2A
@@ -748,6 +776,10 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
         }
 
+        let mut input = input;
+        if tool_name == "propose_plan" {
+            crate::domain::models::DelegationRestrictions::write_to_rail(&mut input, None, None);
+        }
         self.builtin.execute(tool_name, input, cancel).await
     }
 
@@ -789,37 +821,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
         }
 
         // Story 10.7 — route subagent capabilities to SubagentProvider::invoke().
-        // D1 fix: inject per-turn context into input JSON before dispatch.
-        if let Some(subagent_provider) = self.subagent_provider.get() {
-            for cap in self.capability_registry.snapshot() {
-                if cap.protocol == "subagent" && cap.name == tool_name {
-                    let _ = (tool_use_id, progress_tx);
-                    let mut enriched_input = input;
-                    if let Some(obj) = enriched_input.as_object_mut() {
-                        let ctx = self.parent_ctx.read().await;
-                        if let Some(ref ctx) = *ctx {
-                            obj.insert(
-                                "__parent_ctx_tokens".into(),
-                                serde_json::json!(ctx.parent_ctx_tokens),
-                            );
-                            obj.insert(
-                                "__parent_trace".into(),
-                                serde_json::json!(ctx.parent_trace),
-                            );
-                            obj.insert(
-                                "__parent_tool_restriction".into(),
-                                serde_json::json!(ctx.parent_tool_restriction),
-                            );
-                        }
-                        let conv_id = self.conversation_id.read().await;
-                        obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
-                    }
-                    return subagent_provider
-                        .invoke(&cap.id, enriched_input, cancel)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
-                }
-            }
+        // No invocation here, so no restriction can be attached: both rail keys
+        // are written `null`, overwriting anything the model supplied.
+        if let Some((provider, capability_id)) = self.subagent_target(tool_name) {
+            return self
+                .invoke_subagent(&provider, &capability_id, input, cancel, None, None)
+                .await;
         }
 
         // Story 17.4b (R-D) — route a2a__<peer>__<skill> wire names to the A2A
@@ -835,6 +842,12 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
         }
 
+        // No invocation here: a model-supplied rail on `propose_plan` is
+        // overwritten with `null`, never trusted.
+        let mut input = input;
+        if tool_name == "propose_plan" {
+            crate::domain::models::DelegationRestrictions::write_to_rail(&mut input, None, None);
+        }
         self.builtin
             .execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
             .await
@@ -871,6 +884,34 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 )
                 .await
                 .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
+        }
+        if let Some((provider, capability_id)) = self.subagent_target(tool_name) {
+            return self
+                .invoke_subagent(
+                    &provider,
+                    &capability_id,
+                    input,
+                    cancel,
+                    invocation.agent_restriction,
+                    invocation.skill_restriction,
+                )
+                .await;
+        }
+        if tool_name == "propose_plan" {
+            // Story 19.29 (R11): the plan carries the restrictions of the call
+            // that proposed it. Both rail keys are written from THIS call's
+            // invocation (null when absent), overwriting anything the model
+            // supplied; the builtin adapter takes them before parsing.
+            let mut input = input;
+            crate::domain::models::DelegationRestrictions::write_to_rail(
+                &mut input,
+                invocation.agent_restriction,
+                invocation.skill_restriction,
+            );
+            return self
+                .builtin
+                .execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
+                .await;
         }
         self.execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
             .await
@@ -1025,19 +1066,19 @@ impl ToolSetPort for CompositeToolsetAdapter {
         &self,
         parent_ctx_tokens: u32,
         parent_trace: Option<crate::domain::models::TraceContext>,
-        parent_tool_restriction: Option<crate::domain::models::AgentToolRestriction>,
     ) {
-        // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time
+        // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time.
+        // Tool restrictions are deliberately absent: they travel per call on
+        // `ToolInvocation` (Story 19.29), so this shared slot cannot carry one.
         *self.parent_ctx.write().await = Some(
             crate::adapters::subagent::subagent_provider::TaskToolContext {
                 conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
                 parent_ctx_tokens,
                 parent_trace: parent_trace.clone(),
-                parent_tool_restriction: parent_tool_restriction.clone(),
             },
         );
         self.builtin
-            .set_parent_context(parent_ctx_tokens, parent_trace, parent_tool_restriction)
+            .set_parent_context(parent_ctx_tokens, parent_trace)
             .await;
     }
 }

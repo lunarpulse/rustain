@@ -145,6 +145,7 @@ fn plan() -> Plan {
         created_at: 0,
         resolved_at: None,
         host_message_id: Some("k".to_string()),
+        origin_restrictions: None,
     }
 }
 

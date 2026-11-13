@@ -204,6 +204,7 @@ pub fn plan(title: &str) -> Plan {
         created_at: 0,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     }
 }
 

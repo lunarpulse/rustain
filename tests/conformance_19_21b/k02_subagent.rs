@@ -216,6 +216,7 @@ async fn run_child(
                 parent_trace: None,
                 isolated: false,
                 delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+                inherited_skill_restriction: None,
             },
             CancellationToken::new(),
             None,

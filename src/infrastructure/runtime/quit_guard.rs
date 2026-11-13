@@ -178,6 +178,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let card = crate::adapters::tui::decision_queue::PlanCardPayload {
             conversation_id: "c".into(),

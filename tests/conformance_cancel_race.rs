@@ -70,6 +70,7 @@ pub fn make_minimal_plan(num_tasks: u32) -> Plan {
         created_at: 1_700_000_000,
         resolved_at: Some(1_700_000_060),
         host_message_id: Some("msg-1".to_string()),
+        origin_restrictions: None,
     }
 }
 

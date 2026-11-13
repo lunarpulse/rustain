@@ -104,6 +104,7 @@ async fn subagent_spawn_latency() {
         parent_trace: None,
         isolated: false,
         delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: None,
     };
 
     let iterations = 1_000;
@@ -164,6 +165,7 @@ async fn cancellation_propagation_latency() {
         parent_trace: None,
         isolated: false,
         delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: None,
     };
 
     let iterations = 100;
@@ -205,6 +207,7 @@ async fn memory_rss_per_agent() {
         parent_trace: None,
         isolated: false,
         delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: None,
     };
 
     let before = procfs::process::Process::myself()

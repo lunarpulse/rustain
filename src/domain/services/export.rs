@@ -476,6 +476,7 @@ mod tests {
                 created_at: 1_700_000_020,
                 resolved_at: None,
                 host_message_id: Some("msg-plan-1".to_string()),
+                origin_restrictions: None,
             },
         );
 

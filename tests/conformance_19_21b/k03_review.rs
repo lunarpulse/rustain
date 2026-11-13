@@ -117,6 +117,7 @@ async fn k03_review_from_task_drilldown_restores_full_body_without_sending() {
             created_at: 1_700_000_000,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         },
     );
     f.state.task_panel_state.last_executed_plan_id = Some("detail-plan".into());

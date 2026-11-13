@@ -239,6 +239,7 @@ async fn status_bridge_registry_list_reflects_child_status() {
         parent_trace: None,
         isolated: false,
         delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: None,
     };
 
     let cancel = CancellationToken::new();

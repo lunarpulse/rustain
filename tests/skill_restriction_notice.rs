@@ -126,11 +126,11 @@ impl StreamingProvider for OfferCapturingProvider {
 
 /// Emits one deterministic tool-use batch, then captures the production
 /// scheduler's tool results on the follow-up provider call.
-struct ToolCallProvider {
-    calls: std::sync::atomic::AtomicUsize,
-    tool_calls: Vec<(String, String, serde_json::Value)>,
-    offered: PlMutex<Vec<String>>,
-    results: PlMutex<Vec<ToolResultMessage>>,
+pub(crate) struct ToolCallProvider {
+    pub(crate) calls: std::sync::atomic::AtomicUsize,
+    pub(crate) tool_calls: Vec<(String, String, serde_json::Value)>,
+    pub(crate) offered: PlMutex<Vec<String>>,
+    pub(crate) results: PlMutex<Vec<ToolResultMessage>>,
 }
 
 #[async_trait]
@@ -194,9 +194,9 @@ impl StreamingProvider for ToolCallProvider {
     }
 }
 
-struct RecordingTools {
-    names: Vec<&'static str>,
-    executed: PlMutex<Vec<String>>,
+pub(crate) struct RecordingTools {
+    pub(crate) names: Vec<&'static str>,
+    pub(crate) executed: PlMutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -232,7 +232,10 @@ impl ToolSetPort for RecordingTools {
 /// Parse a SKILL.md from disk through the real registry, activate it through
 /// the real activator, and hand back the activation set the event loop would
 /// carry on a submission.
-async fn activation_from_skill_md(ws: &std::path::Path, rel: &str) -> SkillActivationSet {
+pub(crate) async fn activation_from_skill_md(
+    ws: &std::path::Path,
+    rel: &str,
+) -> SkillActivationSet {
     let registry = SkillRegistry::discover(ws, None, &[]);
     let def = registry
         .find(rel)
@@ -262,7 +265,7 @@ async fn drive_turn(
 /// Drive the production turn door with caller-supplied provider, security, and
 /// toolset. The scheduler is real; tests observe provider inputs and tool
 /// execution rather than calling either allowlist helper directly.
-async fn run_turn_front_door(
+pub(crate) async fn run_turn_front_door(
     ws: &std::path::Path,
     activation: Option<SkillActivationSet>,
     agent: Option<rustain::domain::models::ActiveAgent>,
@@ -393,7 +396,7 @@ async fn drive_turn_with_agent(
     (notices, offered)
 }
 
-async fn drive_agent_tool_calls(
+pub(crate) async fn drive_agent_tool_calls(
     ws: &std::path::Path,
     activation: Option<SkillActivationSet>,
     agent: rustain::domain::models::ActiveAgent,
@@ -435,7 +438,7 @@ async fn drive_agent_tool_calls(
 /// The PRD § Journey 3 SKILL.md, byte-exact (see prd.md, the fenced block).
 const PRD_J3_SKILL_MD: &str = "---\nname: safe-deploy\ndescription: Deploy services following team safety protocols. Use when deploying any service to staging or production.\nallowed-tools: Bash(kubectl:*) Bash(helm:*) Read\n---\n## Protocol\n1. Read deploy.yaml for environment config\n2. Run helm diff to preview changes — show diff to user\n3. Check migrations/ for pending changes — if breaking, STOP and warn\n4. If staging: deploy and run smoke tests\n5. If production: require explicit user confirmation BEFORE deploying\n6. Run smoke tests post-deploy. If any fail, auto-rollback.\nNever skip smoke tests. Never force-push to production.\n";
 
-fn write_skill(ws: &std::path::Path, name: &str, content: &str) {
+pub(crate) fn write_skill(ws: &std::path::Path, name: &str, content: &str) {
     let dir = ws.join(".agents").join("skills").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), content).unwrap();
@@ -711,7 +714,7 @@ async fn review_non_bash_pattern_stays_unoffered_and_disclosed() {
     assert!(!disclosures[0].contains("Bash(kubectl:*)"));
 }
 
-fn active_agent(
+pub(crate) fn active_agent(
     ws: &std::path::Path,
     name: &str,
     allowed: Option<&[&str]>,
@@ -727,7 +730,7 @@ fn active_agent(
     }
 }
 
-fn error_for<'a>(results: &'a [ToolResultMessage], id: &str) -> &'a ToolResultMessage {
+pub(crate) fn error_for<'a>(results: &'a [ToolResultMessage], id: &str) -> &'a ToolResultMessage {
     results
         .iter()
         .find(|result| result.tool_use_id == id)

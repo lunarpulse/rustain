@@ -3,11 +3,15 @@
 
 use crate::domain::models::{
     ActiveSkill, AgentToolRestriction, ApprovalSource, FileOperation, PermissionMode,
-    ProvenanceTag, TaintDecision, ToolPolicy, ToolRestrictionOrigin, ToolRisk, TurnRoute,
-    is_allowlist_carve_out, risk_for_builtin,
+    ProvenanceTag, SkillToolRestriction, TaintDecision, ToolPolicy, ToolRestrictionOrigin,
+    ToolRisk, TurnRoute, is_allowlist_carve_out, risk_for_builtin,
 };
 use crate::domain::ports::{SecurityPort, ToolSetPort};
-use std::collections::{BTreeSet, HashSet};
+use crate::domain::services::skill_tool_pattern::{
+    CommandScan, RedirectOp, RedirectRefusal, RedirectTarget, ToolAdmission, scan_command,
+    tool_admission,
+};
+use std::collections::BTreeSet;
 
 /// Result of a permission chain check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,11 +142,12 @@ pub async fn check_with_source_and_provenance(
     source: Option<&crate::domain::models::tool_call::ApprovalSource>,
     provenance: ProvenanceTag,
 ) -> PermissionDecision {
+    let skill_restriction = active_skills.and_then(SkillToolRestriction::from_active_skills);
     check_with_source_and_provenance_and_restriction(
         security,
         tool_name,
         input,
-        active_skills,
+        skill_restriction.as_ref(),
         None,
         plan_file,
         tools_port,
@@ -159,7 +164,7 @@ pub async fn check_with_source_and_provenance_and_restriction(
     security: &dyn SecurityPort,
     tool_name: &str,
     input: &serde_json::Value,
-    active_skills: Option<&[ActiveSkill]>,
+    skill_restriction: Option<&SkillToolRestriction>,
     agent_restriction: Option<&AgentToolRestriction>,
     plan_file: Option<&std::path::Path>,
     tools_port: &dyn ToolSetPort,
@@ -240,16 +245,15 @@ pub async fn check_with_source_and_provenance_and_restriction(
         }
     };
 
-    // Step 1: Declared tool restrictions. Carve-outs are per-origin: a skill
-    // may activate another skill, while an agent may also delegate. The agent
-    // carve-out is applied INSIDE `check_agent_tools` because it is an
-    // allowlist carve-out — it must not override an explicit exclusion
-    // (Story 19.28 review, P2).
-    if let Some(deny_reason) = check_agent_tools(tool_name, input, agent_restriction) {
+    let bash = (tool_name == "Bash"
+        && (agent_restriction.is_some() || skill_restriction.is_some()))
+    .then(|| BashCommand::of(input));
+    if let Some(deny_reason) = check_agent_tools(tool_name, bash.as_ref(), agent_restriction) {
         return PermissionDecision::Deny(deny_reason);
     }
     if !is_allowlist_carve_out(ToolRestrictionOrigin::Skill, tool_name) {
-        if let Some(deny_reason) = check_allowed_tools(tool_name, input, active_skills) {
+        if let Some(deny_reason) = check_allowed_tools(tool_name, bash.as_ref(), skill_restriction)
+        {
             return PermissionDecision::Deny(deny_reason);
         }
     }
@@ -268,6 +272,14 @@ pub async fn check_with_source_and_provenance_and_restriction(
                 );
             }
         }
+    }
+
+    // Step 2.5: Redirect targets under a Bash command pattern (Story 19.29).
+    if let Some(bash) = bash.as_ref()
+        && let Some(deny_reason) =
+            check_bash_redirects(security, bash, agent_restriction, skill_restriction)
+    {
+        return PermissionDecision::Deny(deny_reason);
     }
 
     let plan_file_exception = is_plan_file_write(tool_name, input, plan_file);
@@ -528,7 +540,7 @@ fn canonical_tool_name(tool_name: &str) -> &str {
 fn allowlist_allows_execution(
     tools: &BTreeSet<String>,
     tool_name: &str,
-    input: &serde_json::Value,
+    bash: Option<&BashCommand<'_>>,
 ) -> bool {
     if !tools.iter().any(|item| {
         crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
@@ -538,31 +550,28 @@ fn allowlist_allows_execution(
     if tool_name != "Bash" {
         return true;
     }
-    let command = input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    crate::domain::services::skill_tool_pattern::command_matches_allowed_item_refs(
+    crate::domain::services::skill_tool_pattern::command_matches_scanned_items(
         tools.iter().map(String::as_str),
         tool_name,
-        command,
+        bash.map_or("", |bash| bash.command),
+        bash.and_then(|bash| bash.scan.as_ref()),
     )
 }
 
 fn policy_allows_execution(
     policy: &ToolPolicy,
     tool_name: &str,
-    input: &serde_json::Value,
+    bash: Option<&BashCommand<'_>>,
 ) -> bool {
     let tool_name = canonical_tool_name(tool_name);
     match policy {
         ToolPolicy::InheritFromParent => true,
-        ToolPolicy::Allowlist { tools } => allowlist_allows_execution(tools, tool_name, input),
+        ToolPolicy::Allowlist { tools } => allowlist_allows_execution(tools, tool_name, bash),
         ToolPolicy::Denylist { tools } => !tools
             .iter()
             .any(|item| crate::domain::models::agent::excluded_item_names_tool(item, tool_name)),
         ToolPolicy::ResolvedAgainstParent { effective, .. } => {
-            allowlist_allows_execution(effective, tool_name, input)
+            allowlist_allows_execution(effective, tool_name, bash)
         }
     }
 }
@@ -590,7 +599,7 @@ fn restriction_excludes_by_name(policy: &ToolPolicy, tool_name: &str) -> bool {
 
 fn check_agent_tools(
     tool_name: &str,
-    input: &serde_json::Value,
+    bash: Option<&BashCommand<'_>>,
     restriction: Option<&AgentToolRestriction>,
 ) -> Option<String> {
     let restriction = restriction?;
@@ -602,7 +611,7 @@ fn check_agent_tools(
     {
         return None;
     }
-    if policy_allows_execution(&restriction.policy, tool_name, input) {
+    if policy_allows_execution(&restriction.policy, tool_name, bash) {
         return None;
     }
     let tool_name = canonical_tool_name(tool_name);
@@ -647,71 +656,171 @@ fn check_agent_tools(
         tool_name, detail, restriction.agent_name
     ))
 }
-/// Check if the tool is allowed by the active skills' `allowed_tools`.
+/// Check if the tool is allowed by the skill-origin restriction.
 /// Returns `Some(deny_reason)` if denied, `None` if allowed or no constraints.
 fn check_allowed_tools(
     tool_name: &str,
-    input: &serde_json::Value,
-    active_skills: Option<&[ActiveSkill]>,
+    bash: Option<&BashCommand<'_>>,
+    restriction: Option<&SkillToolRestriction>,
 ) -> Option<String> {
     let tool_name = canonical_tool_name(tool_name);
-    let skills = active_skills?;
-    let mut constrained = skills
-        .iter()
-        .filter_map(|skill| skill.allowed_tools.as_ref());
-    let first = constrained.next()?;
-    let mut effective: HashSet<String> = first.iter().cloned().collect();
-    for set in constrained {
-        effective.retain(|item| set.contains(item));
-    }
-
-    if effective.contains(tool_name) {
+    let restriction = restriction?;
+    if restriction.items.contains(tool_name) {
         return None;
     }
 
-    let mut names: Vec<String> = effective.into_iter().collect();
-    names.sort();
-    let constrained_skill_names: Vec<&str> = skills
-        .iter()
-        .filter(|skill| skill.allowed_tools.is_some())
-        .map(|skill| skill.name.as_str())
-        .collect();
-    let noun = if constrained_skill_names.len() == 1 {
-        "skill"
-    } else {
-        "skills"
-    };
+    let names: Vec<&str> = restriction.items.iter().map(String::as_str).collect();
+    let origin = restriction.origin_label();
 
     if tool_name == "Bash"
         && names.iter().any(|item| {
             crate::domain::services::skill_tool_pattern::allowed_item_matches_tool(item, tool_name)
         })
     {
-        let command = input
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        if crate::domain::services::skill_tool_pattern::command_matches_allowed_items(
-            &names, tool_name, command,
+        if crate::domain::services::skill_tool_pattern::command_matches_scanned_items(
+            names.iter().copied(),
+            tool_name,
+            bash.map_or("", |bash| bash.command),
+            bash.and_then(|bash| bash.scan.as_ref()),
         ) {
             return None;
         }
         return Some(format!(
-            "Tool '{}' command not allowed by {} '{}'. Allowed: [{}]",
+            "Tool '{}' command not allowed by {}. Allowed: [{}]",
             tool_name,
-            noun,
-            constrained_skill_names.join(", "),
+            origin,
             names.join(", ")
         ));
     }
 
     Some(format!(
-        "Tool '{}' not allowed by {} '{}'. Allowed: [{}]",
+        "Tool '{}' not allowed by {}. Allowed: [{}]",
         tool_name,
-        noun,
-        constrained_skill_names.join(", "),
+        origin,
         names.join(", ")
     ))
+}
+
+/// The Bash command of this call, scanned once for every consumer below
+/// (the agent gate, the skill gate and the redirect step; Story 19.29, R3).
+struct BashCommand<'a> {
+    command: &'a str,
+    scan: Option<CommandScan<'a>>,
+}
+
+impl<'a> BashCommand<'a> {
+    fn of(input: &'a serde_json::Value) -> Self {
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Self {
+            command,
+            scan: scan_command(command),
+        }
+    }
+}
+
+/// The items through which an agent policy admits tools, when it is an
+/// allowlist form (the only forms that can restrict Bash to patterns).
+fn policy_allowlist_items(policy: &ToolPolicy) -> Option<&BTreeSet<String>> {
+    match policy {
+        ToolPolicy::Allowlist { tools } => Some(tools),
+        ToolPolicy::ResolvedAgainstParent { effective, .. } => Some(effective),
+        ToolPolicy::InheritFromParent | ToolPolicy::Denylist { .. } => None,
+    }
+}
+
+/// Truncate a redirect as written to 120 bytes on a char boundary.
+fn truncate_redirect(text: &str) -> String {
+    const MAX_BYTES: usize = 120;
+    if text.len() <= MAX_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// Step 2.5 (Story 19.29): under a restriction that admits Bash only through
+/// command patterns, a redirect is held to the workspace boundary a file
+/// tool already has. Hard deny in every mode, before any approval card.
+fn check_bash_redirects(
+    security: &dyn SecurityPort,
+    bash: &BashCommand<'_>,
+    agent_restriction: Option<&AgentToolRestriction>,
+    skill_restriction: Option<&SkillToolRestriction>,
+) -> Option<String> {
+    let agent = agent_restriction.filter(|restriction| {
+        policy_allowlist_items(&restriction.policy).is_some_and(|items| {
+            tool_admission(items.iter().map(String::as_str), "Bash") == ToolAdmission::Patterns
+        })
+    });
+    let skill = skill_restriction.filter(|restriction| {
+        tool_admission(restriction.items.iter().map(String::as_str), "Bash")
+            == ToolAdmission::Patterns
+    });
+    if agent.is_none() && skill.is_none() {
+        return None;
+    }
+    // A pattern-restricted axis denies an unscannable command at Step 1, so a
+    // missing scan cannot reach here.
+    let scan = bash.scan.as_ref()?;
+
+    for redirect in &scan.redirects {
+        let redir = truncate_redirect(&redirect.text);
+        let reason = match &redirect.target {
+            RedirectTarget::Refused(RedirectRefusal::Empty) => format!("'{redir}' has no target"),
+            RedirectTarget::Refused(RedirectRefusal::Expansion) => format!(
+                "the target of '{redir}' uses shell expansion ($, ~, *, ?, [ or {{), so it cannot be checked before the command runs"
+            ),
+            RedirectTarget::File { target, .. } if target == "/dev/null" => continue,
+            RedirectTarget::File { target, .. }
+                if !target.starts_with('/') && scan.changes_directory =>
+            {
+                format!(
+                    "the relative target of '{redir}' cannot be checked because the command changes directory"
+                )
+            }
+            RedirectTarget::File { op, target } => {
+                let (file_op, verb) = match op {
+                    RedirectOp::Read => (FileOperation::Read, "reads from"),
+                    RedirectOp::Write => (FileOperation::Write, "writes to"),
+                };
+                match security.check_workspace_access(std::path::Path::new(target), file_op) {
+                    Ok(_) => continue,
+                    Err(error) => {
+                        format!("'{redir}' {verb} a path the workspace check refuses ({error})")
+                    }
+                }
+            }
+        };
+        let origin = match (agent, skill) {
+            (Some(agent), Some(skill)) => {
+                format!("agent '{}' and {}", agent.agent_name, skill.origin_label())
+            }
+            (Some(agent), None) => format!("agent '{}'", agent.agent_name),
+            (None, Some(skill)) => skill.origin_label(),
+            (None, None) => return None,
+        };
+        let operator = match (agent, skill) {
+            (_, Some(skill)) => format!(
+                " To run it unrestricted, the operator can deactivate {}.",
+                skill.subject_label()
+            ),
+            (Some(agent), None) => format!(
+                " To run it unrestricted, the operator can run it without agent '{}'.",
+                agent.agent_name
+            ),
+            (None, None) => String::new(),
+        };
+        return Some(format!(
+            "Tool 'Bash' redirect refused by {origin}: {reason}. Redirect to a literal path inside the workspace, or drop the redirect.{operator}"
+        ));
+    }
+    None
 }
 
 // Tests moved to tests/security.rs to satisfy domain purity conformance test.

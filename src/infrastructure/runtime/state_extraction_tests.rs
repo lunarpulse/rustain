@@ -52,6 +52,7 @@ fn conversation() -> Conversation {
             created_at: 1_700_000_000,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         },
     );
     conversation

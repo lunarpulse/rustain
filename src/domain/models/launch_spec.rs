@@ -55,6 +55,11 @@ pub struct AgentLaunchSpec {
     /// launch serialization byte-for-byte.
     #[serde(default, skip_serializing_if = "DelegationProfile::is_child")]
     pub delegation: DelegationProfile,
+    /// Story 19.29: the delegating turn's skill restriction, carried as a
+    /// second axis beside `tools_allow` (never merged into it). Omitted when
+    /// absent to preserve legacy launch serialization byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_skill_restriction: Option<crate::domain::models::SkillToolRestriction>,
 }
 
 #[cfg(test)]
@@ -72,6 +77,7 @@ mod tests {
             parent_trace: None,
             isolated,
             delegation: DelegationProfile::Child,
+            inherited_skill_restriction: None,
         }
     }
 

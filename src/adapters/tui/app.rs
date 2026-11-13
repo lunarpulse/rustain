@@ -4423,6 +4423,7 @@ mod tests {
                         created_at: 1,
                         resolved_at: None,
                         host_message_id: None,
+                        origin_restrictions: None,
                     };
                     let conversation = crate::domain::models::Conversation {
                         id: "conv-1".to_owned(),
@@ -6300,6 +6301,7 @@ mod story21_2_shortcut_tests {
                     created_at: 0,
                     resolved_at: None,
                     host_message_id: None,
+                    origin_restrictions: None,
                 },
             },
         );

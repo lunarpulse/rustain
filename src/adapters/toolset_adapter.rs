@@ -1409,8 +1409,30 @@ impl ToolSetAdapter {
     ) -> Result<ToolResult, ToolError> {
         use crate::domain::services::plan_parser::parse_plan_input;
 
+        // Story 19.29 (R11): take the delegating call's restrictions BEFORE
+        // parsing (the parser must never see rail keys), and refuse the plan
+        // when they cannot be read — a plan that lost its restriction would
+        // delegate wider than the turn that proposed it.
+        let mut input = input.clone();
+        let restrictions = match crate::domain::models::DelegationRestrictions::take_from_rail(
+            &mut input,
+        ) {
+            Ok(restrictions) => restrictions,
+            Err(error) => {
+                return Ok(ToolResult {
+                    tool_use_id: String::new(),
+                    content: format!(
+                        "Plan refused: the proposing turn's restriction could not be read ({error})"
+                    ),
+                    is_error: true,
+                    images: Vec::new(),
+                });
+            }
+        };
+
         let plan_id = nanoid::nanoid!();
-        let plan = parse_plan_input(input, &plan_id)?;
+        let mut plan = parse_plan_input(&input, &plan_id)?;
+        plan.origin_restrictions = restrictions.into_option();
 
         if let Some(ref tx) = self.event_tx {
             let context = self.current_context.lock().await;

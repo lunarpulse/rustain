@@ -182,6 +182,7 @@ pub async fn child(daemon: &AttachedDaemon, name: &'static str, value: Value) {
                 parent_trace: None,
                 isolated: false,
                 delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+                inherited_skill_restriction: None,
             },
             tokio_util::sync::CancellationToken::new(),
             None,

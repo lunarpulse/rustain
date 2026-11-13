@@ -551,6 +551,7 @@ mod tests {
             created_at: 1700000000,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         }
     }
 
@@ -834,6 +835,7 @@ mod tests {
             created_at: 1700000000,
             resolved_at: Some(1700000060),
             host_message_id: None,
+            origin_restrictions: None,
         }
     }
 

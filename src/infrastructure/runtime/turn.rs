@@ -423,11 +423,7 @@ pub async fn run_turn(
                             )
                             .await;
                         tools
-                            .set_parent_context(
-                                parent_ctx_tokens,
-                                parent_trace.clone(),
-                                agent_restriction.clone(),
-                            )
+                            .set_parent_context(parent_ctx_tokens, parent_trace.clone())
                             .await;
 
                         let indexed: Vec<(usize, ToolCallInfo)> =
@@ -551,15 +547,19 @@ pub async fn run_turn(
                                 let mut terminal = Vec::with_capacity(requests.len());
                                 for request in requests {
                                     let mut one = {
-                                        let active_skills =
-                                            activation_set.as_ref().map(|s| s.active_skills());
+                                        let skill_restriction =
+                                            activation_set.as_ref().and_then(|s| {
+                                                crate::domain::models::SkillToolRestriction::from_active_skills(
+                                                    s.active_skills(),
+                                                )
+                                            });
                                         tool_scheduler
                                             .clone()
                                             .schedule_with_provenance_and_restriction(
                                                 source.clone(),
                                                 vec![request],
                                                 turn_cancel.clone(),
-                                                active_skills,
+                                                skill_restriction.as_ref(),
                                                 agent_restriction.as_ref(),
                                                 provenance,
                                                 Some(turn_origin.route()),
@@ -587,15 +587,18 @@ pub async fn run_turn(
                                 }
                                 terminal
                             } else {
-                                let active_skills =
-                                    activation_set.as_ref().map(|s| s.active_skills());
+                                let skill_restriction = activation_set.as_ref().and_then(|s| {
+                                    crate::domain::models::SkillToolRestriction::from_active_skills(
+                                        s.active_skills(),
+                                    )
+                                });
                                 tool_scheduler
                                     .clone()
                                     .schedule_with_provenance_and_restriction(
                                         source,
                                         requests,
                                         turn_cancel.clone(),
-                                        active_skills,
+                                        skill_restriction.as_ref(),
                                         agent_restriction.as_ref(),
                                         provenance,
                                         Some(turn_origin.route()),

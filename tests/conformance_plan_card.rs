@@ -119,6 +119,7 @@ fn make_plan_with_tasks(task_count: u32) -> Plan {
         created_at: 1_700_000_000,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     }
 }
 
@@ -154,6 +155,7 @@ fn ac1_plan_serde_round_trip() {
         created_at: 1_700_000_000,
         resolved_at: Some(1_700_000_060),
         host_message_id: Some("msg-1".to_string()),
+        origin_restrictions: None,
     };
     let json = serde_json::to_string(&plan).unwrap();
     let back: Plan = serde_json::from_str(&json).unwrap();
@@ -235,6 +237,7 @@ fn ac2_validate_plan_rejects_empty() {
         created_at: 0,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     };
     let err = validate_plan(&plan).unwrap_err();
     assert!(err.contains("at least one task"));
@@ -301,6 +304,7 @@ fn ac4_host_message_id_set() {
         created_at: 0,
         resolved_at: None,
         host_message_id: Some("msg-host".to_string()),
+        origin_restrictions: None,
     };
     let json = serde_json::to_string(&plan).unwrap();
     let back: Plan = serde_json::from_str(&json).unwrap();
@@ -325,6 +329,7 @@ fn ac5_plan_card_renders_pending() {
         created_at: 0,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     };
     let theme = rustain::adapters::tui::theme::Theme::dark();
     let lines = render_plan_card_lines(&plan, &theme, 80, true);
@@ -364,6 +369,7 @@ fn ac5_plan_card_renders_resolved() {
         created_at: 0,
         resolved_at: Some(1_700_000_060),
         host_message_id: None,
+        origin_restrictions: None,
     };
     let theme = rustain::adapters::tui::theme::Theme::dark();
     let lines = render_plan_card_lines(&plan, &theme, 80, false);
@@ -548,6 +554,7 @@ fn ac7_edit_round_trip_toml() {
         created_at: 1_700_000_000,
         resolved_at: None,
         host_message_id: Some("msg-1".to_string()),
+        origin_restrictions: None,
     };
     let toml_str = toml::to_string(&plan).unwrap();
     let back: Plan = toml::from_str(&toml_str).unwrap();
@@ -599,6 +606,7 @@ fn ac9_pending_plan_rehydrates_after_reload() {
         created_at: 1_700_000_000,
         resolved_at: None,
         host_message_id: Some("msg-1".to_string()),
+        origin_restrictions: None,
     };
 
     let mut conv = make_conv(vec![make_msg(MessageRole::User, "go")]);
@@ -693,6 +701,7 @@ fn ac10_export_renders_plan() {
             created_at: 1_700_000_020,
             resolved_at: None,
             host_message_id: Some(host_msg_id.to_string()),
+            origin_restrictions: None,
         },
     );
 
@@ -746,6 +755,7 @@ fn ac10_export_renders_multiple_plans_per_message() {
             created_at: 1_700_000_020,
             resolved_at: None,
             host_message_id: Some(host_msg_id.to_string()),
+            origin_restrictions: None,
         },
     );
     plans.insert(
@@ -759,6 +769,7 @@ fn ac10_export_renders_multiple_plans_per_message() {
             created_at: 1_700_000_021,
             resolved_at: None,
             host_message_id: Some(host_msg_id.to_string()),
+            origin_restrictions: None,
         },
     );
 
@@ -827,6 +838,7 @@ fn ac10_search_indexes_plan() {
             created_at: 1_700_000_000,
             resolved_at: None,
             host_message_id: Some(host_msg_id.to_string()),
+            origin_restrictions: None,
         },
     );
 
@@ -854,6 +866,7 @@ fn ac10_fork_copies_plan() {
         created_at: 1_700_000_000,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     };
 
     let mut conv = make_conv(vec![make_msg(MessageRole::User, "start")]);

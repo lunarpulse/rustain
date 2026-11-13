@@ -159,6 +159,7 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         parent_trace: None,
         isolated: false,
         delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: None,
     };
 
     let cancel = CancellationToken::new();

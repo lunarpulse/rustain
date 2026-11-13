@@ -242,6 +242,7 @@ fn spec_with_override(sandbox_override: Option<SandboxPolicy>) -> AgentLaunchSpe
         parent_trace: None,
         isolated: false,
         delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: None,
     }
 }
 

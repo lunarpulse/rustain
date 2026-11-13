@@ -38,6 +38,9 @@ pub struct ChildState {
     pub paused: Arc<std::sync::atomic::AtomicBool>,
     pub effective_model: Arc<ArcSwap<String>>,
     pub tools_allow: Arc<ArcSwap<ToolPolicy>>,
+    /// The skill restriction inherited from the delegating turn (second axis,
+    /// immutable for the child's life).
+    pub inherited_skill_restriction: Option<crate::domain::models::SkillToolRestriction>,
     pub status: watch::Sender<NodeState>,
     pub metrics: watch::Sender<AgentMetrics>,
 }
@@ -57,9 +60,21 @@ impl ChildState {
             paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             effective_model: Arc::new(ArcSwap::from_pointee(initial_model)),
             tools_allow: Arc::new(ArcSwap::from_pointee(initial_tools)),
+            inherited_skill_restriction: None,
             status: status_tx,
             metrics: metrics_tx,
         }
+    }
+
+    /// Story 19.29: hold the delegating turn's skill restriction beside the
+    /// policy. Unlike `tools_allow` it has no swap: no owner command may
+    /// widen it.
+    pub fn with_inherited_skill_restriction(
+        mut self,
+        restriction: Option<crate::domain::models::SkillToolRestriction>,
+    ) -> Self {
+        self.inherited_skill_restriction = restriction;
+        self
     }
 
     pub fn current_metrics(&self) -> AgentMetrics {

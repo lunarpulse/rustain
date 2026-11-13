@@ -68,6 +68,7 @@ fn plan(title: &str) -> Plan {
         created_at: 1,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     }
 }
 

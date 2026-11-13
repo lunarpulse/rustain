@@ -90,15 +90,11 @@ impl SkillActivationSet {
     }
 
     pub fn effective_allowed_tools(&self, all_tool_names: &[String]) -> Option<HashSet<String>> {
-        let mut constrained = self
-            .active
-            .iter()
-            .filter_map(|skill| skill.allowed_tools.as_ref());
-        let first = constrained.next()?;
-        let mut result: HashSet<String> = first.iter().cloned().collect();
-        for set in constrained {
-            result.retain(|item| set.contains(item));
-        }
+        let result: HashSet<String> =
+            super::skill_restriction::SkillToolRestriction::from_active_skills(&self.active)?
+                .items
+                .into_iter()
+                .collect();
         if result.is_empty() {
             // A genuinely empty raw intersection (cross-skill disjoint, or an
             // `allowed-tools: []` declaration) keeps its pre-expansion

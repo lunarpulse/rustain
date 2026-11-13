@@ -93,6 +93,31 @@ async fn test_step1_none_is_pass_through() {
     );
 }
 
+/// DF-220 (the case it names): an EMPTY active-skill slice reaching the chain
+/// is pass-through, unlike one active skill that declares `allowed-tools: []`
+/// (`test_step1_empty_allowed_tools_denies_everything`). Story 19.29 patch
+/// round 1, R19-29-05.
+#[tokio::test]
+async fn test_step1_empty_active_skill_slice_is_pass_through() {
+    let security = NoOpSecurity;
+    let skills: Option<&[ActiveSkill]> = Some(&[]);
+
+    for (tool, input) in [
+        ("Bash", serde_json::json!({"command": "ls"})),
+        (
+            "Read",
+            serde_json::json!({"file_path": "/workspace/test.rs"}),
+        ),
+    ] {
+        let decision =
+            permission_chain::check(&security, tool, &input, skills, None, &NoOpToolSet).await;
+        assert!(
+            !matches!(decision, PermissionDecision::Deny(_)),
+            "tool={tool}: Some(&[]) must pass through Step 1, got {decision:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_step1_empty_allowed_tools_denies_everything() {
     let security = NoOpSecurity;

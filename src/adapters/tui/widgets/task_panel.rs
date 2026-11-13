@@ -211,6 +211,7 @@ mod tests {
             created_at: 1000,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         }
     }
 

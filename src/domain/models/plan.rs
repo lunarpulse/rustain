@@ -40,6 +40,13 @@ pub struct Plan {
     /// Used by chat-pane re-render and export to associate the block with its plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_message_id: Option<String>,
+    /// Story 19.29 (R11): the restrictions of the call that proposed this
+    /// plan. Its children are narrowed by them exactly like `task` children,
+    /// whether the plan is auto-approved (YOLO) or approved through the
+    /// cards. `None` = the proposing call carried no restriction (and plans
+    /// persisted before this field existed). Persisted with the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_restrictions: Option<crate::domain::models::DelegationRestrictions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +288,7 @@ mod tests {
             created_at: 1700000000,
             resolved_at: Some(1700000060),
             host_message_id: Some("msg-1".to_string()),
+            origin_restrictions: None,
         };
         let json = serde_json::to_string(&plan).unwrap();
         let back: Plan = serde_json::from_str(&json).unwrap();
@@ -311,6 +319,7 @@ mod tests {
             created_at: 1700000000,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert!(!json.contains("\"estimatedEffort\""), "{}", json);
@@ -363,6 +372,7 @@ mod tests {
             created_at: 0,
             resolved_at: Some(1),
             host_message_id: Some("m".to_string()),
+            origin_restrictions: None,
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert!(json.contains("\"estimatedEffort\""), "{}", json);
@@ -630,6 +640,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert!(json.contains("\"subTasks\""), "{}", json);

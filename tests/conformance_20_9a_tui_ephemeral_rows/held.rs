@@ -284,6 +284,7 @@ async fn assert_durable_projection(source: &Conversation) {
                 created_at: 1,
                 resolved_at: None,
                 host_message_id: None,
+                origin_restrictions: None,
             };
             handle_plan_proposed(
                 &mut conversation,

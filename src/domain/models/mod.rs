@@ -31,6 +31,7 @@ pub mod conversation;
 pub mod credential;
 pub mod cron_config;
 pub mod daemon_crash;
+pub mod delegation_restrictions;
 pub mod diff;
 pub mod doc_key;
 pub mod execution_sandbox;
@@ -82,6 +83,7 @@ pub mod session_queue;
 mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
+mod skill_restriction;
 pub mod status_statement;
 pub mod story_manifest;
 mod stream;
@@ -175,6 +177,7 @@ pub use credential::{
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
+pub use delegation_restrictions::{DelegationRestrictions, RailAxis, RailError};
 #[cfg(test)]
 pub use diff::display_diff;
 pub use diff::{
@@ -277,6 +280,7 @@ pub use skill::{
 };
 pub use skill_catalog_delta::SkillCatalogDelta;
 pub use skill_metadata::SkillMetadata;
+pub use skill_restriction::SkillToolRestriction;
 pub use story_manifest::{
     ReceivedSelection, ReceivedStories, ReceivedStory, RecordedStory, SelectedRecipient,
     SelectionRefusal, SelectionSummary, StoryEntry, StoryHolder, StoryKey, StoryManifest,

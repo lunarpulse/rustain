@@ -126,6 +126,7 @@ fn plan_of(title: &str, tasks: Vec<PlanTask>) -> Plan {
         created_at: 0,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     }
 }
 

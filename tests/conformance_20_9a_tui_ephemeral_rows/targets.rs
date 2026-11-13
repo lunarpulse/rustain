@@ -28,6 +28,7 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
         created_at: 1,
         resolved_at: None,
         host_message_id: None,
+        origin_restrictions: None,
     };
     handle_plan_proposed(
         &mut conversation,

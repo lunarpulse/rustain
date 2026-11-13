@@ -23,7 +23,7 @@ use crate::domain::events::ToolProgressEvent;
 use crate::domain::models::tool_call::{
     ApprovalSource, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
-use crate::domain::models::{ActiveSkill, AgentToolRestriction};
+use crate::domain::models::{ActiveSkill, AgentToolRestriction, SkillToolRestriction};
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::permission_chain;
@@ -135,11 +135,12 @@ impl ToolScheduler {
         cancel: CancellationToken,
         active_skills: Option<&[ActiveSkill]>,
     ) -> Vec<ToolCall> {
+        let skill_restriction = active_skills.and_then(SkillToolRestriction::from_active_skills);
         self.schedule_with_provenance_and_restriction(
             source,
             batch,
             cancel,
-            active_skills,
+            skill_restriction.as_ref(),
             None,
             crate::domain::models::ProvenanceTag::UserOriginated,
             None,
@@ -161,11 +162,12 @@ impl ToolScheduler {
         active_skills: Option<&[ActiveSkill]>,
         provenance: crate::domain::models::ProvenanceTag,
     ) -> Vec<ToolCall> {
+        let skill_restriction = active_skills.and_then(SkillToolRestriction::from_active_skills);
         self.schedule_with_provenance_and_restriction(
             source,
             batch,
             cancel,
-            active_skills,
+            skill_restriction.as_ref(),
             None,
             provenance,
             None,
@@ -179,7 +181,7 @@ impl ToolScheduler {
         source: ApprovalSource,
         batch: Vec<ToolCallRequest>,
         cancel: CancellationToken,
-        active_skills: Option<&[ActiveSkill]>,
+        skill_restriction: Option<&SkillToolRestriction>,
         agent_restriction: Option<&AgentToolRestriction>,
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
@@ -187,7 +189,7 @@ impl ToolScheduler {
         let all_parallel = batch
             .iter()
             .all(|req| self.tools.is_parallel_safe(&req.tool_name));
-        let active_owned: Option<Vec<ActiveSkill>> = active_skills.map(|s| s.to_vec());
+        let skill_owned = skill_restriction.cloned();
         let agent_owned = agent_restriction.cloned();
 
         if all_parallel {
@@ -196,10 +198,10 @@ impl ToolScheduler {
                 let s = self.clone();
                 let src = source.clone();
                 let c = cancel.child_token();
-                let active = active_owned.clone();
+                let skill = skill_owned.clone();
                 let agent = agent_owned.clone();
                 futures.push_back(async move {
-                    s.run_one(src, req, c, active, agent, provenance, route)
+                    s.run_one(src, req, c, skill, agent, provenance, route)
                         .await
                 });
             }
@@ -218,7 +220,7 @@ impl ToolScheduler {
                             source.clone(),
                             req,
                             c,
-                            active_owned.clone(),
+                            skill_owned.clone(),
                             agent_owned.clone(),
                             provenance,
                             route,
@@ -235,7 +237,7 @@ impl ToolScheduler {
         source: ApprovalSource,
         req: ToolCallRequest,
         cancel: CancellationToken,
-        active_skills: Option<Vec<ActiveSkill>>,
+        skill_restriction: Option<SkillToolRestriction>,
         agent_restriction: Option<AgentToolRestriction>,
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
@@ -289,7 +291,7 @@ impl ToolScheduler {
             self.security.as_ref(),
             &req.tool_name,
             &req.input,
-            active_skills.as_deref(),
+            skill_restriction.as_ref(),
             agent_restriction.as_ref(),
             plan_file.as_deref(),
             self.tools.as_ref(),
@@ -453,6 +455,10 @@ impl ToolScheduler {
             conversation_id: &conversation_id,
             route,
             permission_resolution,
+            // The same values the permission chain just judged this call
+            // against — they travel with the call, never through shared state.
+            agent_restriction: agent_restriction.as_ref(),
+            skill_restriction: skill_restriction.as_ref(),
         };
         let progress_tx = self.progress_tx.read().await.clone();
         let exec = tokio::select! {

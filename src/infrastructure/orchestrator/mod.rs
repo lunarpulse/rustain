@@ -420,6 +420,7 @@ fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
         parent_trace: None,
         isolated: true,
         delegation,
+        inherited_skill_restriction: None,
     }
 }
 

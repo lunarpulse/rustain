@@ -1255,6 +1255,10 @@ impl PlanRuntime {
     /// (Running → Completed/Failed/Cancelled) and the unified `PlanSummary`
     /// contract remain intact.
     ///
+    /// The child is narrowed by the plan's `origin_restrictions` (Story 19.29,
+    /// CR-7) exactly like a `task` child, so a plan auto-approved and
+    /// auto-delegated in YOLO still runs restricted.
+    ///
     /// On `Err(SubagentError)` returns immediately with `Err(...)` so the
     /// caller can fall back to local sequential execution.
     pub async fn delegate_task(
@@ -1293,6 +1297,9 @@ impl PlanRuntime {
             });
         }
 
+        // Story 19.29 (R11): the plan carries the restrictions of the call that
+        // proposed it; YOLO and the cards both end here.
+        let restrictions = plan.origin_restrictions.clone().unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let agent_name = agent_def.name.clone();
 
@@ -1314,6 +1321,7 @@ impl PlanRuntime {
                 default_model,
                 0,
                 None,
+                &restrictions,
             );
             plan.tasks[idx].sub_tasks[sub_idx].delegated_to = Some(DelegationInfo {
                 agent_name: agent_name.clone(),
@@ -1338,6 +1346,7 @@ impl PlanRuntime {
                 default_model,
                 0,
                 None,
+                &restrictions,
             );
             plan.tasks[idx].delegated_to = Some(DelegationInfo {
                 agent_name: agent_name.clone(),
@@ -1463,7 +1472,14 @@ impl PlanRuntime {
         let mut terminal_received = false;
         let cid_for_fallback = conversation_id_clone.clone();
         let pid_for_fallback = plan_id_string.clone();
+        // The owner-liveness sender stays alive until the child's terminal
+        // status: dropping it when this function returns reads as "the owner
+        // connection was lost" to an `Owned` child, which then cancels itself
+        // ("Delegated subagent killed") before doing any work (Story 19.29,
+        // R19-29-03, DF-19-29-PLAN-CHILD-LIVENESS-SENDER-DROPPED).
+        let owner_liveness = task_handle.parent_disconnect;
         tokio::spawn(async move {
+            let _owner_liveness = owner_liveness;
             let mut status_rx = task_handle.status_rx;
             while let Some(status) = status_rx.recv().await {
                 if matches!(
@@ -2491,6 +2507,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let eligible = find_all_eligible(&plan);
         assert_eq!(eligible.len(), 1);
@@ -2513,6 +2530,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let eligible = find_all_eligible(&plan);
         assert_eq!(eligible.len(), 2);
@@ -2536,6 +2554,7 @@ mod tests {
             created_at: 0,
             resolved_at: None,
             host_message_id: None,
+            origin_restrictions: None,
         };
         let eligible = find_all_eligible(&plan);
         assert_eq!(eligible.len(), 1);

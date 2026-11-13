@@ -1,6 +1,8 @@
 use crate::domain::models::agent::AgentDef;
 use crate::domain::models::plan::{PlanSubTask, PlanTask};
-use crate::domain::models::{AgentLaunchSpec, ModelTier, ToolPolicy, TraceContext};
+use crate::domain::models::{
+    AgentLaunchSpec, DelegationRestrictions, ModelTier, ToolPolicy, TraceContext,
+};
 use crate::domain::services::plan_runtime::{format_sub_task_prompt, format_task_prompt};
 
 pub struct LaunchSpecBuilder;
@@ -10,31 +12,31 @@ impl LaunchSpecBuilder {
     /// Default model fallback chain:
     ///   agent_def.model.clone()
     ///     .unwrap_or_else(|| default_model.to_string())
+    ///
+    /// `parent` is the restriction of the call that proposed the plan
+    /// (Story 19.29 R11): the child is narrowed exactly like a `task` child.
     pub fn from_plan_task(
         task: &PlanTask,
         agent_def: &AgentDef,
         default_model: &str,
         parent_ctx_tokens: u32,
         parent_trace: Option<TraceContext>,
+        parent: &DelegationRestrictions,
     ) -> AgentLaunchSpec {
         let prompt = format_task_prompt(task);
         let effective_model = agent_def
             .model
             .clone()
             .unwrap_or_else(|| default_model.to_string());
-        let tier = ModelTier::CheapAgentic;
-        let tools_allow = agent_def.tool_policy();
-        AgentLaunchSpec {
+        child_spec(
             prompt,
             effective_model,
-            tier,
-            tools_allow,
+            ModelTier::CheapAgentic,
+            agent_def,
             parent_ctx_tokens,
-            sandbox_override: None,
             parent_trace,
-            isolated: agent_def.isolated,
-            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
-        }
+            parent,
+        )
     }
 
     /// Story 10.7: build a launch spec for the `task` tool path.
@@ -45,63 +47,89 @@ impl LaunchSpecBuilder {
         tier: crate::domain::models::ModelTier,
         parent_ctx_tokens: u32,
         parent_trace: Option<TraceContext>,
-        parent_tool_restriction: Option<&crate::domain::models::AgentToolRestriction>,
+        parent: &DelegationRestrictions,
     ) -> AgentLaunchSpec {
         let effective_model = agent_def
             .model
             .clone()
             .unwrap_or_else(|| resolved_model.to_string());
-        let child_policy = agent_def.tool_policy();
-        let tools_allow = if let Some(parent) = parent_tool_restriction {
-            let effective = child_policy.resolve(&parent.declared_items);
-            ToolPolicy::ResolvedAgainstParent {
-                effective,
-                parent: parent.declared_items.clone(),
-                child: Box::new(child_policy),
-            }
-        } else {
-            child_policy
-        };
-        AgentLaunchSpec {
-            prompt: prompt.to_string(),
+        child_spec(
+            prompt.to_string(),
             effective_model,
             tier,
-            tools_allow,
+            agent_def,
             parent_ctx_tokens,
-            sandbox_override: None,
             parent_trace,
-            isolated: agent_def.isolated,
-            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
-        }
+            parent,
+        )
     }
 
     /// Story 10.6: build a launch spec for a sub-task delegated to `agent_def`.
     pub fn from_sub_task(
-        parent: &PlanTask,
+        parent_task: &PlanTask,
         sub_task: &PlanSubTask,
         agent_def: &AgentDef,
         default_model: &str,
         parent_ctx_tokens: u32,
         parent_trace: Option<TraceContext>,
+        parent: &DelegationRestrictions,
     ) -> AgentLaunchSpec {
-        let prompt = format_sub_task_prompt(parent, sub_task);
+        let prompt = format_sub_task_prompt(parent_task, sub_task);
         let effective_model = agent_def
             .model
             .clone()
             .unwrap_or_else(|| default_model.to_string());
-        let tier = ModelTier::CheapAgentic;
-        let tools_allow = agent_def.tool_policy();
-        AgentLaunchSpec {
+        child_spec(
             prompt,
             effective_model,
-            tier,
-            tools_allow,
+            ModelTier::CheapAgentic,
+            agent_def,
             parent_ctx_tokens,
-            sandbox_override: None,
             parent_trace,
-            isolated: agent_def.isolated,
-            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+            parent,
+        )
+    }
+}
+
+/// The one place a child's spec is assembled: its own tool policy resolved
+/// against the parent agent's declared items, and the parent's skill
+/// restriction carried as a second, inherited axis (never merged into the
+/// agent policy).
+fn child_spec(
+    prompt: String,
+    effective_model: String,
+    tier: ModelTier,
+    agent_def: &AgentDef,
+    parent_ctx_tokens: u32,
+    parent_trace: Option<TraceContext>,
+    parent: &DelegationRestrictions,
+) -> AgentLaunchSpec {
+    let child_policy = agent_def.tool_policy();
+    let tools_allow = match parent.agent.as_ref() {
+        Some(parent_agent) => {
+            let effective = child_policy.resolve(&parent_agent.declared_items);
+            ToolPolicy::ResolvedAgainstParent {
+                effective,
+                parent: parent_agent.declared_items.clone(),
+                child: Box::new(child_policy),
+            }
         }
+        None => child_policy,
+    };
+    AgentLaunchSpec {
+        prompt,
+        effective_model,
+        tier,
+        tools_allow,
+        parent_ctx_tokens,
+        sandbox_override: None,
+        parent_trace,
+        isolated: agent_def.isolated,
+        delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
+        inherited_skill_restriction: parent
+            .skill
+            .clone()
+            .map(crate::domain::models::SkillToolRestriction::into_inherited),
     }
 }
 
@@ -149,7 +177,14 @@ mod tests {
     fn uses_agent_model_when_present() {
         let agent = make_agent("test", Some("claude-3-opus"), None, None);
         let task = make_task("Do thing", "Do the thing");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         assert_eq!(spec.effective_model, "claude-3-opus");
     }
 
@@ -157,7 +192,14 @@ mod tests {
     fn falls_back_to_default_model() {
         let agent = make_agent("test", None, None, None);
         let task = make_task("Do thing", "");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         assert_eq!(spec.effective_model, "gpt-4");
     }
 
@@ -165,7 +207,14 @@ mod tests {
     fn allowed_tools_becomes_allowlist() {
         let agent = make_agent("test", None, Some(vec!["bash", "read"]), None);
         let task = make_task("Do thing", "");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         match spec.tools_allow {
             ToolPolicy::Allowlist { tools } => {
                 let set: HashSet<_> = tools.iter().cloned().collect();
@@ -180,7 +229,14 @@ mod tests {
     fn excluded_tools_becomes_denylist() {
         let agent = make_agent("test", None, None, Some(vec!["read"]));
         let task = make_task("Do thing", "");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         match spec.tools_allow {
             ToolPolicy::Denylist { tools } => {
                 assert!(tools.contains("read"));
@@ -193,7 +249,14 @@ mod tests {
     fn none_tools_becomes_inherit() {
         let agent = make_agent("test", None, None, None);
         let task = make_task("Do thing", "");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         assert_eq!(spec.tools_allow, ToolPolicy::InheritFromParent);
     }
 
@@ -201,7 +264,14 @@ mod tests {
     fn prompt_contains_task_title() {
         let agent = make_agent("test", None, None, None);
         let task = make_task("Run tests", "Run all unit tests");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         assert!(spec.prompt.contains("Run tests"));
     }
 
@@ -213,14 +283,28 @@ mod tests {
         let mut agent = make_agent("iso-coder", None, None, None);
         agent.isolated = true;
         let task = make_task("Edit files", "make a change");
-        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &agent,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         assert!(
             spec.isolated,
             "an agent def with isolated:true must produce an isolated launch spec"
         );
         // Negative control: a default agent def (isolated:false) stays non-isolated.
         let plain = make_agent("plain-coder", None, None, None);
-        let plain_spec = LaunchSpecBuilder::from_plan_task(&task, &plain, "gpt-4", 0, None);
+        let plain_spec = LaunchSpecBuilder::from_plan_task(
+            &task,
+            &plain,
+            "gpt-4",
+            0,
+            None,
+            &DelegationRestrictions::default(),
+        );
         assert!(
             !plain_spec.isolated,
             "a default agent def must produce a non-isolated launch spec"
