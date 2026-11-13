@@ -35,12 +35,30 @@ pub fn durable_target(
         })
 }
 
+/// Fork at a live row. The live durable transcript is written first so the storage
+/// re-read in `fork_at_checkpoint` addresses the rows the operator chose: a durable row
+/// still only in memory (the plan summary) is otherwise past the stored end. The caller
+/// passes the event loop's in-flight background save, which is completed before the
+/// flush so a stale clone cannot shorten the file again, and whether a turn producer of
+/// this conversation is still live: a running turn saves the same source on its own, so
+/// the fork is refused until it ends. A failed flush aborts the fork.
 pub async fn handle_fork_confirm(
     storage: &dyn StoragePort,
+    pending_save: &mut Option<tokio::task::JoinHandle<()>>,
+    producer_live: bool,
     conversation: &Conversation,
     live_index: usize,
 ) -> Result<String, StorageError> {
+    if producer_live {
+        return Err(StorageError::Other(
+            "A response is still running. Wait for it to finish, then fork again.".into(),
+        ));
+    }
     let index = durable_target(conversation, live_index)?;
+    if let Some(previous) = pending_save.take() {
+        let _ = previous.await;
+    }
+    storage.save_conversation(conversation).await?;
     storage
         .fork_at_checkpoint(&conversation.id, CheckpointId(index as u64))
         .await
@@ -48,10 +66,12 @@ pub async fn handle_fork_confirm(
 
 pub async fn handle_rewind_fork_instead(
     storage: &dyn StoragePort,
+    pending_save: &mut Option<tokio::task::JoinHandle<()>>,
+    producer_live: bool,
     conversation: &Conversation,
     index: usize,
 ) -> Result<String, StorageError> {
-    handle_fork_confirm(storage, conversation, index).await
+    handle_fork_confirm(storage, pending_save, producer_live, conversation, index).await
 }
 
 pub struct RewindOutcome {

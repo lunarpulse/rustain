@@ -473,15 +473,14 @@ mod tests {
 
     #[tokio::test]
     async fn story21_14_a_fork_that_storage_refuses_raises_the_session_failure() {
-        use crate::adapters::filesystem::FileSystemStorage;
+        use crate::adapters::noop::NoOpStorage;
         use crate::adapters::tui::handlers::transcript_target::handle_fork_confirm;
-        let dir = tempfile::tempdir().unwrap();
-        let storage = FileSystemStorage::new(dir.path().to_path_buf());
         let conversation = conversation_with_one_message();
-        let result = handle_fork_confirm(&storage, &conversation, 0).await;
+        // The flush is accepted; this storage cannot fork (the port's default refusal).
+        let result = handle_fork_confirm(&NoOpStorage, &mut None, false, &conversation, 0).await;
         let detail = result
             .as_ref()
-            .expect_err("the conversation was never saved")
+            .expect_err("this storage does not support forking")
             .to_string();
         let mut state = TuiState::new(80, 24);
         let idle = TuiState::new(80, 24);
@@ -496,6 +495,79 @@ mod tests {
             conversation.messages.len(),
             1,
             "the conversation is untouched"
+        );
+    }
+
+    /// A storage that cannot take the flush: the fork must not be attempted.
+    struct RefusesTheFlush(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::StoragePort for RefusesTheFlush {
+        async fn save_conversation(
+            &self,
+            _conv: &crate::domain::models::Conversation,
+        ) -> Result<(), crate::domain::errors::StorageError> {
+            Err(crate::domain::errors::StorageError::IoError(
+                "disk is full".into(),
+            ))
+        }
+
+        async fn load_conversation(
+            &self,
+            _id: &str,
+        ) -> Result<Option<crate::domain::models::Conversation>, crate::domain::errors::StorageError>
+        {
+            Ok(None)
+        }
+
+        async fn list_conversations(
+            &self,
+        ) -> Result<
+            Vec<crate::domain::models::ConversationSummary>,
+            crate::domain::errors::StorageError,
+        > {
+            Ok(Vec::new())
+        }
+
+        async fn read_snapshot(
+            &self,
+            _conversation_id: &str,
+            _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+            _path: &std::path::Path,
+        ) -> Result<Option<Vec<u8>>, crate::domain::errors::StorageError> {
+            Ok(None)
+        }
+
+        async fn fork_at_checkpoint(
+            &self,
+            _source_conversation_id: &str,
+            _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        ) -> Result<String, crate::domain::errors::StorageError> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("forked-anyway".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flush_that_storage_refuses_aborts_the_fork_and_raises_the_session_failure() {
+        use crate::adapters::tui::handlers::transcript_target::handle_fork_confirm;
+        let storage = RefusesTheFlush(std::sync::atomic::AtomicBool::new(false));
+        let conversation = conversation_with_one_message();
+        let result = handle_fork_confirm(&storage, &mut None, false, &conversation, 0).await;
+        let detail = result.as_ref().expect_err("the flush failed").to_string();
+        assert!(detail.contains("disk is full"), "{detail}");
+        assert!(
+            !storage.0.load(std::sync::atomic::Ordering::SeqCst),
+            "no fork is attempted after a failed flush"
+        );
+        let mut state = TuiState::new(80, 24);
+        let idle = TuiState::new(80, 24);
+        assert_eq!(fork_result(&mut state, result), None);
+        assert_session_failure(
+            &state,
+            &idle,
+            ["Could not fork the conversation.", "Try forking again."],
+            &detail,
         );
     }
 

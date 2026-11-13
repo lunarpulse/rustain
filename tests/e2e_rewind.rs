@@ -504,6 +504,8 @@ async fn test_e2e_rewind_fork_instead_creates_new_tab() {
     };
     let fork_id = rustain::adapters::tui::handlers::transcript_target::handle_rewind_fork_instead(
         &storage,
+        &mut None,
+        false,
         &conv,
         payload.preview.target_message_index,
     )

@@ -2791,7 +2791,7 @@ pub async fn run(
                                     {
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
-                                        let result = handlers::transcript_target::handle_fork_confirm(&*storage, &conversation, message_index).await;
+                                        let result = handlers::transcript_target::handle_fork_confirm(&*storage, &mut _pending_save, turn_lifecycle.is_live(&conversation.id), &conversation, message_index).await;
                                         if let Some(new_id) = super::error_notices::fork_result(&mut state, result) {
                                                 match storage.load_conversation(&new_id).await {
                                                     Ok(Some(forked_conv)) => {
@@ -2997,7 +2997,7 @@ pub async fn run(
                                         continue;
                                     }
                                     {
-                                        let result = handlers::transcript_target::handle_rewind_fork_instead(&*storage, &conversation, message_index).await;
+                                        let result = handlers::transcript_target::handle_rewind_fork_instead(&*storage, &mut _pending_save, turn_lifecycle.is_live(&conversation.id), &conversation, message_index).await;
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
                                         if let Some(new_id) = super::error_notices::fork_result(&mut state, result) {

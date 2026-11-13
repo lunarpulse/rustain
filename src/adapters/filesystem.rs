@@ -3,7 +3,7 @@
 //! Implements `StoragePort` using async file I/O via `tokio::fs`.
 //! Session files use CC-compatible camelCase JSON format (`.meta.json`).
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -58,6 +58,16 @@ pub enum SessionLayout {
     /// No session files or directory found for this id.
     Missing,
 }
+
+/// Which half of an atomic write failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteStage {
+    Write,
+    Rename,
+}
+
+/// Sequence for temporary-file names no two writers share.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Filesystem-backed storage for conversations.
 ///
@@ -615,22 +625,17 @@ impl FileSystemStorage {
 
     /// Atomic write of PersistedConversation JSON using the flat layout.
     async fn save_flat_layout(&self, id: &str, json: &str) -> Result<(), StorageError> {
-        let sanitized = Self::sanitize_id(id);
         let path = self.session_path(id);
-        let tmp_path = self
-            .sessions_dir
-            .join(format!("{}.meta.json.tmp", sanitized));
-        tokio::fs::write(&tmp_path, json.as_bytes())
+        Self::atomic_write(path, json.as_bytes().to_vec())
             .await
-            .map_err(|e| StorageError::IoError(format!("Failed to write session file: {}", e)))?;
-        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(StorageError::IoError(format!(
-                "Failed to rename session file: {}",
-                e
-            )));
-        }
-        Ok(())
+            .map_err(|(stage, e)| match stage {
+                WriteStage::Write => {
+                    StorageError::IoError(format!("Failed to write session file: {}", e))
+                }
+                WriteStage::Rename => {
+                    StorageError::IoError(format!("Failed to rename session file: {}", e))
+                }
+            })
     }
 
     /// Atomic write of PersistedConversation + SessionMeta using the directory layout.
@@ -650,30 +655,28 @@ impl FileSystemStorage {
 
         // Write conversation.json atomically.
         let conv_path = self.conversation_file(id);
-        let conv_tmp = dir.join("conversation.json.tmp");
-        tokio::fs::write(&conv_tmp, conversation_json.as_bytes())
+        Self::atomic_write(conv_path.clone(), conversation_json.as_bytes().to_vec())
             .await
-            .map_err(|e| {
-                StorageError::IoError(format!("Failed to write conversation.json: {}", e))
+            .map_err(|(stage, e)| match stage {
+                WriteStage::Write => {
+                    StorageError::IoError(format!("Failed to write conversation.json: {}", e))
+                }
+                WriteStage::Rename => {
+                    StorageError::IoError(format!("Failed to rename conversation.json: {}", e))
+                }
             })?;
-        if let Err(e) = tokio::fs::rename(&conv_tmp, &conv_path).await {
-            let _ = tokio::fs::remove_file(&conv_tmp).await;
-            return Err(StorageError::IoError(format!(
-                "Failed to rename conversation.json: {}",
-                e
-            )));
-        }
 
         // Write meta.json atomically.
         let meta_json = serde_json::to_string_pretty(meta)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         let meta_path = self.meta_file_in_dir(id);
-        let meta_tmp = dir.join("meta.json.tmp");
-        tokio::fs::write(&meta_tmp, meta_json.as_bytes())
-            .await
-            .map_err(|e| StorageError::IoError(format!("Failed to write meta.json: {}", e)))?;
-        if let Err(e) = tokio::fs::rename(&meta_tmp, &meta_path).await {
-            let _ = tokio::fs::remove_file(&meta_tmp).await;
+        if let Err((stage, e)) = Self::atomic_write(meta_path, meta_json.into_bytes()).await {
+            if stage == WriteStage::Write {
+                return Err(StorageError::IoError(format!(
+                    "Failed to write meta.json: {}",
+                    e
+                )));
+            }
             // DF-096: conversation.json was already renamed — roll it back so
             // the flat files remain the authoritative copy.
             if let Err(rb) = tokio::fs::remove_file(&conv_path).await {
@@ -866,6 +869,40 @@ impl FileSystemStorage {
         }
         Ok(())
     }
+
+    /// A temporary path in `target`'s directory that no other writer shares (process id +
+    /// sequence). The name is short and fixed-length whatever the session id is, so it fits
+    /// wherever the target does; it always ends in `.tmp`, which listing skips.
+    fn unique_tmp(target: &Path) -> PathBuf {
+        target.with_file_name(format!(
+            ".rustain-{}-{}.tmp",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// Write `bytes` to a unique temporary file and rename it over `target`, as ONE
+    /// blocking unit that runs to completion even if the caller is dropped, and removes
+    /// its temporary file on every failure path.
+    async fn atomic_write(
+        target: PathBuf,
+        bytes: Vec<u8>,
+    ) -> Result<(), (WriteStage, std::io::Error)> {
+        tokio::task::spawn_blocking(move || {
+            let tmp = Self::unique_tmp(&target);
+            if let Err(e) = std::fs::write(&tmp, &bytes) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err((WriteStage::Write, e));
+            }
+            if let Err(e) = std::fs::rename(&tmp, &target) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err((WriteStage::Rename, e));
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err((WriteStage::Write, std::io::Error::other(e.to_string()))))
+    }
 }
 
 #[async_trait]
@@ -992,36 +1029,26 @@ impl StoragePort for FileSystemStorage {
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
 
         let layout = self.detect_layout(id).await;
-        let (target, tmp) = match layout {
+        let target = match layout {
             SessionLayout::Directory => {
                 let dir = self.session_dir(id);
                 tokio::fs::create_dir_all(&dir).await.map_err(|e| {
                     StorageError::IoError(format!("Failed to create session dir: {}", e))
                 })?;
-                (self.meta_file_in_dir(id), dir.join("meta.json.tmp"))
+                self.meta_file_in_dir(id)
             }
-            SessionLayout::Flat | SessionLayout::Missing => {
-                let sanitized = Self::sanitize_id(id);
-                (
-                    self.session_meta_path(id),
-                    self.sessions_dir
-                        .join(format!("{}.session.json.tmp", sanitized)),
-                )
-            }
+            SessionLayout::Flat | SessionLayout::Missing => self.session_meta_path(id),
         };
-
-        tokio::fs::write(&tmp, json.as_bytes()).await.map_err(|e| {
-            StorageError::IoError(format!("Failed to write session meta file: {}", e))
-        })?;
-        if let Err(e) = tokio::fs::rename(&tmp, &target).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(StorageError::IoError(format!(
-                "Failed to rename session meta file: {}",
-                e
-            )));
-        }
-
-        Ok(())
+        Self::atomic_write(target, json.into_bytes())
+            .await
+            .map_err(|(stage, e)| match stage {
+                WriteStage::Write => {
+                    StorageError::IoError(format!("Failed to write session meta file: {}", e))
+                }
+                WriteStage::Rename => {
+                    StorageError::IoError(format!("Failed to rename session meta file: {}", e))
+                }
+            })
     }
 
     async fn load_session_meta(&self, id: &str) -> Result<Option<SessionMeta>, StorageError> {
@@ -4451,5 +4478,180 @@ mod tests {
             .expect("should reload");
         assert_eq!(reloaded.plans.len(), 1);
         assert!(reloaded.plans.contains_key("plan-keep"));
+    }
+}
+
+#[cfg(test)]
+mod unique_tmp_tests {
+    use super::*;
+    use crate::domain::models::{ChatMessage, MessageRole};
+    use crate::domain::ports::StoragePort;
+    use tempfile::TempDir;
+
+    fn conversation(id: &str, rows: usize) -> Conversation {
+        let mut conv = Conversation {
+            id: id.into(),
+            title: "t".into(),
+            created_at: 1,
+            updated_at: 1,
+            ..Default::default()
+        };
+        for i in 0..rows {
+            conv.messages.push(ChatMessage {
+                id: format!("m{i}"),
+                role: if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
+                content: format!("row {i}"),
+                ..Default::default()
+            });
+        }
+        conv
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_never_share_a_temp_path_or_tear_the_file() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        // Several instances on one directory write the same session concurrently.
+        let mut writers = Vec::new();
+        for rows in 1..=24usize {
+            let store = FileSystemStorage::new(sessions.clone());
+            writers.push(tokio::spawn(async move {
+                store.save_conversation(&conversation("race", rows)).await
+            }));
+        }
+        for writer in writers {
+            writer
+                .await
+                .unwrap()
+                .expect("every concurrent save succeeds");
+        }
+        let loaded = FileSystemStorage::new(sessions.clone())
+            .load_conversation("race")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            (1..=24).contains(&loaded.messages.len()),
+            "the file is one whole write"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&sessions)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file is left: {leftovers:?}");
+
+        let target = sessions.join("race.meta.json");
+        let names: std::collections::HashSet<_> = (0..1000)
+            .map(|_| FileSystemStorage::unique_tmp(&target))
+            .collect();
+        assert_eq!(names.len(), 1000, "no two writers share a temp path");
+        assert!(names.iter().all(|p| p.to_string_lossy().ends_with(".tmp")));
+    }
+
+    fn temp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// A save whose caller is dropped once its worker has started (a cancelled turn, a
+    /// timed-out quit save) must not leave a temporary file behind and must still land the
+    /// whole new bytes: the write and its rename are one blocking unit that finishes on
+    /// its own. Deterministic: the future is polled once (that submits the worker), the
+    /// test waits until the worker is OBSERVED on disk (a temp file or the target), drops
+    /// the future, then drops the runtime, which waits for every started blocking task.
+    #[test]
+    fn a_cancelled_write_leaves_no_temp_file() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        let storage = FileSystemStorage::new(sessions.clone());
+        std::fs::create_dir_all(&sessions).unwrap();
+        let json = "{}".repeat(1 << 16);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let session = sessions.join("cancel.meta.json");
+        {
+            let _entered = runtime.enter();
+            let mut save = Box::pin(storage.save_flat_layout("cancel", &json));
+            // One poll submits the worker; the future is never polled again.
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let _ = save.as_mut().poll(&mut cx);
+            let mut observed = false;
+            for _ in 0..50_000_000u32 {
+                if session.exists() || !temp_files(&sessions).is_empty() {
+                    observed = true;
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            assert!(observed, "the write worker never appeared on disk");
+            drop(save);
+        }
+        // Dropping the runtime waits for the started blocking task to finish.
+        drop(runtime);
+        assert_eq!(
+            std::fs::read(&session).expect("the target holds the new bytes"),
+            json.as_bytes()
+        );
+        assert!(
+            temp_files(&sessions).is_empty(),
+            "leftover: {:?}",
+            temp_files(&sessions)
+        );
+    }
+
+    /// A failed rename leaves no temporary file either.
+    #[tokio::test]
+    async fn a_failed_write_leaves_no_temp_file() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        let storage = FileSystemStorage::new(sessions.clone());
+        storage.ensure_dir().await.unwrap();
+        // The target is a non-empty directory: the rename must fail.
+        let target = sessions.join("blocked.meta.json");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        let failed = storage.save_flat_layout("blocked", "{}").await;
+        assert!(failed.is_err());
+        assert!(
+            temp_files(&sessions).is_empty(),
+            "{:?}",
+            temp_files(&sessions)
+        );
+    }
+
+    /// An id that fit the old temporary names (`<id>.session.json.tmp` is the longest)
+    /// still saves: temporary names stay within the old length envelope.
+    #[tokio::test]
+    async fn the_longest_id_that_used_to_save_still_saves() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        let storage = FileSystemStorage::new(sessions.clone());
+        let id = "a".repeat(238);
+        assert_eq!(format!("{id}.session.json.tmp").len(), 255);
+        storage
+            .save_conversation(&conversation(&id, 2))
+            .await
+            .expect("a 238-character id saves");
+        let loaded = storage.load_conversation(&id).await.unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert!(temp_files(&sessions).is_empty());
+        for target in [
+            sessions.join(format!("{id}.meta.json")),
+            sessions.join(format!("{id}.session.json")),
+            sessions.join(&id).join("conversation.json"),
+            sessions.join(&id).join("meta.json"),
+        ] {
+            let tmp = FileSystemStorage::unique_tmp(&target);
+            let name = tmp.file_name().unwrap().len();
+            assert!(name <= 255, "{name} bytes for {}", target.display());
+        }
     }
 }

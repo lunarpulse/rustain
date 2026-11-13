@@ -215,6 +215,8 @@ async fn test_e2e_fork_confirm_creates_new_tab() {
     assert_eq!(payload.conversation_id, source_id);
     let new_id = rustain::adapters::tui::handlers::transcript_target::handle_fork_confirm(
         &storage,
+        &mut None,
+        false,
         &conv,
         payload.message_index,
     )
@@ -287,6 +289,8 @@ async fn fork_refuses_changed_target_before_storage() {
     if verified.is_ok() {
         let id = rustain::adapters::tui::handlers::transcript_target::handle_fork_confirm(
             &storage,
+            &mut None,
+            false,
             &conv,
             payload.message_index,
         )

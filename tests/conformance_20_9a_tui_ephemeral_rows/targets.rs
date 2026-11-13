@@ -56,7 +56,11 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
         .unwrap();
     let initial = store.load_conversation("targets").await.unwrap().unwrap();
     let original = serde_json::to_value(&initial).unwrap();
-    assert!(handle_fork_confirm(&store, &conversation, 1).await.is_err());
+    assert!(
+        handle_fork_confirm(&store, &mut None, false, &conversation, 1)
+            .await
+            .is_err()
+    );
     assert!(
         handle_rewind_confirm(&store, &conversation, 1)
             .await
@@ -66,7 +70,7 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
         serde_json::to_value(store.load_conversation("targets").await.unwrap().unwrap()).unwrap(),
         original
     );
-    let result = handle_rewind_fork_instead(&store, &conversation, 2)
+    let result = handle_rewind_fork_instead(&store, &mut None, false, &conversation, 2)
         .await
         .unwrap();
     let forked = store.load_conversation(&result).await.unwrap().unwrap();
@@ -78,8 +82,12 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
             .collect::<Vec<_>>(),
         ["before", "target"]
     );
-    let fork_before = handle_fork_confirm(&store, &conversation, 2).await.unwrap();
-    let fork_after = handle_fork_confirm(&store, &initial, 1).await.unwrap();
+    let fork_before = handle_fork_confirm(&store, &mut None, false, &conversation, 2)
+        .await
+        .unwrap();
+    let fork_after = handle_fork_confirm(&store, &mut None, false, &initial, 1)
+        .await
+        .unwrap();
     for fork in [fork_before, fork_after] {
         let forked = store.load_conversation(&fork).await.unwrap().unwrap();
         assert_eq!(
