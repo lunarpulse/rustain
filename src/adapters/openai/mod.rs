@@ -17,9 +17,12 @@ pub mod stream;
 pub mod types;
 pub mod variant;
 
-pub use profile::{ChatCompat, ChatImages, ChatProfile, StaticChatProfile};
+pub use profile::{
+    ChatCompat, ChatImages, ChatProfile, InBandError, InBandText, StaticChatProfile,
+};
 pub use variant::OpenAiCompatibleVariant;
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
@@ -112,47 +115,177 @@ fn legacy_error(status: u16, headers: &HeaderMap, body: &str) -> ProviderError {
     }
 }
 
-/// SSE bytes → `StreamChunk`s of one response.
-fn chunks(response: reqwest::Response) -> BoxStream<'static, StreamChunk> {
-    let byte_stream = response.bytes_stream();
+/// Bytes of a body without a stream event kept for the error text.
+const CAPTURE_CAP: usize = 8 * 1024;
+/// Bytes read before the first SSE frame: a body that reaches this without one
+/// is not a stream (an SSE line buffer would otherwise grow without limit).
+const PRE_FRAME_CAP: usize = 1024 * 1024;
+
+/// The final error of a 2xx whose body carried no SSE event: status, content
+/// type and either the error object the body carried (whole body captured) or a
+/// redacted, bounded prefix of it.
+fn zero_event_error(
+    errors: &InBandText,
+    content_type: Option<&str>,
+    mut capture: Vec<u8>,
+    truncated: bool,
+) -> ProviderError {
+    if truncated {
+        // A token cut by the capture end must never survive as an
+        // unrecognisable prefix: drop the trailing run of non-whitespace.
+        while capture.last().is_some_and(|b| !b.is_ascii_whitespace()) {
+            capture.pop();
+        }
+    }
+    let body = String::from_utf8_lossy(&capture);
+    let parts = if truncated {
+        None
+    } else {
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| stream::error_parts(&value))
+    };
+    let (code, message) = parts.unwrap_or_default();
+    let text = errors.text(&InBandError {
+        status: errors.status(),
+        content_type,
+        code: code.as_deref(),
+        message: message.as_deref(),
+        raw: &body,
+        in_stream: false,
+    });
+    // Only the text already made safe (normalised, request-redacted, bounded)
+    // is logged: no separate raw header or body field.
+    tracing::warn!(
+        status = errors.status(),
+        "Chat answer carried no stream event: {text}"
+    );
+    ProviderError::Other(text)
+}
+
+/// Reads `response` until its first SSE frame, then streams the decoded chunks.
+async fn open_stream(
+    response: reqwest::Response,
+    errors: Arc<InBandText>,
+) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    open_chunks(response.bytes_stream(), content_type, errors).await
+}
+
+/// The open path over a body's chunks. A body that ends, or whose first
+/// `PRE_FRAME_CAP` bytes complete no SSE frame, is a final error carrying what
+/// was sent; a read error before the first frame is the stream's first chunk.
+/// A chunk crossing the cap is fed only up to it, and the rest only when a
+/// frame completed within the allowance. An in-stream error ends the stream.
+async fn open_chunks<S, B, E>(
+    mut byte_stream: S,
+    content_type: Option<String>,
+    errors: Arc<InBandText>,
+) -> Result<BoxStream<'static, StreamChunk>, ProviderError>
+where
+    S: futures::Stream<Item = Result<B, E>> + Unpin + Send + 'static,
+    B: AsRef<[u8]> + Send,
+    E: fmt::Display + Send + 'static,
+{
+    let mut sse_buf = SseLineBuffer::new();
+    let mut transformer = OpenAiStreamTransformer::with_errors(errors.clone());
+    let mut capture = Vec::new();
+    let mut read = 0usize;
+    let mut ended = false;
+    let first = loop {
+        match byte_stream.next().await {
+            Some(Ok(bytes)) => {
+                let bytes = bytes.as_ref();
+                let (head, tail) = bytes.split_at(bytes.len().min(PRE_FRAME_CAP - read));
+                capture.extend_from_slice(
+                    &head[..head.len().min(CAPTURE_CAP.saturating_sub(capture.len()))],
+                );
+                read += head.len();
+                let mut frames = sse_buf.feed(head);
+                if !frames.is_empty() {
+                    frames.extend(sse_buf.feed(tail));
+                    break frames;
+                }
+                if read >= PRE_FRAME_CAP {
+                    let truncated = true;
+                    return Err(zero_event_error(
+                        &errors,
+                        content_type.as_deref(),
+                        capture,
+                        truncated,
+                    ));
+                }
+            }
+            Some(Err(e)) => {
+                return Ok(Box::pin(futures::stream::once(async move {
+                    StreamChunk::Error {
+                        content: format!("Stream read error: {}", e),
+                    }
+                })));
+            }
+            None => {
+                ended = true;
+                let frames = sse_buf.finish();
+                if frames.is_empty() {
+                    let truncated = read > capture.len();
+                    return Err(zero_event_error(
+                        &errors,
+                        content_type.as_deref(),
+                        capture,
+                        truncated,
+                    ));
+                }
+                break frames;
+            }
+        }
+    };
+    let mut pending = VecDeque::new();
+    for frame in &first {
+        pending.extend(transformer.transform(frame));
+    }
     let stream = futures::stream::unfold(
-        (
-            byte_stream,
-            SseLineBuffer::new(),
-            OpenAiStreamTransformer::new(),
-            std::collections::VecDeque::new(),
-        ),
-        |(mut byte_stream, mut sse_buf, mut transformer, mut pending)| async move {
+        (byte_stream, sse_buf, transformer, pending, ended),
+        |(mut byte_stream, mut sse_buf, mut transformer, mut pending, mut ended)| async move {
             loop {
                 // Drain pending chunks first (FIFO order)
                 if let Some(chunk) = pending.pop_front() {
-                    return Some((chunk, (byte_stream, sse_buf, transformer, pending)));
+                    return Some((chunk, (byte_stream, sse_buf, transformer, pending, ended)));
                 }
-
-                // Get next bytes from HTTP stream
+                // An in-stream error is the last thing this stream says.
+                if ended || transformer.failed() {
+                    return None;
+                }
                 match byte_stream.next().await {
                     Some(Ok(bytes)) => {
-                        let frames = sse_buf.feed(&bytes);
-                        for frame in frames {
-                            let chunks = transformer.transform(&frame);
-                            pending.extend(chunks);
+                        for frame in sse_buf.feed(bytes.as_ref()) {
+                            pending.extend(transformer.transform(&frame));
                         }
-                        // Loop back to drain pending
                     }
                     Some(Err(e)) => {
+                        ended = true;
                         return Some((
                             StreamChunk::Error {
                                 content: format!("Stream read error: {}", e),
                             },
-                            (byte_stream, sse_buf, transformer, pending),
+                            (byte_stream, sse_buf, transformer, pending, ended),
                         ));
                     }
-                    None => return None, // Stream ended
+                    None => {
+                        // An unterminated last event is still an event.
+                        ended = true;
+                        for frame in sse_buf.finish() {
+                            pending.extend(transformer.transform(&frame));
+                        }
+                    }
                 }
             }
         },
     );
-    Box::pin(stream)
+    Ok(Box::pin(stream))
 }
 
 /// One logical completion request for one resolved credential: the encoded
@@ -184,6 +317,15 @@ impl ChatAttempt {
             .error(status, headers, body, self.request.headers(), &self.model)
             .unwrap_or_else(|| legacy_error(status, headers, body))
     }
+    /// How a 2xx answer of this attempt words an error it carries.
+    fn in_band(&self, response: &reqwest::Response) -> Arc<InBandText> {
+        Arc::new(InBandText::new(
+            self.profile.clone(),
+            self.request.headers().clone(),
+            self.model.clone(),
+            response.status().as_u16(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -192,7 +334,10 @@ impl stream_retry::Attempt for ChatAttempt {
     /// ran under `OPENAI_WIRE`.
     async fn open(&mut self) -> Result<BoxStream<'static, StreamChunk>, stream_retry::Rejected> {
         match self.exchange().await? {
-            Outcome::Success(response) => Ok(chunks(response)),
+            Outcome::Success(response) => {
+                let errors = self.in_band(&response);
+                Ok(open_stream(response, errors).await?)
+            }
             Outcome::Failure {
                 status,
                 headers,
@@ -435,7 +580,18 @@ impl OpenAiAdapter {
             match outcome {
                 Outcome::Success(response) => {
                     tracing::debug!(status = %response.status(), "Response received");
-                    let first = chunks(response);
+                    let errors = attempt.in_band(&response);
+                    let first = match (resilience, deadline) {
+                        (Some(policy), Some(deadline)) => {
+                            stream_retry::first_open(
+                                deadline,
+                                policy,
+                                open_stream(response, errors),
+                            )
+                            .await?
+                        }
+                        _ => open_stream(response, errors).await?,
+                    };
                     return Ok(match (resilience, deadline) {
                         (Some(policy), Some(deadline)) => {
                             stream_retry::resume(first, Box::new(attempt), policy, deadline)
@@ -1060,5 +1216,336 @@ mod tests {
             );
             assert!(request.messages[1].content.text().starts_with("Error: "));
         }
+    }
+}
+
+/// The open path of a 2xx answer, fed real `reqwest::Response`s from a loopback
+/// stub (cp-free-2 AD-3).
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TOKEN: &str = "SECRETTOKEN12345";
+
+    async fn answer(template: ResponseTemplate) -> (MockServer, reqwest::Response) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        let response = reqwest::get(format!("{}/a", server.uri())).await.unwrap();
+        (server, response)
+    }
+
+    fn errors() -> Arc<InBandText> {
+        let mut sent = HeaderMap::new();
+        sent.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        Arc::new(InBandText::new(
+            StaticChatProfile::new("http://stub.invalid/v1"),
+            sent,
+            "m".into(),
+            200,
+        ))
+    }
+
+    async fn open(template: ResponseTemplate) -> Result<Vec<StreamChunk>, String> {
+        let (_server, response) = answer(template).await;
+        match open_stream(response, errors()).await {
+            Ok(stream) => Ok(stream.collect().await),
+            Err(ProviderError::Other(text)) => Err(text),
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    const FRAME: &str = r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#;
+    const STOP: &str = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+
+    fn text(chunks: &[StreamChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_empty_body_is_an_error_naming_status_and_content_type() {
+        let with_type =
+            open(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream"))
+                .await
+                .unwrap_err();
+        assert!(
+            with_type.contains("200") && with_type.contains("text/event-stream"),
+            "{with_type}"
+        );
+        assert!(with_type.contains("empty body"), "{with_type}");
+        let bare = open(ResponseTemplate::new(200)).await.unwrap_err();
+        assert!(bare.contains("no content-type"), "{bare}");
+    }
+
+    #[tokio::test]
+    async fn a_json_error_body_gives_its_code_and_message_without_the_bearer() {
+        let text = open(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"error":{"message":format!("nope {TOKEN}"),"code":"zz_code"}}),
+        ))
+        .await
+        .unwrap_err();
+        assert!(text.contains("zz_code") && text.contains("nope"), "{text}");
+        assert!(text.contains("application/json"), "{text}");
+        assert!(!text.contains(TOKEN), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_html_page_is_a_bounded_control_free_prefix() {
+        let page = format!(
+            "<title>Blocked</title>\u{1b}[2J\u{7}{TOKEN}{}",
+            "x".repeat(5000)
+        );
+        let text = open(ResponseTemplate::new(200).set_body_raw(page.into_bytes(), "text/html"))
+            .await
+            .unwrap_err();
+        assert!(
+            text.contains("Blocked") && text.contains("text/html"),
+            "{text}"
+        );
+        assert!(!text.contains(TOKEN), "{text}");
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(text.chars().count() < 700, "{}", text.chars().count());
+    }
+
+    #[tokio::test]
+    async fn junk_then_a_frame_and_keep_alives_then_a_frame_are_streams() {
+        let body = format!(
+            ": keep-alive\n\n: still here\n\nnot sse at all\ndata: {FRAME}\n\ndata: {STOP}\n\n"
+        );
+        let chunks = open(ResponseTemplate::new(200).set_body_string(body))
+            .await
+            .unwrap();
+        assert_eq!(text(&chunks), "hi", "{chunks:?}");
+        assert!(
+            matches!(chunks.last(), Some(StreamChunk::TurnComplete { .. })),
+            "{chunks:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sole_unterminated_data_line_is_a_frame() {
+        let chunks = open(ResponseTemplate::new(200).set_body_string(format!("data: {FRAME}")))
+            .await
+            .unwrap();
+        assert_eq!(text(&chunks), "hi", "{chunks:?}");
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_pre_frame_cap_is_not_read_to_its_frame() {
+        let body = format!(
+            "{}\ndata: {FRAME}\n\n",
+            "x".repeat(PRE_FRAME_CAP + 2 * 1024 * 1024)
+        );
+        let text = open(ResponseTemplate::new(200).set_body_string(body))
+            .await
+            .unwrap_err();
+        assert!(
+            text.contains("200") && text.contains("without a stream event"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_cut_by_the_capture_end_leaves_no_prefix() {
+        let pad = format!(
+            "{}{}",
+            "é".repeat(100),
+            "a".repeat(CAPTURE_CAP - 8 - 1 - 200)
+        );
+        let body = format!("{pad} {TOKEN} and more text after the token");
+        let text = open(ResponseTemplate::new(200).set_body_string(body))
+            .await
+            .unwrap_err();
+        for start in 0..=TOKEN.len() - 8 {
+            assert!(!text.contains(&TOKEN[start..start + 8]), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_capture_drops_the_token_it_cuts() {
+        let capture = format!("ééé blocked {}", &TOKEN[..8]).into_bytes();
+        let ProviderError::Other(text) =
+            zero_event_error(&errors(), Some("text/html"), capture, true)
+        else {
+            panic!("expected the zero-event error");
+        };
+        assert!(text.contains("blocked"), "{text}");
+        assert!(!text.contains(&TOKEN[..8]), "{text}");
+        // Whole (not truncated), the same capture keeps its last word.
+        let capture = format!("ééé blocked {}", &TOKEN[..8]).into_bytes();
+        let ProviderError::Other(text) =
+            zero_event_error(&errors(), Some("text/html"), capture, false)
+        else {
+            panic!("expected the zero-event error");
+        };
+        assert!(text.contains(&TOKEN[..8]), "{text}");
+    }
+
+    // ── patch round 1 ───────────────────────────────────────────────────────
+
+    type Part = Result<Vec<u8>, String>;
+
+    fn body(parts: Vec<Vec<u8>>) -> futures::stream::Iter<std::vec::IntoIter<Part>> {
+        futures::stream::iter(parts.into_iter().map(Ok).collect::<Vec<_>>())
+    }
+
+    async fn opened<S>(source: S) -> Result<Vec<StreamChunk>, String>
+    where
+        S: futures::Stream<Item = Part> + Unpin + Send + 'static,
+    {
+        match open_chunks(source, Some("text/event-stream".into()), errors()).await {
+            Ok(stream) => Ok(tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                stream.collect(),
+            )
+            .await
+            .expect("an error ends the stream; nothing may keep it pending")),
+            Err(ProviderError::Other(text)) => Err(text),
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    /// CP2-R4: a chunk crossing the cap is fed only up to it; a frame that
+    /// completes after the boundary does not count.
+    #[tokio::test]
+    async fn a_single_chunk_crossing_the_cap_with_its_first_frame_after_it_is_rejected() {
+        let mut chunk = "x".repeat(PRE_FRAME_CAP - 5).into_bytes();
+        chunk.extend_from_slice(format!("\ndata: {FRAME}\n\n").as_bytes());
+        let text = opened(body(vec![chunk])).await.unwrap_err();
+        assert!(text.contains("without a stream event"), "{text}");
+    }
+
+    /// CP2-R4: a first frame inside the allowance is kept, and the remainder of
+    /// the same chunk still streams.
+    #[tokio::test]
+    async fn a_single_chunk_crossing_the_cap_with_its_first_frame_inside_it_streams_the_rest() {
+        let mut chunk = format!("data: {FRAME}\n\n").into_bytes();
+        chunk.extend_from_slice("x".repeat(PRE_FRAME_CAP).as_bytes());
+        chunk.extend_from_slice(format!("\ndata: {STOP}\n\n").as_bytes());
+        let chunks = opened(body(vec![chunk])).await.unwrap();
+        assert_eq!(text(&chunks), "hi", "{chunks:?}");
+        assert!(
+            matches!(chunks.last(), Some(StreamChunk::TurnComplete { .. })),
+            "{chunks:?}"
+        );
+    }
+
+    /// CP2-R2: tool call, error, `[DONE]` is the Error alone, and an error
+    /// followed by a body that never ends does not keep the stream pending.
+    #[tokio::test]
+    async fn an_error_ends_the_stream_without_the_tool_and_without_waiting_for_the_body() {
+        let tool = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"Bash","arguments":"{}"}}]}}]}"#;
+        let sequence = format!(
+            "data: {tool}\n\ndata: {{\"error\":{{\"message\":\"request rejected\"}}}}\n\ndata: [DONE]\n\n"
+        );
+        let chunks = opened(body(vec![sequence.into_bytes()])).await.unwrap();
+        assert_eq!(chunks.len(), 1, "{chunks:?}");
+        assert!(
+            matches!(&chunks[0], StreamChunk::Error { .. }),
+            "{chunks:?}"
+        );
+
+        let held = body(vec![
+            b"data: {\"error\":{\"message\":\"request rejected\"}}\n\n".to_vec(),
+        ])
+        .chain(futures::stream::pending::<Part>());
+        let chunks = opened(Box::pin(held)).await.unwrap();
+        assert_eq!(chunks.len(), 1, "{chunks:?}");
+
+        // An error in a later chunk ends the stream the same way.
+        let held = body(vec![
+            format!("data: {FRAME}\n\n").into_bytes(),
+            b"data: {\"error\":{\"message\":\"request rejected\"}}\n\n".to_vec(),
+        ])
+        .chain(futures::stream::pending::<Part>());
+        let chunks = opened(Box::pin(held)).await.unwrap();
+        assert_eq!(text(&chunks), "hi", "{chunks:?}");
+        assert!(
+            matches!(chunks.last(), Some(StreamChunk::Error { .. })),
+            "{chunks:?}"
+        );
+    }
+
+    /// CP2-R1: a credential split by an escape sequence is rebuilt by the
+    /// normaliser, so it is removed after normalising, in code, message and body.
+    #[test]
+    fn an_escape_split_credential_does_not_survive_normalising() {
+        let split = format!("{}\u{1b}[0m{}", &TOKEN[..6], &TOKEN[6..]);
+        let capture = format!("<html>{split}</html>").into_bytes();
+        let ProviderError::Other(text) = zero_event_error(&errors(), None, capture, false) else {
+            panic!("expected the zero-event error");
+        };
+        assert!(
+            !text.contains(TOKEN) && !text.contains(&TOKEN[..6]),
+            "{text}"
+        );
+        let capture = serde_json::json!({"error":{"code":split,"message":format!("m {split}")}})
+            .to_string()
+            .into_bytes();
+        let ProviderError::Other(text) = zero_event_error(&errors(), None, capture, false) else {
+            panic!("expected the zero-event error");
+        };
+        assert!(
+            !text.contains(TOKEN) && !text.contains(&TOKEN[..6]),
+            "{text}"
+        );
+    }
+
+    /// CP2-R6: code and message share ONE 500-character bound.
+    #[test]
+    fn code_and_message_share_one_bound() {
+        let capture =
+            serde_json::json!({"error":{"code":"c".repeat(600),"message":"m".repeat(600)}})
+                .to_string()
+                .into_bytes();
+        let ProviderError::Other(long) =
+            zero_event_error(&errors(), Some("application/json"), capture, false)
+        else {
+            panic!("expected the zero-event error");
+        };
+        let ProviderError::Other(empty) =
+            zero_event_error(&errors(), Some("application/json"), Vec::new(), false)
+        else {
+            panic!("expected the zero-event error");
+        };
+        let fixed = empty.chars().count() - "empty body".len();
+        assert_eq!(
+            long.chars().count(),
+            fixed + crate::adapters::auth::PROVIDER_TEXT_CAP,
+            "{long}"
+        );
+        // Short code and message stay whole.
+        let capture = br#"{"error":{"code":"zz","message":"nope"}}"#.to_vec();
+        let ProviderError::Other(short) = zero_event_error(&errors(), None, capture, false) else {
+            panic!("expected the zero-event error");
+        };
+        assert!(short.ends_with("zz: nope"), "{short}");
+    }
+
+    /// CP2-R3: the zero-event WARN logs only the safe text: a valid
+    /// content-type value carrying the bearer never reaches the log.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn the_zero_event_warning_never_logs_the_bearer_from_a_header() {
+        let template = ResponseTemplate::new(200)
+            .insert_header("content-type", format!("text/html; diagnostic={TOKEN}"));
+        let shown = open(template).await.unwrap_err();
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(logs_contain("Chat answer carried no stream event"));
+        assert!(!logs_contain(TOKEN));
     }
 }

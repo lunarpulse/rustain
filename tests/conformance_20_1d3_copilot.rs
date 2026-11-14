@@ -22,3 +22,5 @@ mod identity;
 mod login;
 #[path = "conformance_20_1d3_copilot/routes.rs"]
 mod routes;
+#[path = "conformance_20_1d3_copilot/stream_diagnostics.rs"]
+mod stream_diagnostics;

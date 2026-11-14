@@ -111,7 +111,7 @@ impl Respond for Seq {
     }
 }
 
-async fn script(server: &MockServer, route: &str, replies: Vec<ResponseTemplate>) {
+pub(super) async fn script(server: &MockServer, route: &str, replies: Vec<ResponseTemplate>) {
     Mock::given(method("POST"))
         .and(path(route))
         .respond_with(Seq::new(replies))
@@ -119,21 +119,21 @@ async fn script(server: &MockServer, route: &str, replies: Vec<ResponseTemplate>
         .await;
 }
 
-fn json_error(status: u16, body: Value) -> ResponseTemplate {
+pub(super) fn json_error(status: u16, body: Value) -> ResponseTemplate {
     ResponseTemplate::new(status).set_body_json(body)
 }
 fn forbidden() -> ResponseTemplate {
     json_error(403, json!({"error":{"message":"Forbidden"}}))
 }
-fn sse(frames: &[String]) -> ResponseTemplate {
+pub(super) fn sse(frames: &[String]) -> ResponseTemplate {
     ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")
         .set_body_string(frames.concat())
 }
-fn data(value: Value) -> String {
+pub(super) fn data(value: Value) -> String {
     format!("data: {value}\n\n")
 }
-fn event(name: &str, value: Value) -> String {
+pub(super) fn event(name: &str, value: Value) -> String {
     format!("event: {name}\ndata: {value}\n\n")
 }
 
@@ -163,7 +163,7 @@ fn assert_forbidden(result: Result<Vec<StreamChunk>, ProviderError>, token: &str
     }
 }
 
-fn errors(chunks: &[StreamChunk]) -> Vec<String> {
+pub(super) fn errors(chunks: &[StreamChunk]) -> Vec<String> {
     chunks
         .iter()
         .filter_map(|chunk| match chunk {

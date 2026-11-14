@@ -242,6 +242,7 @@ pub async fn run_turn(
             Ok(stream) => {
                 futures::pin_mut!(stream);
                 let mut received_turn_complete = false;
+                let mut forwarded_error = false;
                 let mut stop_reason = StopReason::EndTurn;
                 let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
                 let mut accumulated_text = String::new();
@@ -282,6 +283,7 @@ pub async fn run_turn(
                         StreamChunk::Usage { usage, .. } => {
                             iteration_usage = Some(usage.clone());
                         }
+                        StreamChunk::Error { .. } => forwarded_error = true,
                         _ => {}
                     }
                     let _ = event_tx.send(AppEvent::ProviderChunk {
@@ -327,15 +329,19 @@ pub async fn run_turn(
                     tracing::warn!("Usage ledger append failed: {}", e);
                 }
 
-                // Safety: synthesize TurnComplete if stream ended without one
+                // Safety: synthesize TurnComplete if stream ended without one. A
+                // provider error already forwarded says what happened; the
+                // generic disconnect text would only repeat it.
                 if !received_turn_complete {
                     tracing::warn!("Provider stream ended without TurnComplete — synthesizing end");
-                    let _ = event_tx.send(AppEvent::ProviderChunk {
-                        conversation_id: conversation_id.clone(),
-                        chunk: StreamChunk::Error {
-                            content: "Stream disconnected unexpectedly".to_string(),
-                        },
-                    });
+                    if !forwarded_error {
+                        let _ = event_tx.send(AppEvent::ProviderChunk {
+                            conversation_id: conversation_id.clone(),
+                            chunk: StreamChunk::Error {
+                                content: "Stream disconnected unexpectedly".to_string(),
+                            },
+                        });
+                    }
                     let _ = event_tx.send(AppEvent::ProviderChunk {
                         conversation_id: conversation_id.clone(),
                         chunk: StreamChunk::TurnComplete {

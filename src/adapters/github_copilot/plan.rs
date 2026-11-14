@@ -10,7 +10,7 @@ const MODEL_DISPLAY_CAP: usize = 100;
 /// through the shared display sanitiser, whitespace runs become one space, and
 /// the invisible Unicode format characters it leaves (zero-width, LRM/RLM, ALM,
 /// word joiner, BOM) are dropped. Not capped: callers redact first, then cap.
-pub(super) fn display_safe(text: &str) -> String {
+pub(crate) fn display_safe(text: &str) -> String {
     sanitize_display_line(text)
         .chars()
         .filter(|ch| {
@@ -34,17 +34,23 @@ pub fn login_notice() -> String {
     AVAILABILITY_HINT.to_owned()
 }
 
-/// The text of a final HTTP 400 `model_not_supported`: GitHub's own message
-/// (already made safe, redacted and bounded by the caller), the model that was
+/// What follows GitHub's message when it refuses a model: the model that was
 /// sent (shown without terminal controls and bounded; the wire id is untouched)
 /// and the availability hint.
-pub fn model_refused(model: &str, github_message: &str) -> String {
+pub fn refusal_tail(model: &str) -> String {
     let model: String = display_safe(model)
         .chars()
         .take(MODEL_DISPLAY_CAP)
         .collect();
+    format!("GitHub did not accept model '{model}' for this account. {AVAILABILITY_HINT}")
+}
+
+/// The text of a final HTTP 400 `model_not_supported`: GitHub's own message
+/// (already made safe, redacted and bounded by the caller), then `refusal_tail`.
+pub fn model_refused(model: &str, github_message: &str) -> String {
     format!(
-        "GitHub Copilot HTTP 400: {github_message} — GitHub did not accept model '{model}' for this account. {AVAILABILITY_HINT}"
+        "GitHub Copilot HTTP 400: {github_message} — {}",
+        refusal_tail(model)
     )
 }
 

@@ -396,6 +396,10 @@ integration id is `copilot-chat` for github.com accounts and
 pin another. When an unpinned request is denied (HTTP 403, or 400
 `model_not_supported`) rustain retries it once with the other identity and
 remembers the identity that worked for that credential and endpoint (in memory).
+A 2xx answer that carries no stream event (an empty body, a JSON error, a proxy
+page) is reported with its HTTP status, content type and the start of its body
+(credentials removed), and is not re-sent. An error event inside a stream is
+shown with GitHub's code and message.
 
 **401 vs 403.** HTTP 401 means the GitHub token was revoked: the request fails
 with an authentication error and nothing can repair it except a new login. HTTP

@@ -1,9 +1,59 @@
 //! Transforms SSE frames into domain `StreamChunk` values for OpenAI-compatible APIs.
 
+use std::sync::Arc;
+
 use crate::domain::models::{StopReason, StreamChunk, UsageInfo};
 
+use super::profile::{InBandError, InBandText};
 use super::types::OpenAiStreamEvent;
 use crate::adapters::anthropic::sse::SseFrame;
+use crate::adapters::github_copilot::plan::display_safe;
+
+/// The code and message of an error object, or the message of a string error:
+/// the `error` of a payload that has one (`null` is no error).
+pub(super) fn error_parts(value: &serde_json::Value) -> Option<(Option<String>, Option<String>)> {
+    value.get("error").and_then(error_member_parts)
+}
+
+/// The code and message of an `error` member: an object (`code`, else `type`,
+/// and `message`) or a string message. Anything else is no error.
+pub(super) fn error_member_parts(
+    error: &serde_json::Value,
+) -> Option<(Option<String>, Option<String>)> {
+    let text = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    match error {
+        // An empty or whitespace-only string is a sentinel, not an error.
+        serde_json::Value::String(message) if message.trim().is_empty() => None,
+        serde_json::Value::String(message) => Some((None, Some(message.clone()))),
+        serde_json::Value::Object(_) => Some((
+            error
+                .get("code")
+                .and_then(text)
+                .or_else(|| error.get("type").and_then(text)),
+            error.get("message").and_then(text),
+        )),
+        _ => None,
+    }
+}
+
+/// At most 200 characters of an event payload for the log: the WHOLE payload is
+/// made safe by `scrub` (normalised, credentials removed) and only then cut,
+/// once, to 200 characters. Nothing is cut before scrubbing: a removable prefix
+/// could otherwise push part of a credential across an early cut. Only a
+/// malformed frame reaches this.
+pub(super) fn log_excerpt(data: &str, scrub: impl Fn(&str) -> String) -> String {
+    scrub(data).chars().take(200).collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Frames that needed the second (generic) parse.
+    static FALLBACK_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Internal state for accumulating tool call data across multiple SSE events.
 struct ToolAccumulator {
@@ -24,6 +74,10 @@ pub struct OpenAiStreamTransformer {
     output: bool,
     /// A `finish_reason` ended the turn.
     finished: bool,
+    /// Words an error event; `None` uses the unbranded default text.
+    errors: Option<Arc<InBandText>>,
+    /// An in-stream error ended the stream.
+    failed: bool,
 }
 
 impl Default for OpenAiStreamTransformer {
@@ -40,6 +94,16 @@ impl OpenAiStreamTransformer {
             output_tokens: 0,
             output: false,
             finished: false,
+            errors: None,
+            failed: false,
+        }
+    }
+
+    /// A transformer that words in-stream errors through `errors`.
+    pub fn with_errors(errors: Arc<InBandText>) -> Self {
+        Self {
+            errors: Some(errors),
+            ..Self::new()
         }
     }
 
@@ -71,8 +135,47 @@ impl OpenAiStreamTransformer {
         chunks.push(StreamChunk::TurnComplete { stop_reason });
     }
 
+    /// An error the provider sent inside the stream: a payload whose decoded
+    /// JSON has a top-level `error` member (it wins over any `choices` beside
+    /// it, whatever the key's spelling on the wire) or an `event: error` frame.
+    /// The decoder is finished after it: no later frame produces anything.
+    fn error_event(
+        &mut self,
+        frame: &SseFrame,
+        parts: Option<(Option<String>, Option<String>)>,
+    ) -> Option<StreamChunk> {
+        let named = frame.event == "error";
+        if parts.is_none() && !named {
+            return None;
+        }
+        let (code, message) = parts.unwrap_or_default();
+        let error = InBandError {
+            status: self.errors.as_ref().map_or(200, |e| e.status()),
+            content_type: None,
+            code: code.as_deref(),
+            message: message.as_deref(),
+            raw: &frame.data,
+            in_stream: true,
+        };
+        let content = match &self.errors {
+            Some(errors) => errors.text(&error),
+            None => error.text("The provider", &|part| display_safe(part)),
+        };
+        self.failed = true;
+        self.active_tools.clear();
+        Some(StreamChunk::Error { content })
+    }
+
+    /// An in-stream error ended the stream: the decoder yields nothing more.
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
     /// Transform an SSE frame into zero or more domain StreamChunks.
     pub fn transform(&mut self, frame: &SseFrame) -> Vec<StreamChunk> {
+        if self.failed {
+            return vec![];
+        }
         // `[DONE]` is the protocol's terminal: a turn that produced output but
         // no `finish_reason` completed by server agreement and ends as a
         // default stop; after a `finish_reason` it adds nothing.
@@ -84,14 +187,33 @@ impl OpenAiStreamTransformer {
             return chunks;
         }
 
-        // Parse the SSE data as an OpenAI stream event
-        let event: OpenAiStreamEvent = match serde_json::from_str(&frame.data) {
-            Ok(e) => e,
+        // One typed parse on the normal path: `error` is an optional member of
+        // the chunk type, so serde's decoded key matching sees an escaped key
+        // beside `choices`. Only a frame that fails the typed parse (an
+        // error-only payload has no `choices`) is parsed a second time, as a
+        // generic tree, to look for the error.
+        let event = match serde_json::from_str::<OpenAiStreamEvent>(&frame.data) {
+            Ok(event) => {
+                let parts = event.error.as_ref().and_then(error_member_parts);
+                if let Some(error) = self.error_event(frame, parts) {
+                    return vec![error];
+                }
+                event
+            }
             Err(e) => {
+                #[cfg(test)]
+                FALLBACK_PARSES.with(|n| n.set(n.get() + 1));
+                let value = serde_json::from_str::<serde_json::Value>(&frame.data).ok();
+                if let Some(error) = self.error_event(frame, value.as_ref().and_then(error_parts)) {
+                    return vec![error];
+                }
                 tracing::warn!(
                     "Failed to parse OpenAI SSE event data: {} — raw: {}",
                     e,
-                    frame.data
+                    log_excerpt(&frame.data, |text| match &self.errors {
+                        Some(errors) => errors.scrub(text),
+                        None => display_safe(text),
+                    })
                 );
                 return vec![];
             }
@@ -673,5 +795,324 @@ mod tests {
         let role = r#"{"object":"chat.completion.chunk","choices":[
             {"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
         assert!(run(&[role, DONE]).is_empty(), "no output: no terminal");
+    }
+
+    /// The four lines of a real Copilot `gpt-4.1` answer (the owner's v0.4.0
+    /// log, 2026-11-14), verbatim: no top-level `object`.
+    const OWNER_LINES: [&str; 4] = [
+        r#"{"choices":[],"created":0,"id":"","model":"gpt-4.1-2025-04-14","prompt_filter_results":[{"content_filter_results":{"hate":{"filtered":false,"severity":"safe"},"self_harm":{"filtered":false,"severity":"safe"},"sexual":{"filtered":false,"severity":"safe"},"violence":{"filtered":false,"severity":"safe"}},"prompt_index":0}]}"#,
+        r#"{"choices":[{"index":0,"content_filter_results":{},"delta":{"content":"","role":"assistant"}}],"created":1794649681,"id":"chatcmpl-Ek4eXEDaj9CRNMPUZQUFQK9SoiBw5","model":"gpt-4.1-2025-04-14","system_fingerprint":"fp_8c4c3e6d7a"}"#,
+        r#"{"choices":[{"index":0,"content_filter_results":{},"delta":{"content":"Hello"}}],"created":1794649681,"id":"chatcmpl-Ek4eXEDaj9CRNMPUZQUFQK9SoiBw5","model":"gpt-4.1-2025-04-14","system_fingerprint":"fp_8c4c3e6d7a"}"#,
+        r#"{"choices":[{"finish_reason":"stop","index":0,"content_filter_results":{},"delta":{"content":null}}],"created":1794649681,"id":"chatcmpl-Ek4eXEDaj9CRNMPUZQUFQK9SoiBw5","usage":{"completion_tokens":10,"completion_tokens_details":{"accepted_prediction_tokens":0,"rejected_prediction_tokens":0},"prompt_tokens":1549,"prompt_tokens_details":{"cached_tokens":1408},"total_tokens":1559},"model":"gpt-4.1-2025-04-14","system_fingerprint":"fp_8c4c3e6d7a","copilot_usage":{"token_details":[{"batch_size":1000000,"cost_per_batch":0,"model":"gpt-4.1","token_count":141,"token_type":"input"},{"batch_size":1000000,"cost_per_batch":0,"model":"gpt-4.1","token_count":1408,"token_type":"cache_read"},{"batch_size":1000000,"cost_per_batch":0,"model":"gpt-4.1","token_count":0,"token_type":"cache_write"},{"batch_size":1000000,"cost_per_batch":0,"model":"gpt-4.1","token_count":10,"token_type":"output"}],"total_nano_aiu":0}}"#,
+    ];
+
+    fn all(frames: &[SseFrame]) -> Vec<StreamChunk> {
+        let mut t = OpenAiStreamTransformer::new();
+        frames.iter().flat_map(|f| t.transform(f)).collect()
+    }
+
+    #[test]
+    fn the_owners_copilot_lines_decode_in_order() {
+        let frames: Vec<_> = OWNER_LINES.iter().map(|line| frame(line)).collect();
+        let chunks = all(&frames);
+        assert_eq!(chunks.len(), 3, "{chunks:?}");
+        assert!(
+            matches!(&chunks[0], StreamChunk::Text { content, .. } if content == "Hello"),
+            "{chunks:?}"
+        );
+        assert!(
+            matches!(
+                &chunks[1],
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn
+                }
+            ),
+            "{chunks:?}"
+        );
+        match &chunks[2] {
+            StreamChunk::Usage { usage, .. } => {
+                assert_eq!(usage.input_tokens, 1549);
+                assert_eq!(usage.output_tokens, 10);
+                assert_eq!(usage.cache_read_input_tokens, Some(1408));
+            }
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunks_with_and_without_object_decode_and_meaning_stays_required() {
+        for line in OWNER_LINES {
+            assert!(
+                serde_json::from_str::<OpenAiStreamEvent>(line).is_ok(),
+                "{line}"
+            );
+        }
+        for missing in [
+            r#"{"id":"x"}"#,
+            r#"{"choices":[{"index":0}]}"#,
+            r#"{"choices":[{"delta":{"content":"a"}}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":1}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<OpenAiStreamEvent>(missing).is_err(),
+                "{missing}"
+            );
+        }
+        // Azure: an empty `object` on the annotation chunk, then content chunks.
+        let azure_first =
+            r#"{"object":"","choices":[],"prompt_filter_results":[{"prompt_index":0}]}"#;
+        let content = r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"content_filter_results":{}}]}"#;
+        let stop = r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        assert_eq!(
+            run(&[azure_first, content, stop]),
+            ["text:Hi", "stop:EndTurn"]
+        );
+        assert!(run(&[r#"{"choices":["#]).is_empty(), "malformed: nothing");
+    }
+
+    #[test]
+    fn the_log_excerpt_is_bounded_scrubbed_and_never_a_cut_credential() {
+        let payload = format!("\u{1b}[2J\u{7}é€{}", "ü".repeat(10_000));
+        let excerpt = log_excerpt(&payload, display_safe);
+        assert_eq!(excerpt.chars().count(), 200);
+        assert!(!excerpt.chars().any(char::is_control), "{excerpt:?}");
+        assert_eq!(log_excerpt("short", display_safe), "short");
+        // The credential is removed from the whole head before the 200 cut.
+        let payload = format!("{} {TOKEN} tail", "a".repeat(190));
+        let hide = |text: &str| text.replace(TOKEN, "[redacted]");
+        let excerpt = log_excerpt(&payload, hide);
+        assert!(!excerpt.contains("SECRET"), "{excerpt}");
+    }
+
+    fn error_text(data: &str, event: &str) -> Vec<String> {
+        let mut t = OpenAiStreamTransformer::new();
+        t.transform(&SseFrame {
+            event: event.to_string(),
+            data: data.to_string(),
+        })
+        .into_iter()
+        .map(|chunk| match chunk {
+            StreamChunk::Error { content } => content,
+            other => format!("not an error: {other:?}"),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn error_events_are_one_error_and_win_over_choices() {
+        let texts = error_text(
+            r#"{"error":{"message":"request rejected","code":"zz"}}"#,
+            "message",
+        );
+        assert_eq!(texts.len(), 1);
+        assert!(
+            texts[0].contains("request rejected") && texts[0].contains("zz"),
+            "{texts:?}"
+        );
+        // A neutral message does not read as transient: the transport's own
+        // wording must not make the CHAT budget fire by itself.
+        assert!(
+            !crate::adapters::responses::events::generic_retryable(&texts[0]),
+            "{texts:?}"
+        );
+        // A string error, a numeric code, and `event: error` with plain data.
+        assert!(error_text(r#"{"error":"plain"}"#, "message")[0].ends_with("plain"));
+        assert!(
+            error_text(r#"{"error":{"code":429,"message":"m"}}"#, "message")[0].contains("429: m")
+        );
+        assert!(error_text("plain words", "error")[0].contains("plain words"));
+        let both = r#"{"error":{"message":"bad"},"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}]}"#;
+        let texts = error_text(both, "message");
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].contains("bad"), "{texts:?}");
+        // Not errors: a null error, an annotation chunk, a content chunk.
+        for data in [
+            r#"{"error":null,"choices":[]}"#,
+            OWNER_LINES[0],
+            r#"{"choices":[{"index":0,"delta":{"content":"error"}}]}"#,
+        ] {
+            assert!(
+                error_text(data, "message")
+                    .iter()
+                    .all(|t| t.starts_with("not an error")),
+                "{data}"
+            );
+        }
+    }
+
+    const TOKEN: &str = "SECRETTOKEN12345";
+
+    fn bound() -> OpenAiStreamTransformer {
+        let mut sent = reqwest::header::HeaderMap::new();
+        sent.insert(
+            "authorization",
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+        );
+        OpenAiStreamTransformer::with_errors(Arc::new(InBandText::new(
+            super::super::StaticChatProfile::new("http://stub.invalid/v1"),
+            sent,
+            "m".into(),
+            200,
+        )))
+    }
+
+    fn data_frame(data: &str) -> SseFrame {
+        SseFrame {
+            event: "message".into(),
+            data: data.into(),
+        }
+    }
+
+    /// CP2-R5: the error key is read from the decoded JSON, whatever its
+    /// spelling on the wire.
+    #[test]
+    fn an_escaped_error_key_is_still_an_error_and_wins_over_choices() {
+        let escaped = r#"{"err\u006fr":{"message":"request rejected","c\u006fde":"zz"}}"#;
+        let both = r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}],"\u0065rror":{"message":"bad"}}"#;
+        for data in [escaped, both] {
+            let mut t = OpenAiStreamTransformer::new();
+            let chunks = t.transform(&data_frame(data));
+            assert_eq!(chunks.len(), 1, "{data}: {chunks:?}");
+            assert!(
+                matches!(&chunks[0], StreamChunk::Error { .. }),
+                "{chunks:?}"
+            );
+        }
+    }
+
+    /// CP2-R2: the decoder itself is finished by an error, whatever follows.
+    #[test]
+    fn after_an_error_nothing_more_is_decoded() {
+        let mut t = bound();
+        let tool = tool_delta(0, "call_1", "Bash", r#"{"command":"x"}"#);
+        assert!(t.transform(&data_frame(&tool)).is_empty());
+        let chunks = t.transform(&data_frame(r#"{"error":{"message":"request rejected"}}"#));
+        assert_eq!(chunks.len(), 1, "{chunks:?}");
+        assert!(t.failed());
+        for later in [
+            DONE.to_owned(),
+            text_delta("late"),
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#.to_owned(),
+            r#"{"error":{"message":"again"}}"#.to_owned(),
+        ] {
+            assert!(t.transform(&data_frame(&later)).is_empty(), "{later}");
+        }
+    }
+
+    /// CP2-R3: the parse WARN carries the scrubbed excerpt, never the bearer.
+    #[tracing_test::traced_test]
+    #[test]
+    fn the_parse_warning_never_logs_the_bearer() {
+        let mut t = bound();
+        let split = format!("{{\"choices\":[ {}\u{1b}[0m{}", &TOKEN[..6], &TOKEN[6..]);
+        assert!(t.transform(&data_frame(&split)).is_empty());
+        assert!(logs_contain("Failed to parse OpenAI SSE event data"));
+        assert!(!logs_contain(TOKEN));
+        assert!(logs_contain("[redacted]"));
+    }
+
+    /// CP2-R8: removable ANSI prefixes push the credential across any early
+    /// cut; nothing is cut before the whole payload is scrubbed.
+    #[tracing_test::traced_test]
+    #[test]
+    fn an_ansi_prefix_cannot_push_a_credential_across_a_cut() {
+        let mut t = bound();
+        // The credential starts at character 4,090 of the raw payload (77) or far past it.
+        for pad in [77, 5000] {
+            let payload = format!(
+                "{{\"choices\":[ {}{}{TOKEN}",
+                "\u{1b}[0m".repeat(1000),
+                "x".repeat(pad)
+            );
+            assert!(t.transform(&data_frame(&payload)).is_empty());
+        }
+        assert!(logs_contain("Failed to parse OpenAI SSE event data"));
+        assert!(
+            !logs_contain("SECRET"),
+            "a credential fragment reached the log"
+        );
+        // Directly: the credential starts at character 4,090.
+        let payload = format!("{}{}{TOKEN}", "\u{1b}[0m".repeat(1000), "x".repeat(90));
+        let hide = |text: &str| display_safe(text).replace(TOKEN, "[redacted]");
+        assert!(!log_excerpt(&payload, hide).contains("SECRET"));
+    }
+
+    /// CP2-R10: an empty or whitespace-only string `error` (a sentinel some
+    /// providers send on every chunk) is no error: the chunk decodes and the
+    /// stream continues. An error-only frame with such a value is not fatal
+    /// either; `event: error` and non-empty errors still are.
+    #[test]
+    fn an_empty_string_error_is_not_an_error() {
+        for sentinel in [r#""""#, r#""  ""#, "null", "false", "0"] {
+            let mut t = OpenAiStreamTransformer::new();
+            let chunk = format!(
+                r#"{{"choices":[{{"index":0,"delta":{{"content":"Hi"}}}}],"error":{sentinel}}}"#
+            );
+            let chunks = t.transform(&data_frame(&chunk));
+            assert!(
+                matches!(&chunks[..], [StreamChunk::Text { content, .. }] if content == "Hi"),
+                "{sentinel}: {chunks:?}"
+            );
+            assert!(!t.failed(), "{sentinel}");
+            let later = t.transform(&data_frame(&text_delta("more")));
+            assert_eq!(later.len(), 1, "{sentinel}: the stream continues");
+        }
+        for only in [r#"{"error":""}"#, r#"{"error":"  "}"#] {
+            let mut t = OpenAiStreamTransformer::new();
+            assert!(t.transform(&data_frame(only)).is_empty(), "{only}");
+            assert!(!t.failed(), "{only}");
+        }
+        // Still fatal: a non-empty string, an object, and `event: error`.
+        for fatal in [r#"{"error":"bad"}"#, r#"{"error":{"message":"bad"}}"#] {
+            let chunks = OpenAiStreamTransformer::new().transform(&data_frame(fatal));
+            assert!(
+                matches!(&chunks[..], [StreamChunk::Error { .. }]),
+                "{fatal}"
+            );
+        }
+        let mut t = OpenAiStreamTransformer::new();
+        let named = SseFrame {
+            event: "error".into(),
+            data: r#"{"error":""}"#.into(),
+        };
+        assert_eq!(t.transform(&named).len(), 1);
+        assert!(t.failed());
+    }
+
+    /// CP2-R9: a normal chunk is ONE typed parse (no generic tree); only a
+    /// frame the typed decoder rejects takes the second parse.
+    #[test]
+    fn normal_chunks_take_the_single_typed_parse_path() {
+        let before = FALLBACK_PARSES.with(|n| n.get());
+        let mut t = OpenAiStreamTransformer::new();
+        for line in OWNER_LINES {
+            t.transform(&data_frame(line));
+        }
+        t.transform(&data_frame(&text_delta("more")));
+        assert_eq!(
+            FALLBACK_PARSES.with(|n| n.get()),
+            before,
+            "a normal chunk fell back"
+        );
+        // An escaped `error` key beside `choices` is found by the typed parse.
+        let mut t = OpenAiStreamTransformer::new();
+        let both = r#"{"choices":[{"index":0,"delta":{}}],"\u0065rror":{"message":"bad"}}"#;
+        assert!(matches!(
+            t.transform(&data_frame(both))[..],
+            [StreamChunk::Error { .. }]
+        ));
+        assert_eq!(
+            FALLBACK_PARSES.with(|n| n.get()),
+            before,
+            "error+choices fell back"
+        );
+        // An error-only frame has no `choices`: exactly one fallback parse.
+        let mut t = OpenAiStreamTransformer::new();
+        let only = r#"{"err\u006fr":{"message":"bad"}}"#;
+        assert!(matches!(
+            t.transform(&data_frame(only))[..],
+            [StreamChunk::Error { .. }]
+        ));
+        assert_eq!(FALLBACK_PARSES.with(|n| n.get()), before + 1);
     }
 }

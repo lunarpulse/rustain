@@ -358,7 +358,8 @@ pub struct OpenAiStreamEvent {
     #[allow(dead_code)]
     pub id: Option<String>,
     #[allow(dead_code)]
-    pub object: String,
+    #[serde(default)]
+    pub object: Option<String>,
     #[allow(dead_code)]
     pub created: Option<u64>,
     #[allow(dead_code)]
@@ -369,6 +370,10 @@ pub struct OpenAiStreamEvent {
     /// non-final chunk (which omits the key) deserializes as `None`.
     #[serde(default)]
     pub usage: Option<OpenAiUsage>,
+    /// A provider error beside (or instead of) the chunk; read through serde's
+    /// decoded key matching, so an escaped `"err\u006fr"` is found too.
+    #[serde(default)]
+    pub error: Option<serde_json::Value>,
 }
 
 /// Token usage payload sent by OpenAI-compatible providers on the final stream

@@ -37,7 +37,7 @@ use super::domain::{enterprise_domain, enterprise_root, normalize_api_endpoint, 
 use super::identity::{self, CopilotRequestState};
 use super::{DEFAULT_BASE_URL, Shared, plan};
 use crate::adapters::auth::PROVIDER_TEXT_CAP;
-use crate::adapters::openai::profile::{ChatCompat, ChatImages, ChatProfile};
+use crate::adapters::openai::profile::{ChatCompat, ChatImages, ChatProfile, InBandError};
 use crate::adapters::provider::{
     http_retry::{HttpRetryPolicy, OPENAI_WIRE},
     request_profile::{RequestContext, RequestProfile, RequestState},
@@ -421,6 +421,19 @@ impl RequestProfile for CopilotProfile {
     }
 }
 
+/// GitHub's words from inside a 2xx answer, redacted before the cut; a refused
+/// model also gets the plan text (never an `HTTP 400`: the answer was a 2xx).
+pub fn in_band_text(error: &InBandError<'_>, sent: &HeaderMap, model: &str) -> String {
+    let text = error.text("GitHub Copilot", &|part| {
+        redact(&plan::display_safe(part), sent)
+    });
+    if error.in_stream && error.code == Some("model_not_supported") {
+        format!("{text} — {}", plan::refusal_tail(model))
+    } else {
+        text
+    }
+}
+
 impl ChatProfile for CopilotProfile {
     /// `store: false` only for a seed row that supports it and was not served by
     /// the request credential's own last live discovery; image parts for vision
@@ -443,6 +456,14 @@ impl ChatProfile for CopilotProfile {
             },
             anthropic_cache_control: false,
         }
+    }
+
+    fn scrub(&self, text: &str, sent: &HeaderMap) -> String {
+        redact(&plan::display_safe(text), sent)
+    }
+
+    fn in_band_error(&self, error: &InBandError<'_>, sent: &HeaderMap, model: &str) -> String {
+        in_band_text(error, sent, model)
     }
 }
 
@@ -811,5 +832,54 @@ mod tests {
                 .expect("the GitHub text precedes the model sentence");
             plan::tests::assert_display_safe(github, forbidden, input);
         }
+    }
+
+    #[test]
+    fn in_band_errors_are_githubs_words_redacted_and_the_plan_tail_is_for_refusals_only() {
+        let mut sent = HeaderMap::new();
+        sent.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer cop-sent-bearer-123456"),
+        );
+        let error = |code, in_stream| InBandError {
+            status: 200,
+            content_type: Some("application/json"),
+            code,
+            message: Some("nope Bearer abc.def cop-sent-bearer-123456 gho_abcdefghijkl"),
+            raw: "",
+            in_stream,
+        };
+        let text = in_band_text(&error(Some("quota_zz"), false), &sent, "gpt-4.1");
+        assert!(
+            text.starts_with("GitHub Copilot answered HTTP 200 (application/json)"),
+            "{text}"
+        );
+        for secret in ["abc.def", "cop-sent-bearer", "gho_abc"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert!(!text.contains(plan::AVAILABILITY_HINT), "{text}");
+        let other = in_band_text(&error(Some("quota_zz"), true), &sent, "gpt-4.1");
+        assert!(
+            other.starts_with("GitHub Copilot stream error quota_zz: nope"),
+            "{other}"
+        );
+        assert!(!other.contains(plan::AVAILABILITY_HINT), "{other}");
+        let refused = in_band_text(
+            &error(Some("model_not_supported"), true),
+            &sent,
+            "gemini-3.8-flash",
+        );
+        assert!(
+            refused.ends_with(&plan::refusal_tail("gemini-3.8-flash")),
+            "{refused}"
+        );
+        assert!(!refused.contains("HTTP 400"), "{refused}");
+        // Only an in-stream refusal gets the plan text.
+        let body = in_band_text(
+            &error(Some("model_not_supported"), false),
+            &sent,
+            "gemini-3.8-flash",
+        );
+        assert!(!body.contains(plan::AVAILABILITY_HINT), "{body}");
     }
 }

@@ -409,3 +409,90 @@ async fn k14_openrouter_pre_commit_read_error_is_reissued_once() {
 async fn k14_copilot_pre_commit_read_error_is_reissued_once() {
     read_error_case(Route::Copilot, "cop-k14-read-error").await;
 }
+
+// ── cp-free-2: chunk schema and 2xx without a stream event ─────────────────
+
+impl Stub {
+    /// Like `turn`, but the open may fail: the result and the number of POSTs.
+    async fn try_turn(
+        &self,
+        replies: Vec<ResponseTemplate>,
+    ) -> (
+        Result<Vec<StreamChunk>, rustain::domain::errors::ProviderError>,
+        usize,
+    ) {
+        self.server.reset().await;
+        Mock::given(method("POST"))
+            .and(path(self.route.clone()))
+            .respond_with(Seq::new(replies))
+            .mount(&self.server)
+            .await;
+        let result = complete(
+            &self.provider,
+            vec![user("hi")],
+            options(self.model, 256, None),
+        )
+        .await;
+        let posts = requests(&self.server, "POST", &self.route).await.len();
+        (result, posts)
+    }
+}
+
+/// cp-free-2 AC2: the shared decoder accepts chunks without `object` on
+/// OpenRouter's Chat route too.
+#[tokio::test]
+#[serial]
+async fn cp_free_2_openrouter_decodes_chunks_without_object() {
+    let stub = Stub::new(Route::OpenRouter, "sk-or-v1-cp-free-2-object").await;
+    let frames = [
+        data(json!({"choices":[{"index":0,"delta":{"content":"Hi"}}]})),
+        data(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})),
+        DONE.to_owned(),
+    ];
+    let (chunks, posts) = stub.turn(vec![event_stream(&frames)]).await;
+    assert_eq!(text_of(&chunks), "Hi", "{chunks:?}");
+    assert_eq!(terminals(&chunks), [StopReason::EndTurn], "{chunks:?}");
+    assert!(errors(&chunks).is_empty(), "{chunks:?}");
+    assert_eq!(posts, 1);
+}
+
+/// cp-free-2 AC3: a 200 event stream with an empty body is a final error
+/// after one POST on OpenRouter's Chat route.
+#[tokio::test]
+#[serial]
+async fn cp_free_2_openrouter_zero_event_2xx_is_a_final_error() {
+    let stub = Stub::new(Route::OpenRouter, "sk-or-v1-cp-free-2-zero").await;
+    let empty = ResponseTemplate::new(200).insert_header("content-type", "text/event-stream");
+    let (result, posts) = stub
+        .try_turn(vec![empty, event_stream(&[chat_body("never")])])
+        .await;
+    match result {
+        Err(rustain::domain::errors::ProviderError::Other(text)) => {
+            assert!(text.contains("200"), "{text}");
+            assert!(!text.contains("sk-or-v1-cp-free-2-zero"), "{text}");
+        }
+        other => panic!("expected a final error, got {other:?}"),
+    }
+    assert_eq!(posts, 1);
+}
+
+/// cp-free-2 AC5: an in-stream error event is one `Error` with its message on
+/// OpenRouter's Chat route.
+#[tokio::test]
+#[serial]
+async fn cp_free_2_openrouter_error_event_is_an_error() {
+    let stub = Stub::new(Route::OpenRouter, "sk-or-v1-cp-free-2-event").await;
+    let event = data(json!({"error":{"message":"request rejected","code":"zz_rejected"}}));
+    let (chunks, posts) = stub
+        .turn(vec![
+            event_stream(&[event]),
+            event_stream(&[chat_body("never")]),
+        ])
+        .await;
+    let texts = errors(&chunks);
+    assert_eq!(texts.len(), 1, "{chunks:?}");
+    assert!(texts[0].contains("request rejected"), "{texts:?}");
+    assert!(terminals(&chunks).is_empty(), "{chunks:?}");
+    assert!(!text_of(&chunks).contains("never"), "{chunks:?}");
+    assert_eq!(posts, 1);
+}

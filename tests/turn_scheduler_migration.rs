@@ -491,3 +491,168 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
         .expect("turn exits after cancellation")
         .expect("turn task joins");
 }
+
+/// A provider whose single stream is scripted and ends without a terminal.
+struct ScriptedProvider {
+    chunks: Vec<StreamChunk>,
+}
+
+#[async_trait]
+impl StreamingProvider for ScriptedProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>>,
+        rustain::domain::errors::ProviderError,
+    > {
+        Ok(Box::pin(futures::stream::iter(self.chunks.clone())))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "scripted".to_string()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+}
+
+/// The `ProviderChunk`s `run_turn` forwards for one scripted stream.
+async fn scripted_turn(chunks: Vec<StreamChunk>) -> Vec<StreamChunk> {
+    let provider: Arc<dyn StreamingProvider> = Arc::new(ScriptedProvider { chunks });
+    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity);
+    let tools: Arc<dyn ToolSetPort> = Arc::new(MockToolSet);
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
+    let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval_runtime, 16);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    run_turn(
+        provider,
+        vec![Message {
+            role: MessageRole::User,
+            content: "hi".into(),
+            images: vec![],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+            reasoning_content: None,
+            provider_replay: vec![],
+        }],
+        CompletionOptions {
+            session_id: None,
+            model: "test".into(),
+            max_tokens: 100,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        },
+        tx,
+        security,
+        tools,
+        scheduler,
+        "conv-scripted".into(),
+        Arc::new(rustain::adapters::noop::NoOpStorage),
+        make_conversation(),
+        None,
+        None,
+        CancellationToken::new(),
+        Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,
+        ResolvedModel {
+            model: "test".into(),
+            tier: ModelTier::CheapAgentic,
+            escalation_reason: EscalationReason::None,
+        },
+        None,
+        0,
+        None,
+        "sess-scripted".into(),
+        rustain::domain::models::TurnOrigin::Interactive,
+        false,
+        None,
+    )
+    .await;
+    let mut forwarded = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::ProviderChunk { chunk, .. } = event {
+            forwarded.push(chunk);
+        }
+    }
+    forwarded
+}
+
+fn error_texts(chunks: &[StreamChunk]) -> Vec<&str> {
+    chunks
+        .iter()
+        .filter_map(|chunk| match chunk {
+            StreamChunk::Error { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ends_cancelled(chunks: &[StreamChunk]) -> bool {
+    matches!(
+        chunks.last(),
+        Some(StreamChunk::TurnComplete {
+            stop_reason: StopReason::Cancelled
+        })
+    )
+}
+
+/// cp-free-2 AC7: a provider error already says what happened, so the
+/// generic disconnect text is not added after it.
+#[tokio::test]
+async fn a_provider_error_is_not_followed_by_the_disconnect_text() {
+    let alone = scripted_turn(vec![StreamChunk::Error {
+        content: "x".into(),
+    }])
+    .await;
+    assert_eq!(error_texts(&alone), ["x"], "{alone:?}");
+    assert!(ends_cancelled(&alone), "{alone:?}");
+
+    let after_text = scripted_turn(vec![
+        StreamChunk::Text {
+            content: "p".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::Error {
+            content: "y".into(),
+        },
+    ])
+    .await;
+    assert_eq!(error_texts(&after_text), ["y"], "{after_text:?}");
+    assert!(ends_cancelled(&after_text), "{after_text:?}");
+}
+
+/// cp-free-2 AC7 positive control: a stream that ends with neither a terminal
+/// nor an error still gets the synthesized disconnect error.
+#[tokio::test]
+async fn a_stream_that_just_ends_still_gets_the_synthesized_error() {
+    let chunks = scripted_turn(vec![StreamChunk::Text {
+        content: "p".into(),
+        parent_tool_use_id: None,
+    }])
+    .await;
+    assert_eq!(error_texts(&chunks).len(), 1, "{chunks:?}");
+    assert!(ends_cancelled(&chunks), "{chunks:?}");
+}

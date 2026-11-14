@@ -824,6 +824,18 @@ mod tests {
             let task = open();
             let mut socket = within(accept(&listener)).await;
             hold_open(&mut socket).await;
+            if route == Route::Chat {
+                // The Chat open reads up to the first SSE frame (cp-free-2): an
+                // abort while it waits resolves the call itself.
+                adapter.abort().await.unwrap();
+                let result = within(task).await.unwrap().map(drop);
+                assert!(
+                    matches!(result, Err(ProviderError::Cancelled)),
+                    "{route:?}: {result:?}"
+                );
+                assert_eq!(adapter.inner.abort.live(), 0, "{route:?}");
+                continue;
+            }
             let mut stream = within(task).await.unwrap().expect("the stream opens");
             adapter.abort().await.unwrap();
             assert!(
