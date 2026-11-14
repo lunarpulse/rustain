@@ -2756,7 +2756,7 @@ pub(crate) fn dispatch_palette_action(
         PaletteAction::ShowVersion => {
             // Display version info as an Info notice (toast + Notification Log)
             // Covers: FR109
-            let version = crate::adapters::tui::version_info::version_string();
+            let version = crate::infrastructure::build_info::version_block();
             crate::adapters::tui::notifications::info(
                 state,
                 crate::adapters::tui::notifications::NoticeSource::Help,

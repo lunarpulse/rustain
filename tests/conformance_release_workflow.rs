@@ -67,6 +67,124 @@ fn the_linux_leg_smokes_the_release_asset_through_an_in_repo_script() {
     let _ = metadata;
 }
 
+/// fix-1 K9: the features the smoke requires of `--version` are exactly the features
+/// `release.yml` builds with (a removed entry would let a release lose a feature).
+#[test]
+fn k9_smoke_required_features_equal_the_release_build_features() {
+    let build_line = WORKFLOW
+        .lines()
+        .find(|line| line.trim_start().starts_with(RELEASE_BUILD))
+        .expect("release build line");
+    let built: std::collections::BTreeSet<&str> = build_line
+        .split("--features ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("--features value")
+        .split(',')
+        .collect();
+    let script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SMOKE_SCRIPT),
+    )
+    .expect("read release-smoke.sh");
+    let required: std::collections::BTreeSet<&str> = script
+        .lines()
+        .find_map(|l| l.strip_prefix("REQUIRED_FEATURES=\""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("REQUIRED_FEATURES= line")
+        .split_whitespace()
+        .collect();
+    assert_eq!(required, built);
+}
+
+/// Runs the smoke script against a stub `<binary>` that records its arguments and
+/// prints `block` on `--version`. Returns (exit code, stderr, recorded invocations).
+#[cfg(unix)]
+fn run_smoke_against_stub(block: &str) -> (Option<i32>, String, Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sentinel = dir.path().join("sentinel.txt");
+    let stub = dir.path().join("rustain-stub");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>'{}'\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\ncat <<'BLOCK'\n{block}\nBLOCK\nfi\n",
+            sentinel.display()
+        ),
+    )
+    .expect("write stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SMOKE_SCRIPT);
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(&stub)
+        .env("HOME", dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run release-smoke.sh");
+    let calls = std::fs::read_to_string(&sentinel)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        calls,
+    )
+}
+
+#[cfg(unix)]
+const STUB_PROTOCOLS: &str = "protocols: agent-skills, acp 1, mcp 2025-11-25, a2a 0.3";
+
+#[cfg(unix)]
+fn stub_block(features: &str, protocols: &str) -> String {
+    format!(
+        "rustain 9.9.9 (stub)\nbuild: x\ncommit: y\nrustc: 1.0.0\n{protocols}\nfeatures: {features}\nnot built: cron"
+    )
+}
+
+/// fix-1 K9b: the real script refuses a block lacking a required feature (or listing
+/// an unbuilt protocol) before it launches any server, and crosses the check when the
+/// block is complete.
+#[test]
+#[cfg(unix)]
+fn k9b_smoke_checks_version_before_starting_a_server() {
+    let (code, stderr, calls) = run_smoke_against_stub(&stub_block(
+        "a2a, mcp, relay-server, self-update",
+        STUB_PROTOCOLS,
+    ));
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("p2p"),
+        "message names the missing feature: {stderr}"
+    );
+    assert_eq!(
+        calls,
+        ["--version"],
+        "no server may start on a failed check"
+    );
+
+    let (code, stderr, calls) = run_smoke_against_stub(&stub_block(
+        "a2a, mcp, p2p, relay-server, self-update",
+        "protocols: agent-skills, acp 1, mcp 2025-11-25, a2a not built",
+    ));
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("not built"), "{stderr}");
+    assert_eq!(calls, ["--version"]);
+
+    // Positive control: a complete block crosses the check and the script launches
+    // the server (which the stub then fails to be; that later failure is not asserted).
+    let (_, _, calls) = run_smoke_against_stub(&stub_block(
+        "a2a, mcp, p2p, relay-server, self-update",
+        STUB_PROTOCOLS,
+    ));
+    assert_eq!(calls.first().map(String::as_str), Some("--version"));
+    assert!(
+        calls.iter().any(|c| c.starts_with("--serve-a2a=")),
+        "a complete block must reach the server start: {calls:?}"
+    );
+}
+
 /// The `sign` job discloses *expected minus present* targets in the release body
 /// (AC6). An expected target no matrix leg builds makes that disclosure fire on
 /// every release, which is how a real missing macOS asset gets lost in the noise.

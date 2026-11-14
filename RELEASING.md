@@ -136,7 +136,7 @@ When rotating the signing key:
 3. Push an annotated tag: `git tag -a v0.4.0 -m "rustain v0.4.0" && git push origin v0.4.0`
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
-   - Smokes the required release features on the Linux binary (`.github/scripts/release-smoke.sh`)
+   - Smokes the required release features on the Linux binary (`.github/scripts/release-smoke.sh`): first checks that `--version` lists the four release features and no unbuilt protocol, then that the served AgentCard agrees with it
    - Size guard asserts ≤ 38 MiB / 39,845,888 bytes; Linux additionally enforces the reserved-headroom ratchet (`.github/scripts/release-size-guard.sh`)
    - Computes the asset-coverage disclosure (expected targets minus present) for the release body
    - Fails the release if the P0 Linux artifact is missing

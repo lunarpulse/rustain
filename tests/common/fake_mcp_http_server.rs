@@ -130,6 +130,8 @@ pub struct Observations {
     pub initialize_offsets_ms: Vec<u128>,
     /// Auth tokens presented on `Authorization` headers, in order.
     pub presented_authorization: Vec<String>,
+    /// `params.protocolVersion` of each `initialize` POST, as the client sent it.
+    pub initialize_protocol_versions: Vec<String>,
     /// Whether each `tools/call` advertised the Tasks extension specifically.
     pub call_tasks_advertised: Vec<bool>,
 }
@@ -375,6 +377,12 @@ async fn serve_post(
         let attempt = {
             let mut obs = state.observations.lock().expect("observations lock");
             obs.initialize_posts += 1;
+            obs.initialize_protocol_versions.push(
+                message["params"]["protocolVersion"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
             obs.initialize_offsets_ms
                 .push(state.started.elapsed().as_millis());
             obs.initialize_posts

@@ -101,6 +101,16 @@ impl McpClientService {
     }
 }
 
+/// The MCP protocol revision rustain offers in `initialize`, read from the same
+/// handler the handshake sends (`serve_with_ct` uses `ClientHandler::get_info`), so
+/// the `--version` block cannot drift from the wire. A server may settle on an older
+/// revision.
+pub fn offered_protocol_version() -> String {
+    ClientHandler::get_info(&McpClientService::new(std::sync::Weak::new()))
+        .protocol_version
+        .to_string()
+}
+
 impl ClientHandler for McpClientService {
     fn on_tool_list_changed(
         &self,

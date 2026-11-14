@@ -10,7 +10,10 @@ use tempfile::TempDir;
 #[path = "../build.rs"]
 mod build_script;
 
-use build_script::{build_date, format_utc, git_commit_time, git_short_hash, git_watch_paths};
+use build_script::{
+    build_date, format_utc, git_commit_time, git_short_hash, git_watch_paths, parse_rustc_version,
+    rustc_version,
+};
 
 /// Hermetic git: no user/system config, fixed identity, no signing.
 fn git_at(dir: &Path, committer_date: Option<&str>, args: &[&str]) -> String {
@@ -284,4 +287,49 @@ fn b9_hash_and_commit_time_match_git_and_are_independent() {
             .ok(),
         git_commit_time(&repo)
     );
+}
+
+// ── B11–B12: compiler version ────────────────────────────────────────────────
+
+#[test]
+fn b11_parse_rustc_version_vectors() {
+    assert_eq!(
+        parse_rustc_version("rustc 1.98.1 (48a229cea 2026-09-01)\n").as_deref(),
+        Some("1.98.1")
+    );
+    assert_eq!(
+        parse_rustc_version("rustc 1.99.0-nightly (abc 2026-10-01)").as_deref(),
+        Some("1.99.0-nightly")
+    );
+    for bad in ["", "cargo 1.98.1 (abc 2026-09-01)", "rustc", "rustc  "] {
+        assert_eq!(parse_rustc_version(bad), None, "{bad:?}");
+    }
+}
+
+/// A stub "compiler" script printing `stdout` and exiting with `code`.
+#[cfg(unix)]
+fn stub_compiler(dir: &Path, name: &str, stdout: &str, code: i32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\necho '{stdout}'\nexit {code}\n"))
+        .expect("write stub");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    path
+}
+
+/// B12: `rustc_version` runs the program it is given, so it follows whatever `RUSTC` Cargo
+/// selected; it is `None` for a missing program, a failing one and unparsable output.
+/// (The real compiler is checked against Cargo's own choice by `cli_version` K8.)
+#[test]
+#[cfg(unix)]
+fn b12_rustc_version_runs_the_program() {
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    assert_eq!(rustc_version(dir.join("no-such-rustc").as_os_str()), None);
+    let good = stub_compiler(dir, "good", "rustc 9.8.7 (abc 2026-01-01)", 0);
+    assert_eq!(rustc_version(good.as_os_str()).as_deref(), Some("9.8.7"));
+    let failing = stub_compiler(dir, "failing", "rustc 9.8.7 (abc 2026-01-01)", 1);
+    assert_eq!(rustc_version(failing.as_os_str()), None);
+    let garbage = stub_compiler(dir, "garbage", "not a compiler", 0);
+    assert_eq!(rustc_version(garbage.as_os_str()), None);
 }

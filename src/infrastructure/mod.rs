@@ -1,6 +1,7 @@
 pub mod agent_message_bus;
 pub mod apply_lock;
 pub mod auth_accounts;
+pub mod build_info;
 pub mod clock_util;
 pub mod composition;
 pub mod config;

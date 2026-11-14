@@ -1,6 +1,8 @@
-//! Build metadata for `rustain --version`: `GIT_HASH`, `BUILD_DATE`, `TARGET`.
+//! Build metadata for `rustain --version`: `GIT_HASH`, `BUILD_DATE`, `TARGET`, `RUSTC_VERSION`.
 //!
 //! * `GIT_HASH` is `git rev-parse --short HEAD`, or `unknown`.
+//! * `RUSTC_VERSION` is the second token of `$RUSTC --version` (the compiler Cargo
+//!   selected for this build), or `unknown`. It adds no `rerun-if` line.
 //! * `BUILD_DATE` is `SOURCE_DATE_EPOCH` when set, else HEAD's committer time, else
 //!   `unknown`. It is never the wall clock: two builds of one tree must embed the same
 //!   value, or every build would relink `rustain` and every test binary.
@@ -40,9 +42,33 @@ fn main() {
         .unwrap_or_else(|message| panic!("{message}"));
     println!("cargo:rustc-env=BUILD_DATE={date}");
 
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let rustc_ver = rustc_version(&rustc).unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=RUSTC_VERSION={rustc_ver}");
+
     // Target triple (set by Cargo during cross-compilation)
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET={target}");
+}
+
+/// `<rustc> --version` parsed by [`parse_rustc_version`]; `None` when the program
+/// cannot run, exits non-zero, or prints something unparsable.
+pub(crate) fn rustc_version(rustc: &std::ffi::OsStr) -> Option<String> {
+    let out = Command::new(rustc).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_rustc_version(std::str::from_utf8(&out.stdout).ok()?)
+}
+
+/// `rustc 1.98.1 (48a229cea 2026-09-01)` -> `1.98.1`; `rustc 1.99.0-nightly (…)` keeps
+/// its suffix. Anything not starting with the `rustc` token is `None`.
+pub(crate) fn parse_rustc_version(output: &str) -> Option<String> {
+    let mut tokens = output.split_whitespace();
+    if tokens.next()? != "rustc" {
+        return None;
+    }
+    tokens.next().map(str::to_string)
 }
 
 /// Run `git` in `dir`; `Some(output)` if it could be spawned (any exit status).

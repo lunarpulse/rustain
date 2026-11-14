@@ -46,8 +46,7 @@ pub fn install_panic_hook() {
                     .as_secs();
                 let _ = writeln!(file, "Rustain Crash Report");
                 let _ = writeln!(file, "Timestamp: {}", timestamp);
-                let rust_version = option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown");
-                let _ = writeln!(file, "Rust version: {}", rust_version);
+                let _ = writeln!(file, "Rust version: {}", super::build_info::RUSTC_VERSION);
                 let _ = writeln!(file);
                 let _ = writeln!(file, "Panic: {}", info);
                 let _ = writeln!(file);
@@ -77,7 +76,7 @@ pub fn record_startup_panic(info: &str, backtrace: &str) -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let rust_version = option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown");
+    let rust_version = super::build_info::RUSTC_VERSION;
     writeln!(file, "Rustain Startup Crash Report")?;
     writeln!(file, "Timestamp: {timestamp}")?;
     writeln!(file, "Rust version: {rust_version}")?;
@@ -225,7 +224,14 @@ mod tests {
             "missing header sentinel"
         );
         assert!(content.contains("Timestamp:"), "missing timestamp");
-        assert!(content.contains("Rust version:"), "missing rust version");
+        // K12: the report carries the compiler value, not the MSRV (`Rust version:` label kept).
+        assert!(
+            content.contains(&format!(
+                "Rust version: {}",
+                crate::infrastructure::build_info::RUSTC_VERSION
+            )),
+            "missing rust version"
+        );
         assert!(
             content.contains("Panic: test panic sentinel"),
             "missing panic message"

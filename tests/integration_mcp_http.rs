@@ -163,6 +163,33 @@ async fn ac1_http_connects_and_projects_the_same_catalogue_as_stdio() {
     http_client.disconnect().await.expect("http disconnect");
 }
 
+/// fix-1 K6: the MCP revision the `--version` block advertises is the one the
+/// handshake sends, as the server sees it. Positive control: exactly one observed
+/// `initialize`.
+#[tokio::test]
+async fn the_initialize_protocol_version_equals_the_version_block_entry() {
+    let server = FakeHttpMcpServer::start(FakeHttpConfig::healthy()).await;
+    let (client, _rx) = adapter(http_spec("remote", &server.url()));
+    client.connect().await.expect("http connect must succeed");
+
+    let observed = server.observations();
+    assert_eq!(observed.initialize_posts, 1);
+    assert_eq!(observed.initialize_protocol_versions.len(), 1);
+    let block = rustain::infrastructure::build_info::protocols();
+    let mcp = block
+        .iter()
+        .find(|p| p.name == "mcp")
+        .expect("mcp on the protocols line");
+    assert_eq!(
+        mcp.support,
+        rustain::infrastructure::build_info::Support::Version(
+            observed.initialize_protocol_versions[0].clone()
+        ),
+        "the block must advertise what the handshake sent"
+    );
+    client.disconnect().await.expect("http disconnect");
+}
+
 /// State flows `Connecting { attempt: 1 }` → `Connected { tool_count }`, each
 /// transition observable on the production event channel.
 #[tokio::test]

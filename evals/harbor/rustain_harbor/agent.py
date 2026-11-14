@@ -140,7 +140,7 @@ class RustainAgent(BaseInstalledAgent):
 
     @override
     def parse_version(self, stdout: str) -> str:
-        # First line: "rustain rustain 0.2.0 (<target>)"; later: "commit: <sha>".
+        # First line: "rustain 0.4.0 (<target>)"; later: "commit: <sha>".
         version = re.search(r"\d+\.\d+\.\d+[^\s)]*", stdout)
         commit = re.search(r"^commit:\s*(\S+)", stdout, re.MULTILINE)
         parts = [version.group(0) if version else stdout.strip()]

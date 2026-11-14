@@ -3,9 +3,9 @@ use rustain::adapters::tui::hints;
 use rustain::adapters::tui::keymap::render_help;
 use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::state::{HelpOverlayState, TuiState};
-use rustain::adapters::tui::version_info;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
+use rustain::infrastructure::build_info;
 
 // ============================================================
 // Unit: HelpOverlayState (Task 7.4)
@@ -137,12 +137,12 @@ fn test_contextual_hint_shows_at_threshold() {
 }
 
 // ============================================================
-// Unit: version_string (Task 7.6)
+// Unit: version_block (Task 7.6)
 // ============================================================
 
 #[test]
-fn test_version_string_non_empty() {
-    let v = version_info::version_string();
+fn test_version_block_non_empty() {
+    let v = build_info::version_block();
     assert!(!v.is_empty());
     assert!(v.contains(env!("CARGO_PKG_VERSION")));
 }

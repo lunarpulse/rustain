@@ -341,8 +341,11 @@ fn test_e2e_version_command_via_palette() {
         record.severity,
         rustain::adapters::tui::notifications::NoticeSeverity::Info
     );
-    assert!(record.message.contains("rustain"));
-    assert!(record.message.contains(env!("CARGO_PKG_VERSION")));
+    // K11: the notice is the whole shared block, not its first line or a stale copy.
+    assert_eq!(
+        record.message,
+        rustain::infrastructure::build_info::version_block()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

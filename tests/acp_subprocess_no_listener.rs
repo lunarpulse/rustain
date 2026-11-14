@@ -356,6 +356,18 @@ async fn acp_subprocess_binds_no_listen_socket() {
         "initialize must advertise protocolVersion 1 (proves a real JSON-RPC round-trip, \
          not merely a live process)"
     );
+    // fix-1 K7: the `--version` block's `acp` entry is what the real server answers.
+    let acp_in_block = rustain::infrastructure::build_info::protocols()
+        .into_iter()
+        .find(|p| p.name == "acp")
+        .expect("acp on the protocols line");
+    assert_eq!(
+        acp_in_block.support,
+        rustain::infrastructure::build_info::Support::Version(
+            init["result"]["protocolVersion"].to_string()
+        ),
+        "the block must advertise the ACP version initialize answers with"
+    );
     assert_eq!(
         init["result"]["agentInfo"]["name"], "rustain",
         "initialize must identify the agent as `rustain`"

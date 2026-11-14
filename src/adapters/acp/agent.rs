@@ -35,6 +35,10 @@ use super::translate::{
     stop_reason_to_acp, stream_chunk_to_session_update,
 };
 
+/// The Agent Client Protocol revision `initialize` answers with; the `--version`
+/// block reads the same constant.
+pub const ACP_PROTOCOL_VERSION: acp::ProtocolVersion = acp::ProtocolVersion::V1;
+
 pub type CoreFactory =
     Rc<dyn Fn(&Path, &[crate::domain::models::McpServerSpec]) -> acp::Result<CliCore>>;
 pub type AcpCoreFactory =
@@ -1319,7 +1323,7 @@ impl acp::Agent for RustainAcpAgent {
         &self,
         _args: acp::InitializeRequest,
     ) -> Result<acp::InitializeResponse, acp::Error> {
-        let version = acp::ProtocolVersion::V1;
+        let version = ACP_PROTOCOL_VERSION;
         // Task 7: advertise the four lifecycle capabilities so a compliant
         // client (Zed) actually invokes load/resume/list/close. `load_session`
         // is top-level; list/resume/close nest under `session_capabilities`.

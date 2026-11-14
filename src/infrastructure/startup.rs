@@ -227,7 +227,7 @@ pub async fn run() -> Result<()> {
         // Leak the version string to get a 'static str required by clap's API.
         // This runs once at startup; the allocation is intentionally permanent.
         let long_ver: &'static str =
-            Box::leak(crate::adapters::tui::version_info::version_string().into_boxed_str());
+            Box::leak(crate::infrastructure::build_info::long_version().into_boxed_str());
         let cmd = Cli::command().long_version(long_ver);
         let matches = cmd.get_matches();
         Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())

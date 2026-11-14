@@ -25,6 +25,31 @@ if [[ ! -x "$BIN" ]]; then
   exit 2
 fi
 
+# fix-1: the asset must say what it carries. Pinned to release.yml's `--features`
+# list by tests/conformance_release_workflow.rs. Runs before a port is chosen or a
+# server is started.
+REQUIRED_FEATURES="a2a p2p relay-server self-update"
+VERSION_TEXT=$("$BIN" --version) || {
+  echo "release smoke: $BIN --version failed" >&2
+  exit 1
+}
+printf '%s\n' "$VERSION_TEXT"
+BUILT=$(printf '%s\n' "$VERSION_TEXT" | sed -n 's/^features: //p' | tr -d ' ' | tr ',' '\n')
+PROTOCOLS=$(printf '%s\n' "$VERSION_TEXT" | sed -n 's/^protocols: //p')
+A2A_VERSION=$(printf '%s\n' "$PROTOCOLS" | sed -n 's/^\(.*, \)\{0,1\}a2a \([0-9][^,]*\).*/\2/p')
+PKG_VERSION=$(printf '%s\n' "$VERSION_TEXT" | head -n1 | cut -d' ' -f2)
+MISSING=()
+for feature in $REQUIRED_FEATURES; do
+  grep -qxF -- "$feature" <<<"$BUILT" || MISSING+=("$feature")
+done
+if [[ -z $PROTOCOLS || $PROTOCOLS == *"not built"* || -z $A2A_VERSION ]]; then
+  MISSING+=("protocols: ${PROTOCOLS:-<missing line>}")
+fi
+if ((${#MISSING[@]})); then
+  echo "release smoke: --version does not list the required features/protocols: ${MISSING[*]}" >&2
+  exit 1
+fi
+
 RUN_DIR=$(mktemp -d)
 SERVER_PID=""
 cleanup() {
@@ -76,6 +101,6 @@ if [[ "$HTTP_STATUS" != "200" ]]; then
   exit 1
 fi
 
-python3 -c 'import json, sys; card=json.load(open(sys.argv[1], encoding="utf-8")); signatures=card.get("signatures"); assert isinstance(signatures, list) and signatures, "AgentCard signatures missing"; assert any(isinstance(entry, dict) and isinstance(entry.get("signature"), str) and entry["signature"] for entry in signatures), "AgentCard signature value missing"' "$CARD"
+python3 -c 'import json, sys; card=json.load(open(sys.argv[1], encoding="utf-8")); signatures=card.get("signatures"); assert isinstance(signatures, list) and signatures, "AgentCard signatures missing"; assert any(isinstance(entry, dict) and isinstance(entry.get("signature"), str) and entry["signature"] for entry in signatures), "AgentCard signature value missing"; interfaces=card.get("supportedInterfaces"); assert isinstance(interfaces, list) and interfaces and all(i.get("protocolVersion") == sys.argv[2] for i in interfaces), "AgentCard protocolVersion differs from --version a2a " + sys.argv[2]; assert card.get("version") == sys.argv[3], "AgentCard version differs from --version " + sys.argv[3]' "$CARD" "$A2A_VERSION" "$PKG_VERSION"
 
-echo "release smoke: PASS (a2a signed AgentCard HTTP 200; p2p positive = manual gate 18)"
+echo "release smoke: PASS (--version lists the four release features and no unbuilt protocol; a2a signed AgentCard HTTP 200 agrees with it; p2p positive = manual gate 18)"
