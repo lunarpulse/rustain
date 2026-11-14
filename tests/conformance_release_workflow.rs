@@ -96,41 +96,129 @@ fn k9_smoke_required_features_equal_the_release_build_features() {
     assert_eq!(required, built);
 }
 
-/// Runs the smoke script against a stub `<binary>` that records its arguments and
-/// prints `block` on `--version`. Returns (exit code, stderr, recorded invocations).
+/// What one run of the smoke script against a stub produced.
 #[cfg(unix)]
-fn run_smoke_against_stub(block: &str) -> (Option<i32>, String, Vec<String>) {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let sentinel = dir.path().join("sentinel.txt");
-    let stub = dir.path().join("rustain-stub");
-    std::fs::write(
-        &stub,
-        format!(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>'{}'\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\ncat <<'BLOCK'\n{block}\nBLOCK\nfi\n",
-            sentinel.display()
-        ),
-    )
-    .expect("write stub");
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+struct SmokeRun {
+    code: Option<i32>,
+    stderr: String,
+    calls: Vec<String>,
+    attempts: usize,
+}
+
+/// True only when the run failed because the OS refused to exec the stub (ETXTBSY: a
+/// sibling test's fork briefly holds the freshly written stub's write descriptor) and for
+/// no other reason. The script exits 1 and its stderr is exactly the two lines observed
+/// from real bash (`release-smoke.sh` at fix-1): either the `--version` exec
+/// (`<script>: <stub>: /usr/bin/env: bad interpreter: Text file busy` then
+/// `release smoke: <stub> --version failed`) or the server-start exec
+/// (`release smoke: A2A server exited before serving its AgentCard` then the shell's
+/// `env: ‘<stub>’: Text file busy`). The stub path must be this run's own; the phrase
+/// anywhere else, an extra line, or any other status is a genuine failure.
+#[cfg(unix)]
+fn is_exec_busy_failure(
+    code: Option<i32>,
+    stderr: &str,
+    script: &std::path::Path,
+    stub: &std::path::Path,
+) -> bool {
+    if code != Some(1) {
+        return false;
+    }
+    let (script, stub) = (script.display().to_string(), stub.display().to_string());
+    let lines: Vec<&str> = stderr.lines().collect();
+    let &[first, second] = lines.as_slice() else {
+        return false;
+    };
+    // Shape A: the `--version` exec.
+    if let Some(rest) = first.strip_prefix(&format!("{script}: ")) {
+        // bash may or may not add `line N: `.
+        let rest = match rest.strip_prefix("line ").and_then(|r| r.split_once(": ")) {
+            Some((n, tail)) if n.chars().all(|c| c.is_ascii_digit()) => tail,
+            _ => rest,
+        };
+        return rest == format!("{stub}: /usr/bin/env: bad interpreter: Text file busy")
+            && second == format!("release smoke: {stub} --version failed");
+    }
+    // Shape B: the server-start exec (the script dumps the server log, `env`'s message).
+    first == "release smoke: A2A server exited before serving its AgentCard"
+        && ["‘{}’", "'{}'", "\"{}\""]
+            .iter()
+            .any(|q| second == format!("env: {}: Text file busy", q.replace("{}", &stub)))
+}
+
+/// One run of the smoke script against `stub` in a scratch HOME.
+#[cfg(unix)]
+fn run_smoke_once(stub: &std::path::Path, home: &std::path::Path) -> (Option<i32>, String) {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SMOKE_SCRIPT);
     let out = std::process::Command::new("bash")
         .arg(&script)
-        .arg(&stub)
-        .env("HOME", dir.path())
+        .arg(stub)
+        .env("HOME", home)
+        .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .output()
         .expect("run release-smoke.sh");
-    let calls = std::fs::read_to_string(&sentinel)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
     (
         out.status.code(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
-        calls,
     )
+}
+
+/// Runs the smoke script against a stub whose text is `body(sentinel)`; the stub should
+/// append its arguments to the sentinel file.
+///
+/// The script executes the stub by design, so there is no seam to avoid exec-ing a file
+/// this test just wrote. The exec failure ETXTBSY (see [`is_exec_busy_failure`]) is
+/// retried, at most `ATTEMPTS` times and without sleeping; every other outcome is final
+/// at once. Exhausting the attempts fails with the last attempt's stderr.
+#[cfg(unix)]
+fn run_smoke(body: impl Fn(&std::path::Path) -> String) -> SmokeRun {
+    use std::os::unix::fs::PermissionsExt;
+    const ATTEMPTS: usize = 5;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sentinel = dir.path().join("sentinel.txt");
+    let stub = dir.path().join("rustain-stub");
+    std::fs::write(&stub, body(&sentinel)).expect("write stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SMOKE_SCRIPT);
+    for attempt in 1..=ATTEMPTS {
+        let _ = std::fs::remove_file(&sentinel);
+        let (code, stderr) = run_smoke_once(&stub, dir.path());
+        if is_exec_busy_failure(code, &stderr, &script, &stub) {
+            if attempt == ATTEMPTS {
+                panic!(
+                    "release-smoke.sh could not exec the stub after {ATTEMPTS} attempts \
+                     (ETXTBSY every time); last stderr:\n{stderr}"
+                );
+            }
+            continue;
+        }
+        let calls = std::fs::read_to_string(&sentinel)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        return SmokeRun {
+            code,
+            stderr,
+            calls,
+            attempts: attempt,
+        };
+    }
+    unreachable!("the loop returns or panics on its last attempt")
+}
+
+/// A stub `<binary>` that records its arguments and prints `block` on `--version`.
+/// Returns (exit code, stderr, recorded invocations).
+#[cfg(unix)]
+fn run_smoke_against_stub(block: &str) -> (Option<i32>, String, Vec<String>) {
+    let run = run_smoke(|sentinel| {
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>'{}'\nif [[ \"${{1:-}}\" == \"--version\" ]]; then\ncat <<'BLOCK'\n{block}\nBLOCK\nfi\n",
+            sentinel.display()
+        )
+    });
+    (run.code, run.stderr, run.calls)
 }
 
 #[cfg(unix)]
@@ -183,6 +271,94 @@ fn k9b_smoke_checks_version_before_starting_a_server() {
         calls.iter().any(|c| c.starts_with("--serve-a2a=")),
         "a complete block must reach the server start: {calls:?}"
     );
+}
+
+/// The retry classifier accepts exactly the two exec-failure shapes real bash produced
+/// for this stub and nothing else.
+#[test]
+#[cfg(unix)]
+fn k9b_busy_retry_matches_only_the_stubs_own_exec_failure() {
+    use std::path::Path;
+    let (script, stub) = (Path::new("/r/release-smoke.sh"), Path::new("/t/stub"));
+    let a = "/r/release-smoke.sh: /t/stub: /usr/bin/env: bad interpreter: Text file busy\n\
+             release smoke: /t/stub --version failed\n";
+    let b = "release smoke: A2A server exited before serving its AgentCard\n\
+             env: ‘/t/stub’: Text file busy\n";
+    assert!(is_exec_busy_failure(Some(1), a, script, stub), "shape A");
+    assert!(is_exec_busy_failure(Some(1), b, script, stub), "shape B");
+    let a_line = a.replace("release-smoke.sh: ", "release-smoke.sh: line 28: ");
+    assert!(is_exec_busy_failure(Some(1), &a_line, script, stub));
+    // Everything else is a genuine failure and final at once.
+    assert!(!is_exec_busy_failure(Some(126), a, script, stub), "status");
+    assert!(!is_exec_busy_failure(None, a, script, stub), "signal");
+    assert!(!is_exec_busy_failure(
+        Some(1),
+        &format!("{a}extra\n"),
+        script,
+        stub
+    ));
+    assert!(!is_exec_busy_failure(
+        Some(1),
+        &format!("noise\n{b}"),
+        script,
+        stub
+    ));
+    assert!(
+        !is_exec_busy_failure(Some(1), b, script, Path::new("/t/other")),
+        "path"
+    );
+    assert!(!is_exec_busy_failure(
+        Some(1),
+        "Text file busy\nrelease smoke: /t/stub --version failed\n",
+        script,
+        stub
+    ));
+    assert!(!is_exec_busy_failure(Some(1), "", script, stub));
+}
+
+/// The accepted shapes are the ones real bash prints: hold the stub open for writing
+/// (deterministic ETXTBSY) and classify the script's actual output, then release it.
+#[test]
+#[cfg(unix)]
+fn k9b_busy_classifier_recognises_a_real_etxtbsy_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = dir.path().join("rustain-stub");
+    std::fs::write(&stub, "#!/usr/bin/env bash\nexit 0\n").expect("write stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SMOKE_SCRIPT);
+    let held = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&stub)
+        .expect("hold the stub open for writing");
+    let (code, stderr) = run_smoke_once(&stub, dir.path());
+    assert!(
+        is_exec_busy_failure(code, &stderr, &script, &stub),
+        "a real ETXTBSY run must be classified as busy: {code:?} {stderr:?}"
+    );
+    drop(held);
+    let (code, stderr) = run_smoke_once(&stub, dir.path());
+    assert!(
+        !is_exec_busy_failure(code, &stderr, &script, &stub),
+        "once released the stub execs: {code:?} {stderr:?}"
+    );
+}
+
+/// Positive control: a stub that itself prints `Text file busy` from its own logic (and
+/// fails) is a genuine failure: run exactly once, its stderr returned intact.
+#[test]
+#[cfg(unix)]
+fn k9b_text_file_busy_from_the_stub_is_not_retried() {
+    let run = run_smoke(|sentinel| {
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>'{}'\necho 'Text file busy' >&2\nexit 7\n",
+            sentinel.display()
+        )
+    });
+    assert_eq!(run.attempts, 1, "must not be retried");
+    assert_eq!(run.code, Some(1));
+    assert!(run.stderr.contains("Text file busy"), "{}", run.stderr);
+    assert_eq!(run.calls, ["--version"]);
 }
 
 /// The `sign` job discloses *expected minus present* targets in the release body

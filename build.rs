@@ -51,10 +51,17 @@ fn main() {
     println!("cargo:rustc-env=TARGET={target}");
 }
 
-/// `<rustc> --version` parsed by [`parse_rustc_version`]; `None` when the program
-/// cannot run, exits non-zero, or prints something unparsable.
+/// `<rustc> --version` parsed by [`rustc_version_from_output`].
 pub(crate) fn rustc_version(rustc: &std::ffi::OsStr) -> Option<String> {
-    let out = Command::new(rustc).arg("--version").output().ok()?;
+    rustc_version_from_output(Command::new(rustc).arg("--version").output())
+}
+
+/// The result of running a compiler's `--version`, parsed by [`parse_rustc_version`];
+/// `None` when the program could not run, exited non-zero, or printed something
+/// unparsable. A separate seam so tests can exercise every outcome without executing a
+/// freshly written file (which races with concurrent forks: ETXTBSY).
+pub(crate) fn rustc_version_from_output(out: std::io::Result<Output>) -> Option<String> {
+    let out = out.ok()?;
     if !out.status.success() {
         return None;
     }

@@ -12,7 +12,7 @@ mod build_script;
 
 use build_script::{
     build_date, format_utc, git_commit_time, git_short_hash, git_watch_paths, parse_rustc_version,
-    rustc_version,
+    rustc_version, rustc_version_from_output,
 };
 
 /// Hermetic git: no user/system config, fixed identity, no signing.
@@ -306,30 +306,50 @@ fn b11_parse_rustc_version_vectors() {
     }
 }
 
-/// A stub "compiler" script printing `stdout` and exiting with `code`.
-#[cfg(unix)]
-fn stub_compiler(dir: &Path, name: &str, stdout: &str, code: i32) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\necho '{stdout}'\nexit {code}\n"))
-        .expect("write stub");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
-    path
-}
-
-/// B12: `rustc_version` runs the program it is given, so it follows whatever `RUSTC` Cargo
-/// selected; it is `None` for a missing program, a failing one and unparsable output.
-/// (The real compiler is checked against Cargo's own choice by `cli_version` K8.)
+/// B12: `rustc_version` maps every outcome of running `<program> --version` to `Some`
+/// only for a successful, parsable run. The outcomes are fed through the
+/// `rustc_version_from_output` seam instead of stub scripts: executing a script this test
+/// just wrote races with concurrent forks in sibling tests (ETXTBSY, `Text file busy`).
+/// The real compiler is checked end to end by `cli_version` K8.
 #[test]
 #[cfg(unix)]
-fn b12_rustc_version_runs_the_program() {
+fn b12_rustc_version_maps_every_outcome() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+    let ran = |code: i32, stdout: &[u8]| {
+        Ok(Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        })
+    };
+    let good = b"rustc 9.8.7 (abc 2026-01-01)\n";
+    assert_eq!(
+        rustc_version_from_output(ran(0, good)).as_deref(),
+        Some("9.8.7")
+    );
+    assert_eq!(
+        rustc_version_from_output(ran(1, good)),
+        None,
+        "non-zero exit"
+    );
+    assert_eq!(rustc_version_from_output(ran(0, b"not a compiler")), None);
+    assert_eq!(
+        rustc_version_from_output(ran(0, &[0xff, 0xfe])),
+        None,
+        "not UTF-8"
+    );
+    assert_eq!(
+        rustc_version_from_output(Err(std::io::Error::from_raw_os_error(2))),
+        None,
+        "spawn failure"
+    );
+    // The spawning glue itself, on programs that already exist: absent, and a real
+    // program that succeeds but prints no compiler version.
     let tmp = TempDir::new().expect("tempdir");
-    let dir = tmp.path();
-    assert_eq!(rustc_version(dir.join("no-such-rustc").as_os_str()), None);
-    let good = stub_compiler(dir, "good", "rustc 9.8.7 (abc 2026-01-01)", 0);
-    assert_eq!(rustc_version(good.as_os_str()).as_deref(), Some("9.8.7"));
-    let failing = stub_compiler(dir, "failing", "rustc 9.8.7 (abc 2026-01-01)", 1);
-    assert_eq!(rustc_version(failing.as_os_str()), None);
-    let garbage = stub_compiler(dir, "garbage", "not a compiler", 0);
-    assert_eq!(rustc_version(garbage.as_os_str()), None);
+    assert_eq!(
+        rustc_version(tmp.path().join("no-such-rustc").as_os_str()),
+        None
+    );
+    assert_eq!(rustc_version(std::ffi::OsStr::new("true")), None);
 }
