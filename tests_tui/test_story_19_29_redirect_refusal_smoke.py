@@ -229,6 +229,8 @@ def _exercise(binary: Path, evidence: Path, scratch: Path, monkeypatch) -> None:
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_redirect_under_a_command_pattern_is_refused_80x24(monkeypatch):
+    if not os.environ.get("RUSTAIN_TUI_BINARY"):
+        pytest.skip("no native binary: build `cargo build --bin rustain` and set RUSTAIN_TUI_BINARY")
     evidence_root = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     evidence_root.mkdir(parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="19-29-", dir=evidence_root))
