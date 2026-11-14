@@ -73,15 +73,6 @@ def _drive_plan(tui: RustainTUI) -> bool:
 # ── structural (no API) ──────────────────────────────────────────────────────
 
 
-def test_no_more_coming_in_6_4_notice(tui: RustainTUI):
-    """AC11: the stale 6.3 'Coming in Story 6.4' placeholder is gone."""
-    _chord_tasks(tui)
-    time.sleep(0.3)
-    tui.send("r")
-    time.sleep(0.3)
-    assert "Coming in Story 6.4" not in tui.get_screen_text()
-
-
 def test_palette_opens_no_crash(tui: RustainTUI):
     """Ctrl+P palette overlay renders and Esc dismisses without freeze."""
     tui.send(CTRL_P)

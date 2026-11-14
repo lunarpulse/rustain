@@ -29,13 +29,13 @@ jobs:
       - name: Install pinned source-metric parser
         run: python3 -m pip install -r tools/ci/requirements-metrics.txt
 
-      - name: Run real metric CLI and ratchet signoff behavioral controls
+      - name: Run real metric CLI, ratchet signoff and TUI skip checker behavioral controls
         run: |
           python3 - <<'PY'
           import sys
           import unittest
           suites = []
-          for pattern in ("test_event_loop_complexity.py", "test_ratchet_signoff_guard.py"):
+          for pattern in ("test_event_loop_complexity.py", "test_ratchet_signoff_guard.py", "test_check_tui_skips.py"):
               suite = unittest.defaultTestLoader.discover(".github/scripts", pattern=pattern)
               if suite.countTestCases() == 0:
                   raise SystemExit(f"No behavioral controls selected: {pattern}")
@@ -341,9 +341,25 @@ jobs:
             receipt-checker-evidence/**/restored.json
 
       - name: Run non-API Python TUI tests
-        run: pytest tests_tui/ -m "not requires_api and not a2a_binary and not p2p_binary" -n auto --timeout=120 -v --junitxml=tui-results.xml
+        shell: bash # GitHub then runs bash -eo pipefail: tee cannot hide a red pytest
+        run: |
+          pytest tests_tui/ -m "not requires_api and not a2a_binary and not p2p_binary" \
+            --ignore=tests_tui/test_receipt_controls.py \
+            -n auto --timeout=120 -v --durations=0 --junitxml=tui-results.xml 2>&1 | tee tui-results.log
         env:
           RUST_LOG: debug
+          RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/debug/rustain
+      - name: Reject Python TUI skips missing from the allowlist
+        if: ${{ !cancelled() && hashFiles('tui-results.xml') != '' }}
+        run: python3 .github/scripts/check-tui-skips.py tui-results.xml tests_tui/skip-allowlist.json
+      - name: Retain Python TUI results and durations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-tui-results
+          path: |
+            tui-results.xml
+            tui-results.log
       - name: Annotate test failures
         if: failure()
         run: python3 .github/scripts/annotate-test-failures.py receipt-policy-results.xml tui-results.xml

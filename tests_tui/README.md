@@ -385,6 +385,21 @@ pytest -m "slow"               # Only slow tests
 pytest -m "not slow"           # Quick tests only
 ```
 
+### CI lane
+
+The `tui-tests` job runs the generic lane against the debug binary the job already built, through `RUSTAIN_TUI_BINARY`:
+
+```bash
+RUSTAIN_TUI_BINARY=$PWD/target/debug/rustain pytest tests_tui/ \
+  -m "not requires_api and not a2a_binary and not p2p_binary" \
+  --ignore=tests_tui/test_receipt_controls.py \
+  -n auto --timeout=120 -v --durations=0 --junitxml=tui-results.xml
+```
+
+- `test_receipt_controls.py` runs only in its own receipt-policy step, so the generic step ignores it.
+- Every skip must be listed with a reason that names its owner row in `tests_tui/skip-allowlist.json` (key `<module>::<test name>`). An unlisted skip and a listed test that did not skip (stale entry) both fail the lane (`.github/scripts/check-tui-skips.py`).
+- The `python-tui-results` artifact holds `tui-results.xml` (JUnit) and `tui-results.log` (pytest output with `--durations=0`).
+
 ## Adding a New Story
 
 1. Create `test_story_X_Y_name.py`

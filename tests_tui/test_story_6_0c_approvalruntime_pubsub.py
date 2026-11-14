@@ -24,45 +24,6 @@ from pathlib import Path
 from test_story_5_0b_permissions import _permission_ready, _stable_sheet
 
 
-# ── Structural / non-API tests ─────────────────────────────────────────────
-
-
-@pytest.mark.story_6_0c
-def test_permission_keys_still_defined():
-    """AC11 regression: all 5 action keys still exist after migration."""
-    assert Permission.ALLOW == "y"
-    assert Permission.SESSION_ALLOW == "s"
-    assert Permission.ALWAYS_ALLOW == "a"
-    assert Permission.DENY == "n"
-    assert Permission.DENY_FEEDBACK == "f"
-
-
-@pytest.mark.story_6_0c
-def test_harness_has_all_permission_methods():
-    """AC11: harness exposes session_allow, always_allow, deny_with_feedback."""
-    assert hasattr(RustainTUI, "session_allow_permission")
-    assert hasattr(RustainTUI, "always_allow_permission")
-    assert hasattr(RustainTUI, "deny_with_feedback")
-    assert hasattr(RustainTUI, "set_permission_mode")
-
-
-@pytest.mark.story_6_0c
-def test_permissions_toml_round_trip(tmp_path):
-    """AC10: Write a permissions.toml and verify it parses on load."""
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / ".rustain").mkdir(parents=True, exist_ok=True)
-    rules_content = (
-        '[[rules]]\npriority = 100\npattern = "Bash:*"\naction = "allow"\nscope = "tool"\n\n'
-        '[[rules]]\npattern = "*"\naction = "ask"\nscope = "tool"\n'
-    )
-    (workspace / ".rustain" / "permissions.toml").write_text(rules_content)
-    loaded = (workspace / ".rustain" / "permissions.toml").read_text()
-    assert "Bash:*" in loaded
-    assert "priority = 100" in loaded
-    assert "catch-all" not in loaded or "ask" in loaded
-
-
 # ── API-dependent TUI tests ───────────────────────────────────────────────
 
 

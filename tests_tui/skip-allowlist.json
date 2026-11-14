@@ -1,0 +1,3 @@
+{
+  "test_story_20_1d4a_tool_turn_reload::test_gemini_tool_turn_survives_tui_reload_80x24": "The job's plain cargo build lacks test-instrumentation, so the test skips at test_story_20_1d4a_tool_turn_reload.py:494. Owner: tui-5 (Rust twin tests/conformance_20_1d4a_tool_turn_fidelity/gemini.rs)."
+}

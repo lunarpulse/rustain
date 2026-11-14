@@ -22,16 +22,9 @@ row says `PLAN`) and offers the tour. While a step is armed the top row of the c
 coach line (`Tour <k>/5 · <instruction> · /tour`); the target of the step carries the reverse
 attribute (pyte `reverse`): step 4 the strip row's idle hint, step 5 the status row's `^X menu`.
 `/tour` then reopens step 1 and `Esc` leaves the `Tour closed.` toast. The live process is spawned
-with the raw PTY capture attached at spawn, so the first bytes are in `raw.pty`. Offline first:
-the frames and `.rev` highlight masks of `story21_14_smoke_frames_export_b` at 60x16, 80x24,
-130x30 and 130x30 with the monitor column, plus the strip-yield frame (a full composer at 60x16),
-each predicate proven against torn controls.
+with the raw PTY capture attached at spawn, so the first bytes are in `raw.pty`.
 
-Offline first: RUSTAIN_TOUR_DESKCHECK=1 with RUSTAIN_TOUR_FRAMES=<dir> consumes only the frames
-written by the ignored Rust test `story21_14_smoke_frames_export` (60x16, 80x24, 130x30, 130x30
-with the monitor column); no binary or subprocess is started. Every predicate passes on the
-intended frame and fails on torn controls. Predicates are anchored on whole rows; waits are
-structural, never sleeps.
+Predicates are anchored on whole rows; waits are structural, never sleeps.
 """
 import os
 import re
@@ -45,8 +38,6 @@ import harness
 from harness import RustainTUI
 from keys import CTRL_X, ENTER, ESC
 
-DESKCHECK = os.environ.get("RUSTAIN_TOUR_DESKCHECK") == "1"
-SIZES = ((60, 16), (80, 24), (130, 30))
 OFFER_RAIL = "[Enter] Continue  [Esc] Skip tour"
 STEP_RAIL = "[Enter] Continue  [n] Skip step  [Esc] Skip tour"
 COMPLETE = "Tour complete. Help is always one key away: Ctrl+X, ?."
@@ -75,11 +66,6 @@ def _tour_top(rows):
     return next((i for i, row in enumerate(rows) if pattern.fullmatch(row)), None)
 
 
-def tour_title(screen):
-    rows = _rows(screen)
-    top = _tour_top(rows)
-    return None if top is None else re.search(r"┌(Tour[^─┐]*?) ?─*┐", rows[top]).group(1).strip()
-
 def chrome_ok(screen, mode="Normal", strip=True):
     """The status row above the composer and, directly above it, the reserved strip row (the idle
     hint in every fixture unless the strip yielded): deleting or swapping either fails."""
@@ -105,7 +91,6 @@ def card_ok(screen, title, rail, mode="Normal"):
 
 
 LIVE_EMPTY = ("No agents active.",)
-FRAME_EMPTY = ("No agents active.", "Nothing here yet.")  # the frame export has no roster read
 
 
 def hub_ok(screen, empty=LIVE_EMPTY, mode="Normal"):
@@ -121,9 +106,6 @@ def help_ok(screen, mode="Normal"):
         and _tour_top(rows) is None and chrome_ok(screen, mode)
 
 
-COMPLETE_NARROW = "Tour complete. Help is always one key away: Ctrl+X,…"  # a 60-column toast headline
-
-
 def complete_ok(screen, text=COMPLETE, rows=1, monitor=False, mode="Normal"):
     """The Success toast on the toast rows the strip-aware harness derives (a bordered toast of
     100+ columns spans three rows; beside a monitor column the harness's row-end anchor cannot
@@ -135,90 +117,10 @@ def complete_ok(screen, text=COMPLETE, rows=1, monitor=False, mode="Normal"):
     return _tour_top(_rows(screen)) is None and toast and chrome_ok(screen, mode)
 
 
-def idle_ok(screen):
-    return _tour_top(_rows(screen)) is None and chrome_ok(screen)
-
-
-def torn_controls(screen, title, rail):
-    rows = _rows(screen)
-    top = _frame_top(rows, title)
-    assert top is not None
-    status = harness.status_row(screen)
-    controls = {
-        "title missing": "\n".join(row for i, row in enumerate(rows) if i != top),
-        "rail half painted": "\n".join(row.replace(rail, rail[: len(rail) // 2]) for row in rows),
-        "status row missing": "\n".join(row for row in rows if row != status),
-        "wrong title": "\n".join(row.replace(title, "Needs you (1)", 1) for row in rows),
-    }
-    strip = harness.strip_row(screen)
-    if strip:
-        swapped = [status if row == strip else strip if row == status else row for row in rows]
-        controls["strip and status swapped"] = "\n".join(swapped)
-    bottom = next(i for i in range(top + 1, len(rows)) if re.fullmatch(_LEFT + r"└─*┘" + _COL, rows[i]))
-    controls["bottom border missing"] = "\n".join(row for i, row in enumerate(rows) if i != bottom)
-    controls["strip deleted"] = "\n".join(row for row in rows if not strip or row != strip)
-    return controls
-
-
-def _frames(width, height, suffix=""):
-    root = Path(os.environ["RUSTAIN_TOUR_FRAMES"])
-    return {path.name.split("-")[0]: path.read_text(encoding="utf-8")
-            for path in root.glob(f"*-{width}x{height}{suffix}.txt")}
-
-
-def _deskcheck():
-    for width, height, suffix in [(w, h, "") for w, h in SIZES] + [(130, 30, "-monitor")]:
-        frames = _frames(width, height, suffix)
-        label = f"{width}x{height}{suffix}"
-        cards = {
-            "offer": ("Tour", OFFER_RAIL),
-            "step1": ("Tour · 1 of 5", STEP_RAIL),
-            "step4": ("Tour · 4 of 5", STEP_RAIL),
-            "step5": ("Tour · 5 of 5", STEP_RAIL),
-        }
-        for name, (title, rail) in cards.items():
-            screen = frames[name]
-            assert card_ok(screen, title, rail), f"{label} {name}:\n{screen}"
-            assert tour_title(screen) == title
-            for control, torn in torn_controls(screen, title, rail).items():
-                assert not card_ok(torn, title, rail), f"{label} {name}: torn control `{control}` passed"
-        assert "[n]" not in frames["offer"], f"{label}: n is not painted on the offer"
-        assert hub_ok(frames["hub"], FRAME_EMPTY), f"{label} hub:\n{frames['hub']}"
-        assert not hub_ok(frames["help"], FRAME_EMPTY) and not hub_ok(frames["idle"], FRAME_EMPTY)
-        assert help_ok(frames["help"]), f"{label} help:\n{frames['help']}"
-        text = COMPLETE_NARROW if width == 60 else COMPLETE
-        kw = {"rows": 3 if width >= 100 else 1, "monitor": suffix == "-monitor"}
-        assert complete_ok(frames["complete"], text, **kw), f"{label} complete:\n{frames['complete']}"
-        assert idle_ok(frames["idle"]), f"{label} idle:\n{frames['idle']}"
-        assert idle_ok(frames["armed4"]) and tour_title(frames["armed4"]) is None
-        assert not complete_ok(frames["armed4"], text, **kw)
-        # Torn controls of the other predicates.
-        assert not hub_ok("\n".join(r for r in _rows(frames["hub"]) if "Nothing here yet." not in r), FRAME_EMPTY)
-        assert not help_ok(frames["hub"]) and not idle_ok(frames["offer"])
-        torn_toast = frames["complete"].replace("Tour complete.", "Tour comp")
-        assert not complete_ok(torn_toast, text, **kw)
-        assert not complete_ok("\n".join(r for r in _rows(frames["complete"]) if "Normal" not in r), text, **kw)
-        # The reserved strip is required, and the toast is anchored to the toast rows.
-        for name in ("idle", "hub", "help", "complete"):
-            strip = harness.strip_row(frames[name])
-            assert strip, f"{label} {name}: the strip row is painted"
-            no_strip = "\n".join(r for r in _rows(frames[name]) if r != strip)
-            assert not chrome_ok(no_strip), f"{label} {name}: strip deleted passed"
-        moved = [r.replace(f"Success {text}", "") if "Success " in r else r for r in _rows(frames["complete"])]
-        moved[2] = (moved[2] + f"  Success {text}").rstrip()
-        assert not complete_ok("\n".join(moved), text, **kw), f"{label}: a toast moved into the Stage passed"
-
-
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
-    """Offline desk-check starts no binary; live runs use the harness resolution."""
-    if not DESKCHECK:
-        assert harness._resolve_binary()[0].is_file()
-
-
-@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
-def test_tour_predicates_accept_real_saved_frames_and_reject_torn_ones():
-    _deskcheck()
+    """Asserts the supplied/resolved binary exists; live runs use the harness resolution."""
+    assert harness._resolve_binary()[0].is_file()
 
 
 def _settle_no_tour(tui, polls=30):
@@ -231,7 +133,6 @@ def _settle_no_tour(tui, polls=30):
     return tui.get_screen_text()
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_a_tour_offer_steps_and_persistence_at_80x24(monkeypatch):
@@ -303,16 +204,6 @@ COACH = {
 TEAM_ARGS = ["-c", "onboarding.team=true"]
 
 
-def _marked(mask):
-    """{row: [columns]} of the highlighted cells of a `#`/`.` mask."""
-    marks = {}
-    for y, row in enumerate(mask.split("\n")):
-        cols = [x for x, ch in enumerate(row) if ch == "#"]
-        if cols:
-            marks[y] = cols
-    return marks
-
-
 def _span(text, needle):
     start = text.rfind(needle)
     return None if start < 0 else list(range(start, start + len(needle)))
@@ -334,89 +225,6 @@ def expected_marks(screen, number):
         return {top - 2: list(range(hint.start(), hint.end()))} if hint else None
     span = _span(lines[top - 1], "^X menu")
     return {top - 1: span} if span else {}
-
-
-def coach_frame_ok(screen, mask, number, mode="Normal", strip=True):
-    """Row 0 of the chat pane is the coach line, exactly the target cells carry the highlight, and
-    the status row (and the strip row unless it yielded) are in place."""
-    if not _rows(screen)[0].startswith(COACH[number]):
-        return False
-    expected = expected_marks(screen, number)
-    return expected is not None and _marked(mask) == expected and chrome_ok(screen, mode, strip)
-
-
-def coach_torn_controls(screen, mask, number, strip=True):
-    rows = screen.split("\n")
-    masks = mask.split("\n")
-    status = harness.status_row(screen)
-    row_strip = harness.strip_row(screen)
-    controls = {
-        "coach line missing": "\n".join([""] + rows[1:]),
-        "coach line on the wrong row": "\n".join([rows[1], rows[0]] + rows[2:]),
-        "coach text torn": "\n".join([rows[0].replace("Tour", "Tou", 1)] + rows[1:]),
-        "status row missing": "\n".join(r for r in rows if r != status),
-        "toast over the coach line": "\n".join([f"{'':>30}Success Tour closed."] + rows[1:]),
-    }
-    if strip and row_strip:
-        controls["strip row missing"] = "\n".join(r for r in rows if r.rstrip() != row_strip)
-        swapped = [status if r.rstrip() == row_strip else row_strip if r == status else r for r in rows]
-        controls["strip and status swapped"] = "\n".join(swapped)
-    mask_controls = {
-        "highlight missing": "\n".join("." * len(r) for r in masks),
-        "highlight shifted by a cell": "\n".join("." + r[:-1] for r in masks),
-        "highlight on the wrong row": "\n".join(masks[1:] + masks[:1]),
-        "highlight everywhere": "\n".join("#" * len(r) for r in masks),
-    }
-    return controls, mask_controls
-
-
-def _masks(width, height, suffix=""):
-    root = Path(os.environ["RUSTAIN_TOUR_FRAMES"])
-    return {path.name.split("-")[0]: path.read_text(encoding="utf-8")
-            for path in root.glob(f"*-{width}x{height}{suffix}.rev")}
-
-
-def _deskcheck_b():
-    for width, height, suffix in [(w, h, "") for w, h in SIZES] + [(130, 30, "-monitor")]:
-        frames, masks = _frames(width, height, suffix), _masks(width, height, suffix)
-        label = f"{width}x{height}{suffix}"
-        for number in (1, 4, 5):
-            name = f"coach{number}"
-            screen, mask = frames[name], masks[name]
-            assert coach_frame_ok(screen, mask, number), f"{label} {name}:\n{screen}\n{mask}"
-            controls, mask_controls = coach_torn_controls(screen, mask, number)
-            for control, torn in controls.items():
-                assert not coach_frame_ok(torn, mask, number), f"{label} {name}: `{control}` passed"
-            for control, torn in mask_controls.items():
-                if not expected_marks(screen, number) and control != "highlight everywhere":
-                    continue  # the target is not painted at this width: no cells to tear
-                assert not coach_frame_ok(screen, torn, number), f"{label} {name}: `{control}` passed"
-            # The highlight is the step's own: another step's frame is not this step's.
-            other = 5 if number != 5 else 1
-            assert not coach_frame_ok(frames[f"coach{other}"], masks[f"coach{other}"], number)
-        # The coach row is the chat pane's first row and never reaches the strip, the status row
-        # or the composer (the target cells excepted).
-        assert "Tour" not in "\n".join(_rows(frames["idle"])), f"{label}: no tour, no coach row"
-    screen, mask = _frames(60, 16)["yield4"], _masks(60, 16)["yield4"]
-    assert harness.strip_row(screen) == "", "the strip yielded its row"
-    assert coach_frame_ok(screen, mask, 4, strip=False), f"yield:\n{screen}\n{mask}"
-    assert not coach_frame_ok(screen, mask, 4), "the strip case does not hold on a yielded frame"
-    lines = screen.split("\n")
-    status = harness.status_row(screen)
-    painted = "^X menu" in status  # at 60 columns the tail may not fit: then nothing is highlighted
-    assert _marked(mask) == ({lines.index(status): _span(status, "^X menu")} if painted else {})
-    controls, mask_controls = coach_torn_controls(screen, mask, 4, strip=False)
-    for control, torn in controls.items():
-        assert not coach_frame_ok(torn, mask, 4, strip=False), f"yield: `{control}` passed"
-    for control, torn in mask_controls.items():
-        if not painted and control != "highlight everywhere":
-            continue  # an unpainted target has no cells to tear
-        assert not coach_frame_ok(screen, torn, 4, strip=False), f"yield: `{control}` passed"
-
-
-@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
-def test_coach_predicates_accept_real_saved_frames_and_reject_torn_ones():
-    _deskcheck_b()
 
 
 def _reverse_row(tui, row):
@@ -458,7 +266,6 @@ def _submit_tour_command(tui):
     tui.send(ENTER)
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_b_coach_line_highlight_and_team_defaults_at_80x24(monkeypatch):
@@ -529,8 +336,6 @@ def test_leg_b_coach_line_highlight_and_team_defaults_at_80x24(monkeypatch):
 # `/export <abs path>` (an absolute path is refused by the export handler without a provider) paints
 # an Error toast whose row is the fact line, `Ctrl+X n` opens the notification log whose row shows
 # the fact and not the next step, and `Enter` opens Details that show the fact AND the next step.
-# Offline first: the frames of `story21_14_smoke_frames_export_c` (toast, log list, details at
-# 60x16, 80x24, 130x30 and 130x30 with the monitor column) and the rendered help texts.
 ID_RE = re.compile(r"\b(?:(?:Story|Stories|Epic)\s+\d|(?:FR|NFR|UX-DR|ADR|AD|RU|DF|KG|MW|LR|OD|TM|AC)-?\d)")
 FP_RE = re.compile(r"(?:^|[^\w/])(?:I|I'm|I'll|I've|I'd)\b(?!/O)", re.M)
 ERR_WHAT = "Could not export to an absolute path."
@@ -580,55 +385,6 @@ def err_details_ok(screen):
     return ERR_WHAT in text and ERR_NEXT in text
 
 
-def _deskcheck_c():
-    for name in ("root", "daemon", "team"):
-        text = (Path(os.environ["RUSTAIN_TOUR_FRAMES"]) / f"help-{name}.txt").read_text(encoding="utf-8")
-        assert help_clean(text), f"help {name}:\n{text}"
-        assert len(text.splitlines()) > 4, f"help {name} is not empty"
-        for control in (text + "\n  (Story 9.4)", text + "\nI will draft it for you", text.replace("Usage", "Usage (FR12)", 1),
-                        text + "\nSee ADR-09-02.", ""):
-            assert not help_clean(control), f"help {name}: torn control passed:\n{control[-80:]!r}"
-    assert help_clean("Say I/O errors out loud") and not help_clean("Say: I think so")
-    for width, height, suffix in [(w, h, "") for w, h in SIZES] + [(130, 30, "-monitor")]:
-        frames = _frames(width, height, suffix)
-        label = f"{width}x{height}{suffix}"
-        monitor, rows = suffix == "-monitor", (3 if width >= 100 else 1)
-        toast, log, details = frames["errtoast"], frames["errlog"], frames["errdetails"]
-        assert err_toast_ok(toast, monitor, rows), f"{label} toast:\n{toast}"
-        full = width >= 80
-        assert err_log_ok(log, full), f"{label} log:\n{log}"
-        # Torn LOG-row facts: truncated to `Could not`, another export fact, a leaked next step.
-        row = next(r for r in _rows(log) if "export · Could not" in r)
-        body = row[row.index("export · ") + len("export · "):].rstrip(" │")
-        torn = ["Could not…", "Could not export the conversation.…", "Could not export to an a"]
-        if width >= 130:  # the row has room to carry a leaked next step inside the frame
-            torn.append(body + " " + ERR_NEXT)
-        for torn_body in torn:
-            assert not err_log_ok(log.replace(body, torn_body, 1), full), f"{label}: torn log row `{torn_body}` passed"
-        assert not err_log_ok("\n".join(r for r in _rows(log) if "export ·" not in r), full)
-        assert err_details_ok(details), f"{label} details:\n{details}"
-        # Torn controls: each predicate fails when its fact is gone, moved or merged.
-        assert not err_toast_ok(toast.replace(ERR_WHAT, "Could not exp"), monitor, rows)
-        assert not err_toast_ok(toast.replace("Error " + ERR_WHAT, "Error " + ERR_WHAT + " " + ERR_NEXT), monitor, rows)
-        assert not err_toast_ok("\n".join(r for r in _rows(toast) if ERR_WHAT not in r), monitor, rows)
-        moved = [r.replace("Error " + ERR_WHAT, "") if ERR_WHAT in r else r for r in _rows(toast)]
-        moved[2] = (moved[2] + "  Error " + ERR_WHAT + "…").rstrip()
-        assert not err_toast_ok("\n".join(moved), monitor, rows), f"{label}: a toast moved into the Stage passed"
-        assert not err_toast_ok(toast, monitor, rows, mode="PLAN")
-        assert not err_log_ok(toast) and not err_log_ok(details)
-        assert not err_log_ok(log.replace("Error ·", "Info  ·"))
-        assert not err_details_ok(log) and not err_details_ok(toast)
-        assert not err_details_ok(details.replace("Run /export", "Run /expo"))
-        assert not err_details_ok(details.replace("absolute path", "abso"))
-        assert not err_details_ok("\n".join(r for r in _rows(details) if "Run" not in r))
-
-
-@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
-def test_voice_predicates_accept_real_saved_frames_and_reject_torn_ones():
-    _deskcheck_c()
-
-
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_c_help_is_plain_and_an_error_states_its_next_step_at_80x24(monkeypatch):

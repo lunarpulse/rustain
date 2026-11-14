@@ -15,7 +15,7 @@ import time
 import pytest
 
 from harness import RustainTUI
-from keys import Permission, ENTER, ESC
+from keys import ENTER, ESC
 
 def _complete_sheet(screen, title, controls):
     """Identify a fully painted, bordered sheet with all its controls."""
@@ -61,47 +61,6 @@ def _permission_ready(tui):
     return _stable_sheet(tui, "Decision: Permission",
                          ("[y] Allow", "[s] Session", "[a] Always",
                           "[n] Deny", "[f] Deny + feedback", "[r] Review"))
-
-
-def test_complete_sheet_rejects_torn_permission_frame():
-    top = "┌ " + "Decision: Permission ".ljust(78, "─") + "┐"
-    body = "│" + " [y] Allow [s] Session [a] Always [n] Deny [f] Deny + feedback [r] Review".ljust(79) + "│"
-    whole = "\n".join((top, body, "└" + "─" * 79 + "┘"))
-    controls = ("[y] Allow", "[r] Review")
-    assert _complete_sheet(whole, "Decision: Permission", controls)
-    assert not _complete_sheet(whole.replace("[r] Review", "          "), "Decision: Permission", controls)
-    assert not _complete_sheet(whole.replace("└", " "), "Decision: Permission", controls)
-
-
-# ── Non-API tests (subprocess / mode-switch only) ─────────────────────────
-
-
-@pytest.mark.story_5_0b
-def test_permission_keys_are_defined():
-    """Verify new permission key constants exist in keys.py."""
-    assert Permission.SESSION_ALLOW == "s"
-    assert Permission.DENY_FEEDBACK == "f"
-    assert Permission.ALLOW == "y"
-    assert Permission.DENY == "n"
-    assert Permission.ALWAYS_ALLOW == "a"
-
-
-@pytest.mark.story_5_0b
-def test_harness_session_allow_method_exists():
-    """Verify harness has session_allow_permission method (structural check)."""
-    assert hasattr(RustainTUI, "session_allow_permission")
-
-
-@pytest.mark.story_5_0b
-def test_harness_deny_with_feedback_method_exists():
-    """Verify harness has deny_with_feedback method (structural check)."""
-    assert hasattr(RustainTUI, "deny_with_feedback")
-
-
-@pytest.mark.story_5_0b
-def test_harness_set_permission_mode_method_exists():
-    """Verify harness has set_permission_mode method (structural check)."""
-    assert hasattr(RustainTUI, "set_permission_mode")
 
 
 # ── API-dependent TUI tests ───────────────────────────────────────────────

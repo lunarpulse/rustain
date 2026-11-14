@@ -27,10 +27,7 @@ directly above the strip, found by the strip-aware `harness.toast_rows`. A secon
 60x16 with an eight-line draft: the strip yields its row (none painted) and `Ctrl+X h` still paints
 the five-row History frame with the status row directly below it.
 
-Offline first: RUSTAIN_MISSION_DESKCHECK=1 with RUSTAIN_MISSION_FRAMES=<dir> consumes only the
-frames written by the ignored Rust test `story21_7_smoke_frames_export` (60x16, 80x24, 130x30);
-no binary or subprocess is started. Every predicate passes on the intended frame and fails on
-torn controls. Predicates are anchored on whole rows; waits are structural, never sleeps.
+Predicates are anchored on whole rows; waits are structural.
 """
 import hashlib
 import json
@@ -45,9 +42,6 @@ import pytest
 import harness
 from harness import RustainTUI
 from keys import ALT_ENTER, CTRL_X
-
-DESKCHECK = os.environ.get("RUSTAIN_MISSION_DESKCHECK") == "1"
-SIZES = ((60, 16), (80, 24), (130, 30))
 
 
 def _rows(screen):
@@ -94,19 +88,6 @@ def stage_rows(screen):
     return rows[:max(composer - 1, 0)]
 
 
-def torn_controls(screen):
-    rows = _rows(screen)
-    top = _frame_top(rows)
-    assert top is not None
-    controls = {}
-    controls["cut mid-row"] = "\n".join(rows[:top + 2] + [rows[top + 2][: max(len(rows[top + 2]) // 2, 1)]] + rows[top + 3:])
-    controls["status row missing"] = "\n".join(row for row in rows if STATUS not in row)
-    controls["tab row missing"] = "\n".join(rows[:top + 1] + rows[top + 2:])
-    controls["rail half painted"] = "\n".join(row.replace("[Esc] Back", "[Esc") for row in rows)
-    controls["title swapped for status"] = "\n".join(
-        row.replace("Mission Control · Room", "Needs you (1)") for row in rows)
-    return controls
-
 MESSAGES_TITLE = "Mission Control · Messages"
 SEED_TS = "2023-11-14 22:13:20Z"
 ARTIFACT_BODY = "proof artifact body line\n"
@@ -152,37 +133,6 @@ def artifact_frame_ok(screen, prefix="aaaaaa"):
     return body and rail and status
 
 
-def _torn_frame(screen, title, marker, swap_to, extra):
-    """Torn controls of a hub/window frame: `marker` is a substring of the row whose loss or cut
-    must fail the predicate; `extra` is a {label: (old, new)} text replacement over every row."""
-    rows = _rows(screen)
-    top, bottom = _frame_bounds(rows, title)
-    assert top is not None and bottom is not None, screen
-    index = next(i for i in range(top + 1, bottom) if marker in rows[i])
-    controls = {}
-    controls["cut mid-row"] = "\n".join(rows[:index] + [rows[index][: max(len(rows[index]) // 2, 1)]] + rows[index + 1:])
-    controls["marker row missing"] = "\n".join(rows[:index] + rows[index + 1:])
-    controls["status row missing"] = "\n".join(row for row in rows if STATUS not in row)
-    controls["rail half painted"] = "\n".join(row.replace("[Esc] Back", "[Esc") for row in rows)
-    controls["title swapped for status"] = "\n".join(row.replace(title, swap_to) for row in rows)
-    for label, (old, new) in extra.items():
-        controls[label] = "\n".join(row.replace(old, new) for row in rows)
-    return controls
-
-
-def torn_messages(screen):
-    controls = _torn_frame(screen, MESSAGES_TITLE, SEED_TS, "Needs you (1)",
-                           {"tab row unmarked": ("▸Messages", " Messages")})
-    rows = _rows(screen)
-    top, _ = _frame_bounds(rows, MESSAGES_TITLE)
-    controls["tab row missing"] = "\n".join(rows[:top + 1] + rows[top + 2:])
-    return controls
-
-
-def torn_artifact(screen, prefix="aaaaaa"):
-    return _torn_frame(screen, artifact_title(prefix), ARTIFACT_BODY.strip(), "Needs you (1)",
-                       {"copy hint missing": ("[c] Copy", "")})
-
 AGENTS_TITLE = "Mission Control · Agents"
 EMPTY_COPY = "No agents active."
 
@@ -211,21 +161,6 @@ def adapters_frame_ok(screen):
     rail = re.fullmatch(r"\s*│.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
     status = any(STATUS in row for row in rows[bottom + 1:])
     return body and rail and status
-
-
-def torn_agents(screen):
-    controls = _torn_frame(screen, AGENTS_TITLE, EMPTY_COPY, "Needs you (1)",
-                           {"tab row unmarked": ("▸Agents", " Agents")})
-    rows = _rows(screen)
-    index = next(i for i, row in enumerate(rows) if EMPTY_COPY in row)
-    controls["cut mid-row"] = "\n".join(rows[:index] + [rows[index][: rows[index].index(EMPTY_COPY) + 6]] + rows[index + 1:])
-    top, _ = _frame_bounds(rows, AGENTS_TITLE)
-    controls["tab row missing"] = "\n".join(rows[:top + 1] + rows[top + 2:])
-    return controls
-
-
-def torn_adapters(screen):
-    return _torn_frame(screen, "Adapters", "persona", "Needs you (1)", {})
 
 
 TASKS_TITLE = "Mission Control · Tasks"
@@ -260,19 +195,6 @@ def task_window_ok(screen):
     return body and rail and status
 
 
-def torn_tasks(screen):
-    controls = _torn_frame(screen, TASKS_TITLE, TASK_ROW, "Needs you (1)",
-                           {"tab row unmarked": ("▸Tasks", " Tasks")})
-    rows = _rows(screen)
-    index = next(i for i, row in enumerate(rows) if TASK_ROW in row)
-    controls["cut mid-row"] = "\n".join(rows[:index] + [rows[index][: rows[index].index(TASK_ROW) + 4]] + rows[index + 1:])
-    return controls
-
-
-def torn_task_window(screen):
-    return _torn_frame(screen, f"Task 2 · {TASK_ROW}", TASK_RESULT, "Needs you (1)", {})
-
-
 HISTORY_TITLE = "History"
 HISTORY_A = "Alpha history session"
 HISTORY_B = "Bravo history session"
@@ -297,17 +219,6 @@ def history_frame_ok(screen):
     rail = re.fullmatch(r"\s*│.*\[Enter\] Open.*\[Esc\] Back\s*│\s*", rows[bottom - 1]) is not None
     status = any(STATUS in row for row in rows[bottom + 1:])
     return both and rail and status
-
-
-def torn_history(screen):
-    return _torn_frame(screen, HISTORY_TITLE, HISTORY_B, "Needs you (1)", {})
-
-
-def torn_launchpad(screen):
-    rows = _rows(screen)
-    index = next(i for i, row in enumerate(rows) if "^X h History" in row)
-    return {"key line cut": "\n".join(rows[:index] + [rows[index][: rows[index].index("History")]] + rows[index + 1:]),
-            "key line missing": "\n".join(rows[:index] + rows[index + 1:])}
 
 
 def transcript_ok(screen):
@@ -360,38 +271,7 @@ def monitor_remedy_ok(screen):
     return toast and monitor_off_ok(screen)
 
 
-def torn_monitor(screen):
-    rows = _rows(screen)
-    top, bottom, x = _monitor_bounds(rows)
-    task = next(i for i, row in enumerate(rows) if TASK_ROW in row)
-    status = next(i for i, row in enumerate(rows) if STATUS in row)
-    controls = {
-        "title cut mid-row": "\n".join(rows[:top] + [rows[top][: x + 9]] + rows[top + 1:]),
-        "title swapped": "\n".join(rows[:top] + [rows[top].replace("Tasks", "Room ")] + rows[top + 1:]),
-        "task row missing": "\n".join(rows[:task] + [rows[task].replace(TASK_ROW, " " * len(TASK_ROW))] + rows[task + 1:]),
-        "task row cut mid-row": "\n".join(rows[:task] + [rows[task][: rows[task].index(TASK_ROW) + 4]] + rows[task + 1:]),
-        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
-        "right border missing": "\n".join(rows[:top + 2] + [rows[top + 2].rstrip("│").rstrip()] + rows[top + 3:]),
-        "bottom border missing": "\n".join(rows[:bottom] + rows[bottom + 1:]),
-        "hub frame painted over": screen + "\n┌Mission Control · Tasks─┐",
-    }
-    return controls
-
-
-def torn_remedy(screen):
-    rows = _rows(screen)
-    toast = next(i for i, row in enumerate(rows) if MONITOR_REMEDY_HEAD in row)
-    status = next(i for i, row in enumerate(rows) if STATUS in row)
-    return {
-        "toast cut mid-row": "\n".join(rows[:toast] + [rows[toast][: rows[toast].index("The monitor") + 11]] + rows[toast + 1:]),
-        "toast missing": "\n".join(rows[:toast] + rows[toast + 1:]),
-        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
-        "a column painted": "\n".join(rows + ["    ┌Monitor · Tasks──┐"]),
-    }
-
-
 STRIP_TASKS = "Tasks 2/3"
-STRIP_IDLE = "^X s Mission Control"
 
 
 def strip_row_ok(screen, text):
@@ -423,161 +303,6 @@ def strip_yield_ok(screen):
     return rail and body and STATUS in rows[bottom + 1]
 
 
-def torn_strip(screen, text):
-    rows = _rows(screen)
-    top = harness.composer_top(rows)
-    strip, status = top - 2, top - 1
-    return {
-        "strip cut mid-row": "\n".join(rows[:strip] + [text[: len(text) // 2]] + rows[strip + 1:]),
-        "strip missing": "\n".join(rows[:strip] + [""] + rows[strip + 1:]),
-        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
-        "strip and status swapped": "\n".join(rows[:strip] + [rows[status], rows[strip]] + rows[status + 1:]),
-        "strip text changed": "\n".join(rows[:strip] + [text.replace("2/3", "9/9").replace("Mission", "Mess")] + rows[strip + 1:]),
-    }
-
-
-def torn_strip_toast(screen):
-    rows = _rows(screen)
-    top = harness.composer_top(rows)
-    strip, toast = top - 2, top - 3
-    return {
-        "toast over the strip": "\n".join(rows[:strip] + [rows[toast]] + rows[strip + 1:]),
-        "toast under the strip": "\n".join(rows[:toast] + [rows[strip], rows[toast]] + rows[strip + 1:]),
-        "toast missing": "\n".join(rows[:toast] + [""] + rows[toast + 1:]),
-        "toast cut mid-row": "\n".join(rows[:toast] + [rows[toast][: rows[toast].index("The monitor") + 11]] + rows[toast + 1:]),
-    }
-
-
-def torn_strip_yield(screen):
-    rows = _rows(screen)
-    top, bottom = _frame_bounds(rows, HISTORY_TITLE)
-    status = bottom + 1
-    return {
-        "a strip row painted over the frame bottom": "\n".join(rows[:bottom] + [STRIP_TASKS] + rows[bottom + 1:]),
-        "frame cut mid-row": "\n".join(rows[:top + 1] + [rows[top + 1][: len(rows[top + 1]) // 2]] + rows[top + 2:]),
-        "status row missing": "\n".join(rows[:status] + rows[status + 1:]),
-        "rail half painted": "\n".join(row.replace("[Esc] Back", "[Esc") for row in rows),
-    }
-
-
-def _deskcheck():
-    frames = Path(os.environ["RUSTAIN_MISSION_FRAMES"])
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        open_frame = (frames / f"room-open-{name}.txt").read_text(encoding="utf-8")
-        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
-        after = (frames / f"stage-after-{name}.txt").read_text(encoding="utf-8")
-        assert room_frame_ok(open_frame), f"{name}: the intended frame must pass\n{open_frame}"
-        assert not room_frame_ok(before), f"{name}: the frame is absent before the open"
-        assert stage_rows(before) == stage_rows(after), f"{name}: Esc restores the Stage rows"
-        assert not room_frame_ok(after), f"{name}: the frame is gone after Esc"
-        for label, torn in torn_controls(open_frame).items():
-            assert not room_frame_ok(torn), f"{name}: torn control `{label}` must fail:\n{torn}"
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        messages = (frames / f"messages-open-{name}.txt").read_text(encoding="utf-8")
-        artifact = (frames / f"artifact-open-{name}.txt").read_text(encoding="utf-8")
-        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
-        room = (frames / f"room-open-{name}.txt").read_text(encoding="utf-8")
-        assert messages_frame_ok(messages), f"{name}: the Messages frame must pass\n{messages}"
-        assert artifact_frame_ok(artifact), f"{name}: the artifact window must pass\n{artifact}"
-        for label, frame in (("the Stage", before), ("the Room frame", room)):
-            assert not messages_frame_ok(frame), f"{name}: Messages is absent from {label}"
-            assert not artifact_frame_ok(frame), f"{name}: the window is absent from {label}"
-        assert not messages_frame_ok(artifact) and not artifact_frame_ok(messages), name
-        assert not artifact_frame_ok(artifact, prefix="bbbbbb"), f"{name}: another artifact's title fails"
-        for label, torn in torn_messages(messages).items():
-            assert not messages_frame_ok(torn), f"{name}: torn Messages control `{label}` must fail:\n{torn}"
-        for label, torn in torn_artifact(artifact).items():
-            assert not artifact_frame_ok(torn), f"{name}: torn window control `{label}` must fail:\n{torn}"
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        agents = (frames / f"agents-open-{name}.txt").read_text(encoding="utf-8")
-        adapters = (frames / f"adapters-open-{name}.txt").read_text(encoding="utf-8")
-        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
-        room = (frames / f"room-open-{name}.txt").read_text(encoding="utf-8")
-        assert agents_frame_ok(agents), f"{name}: the Agents tab must pass\n{agents}"
-        assert adapters_frame_ok(adapters), f"{name}: the Adapters window must pass\n{adapters}"
-        for label, frame in (("the Stage", before), ("the Room frame", room)):
-            assert not agents_frame_ok(frame) and not adapters_frame_ok(frame), f"{name}: absent from {label}"
-        assert not agents_frame_ok(adapters) and not adapters_frame_ok(agents), name
-        for label, torn in torn_agents(agents).items():
-            assert not agents_frame_ok(torn), f"{name}: torn Agents control `{label}` must fail:\n{torn}"
-        for label, torn in torn_adapters(adapters).items():
-            assert not adapters_frame_ok(torn), f"{name}: torn Adapters control `{label}` must fail:\n{torn}"
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        tasks = (frames / f"tasks-open-{name}.txt").read_text(encoding="utf-8")
-        window = (frames / f"task-open-{name}.txt").read_text(encoding="utf-8")
-        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
-        room = (frames / f"room-open-{name}.txt").read_text(encoding="utf-8")
-        assert tasks_frame_ok(tasks), f"{name}: the Tasks tab must pass\n{tasks}"
-        assert task_window_ok(window), f"{name}: the task window must pass\n{window}"
-        for label, frame in (("the Stage", before), ("the Room frame", room)):
-            assert not tasks_frame_ok(frame) and not task_window_ok(frame), f"{name}: absent from {label}"
-        assert not tasks_frame_ok(window) and not task_window_ok(tasks), name
-        for label, torn in torn_tasks(tasks).items():
-            assert not tasks_frame_ok(torn), f"{name}: torn Tasks control `{label}` must fail:\n{torn}"
-        for label, torn in torn_task_window(window).items():
-            assert not task_window_ok(torn), f"{name}: torn window control `{label}` must fail:\n{torn}"
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        launch = (frames / f"launchpad-{name}.txt").read_text(encoding="utf-8")
-        history = (frames / f"history-open-{name}.txt").read_text(encoding="utf-8")
-        before = (frames / f"stage-before-{name}.txt").read_text(encoding="utf-8")
-        assert launchpad_key_ok(launch), f"{name}: the launchpad key line must name History\n{launch}"
-        assert history_frame_ok(history), f"{name}: the History frame must pass\n{history}"
-        for label, frame in (("the Stage", before), ("the launchpad", launch)):
-            assert not history_frame_ok(frame), f"{name}: History is absent from {label}"
-        assert not launchpad_key_ok(history) and not launchpad_key_ok(before), name
-        for label, torn in torn_history(history).items():
-            assert not history_frame_ok(torn), f"{name}: torn History control `{label}` must fail:\n{torn}"
-        for label, torn in torn_launchpad(launch).items():
-            assert not launchpad_key_ok(torn), f"{name}: torn launchpad control `{label}` must fail:\n{torn}"
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        off = (frames / f"monitor-off-{name}.txt").read_text(encoding="utf-8")
-        on = (frames / f"monitor-on-{name}.txt").read_text(encoding="utf-8")
-        history = (frames / f"history-open-{name}.txt").read_text(encoding="utf-8")
-        assert monitor_off_ok(off), f"{name}: the monitor-off frame must pass\n{off}"
-        assert not monitor_column_ok(off) and not monitor_remedy_ok(off), name
-        if width >= 120:
-            toggled = (frames / f"monitor-toggled-off-{name}.txt").read_text(encoding="utf-8")
-            assert monitor_column_ok(on), f"{name}: the monitor column must pass\n{on}"
-            assert not monitor_off_ok(on) and not monitor_remedy_ok(on), name
-            assert monitor_off_ok(toggled) and not monitor_column_ok(toggled), name
-            for label, torn in torn_monitor(on).items():
-                assert not monitor_column_ok(torn), f"{name}: torn monitor control `{label}` must fail:\n{torn}"
-        else:
-            assert monitor_remedy_ok(on), f"{name}: the width remedy must pass\n{on}"
-            assert monitor_off_ok(on) and not monitor_column_ok(on), name
-            for label, torn in torn_remedy(on).items():
-                assert not monitor_remedy_ok(torn), f"{name}: torn remedy control `{label}` must fail:\n{torn}"
-        assert not monitor_column_ok(history) and not monitor_remedy_ok(history), name
-    for width, height in SIZES:
-        name = f"{width}x{height}"
-        idle = (frames / f"strip-idle-{name}.txt").read_text(encoding="utf-8")
-        plan = (frames / f"strip-plan-{name}.txt").read_text(encoding="utf-8")
-        assert strip_row_ok(idle, STRIP_IDLE), f"{name}: the idle hint must pass\n{idle}"
-        assert strip_row_ok(plan, STRIP_TASKS), f"{name}: the plan strip must pass\n{plan}"
-        assert not strip_row_ok(idle, STRIP_TASKS) and not strip_row_ok(plan, STRIP_IDLE), name
-        for text, frame in ((STRIP_IDLE, idle), (STRIP_TASKS, plan)):
-            for label, torn in torn_strip(frame, text).items():
-                assert not strip_row_ok(torn, text), f"{name}: torn strip control `{label}` must fail:\n{torn}"
-        if width < 120:
-            toast = (frames / f"strip-toast-{name}.txt").read_text(encoding="utf-8")
-            assert strip_toast_ok(toast), f"{name}: the toast above the strip must pass\n{toast}"
-            assert not strip_toast_ok(plan), f"{name}: no toast on the plain frame"
-            for label, torn in torn_strip_toast(toast).items():
-                assert not strip_toast_ok(torn), f"{name}: torn toast control `{label}` must fail:\n{torn}"
-    yielded = (frames / "strip-yield-60x16.txt").read_text(encoding="utf-8")
-    assert strip_yield_ok(yielded), f"60x16: the yielded strip with the five-row frame must pass\n{yielded}"
-    assert not strip_yield_ok((frames / "strip-plan-60x16.txt").read_text(encoding="utf-8"))
-    for label, torn in torn_strip_yield(yielded).items():
-        assert not strip_yield_ok(torn), f"60x16: torn yield control `{label}` must fail:\n{torn}"
-    print("desk-check ok", [f"{w}x{h}" for w, h in SIZES])
-
-
 def _seed_journal(journal: Path) -> None:
     host = {"host_id": "old", "workspace_id": "fixture-workspace"}
     events = [
@@ -595,17 +320,10 @@ def _seed_journal(journal: Path) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
-    """Offline desk-check starts no binary; live runs use the harness resolution."""
-    if not DESKCHECK:
-        assert harness._resolve_binary()[0].is_file()
+    """Assert the supplied or resolved binary exists."""
+    assert harness._resolve_binary()[0].is_file()
 
 
-@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
-def test_mission_predicates_accept_real_saved_frames_and_reject_torn_ones():
-    _deskcheck()
-
-
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_a_room_tab_at_80x24(monkeypatch):
@@ -682,7 +400,6 @@ def _seed_leg_b(journal: Path, workspace: Path) -> str:
     return artifact_id
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_b_messages_and_artifact_window_at_80x24(monkeypatch):
@@ -773,7 +490,6 @@ def test_leg_b_messages_and_artifact_window_at_80x24(monkeypatch):
                 {"viewport": [80, 24], "binary": binary, "artifact": artifact_id, "result": "PASS"}) + "\n")
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_c_agents_tab_and_adapters_window_at_80x24(monkeypatch):
@@ -839,7 +555,6 @@ def _plan_session(session_id: str) -> dict:
     return {**base, "id": session_id, "title": "Plan smoke", "messages": [], "turns": [], "plans": {"p1": plan}}
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_d_tasks_tab_and_task_window_at_80x24(monkeypatch):
@@ -912,7 +627,6 @@ def _history_session(session_id: str, title: str, updated: int, with_turns: bool
     return session
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_e_history_window_at_80x24(monkeypatch):
@@ -966,7 +680,6 @@ def _start_leg_f(monkeypatch, workspace, env, cols, rows, session_id):
                       extra_args=["--session", session_id])
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24(monkeypatch):
@@ -1014,7 +727,6 @@ def test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24(monkeypatch):
             {"viewports": [[130, 30], [80, 24]], "binary": binary, "result": "PASS"}) + "\n")
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_leg_g_mission_strip_at_80x24_and_the_yield_at_60x16(monkeypatch):

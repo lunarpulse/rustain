@@ -16,17 +16,6 @@ import pytest
 from harness import RustainTUI
 
 
-# ── Non-API structural tests ─────────────────────────────────────────────────
-
-
-@pytest.mark.story_6_0b
-def test_story_marker_registered():
-    """Verify the story_6_0b pytest marker is available."""
-    # This test exists so that `pytest -m story_6_0b` does not complain
-    # about an unknown marker when only structural tests are collected.
-    assert True
-
-
 # ── API-dependent TUI tests ──────────────────────────────────────────────────
 
 

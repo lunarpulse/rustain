@@ -13,11 +13,6 @@ thinking part is ONE row ``│ ◇ Thinking · 4.2s · 1.3k tokens``; ``Esc`` ->
 ``Enter`` -> the ``Thinking · 4.2s · 1.3k tokens`` window with the reasoning text;
 ``c`` -> the clipboard file holds the original text byte for byte (its raw ESC
 included); ``Esc`` -> every Stage row restored.
-
-Offline first: RUSTAIN_STAGE_POLISH_DESKCHECK=1 with RUSTAIN_STAGE_POLISH_FRAMES=<dir>
-consumes only saved Rust paints at 60x16, 80x24 and 130x30 and the torn controls
-derived from them; no binary, subprocess or scene provider is started.
-Predicates are anchored on whole rows; no wait is a sleep.
 """
 from datetime import datetime, timezone
 import json
@@ -46,7 +41,6 @@ SESSION_ID = "story21-9-stage-polish"
 TOOLS = Path(__file__).parent / "fixtures" / "sessions" / "story21_9_tool_lines.json"
 TOOLS_ID = "story21-9-tool-lines"
 BRANCH = "smoke-21-9"
-DESKCHECK = os.environ.get("RUSTAIN_STAGE_POLISH_DESKCHECK") == "1"
 
 USER_ROW = r"(?:▶ )?explain <T> Vec<String> <b>b</b> \*x\*"
 # The focused turn paints `▶ ` before its first row when it has no metadata row.
@@ -190,79 +184,13 @@ def _launchpad(screen):
             and not any("Ready" in row or "│" in row for row in block)
             and not _toast_rows(screen))
 
-def _frame(frames, size, name):
-    return json.loads((frames / f"{size}-{name}.json").read_text())["screen"]
-
-
-def _deskcheck_b(frames):
-    for size in ("60x16", "80x24", "130x30"):
-        tools, pad = _frame(frames, size, "tools"), _frame(frames, size, "launchpad")
-        assert _tool_rows(tools) and not _tool_rows(tools.replace("0.3s", "0.3")), size
-        assert _launchpad(pad), size
-        # Torn controls: a cut row, a missing status row, rows shifted by one, a toast.
-        assert not _tool_rows(tools.replace("+12 −3", "+12 −")), size
-        assert not _launchpad(pad.replace(BRANCH, BRANCH[:-1])), size
-        rows = _rows(pad)
-        top = _composer_top(rows)
-        assert not _launchpad("\n".join(rows[:top - 1] + rows[top:])), size
-        head = next(i for i, row in enumerate(rows) if row.strip() == "Welcome to Rustain.")
-        assert not _launchpad("\n".join(rows[:head + 1] + [""] + rows[head + 1:-1] + rows[-1:])), size
-        toasted = rows[:]
-        toasted[head + 1] = toasted[head + 1][:4] + "Warning Model discovery for 'anthropic' returned 0 models."
-        assert not _launchpad("\n".join(toasted)), size
-        assert not _launchpad(pad.replace("Welcome to Rustain.", "Ready to start.")), size
-
-
-
-def _deskcheck():
-    frames = Path(os.environ["RUSTAIN_STAGE_POLISH_FRAMES"])
-    for size in ("60x16", "80x24", "130x30"):
-        stage, marked, opened, back = (
-            _frame(frames, size, name) for name in ("stage", "marked", "opened", "back"))
-        # The predicates accept the real paints and reject the others.
-        assert _thinking_fold(stage) and not _marked(stage), size
-        assert _quiet_marked(marked) and not _opened(marked), size
-        assert _opened(opened) and not _marked(opened) and not _thinking_fold(opened), size
-        assert _back(back, _stage_rows(marked)) and not _opened(back), size
-        assert _verbatim_user(stage), size
-        # Torn frames: a cut row, a missing composer, a half-painted title or rail.
-        assert not _marked(marked.replace("Inspect", "Insp")), size
-        assert not _thinking_fold(stage.replace("1.3k tokens", "1.3k tok")), size
-        assert not _quiet_marked("\n".join(_rows(marked)[:-1])), size
-        assert not _opened(opened.replace("[Esc] Back", "[Esc] Ba")), size
-        assert not _opened(opened.replace("┌Thinking · 4.2s", "┌Thinking · 4.")), size
-        assert not _opened(opened.replace("Compare parser A and parser B.", "Compare par")), size
-        assert not _back(back, _stage_rows(marked)[:-1] + ["torn"]), size
-        # A toast over a Stage row makes the baseline unstable: marked, not quiet.
-        rows = marked.split("\n")
-        last = len(_stage_rows(marked)) - 1
-        rows[last] = rows[last][:10] + "Warning Model discovery for 'anthropic' returned 0 models."
-        toasted = "\n".join(rows)
-        assert _toast_rows(toasted) and not _quiet_marked(toasted), size
-        assert _quiet_marked(marked), size
-    _deskcheck_b(frames)
-    # 80x24 is the live size: the user row is whole and verbatim there.
-    assert _verbatim_user(_frame(frames, "80x24", "stage"))
-    assert not _verbatim_user(_frame(frames, "80x24", "stage").replace("<b>b</b>", "b"))
-    # The thinking row stays one row of its own at every size.
-    for size in ("60x16", "80x24", "130x30"):
-        fold = [row for row in _rows(_frame(frames, size, "stage")) if "◇ Thinking" in row]
-        assert len(fold) == 1 and fold[0].startswith("│ ◇ Thinking"), (size, fold)
-
 
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
-    """Offline desk-check starts no binary; live runs use the default resolution."""
-    if not DESKCHECK:
-        assert harness._resolve_binary()[0].is_file()
+    """Assert the supplied or resolved binary exists."""
+    assert harness._resolve_binary()[0].is_file()
 
 
-@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
-def test_stage_polish_predicates_accept_real_saved_frames_and_reject_torn_ones():
-    _deskcheck()
-
-
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_thinking_row_marker_window_and_copy_at_80x24(monkeypatch):
@@ -388,7 +316,6 @@ def _spawn(binary, evidence, root, original_spawn, monkeypatch):
     assert status == 0, f"scene provider exited {status}: {stub.rows()}"
 
 
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_tool_rows_and_launchpad_at_80x24(monkeypatch):

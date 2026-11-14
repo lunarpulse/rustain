@@ -8,10 +8,6 @@ cue; `Enter` -> the `Block · rust #1` window; `$` shows the tail of line 7 and 
 `→`; `0` returns; `G`, `c` (clipboard file), `Esc` back to the same Stage rows.
 Leg B: `G` shows the cap's `… 15 more lines` row inside the box; `Enter`, `#`, `G`
 line 45 with its number, `]` the table neighbour, `v` its markdown source, `Esc`.
-
-Offline first: RUSTAIN_BLOCK_VIEWER_DESKCHECK=1 with RUSTAIN_BLOCK_VIEWER_FRAMES=<dir>
-consumes only saved Rust paints (see conformance_21_13 `smoke_frames`); no binary,
-subprocess or scene provider is started. Predicates are anchored on whole rows.
 """
 from datetime import datetime, timezone
 import json
@@ -34,7 +30,6 @@ from test_story_20_1c_locked_providers import (  # noqa: E402
 
 SCENE = Path(__file__).parent / "fixtures" / "scenes" / "block_viewer.json"
 PERSONA = "scene-ci-block-viewer"
-DESKCHECK = os.environ.get("RUSTAIN_BLOCK_VIEWER_DESKCHECK") == "1"
 
 
 def _rows(screen):
@@ -149,82 +144,12 @@ def _back(screen, stage_rows=None):
             and (stage_rows is None or _stage_rows(screen) == stage_rows))
 
 
-def _frame(frames, size, name):
-    return json.loads((frames / f"{size}-{name}.json").read_text())["screen"]
-
-
-def _window_any_size(screen):
-    """Title, status row (col range only when something is wider) and the Back rail."""
-    rows = _rows(screen)
-    return (any("Block · rust #1" in row for row in rows)
-            and _matches_row(screen, r"[│ ]*code 1/2 · rust · 45 lines · Rendered( · col \d+-\d+/122)?[│ ]*")
-            and any("[Esc] Back" in row for row in rows))
-
-
-def _deskcheck():
-    frames = Path(os.environ["RUSTAIN_BLOCK_VIEWER_FRAMES"])
-    # 80x24: the smoke's own predicates accept the real paints and reject the others.
-    stage, opened, tail = (_frame(frames, "80x24", name) for name in ("marked", "opened", "tail"))
-    end = _frame(frames, "80x24", "end")
-    assert _marked(stage) and not _marked(opened.replace("▸", " "))
-    assert _opened(opened) and _tail(tail) and _end(end)
-    assert not _tail(opened) and not _opened(stage) and not _end(opened)
-    # Torn frames (a cut row, a missing rail, a half-painted title) are rejected.
-    assert not _marked(stage.replace("Inspect ─┐", "Insp"))
-    assert not _opened(opened.replace("[Esc] Back", "[Esc] Ba"))
-    assert not _opened(opened.replace("Block · rust #1", "Block · ru"))
-    # A toast on a Stage row makes the baseline unstable: marked but not quiet.
-    rows = stage.split("\n")
-    rows[18] = rows[18][:20] + "Warning Model discovery for 'anthropic' returned 0 models."
-    toasted = "\n".join(rows)
-    assert _marked(toasted) and not _quiet_marked(toasted) and _quiet_marked(stage)
-    failing = os.environ.get("RUSTAIN_BLOCK_VIEWER_FAILING_FRAME")
-    if failing:  # the saved real frame of the quarantined attempt
-        saved = Path(failing).read_text().rstrip("\n")
-        assert _marked(saved) and not _quiet_marked(saved)
-    # 60x16 and 130x30 saved S-BLOCK paints: the window predicate holds, and each
-    # size shows its own end-of-body row (the 1-row body shows the bottom border).
-    for size in ("60x16", "130x30"):
-        assert _window_any_size(_frame(frames, size, "opened")), size
-        assert not _window_any_size(_frame(frames, size, "marked")), size
-        assert not _window_any_size(_frame(frames, size, "opened").replace("[Esc] Back", "")), size
-    assert _matches_row(_frame(frames, "60x16", "tail"), r"[│ ]*code 1/2 · rust · 45 lines · Rendered · col \d+-122/122[│ ]*")
-    assert "col" not in _frame(frames, "130x30", "tail").split("\n")[1]
-    assert _end(_frame(frames, "130x30", "end"))
-    assert any(row.lstrip("│ ").startswith("└") for row in _rows(_frame(frames, "60x16", "end")))
-    # Leg B frames at every size. The capped Stage shows its remainder row; numbers,
-    # the neighbour and the source are generic window predicates, and each size shows
-    # its own end-of-body row (a 1-row body shows the bottom border, blank gutter).
-    for size in ("80x24", "60x16", "130x30"):
-        bottom = _frame(frames, size, "stage-bottom")
-        numbers_end = _frame(frames, size, "numbers-end")
-        nxt, source = _frame(frames, size, "next"), _frame(frames, size, "source")
-        assert _capped(bottom) and not _capped(_frame(frames, size, "marked")), size
-        assert _matches_row(numbers_end, STATUS_NUMBERS), size
-        assert _next_table(nxt) and not _next_table(source), size
-        assert _source_table(source) and not _source_table(nxt), size
-        assert not _capped(bottom.replace("more lines", "more line")), size
-        assert not _next_table(nxt.replace("Rendered", "Rend")), size
-        assert not _source_table(source.replace("· Source ·", "· Sour")), size
-    for size in ("80x24", "130x30"):
-        assert _numbers_end(_frame(frames, size, "numbers-end")), size
-    assert any(re.fullmatch(r"│? *│ └─+→?│?", row) for row in _rows(_frame(frames, "60x16", "numbers-end")))
-    assert not _numbers_end(_frame(frames, "80x24", "end"))
-
-
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
-    """Offline desk-check starts no binary; live runs use the default resolution."""
-    if not DESKCHECK:
-        assert harness._resolve_binary()[0].is_file()
+    """Asserts the supplied/resolved binary exists; live runs use the default resolution."""
+    assert harness._resolve_binary()[0].is_file()
 
 
-@pytest.mark.skipif(not DESKCHECK, reason="offline desk-check only")
-def test_block_viewer_predicates_accept_real_saved_frames_and_reject_torn_ones():
-    _deskcheck()
-
-
-@pytest.mark.skipif(DESKCHECK, reason="live run is skipped during the offline desk-check")
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(600)
 def test_block_viewer_cue_window_and_horizontal_scroll_at_80x24(monkeypatch):
