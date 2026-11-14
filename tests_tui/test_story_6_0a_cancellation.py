@@ -100,12 +100,10 @@ class TestTabCancellationLifecycleNoApi:
         """
         # Close the only tab — should be rejected
         tui.chat_mode()
+        mark = tui.notification_mark()
         tui.close_tab()
-        # Story 21.1: an Info toast (4 s) at the chat pane's bottom edge; this
-        # 3 s poll starts right after the palette Enter, inside the TTL.
-        tui.wait_for_screen("Only one tab open", timeout=3.0)
-
-        tui.assert_screen_contains("Only one tab open")
+        # An Info notice: a toast for 4 s, otherwise the Notification Log keeps it.
+        tui.wait_for_notification("Only one tab open", mark, "Info")
         _assert_tui_alive(tui, timeout=3.0)
 
     def test_tab_bar_shows_correct_count_after_creates_and_closes(self, tui: RustainTUI):

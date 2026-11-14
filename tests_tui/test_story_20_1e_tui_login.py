@@ -5,7 +5,8 @@ Phase B: a locked configured provider is signed into from the model picker
 blooms with the live roster and the CLI discovery line, and a turn reaches the
 provider with the new key. Phase C: the Anthropic browser login shows its
 waiting view with an OSC 8 link and the local shortcut, opens the launch URL,
-copies it with Alt+L (OSC 52), and Esc cancels it with the callback port closed.
+copies it with Alt+L (OSC 52), and Esc cancels it (the closed callback port is proved by
+`tests/conformance_20_1e_tui_login/browser.rs`, `k04_esc_in_the_waiting_view_cancels_and_closes_the_callback_port`).
 """
 from base64 import b64encode
 from contextlib import ExitStack
@@ -16,7 +17,6 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import stat
 import tempfile
 import threading
@@ -320,9 +320,6 @@ def _exercise(binary, evidence, root, monkeypatch):
         detail = tui.read_notification_detail("Login cancelled")
         assert "Login cancelled" in detail, detail
         tui.close_notification_log()
-        with socket.socket() as probe:
-            probe.settimeout(5)
-            assert probe.connect_ex(("127.0.0.1", port)) != 0, "callback port still open"
 
         with lock:
             observed = list(requests)

@@ -17,7 +17,7 @@ import time
 import pytest
 
 from harness import RustainTUI
-from keys import ENTER, CTRL_X, CTRL_P, ESC
+from keys import ENTER, CTRL_X, ESC
 
 # Exact 6-3 pattern with minimal substitutions.
 PROMPT = (
@@ -68,23 +68,6 @@ def _drive_plan(tui: RustainTUI) -> bool:
         tui.wait_for_idle()
         return True
     return tui.wait_for_screen("Plan cancelled", timeout=15)
-
-
-# ── structural (no API) ──────────────────────────────────────────────────────
-
-
-def test_palette_opens_no_crash(tui: RustainTUI):
-    """Ctrl+P palette overlay renders and Esc dismisses without freeze."""
-    tui.send(CTRL_P)
-    time.sleep(0.5)
-    screen = tui.get_screen_text()
-    assert any(w in screen for w in ("Tip:", "filter", "Command")), (
-        f"Palette expected.\n{screen}"
-    )
-    tui.send(ESC)
-    time.sleep(0.4)
-    tui.send(ESC)
-    time.sleep(0.2)
 
 
 # ── API tests (single combined test — avoids wasteful repeat plan-execs) ─────

@@ -373,6 +373,9 @@ class TestMyFeature:
 | `close_overlay()` | Overlay | Press Escape |
 | `approve_permission()` | Permission | Press y |
 | `wait_for_idle(sec)` | Any | Sleep (wait for turn to complete) |
+| `notification_mark()` | Any | Read until the wall clock turns into the next whole second; the mark for `wait_for_notification` |
+| `wait_for_notification(text, mark, severity)` | Any | Wait until the Notification Log lists the notice with a time at or after `mark`'s second (the log is the only freshness authority; a toast is never evidence); returns `"log"` |
+| `RustainTUI(notification_ttl_secs=30)` | n/a | Field: Info and Success toast lifetime written to the workspace config (the default is 4 s) |
 
 ### 4. Available Assertions
 
@@ -386,6 +389,10 @@ class TestMyFeature:
 | `checkpoints_exist()` | Any session has checkpoints |
 | `snapshot_count()` | Count snapshot files across sessions |
 | `session_ids()` | List all session IDs |
+| `wait_until(predicate, label, timeout)` | Poll the screen until `predicate(screen)` holds, return that screen (fails with the last screen) |
+| `mode_segment(screen)` | The status row's permission-mode segment (`Normal`, `PLAN`, `AUTOEDIT`, `YOLO`), positional; a module function of `harness` |
+
+**Waits.** Waits are bounded by the wall clock (`wait_for_screen`, `wait_for_screen_not_contains` and `wait_for_export_file` check a monotonic deadline, however slow a read or a sleep is). Never wait on a toast with `wait_for_screen`: a short-lived toast can paint and expire between two reads. Wait on a durable fact (the status row's `mode_segment`, a file, a log line), or on `wait_for_notification(text, mark, severity)` after taking `mark = tui.notification_mark()` just before the triggering key (it returns `"log"` once the Notification Log lists the notice with a time at or after the mark's second: the log is the only freshness authority and a toast is never evidence). When the toast row itself is the claim, start the harness with `notification_ttl_secs=30` (Info and Success lifetime in the workspace config) and dismiss the toast with `Ctrl+X x`.
 
 ## Markers
 

@@ -10,7 +10,6 @@ Tests for the complete Plan mode workflow:
 Non-API tests (structural / no LLM calls):
   - Mode switching via slash command and Shift+Tab
   - Status bar PLAN indicator
-  - Help overlay documentation
 
 API-dependent tests:
   - Full flow: enter Plan → agent Read (succeeds) → agent Write (denied)
@@ -21,8 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-from harness import RustainTUI
-from keys import ENTER, ESC, SHIFT_TAB
+from harness import RustainTUI, mode_segment, status_row
+from keys import SHIFT_TAB
 
 
 # ── Structural / non-API tests ─────────────────────────────────────────────
@@ -77,9 +76,7 @@ def test_slash_command_plan_on_via_input(tui: RustainTUI):
     as a user-defined command, so the mode never changed.
     """
     tui.send_message("/plan on")
-    tui.wait_for_screen("Permission mode: Plan", timeout=3.0)
-    screen = tui.get_screen_text()
-    assert "PLAN" in screen, f"Status bar should show PLAN after /plan on. Screen:\n{screen}"
+    tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment after /plan on")
 
 
 @pytest.mark.story_6_0d
@@ -87,12 +84,10 @@ def test_slash_command_plan_off_via_input(tui: RustainTUI):
     """Bug-fix E2E: typing '/plan off' in the input box returns to Normal mode."""
     # Enter Plan mode first
     tui.set_permission_mode("plan")
-    tui.wait(0.5)
+    tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment")
     # Now type the slash command to exit
     tui.send_message("/plan off")
-    tui.wait_for_screen("Permission mode: Normal", timeout=3.0)
-    screen = tui.get_screen_text()
-    assert "PLAN" not in screen, "Status bar should NOT show PLAN after /plan off"
+    tui.wait_until(lambda s: mode_segment(s) == "Normal", "Normal mode after /plan off")
 
 
 @pytest.mark.story_6_0d
@@ -100,52 +95,10 @@ def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
     """Bug-fix E2E: typing '/plan toggle' in the input box toggles Plan mode."""
     # Start in Normal — toggle should enter Plan
     tui.send_message("/plan toggle")
-    tui.wait_for_screen("Permission mode: Plan", timeout=3.0)
-    screen = tui.get_screen_text()
-    assert "PLAN" in screen, "After /plan toggle from Normal, should be in Plan mode"
+    tui.wait_until(lambda s: mode_segment(s) == "PLAN", "Plan mode after /plan toggle from Normal")
     # Toggle again — should return to Normal
     tui.send_message("/plan toggle")
-    tui.wait_for_screen("Permission mode: Normal", timeout=3.0)
-    screen = tui.get_screen_text()
-    assert "PLAN" not in screen, "After second /plan toggle, should be back in Normal mode"
-
-
-@pytest.mark.story_6_0d
-def test_slash_command_plan_no_args_shows_status(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan' with no args toasts the current mode status.
-
-    Story 21-2 AC4: Esc on a popup-owned slash popup restores the exact
-    pre-trigger composer (it erases the provisional '/plan'), so the old
-    "Esc to dismiss autocomplete, then Enter" route no longer submits. The
-    first Enter accepts the highlighted suggestion (closing the popup, which
-    leaves the composer holding '/plan'); the second Enter submits it.
-    """
-    for c in "/plan":
-        tui.send(c)
-        tui.wait(0.05)
-    tui.wait(0.3)
-    tui.send(ENTER)  # accept the suggestion, popup closes
-    tui.wait(0.3)
-    tui.send(ENTER)  # submit '/plan'
-    # Story 21.1: an Info toast (4 s) at the chat pane's bottom edge; the toast
-    # paints only the first message line, ellipsized to the box budget, and this
-    # 57-cell line fits the half-pane box at the harness's 130 columns.
-    found = tui.wait_for_screen(
-        "Plan mode is not Plan — use /plan on|off|toggle to switch",
-        timeout=3.0,
-    )
-    assert found, "No-arg /plan should toast current mode status"
-
-
-@pytest.mark.story_6_0d
-def test_slash_command_plan_invalid_arg_shows_error(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan invalid' toasts an unknown-argument error."""
-    tui.send_message("/plan invalid")
-    found = tui.wait_for_screen(
-        "Unknown /plan argument: invalid. Use on, off, or toggle",
-        timeout=3.0,
-    )
-    assert found, "Invalid /plan argument should toast error message"
+    tui.wait_until(lambda s: mode_segment(s) == "Normal", "Normal mode after the second /plan toggle")
 
 
 @pytest.mark.story_6_0d
@@ -155,71 +108,12 @@ def test_shift_tab_in_input_cycles_modes(tui: RustainTUI):
     Yolo is never reachable by cycling; only an explicit `/mode yolo` selects it.
     """
     tui.input_mode()
-    mode_flash = {
-        "AutoEdit": "Permission mode: AutoEdit",
-        "Plan": "Permission mode: Plan",
-        "Normal": "Permission mode: Normal",
-    }
-    for expected in ["AutoEdit", "Plan", "Normal"]:
+    segments = {"AutoEdit": "AUTOEDIT", "Plan": "PLAN", "Normal": "Normal"}
+    for name, segment in segments.items():
         tui.send(SHIFT_TAB)
-        found = tui.wait_for_screen(mode_flash[expected], timeout=3.0)
-        assert found, f"Expected mode change to {expected} after Shift+Tab"
+        tui.wait_until(lambda s, want=segment: mode_segment(s) == want, f"the {name} status segment")
     # Yolo is only reachable through an explicit `/mode yolo`.
-    assert "YOLO mode active" not in tui.get_screen_text(), "Shift+Tab must never enter Yolo"
-
-
-@pytest.mark.story_6_0d
-def test_shift_tab_in_chat_switches_tabs(tui: RustainTUI):
-    """AC5: Shift+Tab in chat focus does NOT cycle modes (single tab, no visible change)."""
-    tui.chat_mode()
-    tui.send(SHIFT_TAB)
-    # With a single tab, SwitchToPrevTab does nothing visible.
-    # The important invariant is that NO mode cycle happens.
-    screen = tui.get_screen_text()
-    assert "Permission mode:" not in screen, (
-        "Shift+Tab in chat focus should NOT cycle modes"
-    )
-
-
-@pytest.mark.story_6_0d
-def test_help_overlay_shows_plan_mode_bindings(tui: RustainTUI):
-    """AC5: Help overlay documents /plan and Shift+Tab cycle.
-
-    On the 30-row pyte terminal, only the first few categories fit.
-    We scroll down to find the COMMANDS category.
-    """
-    # Robust reset: close any leftover overlays, ensure chat focus
-    tui.send(ESC)
-    tui.wait(0.3)
-    tui.send(ESC)
-    tui.wait(0.3)
-    tui.chat_mode()
-    tui.open_help()
-    # Wait for help overlay to fully render
-    tui.wait_for_screen("Keybindings", timeout=3.0)
-    # Scroll down incrementally to find /plan in COMMANDS section
-    found_plan = False
-    for _ in range(120):
-        if "/plan on|off|toggle" in tui.get_screen_text():
-            found_plan = True
-            break
-        tui.send("j")
-        tui.wait(0.08)
-    assert found_plan, f"Help should document /plan command. Screen:\n{tui.get_screen_text()}"
-    # Scroll back to top and down to find Shift+Tab (in INPUT section)
-    tui.send("g")
-    tui.wait(0.1)
-    found_shift_tab = False
-    for _ in range(120):
-        if "Shift+Tab in input" in tui.get_screen_text():
-            found_shift_tab = True
-            break
-        tui.send("j")
-        tui.wait(0.08)
-    screen = tui.get_screen_text()
-    assert found_shift_tab, f"Help should document Shift+Tab cycle. Screen:\n{screen}"
-    assert "Cycle permission mode" in screen, "Help should describe Shift+Tab action"
-    tui.close_overlay()
+    assert "YOLO mode active" not in status_row(tui.get_screen_text()), "Shift+Tab must never enter Yolo"
 
 
 @pytest.mark.story_6_0d

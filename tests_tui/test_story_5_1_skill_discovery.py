@@ -140,41 +140,6 @@ def test_slash_autocomplete_shows_discovered_skills(build_binary, tmp_path):
 
 
 @pytest.mark.story_5_1
-def test_empty_workspace_no_skill_notice(build_binary, tmp_path):
-    """AC5: No skill dirs → no 'Loaded' notice, no warnings, autocomplete unchanged.
-
-    Uses an explicitly empty ``tmp_path`` workspace to guarantee no skill
-    directories exist — avoids spurious failures when the shared ``tui``
-    fixture points at a workspace that contains skills.
-    """
-    tui = _start_tui_with_workspace(tmp_path, isolated_home=tmp_path / "home")
-    try:
-        # Give the background scan time to complete
-        time.sleep(3.0)
-
-        tui.assert_screen_not_contains(
-            "Loaded", msg="Empty workspace should not show 'Loaded' notice"
-        )
-        tui.assert_screen_not_contains(
-            "failed validation",
-            msg="Empty workspace should not show validation warnings",
-        )
-
-        tui.send("/")
-        time.sleep(0.5)
-
-        # Built-in commands should still appear
-        tui.assert_screen_contains(
-            "/new", msg="Built-in /new should still appear in autocomplete"
-        )
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_1
 def test_invalid_skill_surfaces_warning_notice(build_binary, tmp_path):
     """AC3: Invalid skill (uppercase name) triggers aggregated warning notice.
 

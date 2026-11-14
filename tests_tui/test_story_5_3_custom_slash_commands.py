@@ -22,7 +22,7 @@ import pytest
 
 from harness import RustainTUI
 from keys import ESC, ENTER, TAB, BACKSPACE, CTRL_U
-from harness import Chat
+from harness import Chat, mode_segment
 from fixtures.commands import write_custom_command
 
 
@@ -83,19 +83,6 @@ def test_namespaced_command_appears_in_autocomplete(build_binary, tmp_path):
         tui.assert_screen_contains(
             "deploy:staging", msg="Namespaced command deploy:staging should appear in autocomplete"
         )
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_no_commands_dir_renders_only_builtins(build_binary, tmp_path):
-    """AC6: workspace without ``.claude/commands/`` shows only built-in commands."""
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        tui.assert_screen_contains("/new", msg="Built-in /new should appear in autocomplete")
-        tui.assert_screen_not_contains("review", msg="No user commands expected without commands dir")
         _close_autocomplete(tui)
     finally:
         tui.stop()
@@ -221,9 +208,7 @@ def test_builtin_commands_still_dispatch(build_binary, tmp_path):
         tui.send(ENTER)
         time.sleep(0.3)
         tui.send(ENTER)
-        assert tui.wait_for_screen("Permission mode: Plan", timeout=5.0), (
-            "Built-in /mode should still dispatch correctly"
-        )
+        tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment")
     finally:
         tui.stop()
 

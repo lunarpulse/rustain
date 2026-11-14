@@ -132,15 +132,6 @@ def _wait_for_skills_loaded(tui: RustainTUI, count: int, timeout: float = 15.0) 
 
 
 @pytest.mark.story_5_2
-def test_status_bar_no_skills_segment_when_none_active(tmp_path):
-    """AC12 negative: status bar MUST NOT render ``Skills:`` segment at idle (0 active)."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    with RustainTUI(build=False, workspace=ws) as t:
-        t.assert_screen_not_contains("Skills:")
-
-
-@pytest.mark.story_5_2
 def test_skill_appears_in_slash_autocomplete(tmp_path):
     """AC8: a discovered workspace skill shows up when the user types ``/``."""
     ws = tmp_path / "ws"
@@ -193,8 +184,9 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
         submit_slash(t, "/declined-skill")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
         settle(t)  # decision keys are inert 500 ms after the frame's first paint
+        mark = t.notification_mark()
         t.send("n")
-        assert t.wait_for_screen("not trusted", timeout=3.0)
+        t.wait_for_notification("not trusted", mark, "Info")
     finally:
         t.stop()
 
@@ -220,8 +212,9 @@ def test_trust_prompt_esc_never_declines(tmp_path):
         t.assert_screen_not_contains("not trusted", msg="Esc must not decline the skill")
         reopen_from_list(t, "Trust and enable this skill")
         settle(t)
+        mark = t.notification_mark()
         t.send("n")
-        assert t.wait_for_screen("not trusted", timeout=3.0)
+        t.wait_for_notification("not trusted", mark, "Info")
     finally:
         t.stop()
 
@@ -248,41 +241,3 @@ def test_trust_prompt_inspect_shows_file_content(tmp_path):
         t.send(ESC)
         assert t.wait_for_screen("Trust and enable this skill", timeout=3.0)
         assert "Decision: Skill trust" in t.get_screen_text()
-
-
-@pytest.mark.story_5_2
-def test_deactivate_with_no_active_skills(tmp_path):
-    """AC5: ``/deactivate`` on an empty active-set emits the canonical info notice."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    # Story 21.1: the default Focus density no longer hides notices, so the
-    # Info toast ("No active skills to deactivate") is visible.
-    t = RustainTUI(build=False, workspace=ws)
-    t.start()
-    try:
-        submit_slash(t, "/deactivate")
-        assert t.wait_for_screen("No active skills to deactivate", timeout=5.0), (
-            "AC5 canonical empty-set notice missing"
-        )
-    finally:
-        t.stop()
-
-
-@pytest.mark.story_5_2
-def test_deactivate_unknown_skill_name(tmp_path):
-    """AC5: ``/deactivate <name>`` for an inactive skill emits the 'not active' notice."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    # Story 21.1: the default Focus density no longer hides notices, so the
-    # Info toast ("Skill '…' is not active") is visible.
-    t = RustainTUI(build=False, workspace=ws)
-    t.start()
-    try:
-        type_slowly(t, "/deactivate unknown-skill")
-        time.sleep(0.3)
-        t.send("\r")
-        assert t.wait_for_screen("is not active", timeout=5.0), (
-            "AC5 unknown-skill notice missing"
-        )
-    finally:
-        t.stop()

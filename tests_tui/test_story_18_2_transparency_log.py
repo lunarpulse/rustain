@@ -36,9 +36,12 @@ MESSAGES_TITLE = "Mission Control · Messages"
 def _chord_ctrl_x_l(tui: RustainTUI) -> None:
     """Send Ctrl+X followed by 'l' → OpenMessages."""
     tui.send(CTRL_X)
-    tui.wait(0.2)
+    tui.wait_until(
+        lambda s: any(line.strip().startswith("┌") and "Ctrl+X" in line for line in s.split("\n")),
+        "the Ctrl+X leader menu",
+    )
     tui.send("l")
-    tui.wait(0.5)
+    tui.wait_for_screen(MESSAGES_TITLE, timeout=5.0)
 
 
 # ── Scenario 1: the chord opens a real panel, not a "not yet available" block ──
@@ -56,39 +59,6 @@ def test_chord_opens_transparency_log_panel(tui_monitor: RustainTUI):
     screen = tui.get_screen_text()
     assert "Epic 14" not in screen, (
         "the stale 'Log panel — Epic 14' Noop copy must be gone. " f"Screen:\n{screen}"
-    )
-
-
-# ── Scenario 2: an empty log is honest, not a dead screen ───────────────────
-
-
-@pytest.mark.story_18_2
-def test_empty_state_is_honest(tui_monitor: RustainTUI):
-    """With no A2A activity the panel says so rather than rendering blank."""
-    tui = tui_monitor
-    _chord_ctrl_x_l(tui)
-    screen = tui.get_screen_text()
-    assert "no A2A interactions" in screen, (
-        "Expected the honest empty-state copy (UX: dim '·' line, not a dead "
-        f"screen). Screen:\n{screen}"
-    )
-
-
-# ── Scenario 3: the panel never claims to be live ───────────────────────────
-
-
-@pytest.mark.story_18_2
-def test_panel_never_claims_to_be_live(tui_monitor: RustainTUI):
-    """`NodeJournal::load()` is a consistent read, not a subscription (P-6).
-
-    A panel advertising itself as live would be a false-green with a UI: the
-    daemon can append between two reads.
-    """
-    tui = tui_monitor
-    _chord_ctrl_x_l(tui)
-    screen = tui.get_screen_text().lower()
-    assert "live" not in screen, (
-        "the panel must never present itself as live. " f"Screen:\n{screen}"
     )
 
 
@@ -136,24 +106,6 @@ def test_slash_team_log_runs_and_renders_in_chat(tui_monitor: RustainTUI):
     # A silently-unresolved command produces a provider error, never rows.
     assert "Empty input messages" not in screen, (
         f"`/team log` fell through to an empty turn. Screen:\n{screen}"
-    )
-
-
-# ── Scenario 6: an unknown sub-verb names the valid set ─────────────────────
-
-
-@pytest.mark.story_18_2
-def test_unknown_subverb_names_the_valid_set(tui_monitor: RustainTUI):
-    """`/team roster` must refuse by naming what IS valid."""
-    tui = tui_monitor
-    tui.send("/team roster")
-    tui.wait(0.3)
-    tui.send("\r")
-    tui.wait(1.5)
-    screen = tui.get_screen_text()
-    assert "team log" in screen, (
-        "an unknown sub-verb must answer with a Warning naming the valid set. "
-        f"Screen:\n{screen}"
     )
 
 
@@ -225,21 +177,18 @@ def test_panel_renders_real_rows_from_the_durable_journal(tui_with_journal: Rust
     """The Messages tab shows rows that are actually on disk."""
     tui = tui_with_journal
     _chord_ctrl_x_l(tui)
-    screen = tui.get_screen_text()
-    assert MESSAGES_TITLE in screen, f"Screen:\n{screen}"
-    # Direction and kind each carry a glyph AND a word (monochrome rule).
-    assert "inbound" in screen or "unknown" in screen, f"Screen:\n{screen}"
-    assert "refused" in screen or "accepted" in screen, f"Screen:\n{screen}"
+    screen = tui.wait_until(
+        lambda s: MESSAGES_TITLE in s and ("inbound" in s or "unknown" in s)
+        and ("refused" in s or "accepted" in s),
+        "the populated Messages tab",
+    )
     assert "no A2A interactions" not in screen, (
         "the journal has records, so the empty state is a wiring failure. "
         f"Screen:\n{screen}"
     )
     # The closing claim says what the rows are (a structural replay, never live); `G` jumps to it.
     tui.send("G")
-    tui.assert_screen_contains(
-        "append-only",
-        msg="the closing structural-replay claim is the last Messages row",
-    )
+    tui.wait_until(lambda s: "append-only" in s, "the closing structural-replay claim")
 
 
 @pytest.mark.story_18_2

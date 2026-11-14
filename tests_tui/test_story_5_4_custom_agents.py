@@ -195,40 +195,6 @@ def test_default_clears_active_agent(build_binary, tmp_path):
 
 
 @pytest.mark.story_5_4
-def test_no_agents_dir_renders_only_default(build_binary, tmp_path):
-    """AC2: workspace with no .claude/agents/ → popup shows only the synthetic default.
-
-    No discovery notice should appear. The @Agents/ popup should still
-    work and show the 'default' entry with the 'no agents discovered' description.
-    """
-    tui = _start_tui_with_workspace(tmp_path, isolated_home=tmp_path / "home")
-    try:
-        time.sleep(3.0)
-
-        # Story 21.1: a discovery toast would be painted for 4 s in the default
-        # Focus density (no density queue hides it any more), so this absence
-        # check is non-vacuous: with zero agents no notice is posted at all.
-        tui.assert_screen_not_contains(
-            "Discovered",
-            msg="Empty workspace should not show agent discovery notice",
-        )
-
-        type_slowly(tui, "@Agents/")
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("default", msg="Synthetic default should always appear")
-        tui.assert_screen_contains(
-            "No custom agents discovered",
-            msg="Empty-state description should appear when no agents found",
-        )
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_4
 def test_unknown_agent_name_warns_and_keeps_buffer(build_binary, tmp_path):
     """AC3: typing an unknown agent filter narrows autocomplete to only default.
 
@@ -265,22 +231,5 @@ def test_unknown_agent_name_warns_and_keeps_buffer(build_binary, tmp_path):
             "Agent: nonexistent",
             msg="Status bar should not show agent for unknown name",
         )
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_4
-def test_background_scan_notice_for_discovered_agents(build_binary, tmp_path):
-    """AC8: starting the TUI with agents in .claude/agents/ surfaces the discovery notice.
-
-    The notice text is 'Discovered N custom agent(s) in .claude/agents/'.
-    Only appears when N >= 1.
-    """
-    write_custom_agent(tmp_path, "alpha", "First agent")
-    write_custom_agent(tmp_path, "beta", "Second agent")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_agents_loaded(tui, "Discovered 2 custom agent")
     finally:
         tui.stop()

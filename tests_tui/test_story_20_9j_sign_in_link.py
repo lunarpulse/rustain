@@ -9,7 +9,8 @@ binary at 80x24, loopback only, in two spawns of the same binary.
     extracts nothing partial, the lead names Alt+C and Alt+C puts the full URL on
     the OSC 52 clipboard.
 
-Both: Esc cancels with the callback port closed; the raw bytes, screens and the
+Both: Esc cancels (the closed callback port is proved by `tests/conformance_20_1e_tui_login/browser.rs`,
+`k04_esc_in_the_waiting_view_cancels_and_closes_the_callback_port`); the raw bytes, screens and the
 dated runtime log never carry a pasted authorization-code canary.
 """
 from base64 import b64encode
@@ -20,7 +21,6 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import stat
 import tempfile
 import threading
@@ -232,9 +232,6 @@ def _spawn_case(name, binary, evidence, root, original_spawn, monkeypatch, expec
                        and "┌ Sign in to Anthropic" not in s and "Local shortcut" not in s,
                        "Login cancelled with the modal removed")
         _capture(tui, evidence, f"{name}-cancelled", screen)
-        with socket.socket() as probe:
-            probe.settimeout(5)
-            assert probe.connect_ex(("127.0.0.1", port)) != 0, "callback port still open"
         with lock:
             observed = list(requests)
         assert all(urlsplit(row["path"]).path == "/api.json" for row in observed), observed

@@ -63,6 +63,22 @@ def _input_rows(screen_text):
     return top, rows[top + 1], rows[top + 2], rows[top + 3]
 
 
+def _draft_frame_ready(screen_text, caret):
+    """The pasted draft's frame is whole: the 40 C, both composer rows, the closed bottom border
+    and the caret from the program's own cursor-position sequence (row two, after 2 C + G = 6
+    cells, +1 for the border). Rows and caret land in separate reads, so a wait on the rows alone
+    can sample the caret one frame early."""
+    if sum(row.count(C) for row in screen_text.split("\n")) < 40:
+        return False
+    try:
+        top, first, second, bottom = _input_rows(screen_text)
+    except ValueError:  # the composer's top border is not painted yet
+        return False
+    return (top == 20 and bottom.startswith("\u2514")
+            and first.startswith("\u2502" + C * 30 + A_SCREEN + C * 8)
+            and second.startswith("\u2502" + C * 2) and caret == (1 + 6, top + 2))
+
+
 def _exercise(binary, evidence, root, monkeypatch):
     workspace = root / "fresh-cwd"
     workspace.mkdir()
@@ -104,17 +120,10 @@ def _exercise(binary, evidence, root, monkeypatch):
         _wait(tui, lambda s: "Message" in s, "composer on screen")
 
         tui.send(f"\x1b[200~{DRAFT}\x1b[201~")
-        screen = _wait(tui, lambda s: sum(row.count(C) for row in s.split("\n")) >= 40,
-                       "pasted draft painted over two visual rows")
+        screen = _wait(tui, lambda s: _draft_frame_ready(s, (tui._screen.cursor.x, tui._screen.cursor.y)),
+                       "pasted draft painted over two visual rows with the caret after the G")
         top, first, second, bottom = _input_rows(screen)
-        assert top == 20 and bottom.startswith("\u2514"), screen
-        assert first.startswith("\u2502" + C * 30 + A_SCREEN + C * 8), first
-        assert second.startswith("\u2502" + C * 2), second
         assert not _orphan_continuations(tui, [(top + 1, 80), (top + 2, 5)])
-        # Caret from the program's own cursor-position sequence: row two, after
-        # 2 C + G = 6 cells (+1 for the border).
-        cursor = tui._screen.cursor
-        assert (cursor.x, cursor.y) == (1 + 6, top + 2), (cursor.x, cursor.y)
         _capture(tui, evidence, "display-width-pasted", screen)
 
         tui.send("\x7f")  # Backspace removes the whole G: the caret moves 2 cells.
@@ -177,3 +186,19 @@ def test_composer_wraps_and_edits_whole_graphemes_at_80x24(monkeypatch):
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"NATIVE_21_11_EVIDENCE={evidence}", flush=True)
+
+
+def test_draft_frame_predicate_rejects_a_mid_paint_caret():
+    """The rows can be whole one read before the caret: the old wait (40 C painted) accepted that
+    frame and the cursor assertion then failed; the frame predicate waits for the caret too."""
+    rows = [""] * 24
+    rows[20] = "\u250c Message " + "\u2500" * 68 + "\u2510"
+    rows[21] = "\u2502" + C * 30 + A_SCREEN + C * 8
+    rows[22] = "\u2502" + C * 2 + G
+    rows[23] = "\u2514" + "\u2500" * 78 + "\u2518"
+    screen = "\n".join(rows)
+    assert sum(row.count(C) for row in screen.split("\n")) >= 40  # the old first-wait predicate
+    assert not _draft_frame_ready(screen, (11, 22))
+    assert not _draft_frame_ready(screen, (7, 21))
+    assert _draft_frame_ready(screen, (7, 22))
+    assert not _draft_frame_ready("\n".join(rows[:20] + [""] * 4), (7, 22))

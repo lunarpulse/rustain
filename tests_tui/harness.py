@@ -27,7 +27,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, NamedTuple
 
 import pexpect
 import pyte
@@ -222,6 +222,62 @@ def toast_present(screen: str, text: str, severity: str | None = None, rows: int
     return any(pattern.search(row.rstrip()) for row in toast_rows(screen, rows))
 
 
+_MODE_SEGMENT = re.compile(r"│ (Normal|PLAN|AUTOEDIT|YOLO)(?: │|\s*$)")
+_LOG_ROW_TIME = re.compile(r"^(?:Info|Success|Warning|Error) · (\d{2}):(\d{2}):(\d{2}) · ")
+
+
+def mode_segment(screen: str) -> str | None:
+    """The status row's permission-mode segment (``Normal``, ``PLAN``,
+    ``AUTOEDIT``, ``YOLO``), read positionally; None when the row shows none."""
+    match = _MODE_SEGMENT.search(status_row(screen))
+    return match.group(1) if match else None
+
+
+_MARK_READ_BUDGET = 0.3  # seconds before the turn from which a mark only drains the PTY in short reads
+_MARK_SLACK = 0.05  # the most a mark may return after the turn it aligned to
+
+
+class NotificationMark(NamedTuple):
+    """A point in time for ``wait_for_notification``: the whole wall-clock second
+    the mark returned at."""
+
+    second: int
+
+
+def _log_row_at_or_after(row: str, mark_second: int) -> bool:
+    """True when the S-LOG row's local ``HH:MM:SS`` is at or after the mark's
+    second. Both are whole seconds of the same local clock; the comparison is
+    modular over one day, so it holds across midnight."""
+    match = _LOG_ROW_TIME.match(row)
+    if match is None:
+        return False
+    hours, minutes, seconds = (int(part) for part in match.groups())
+    mark = time.localtime(mark_second)
+    ahead = (hours * 3600 + minutes * 60 + seconds
+             - (mark.tm_hour * 3600 + mark.tm_min * 60 + mark.tm_sec)) % 86400
+    return ahead < 43200
+
+
+def _log_row_names(row: str, text: str) -> bool:
+    """True when the S-LOG row carries ``text``: whole, or as the clipped prefix
+    (at least 20 characters, then ``…``) the list paints when the message is
+    wider than the box."""
+    if text in row:
+        return True
+    clipped = row[:-1] if row.endswith("…") else None
+    return clipped is not None and any(text.startswith(clipped[i:]) for i in range(len(clipped) - 19))
+
+
+def workspace_config_text(allow_list: list[str], notification_ttl_secs: int | None = None) -> str:
+    """The harness workspace's ``.rustain/config.toml``; the optional
+    ``[notifications]`` table lifts the Info and Success lifetimes."""
+    text = "[permissions]\n" + f"always_tools = {json.dumps(allow_list)}\n"
+    if notification_ttl_secs is not None:
+        text += (f"\n[notifications]\ninfo_ttl_secs = {notification_ttl_secs}\n"
+                 f"success_ttl_secs = {notification_ttl_secs}\n")
+    return text
+
+
 def _notification_log_box(screen: str) -> list[str]:
     """Inner text rows of the ``System · Notifications`` frame ([] when closed)."""
     lines = screen.split("\n")
@@ -291,6 +347,11 @@ class RustainTUI:
     binary: Path | None = None
     """Per-process binary override; defaults to RUSTAIN_TUI_BINARY/build behavior."""
 
+    notification_ttl_secs: int | None = None
+    """Info and Success toast lifetime written to the workspace config. None keeps
+    the product default (4 s); set it (e.g. 30) only where the toast row itself is
+    the claim, and dismiss the toast with ``Ctrl+X x``."""
+
     _child: pexpect.spawn | None = field(default=None, init=False, repr=False)
     _tmpdir: tempfile.TemporaryDirectory | None = field(
         default=None, init=False, repr=False
@@ -339,11 +400,12 @@ class RustainTUI:
         )
         rustain_dir = self._workspace_path / ".rustain"
         rustain_dir.mkdir(parents=True, exist_ok=True)
+        if self.notification_ttl_secs is not None and (rustain_dir / "config.toml").exists():
+            raise ValueError("notification_ttl_secs needs a harness-written config.toml; "
+                             "this workspace already has one")
         if not (rustain_dir / "config.toml").exists():
             (rustain_dir / "config.toml").write_text(
-                "[permissions]\n"
-                + f"always_tools = {json.dumps(allow_list)}\n"
-            )
+                workspace_config_text(allow_list, self.notification_ttl_secs))
         if not (rustain_dir / "permissions.toml").exists():
             (rustain_dir / "permissions.toml").write_text("")
 
@@ -534,13 +596,14 @@ class RustainTUI:
             raise ValueError("wait_for_screen: text must not be empty")
         if poll_interval <= 0:
             raise ValueError(f"wait_for_screen: poll_interval must be positive, got {poll_interval}")
-        elapsed = 0.0
-        while elapsed < timeout:
+        deadline = time.monotonic() + timeout
+        while True:
             if text in self.get_screen_text():
                 return True
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-        return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(poll_interval, remaining))
 
     def wait_for_screen_not_contains(
         self,
@@ -558,13 +621,14 @@ class RustainTUI:
             raise ValueError("wait_for_screen_not_contains: text must not be empty")
         if poll_interval <= 0:
             raise ValueError(f"wait_for_screen_not_contains: poll_interval must be positive, got {poll_interval}")
-        elapsed = 0.0
-        while elapsed < timeout:
+        deadline = time.monotonic() + timeout
+        while True:
             if text not in self.get_screen_text():
                 return True
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-        return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(poll_interval, remaining))
 
     def assert_responsive(self, timeout: float = 3.0) -> None:
         """Verify the TUI process is alive AND accepting input.
@@ -726,16 +790,14 @@ class RustainTUI:
             raise ValueError(f"Unknown permission mode: {mode}")
         segment = {"plan": "PLAN", "normal": "Normal", "autoedit": "AUTOEDIT",
                    "auto": "AUTOEDIT", "yolo": "YOLO"}[arg]
-        fact = re.compile(rf"│ {segment}(?: │|\s*$)")
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             screen = self.get_screen_text()
-            row = status_row(screen)
             # Positional: the Info toast rows above the status row (three rows
             # per bordered toast), or the status row's own facts — never a
             # whole-screen substring a transcript line could satisfy.
-            if (toast_present(screen, toast, "Info", rows=9) or fact.search(row)
-                    or (arg == "yolo" and "YOLO mode active" in row)):
+            if (toast_present(screen, toast, "Info", rows=9) or mode_segment(screen) == segment
+                    or (arg == "yolo" and "YOLO mode active" in status_row(screen))):
                 return
 
     def wait_for_idle(self, seconds: float = TURN_COMPLETE_WAIT) -> None:
@@ -800,6 +862,100 @@ class RustainTUI:
         """Close S-LOG (list or detail) with Esc and wait for the frame to go."""
         self.send(ESC)
         self.wait_until(lambda s: NOTIFICATION_LOG_TITLE not in s, "S-LOG closed", timeout)
+
+    def _wait_pty(self, seconds: float) -> None:
+        """Feed the screen with whatever the PTY delivers within ``seconds`` (a
+        timeout-based read, returning early on data): a bounded wait on the
+        terminal, not a sleep."""
+        try:
+            data = self.child.read_nonblocking(size=65536, timeout=seconds)
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            return
+        if data:
+            self._stream.feed(data)
+
+    def notification_mark(self) -> NotificationMark:
+        """A mark for ``wait_for_notification``, taken just before the key that
+        raises the notice: the whole wall-clock second ``S`` the mark returns at.
+
+        The S-LOG row shows a record's time truncated to the second, so a record
+        raised before the mark returns shows a time before ``S`` and one raised
+        after the caller's key shows ``S`` or later. Reads the PTY until the last
+        ``_MARK_READ_BUDGET`` seconds before the turn, then drains it in 5 ms
+        timeout reads (no sleep) and returns at the turn. If a drain overshoots
+        the turn by more than ``_MARK_SLACK`` (a slow read), the boundary would
+        be older than the second of return: it aligns to the next turn instead.
+        The residual window is at most ``_MARK_SLACK`` between the turn and the
+        return: a matching notice raised there counts as new."""
+        while True:
+            boundary = int(time.time()) + 1
+            while time.time() < boundary:
+                if boundary - time.time() > _MARK_READ_BUDGET:
+                    self.get_screen_text()
+                else:
+                    self._wait_pty(min(boundary - time.time(), 0.005))
+            returned = time.time()
+            if returned - boundary <= _MARK_SLACK:
+                return NotificationMark(int(returned))
+
+    def _confirm_log_detail(self, index: int, text: str, timeout: float) -> bool:
+        """In a freshly opened S-LOG list, select row ``index`` (newest first),
+        open its Details and report whether the FULL message holds ``text``;
+        Esc closes the log."""
+        if index:
+            self.send("j" * index)
+        self.send(ENTER)
+        screen = self.wait_until(
+            lambda s: "· detail" in notification_log_text(s) and "[Esc] Close" in notification_log_text(s),
+            "the S-LOG detail view", timeout)
+        found = " ".join(text.split()) in notification_log_text(screen)
+        self.close_notification_log(timeout)
+        return found
+
+    def wait_for_notification(
+        self,
+        text: str,
+        mark: NotificationMark,
+        severity: str | None = None,
+        timeout: float = 10.0,
+    ) -> str:
+        """Wait until the Notification Log (S-LOG) lists a notice containing
+        ``text`` with the requested severity and a time at or after the mark's
+        second; returns ``"log"``, raises ``AssertionError`` on timeout.
+
+        The log is append-only and timestamped, so it is the only freshness
+        authority. A toast is never evidence here: a short-lived toast can paint
+        and expire between two reads, and one painted late may be an older
+        notice. A row the list clipped (a prefix, then ``…``) is only a
+        candidate: its Details must hold the requested text."""
+        deadline = time.monotonic() + timeout
+
+        def candidates(screen):
+            return [i for i, row in enumerate(notification_log_rows(screen))
+                    if row.startswith(severity or "") and _log_row_names(row, text)
+                    and _log_row_at_or_after(row, mark.second)]
+
+        self.open_notification_log(timeout=max(deadline - time.monotonic(), 1.0))
+        open_log = True
+        try:
+            screen = self.wait_until(
+                lambda s: bool(candidates(s)),
+                f"an S-LOG row {text!r} at or after the mark", max(deadline - time.monotonic(), 0.0))
+            rows = notification_log_rows(screen)
+            found = [i for i in candidates(screen) if text in rows[i]]
+            if not found:  # only clipped rows: confirm each in its Details
+                for position, index in enumerate(candidates(screen)):
+                    if position:
+                        self.open_notification_log(timeout=max(deadline - time.monotonic(), 1.0))
+                    open_log = False
+                    if self._confirm_log_detail(index, text, max(deadline - time.monotonic(), 1.0)):
+                        return "log"
+                    open_log = False
+                raise AssertionError(f"no S-LOG row's Details holds {text!r}:\n{screen}")
+        finally:
+            if open_log:
+                self.close_notification_log()
+        return "log"
 
     def rewind(self) -> None:
         """Trigger rewind (R) and confirm (y). Must be in Chat focus."""
@@ -971,13 +1127,14 @@ class RustainTUI:
         by more than a couple of seconds under load. Returns True on found.
         """
         path = self._exports_dir() / filename
-        elapsed = 0.0
-        while elapsed < timeout:
+        deadline = time.monotonic() + timeout
+        while True:
             if path.exists():
                 return True
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-        return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(poll_interval, remaining))
 
     def export_file_content(self, filename: str) -> str:
         """Read the content of an exported file from .rustain/exports/."""

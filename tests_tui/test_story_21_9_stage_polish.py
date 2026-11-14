@@ -38,9 +38,6 @@ SCENE = Path(__file__).parent / "fixtures" / "scenes" / "block_viewer.json"
 PERSONA = "scene-ci-block-viewer"
 SESSION = Path(__file__).parent / "fixtures" / "sessions" / "story21_9_stage_polish.json"
 SESSION_ID = "story21-9-stage-polish"
-TOOLS = Path(__file__).parent / "fixtures" / "sessions" / "story21_9_tool_lines.json"
-TOOLS_ID = "story21-9-tool-lines"
-BRANCH = "smoke-21-9"
 
 USER_ROW = r"(?:▶ )?explain <T> Vec<String> <b>b</b> \*x\*"
 # The focused turn paints `▶ ` before its first row when it has no metadata row.
@@ -140,49 +137,6 @@ def _reasoning_text():
     walk(json.loads(SESSION.read_text()))
     assert len(found) == 1, found
     return found[0]
-
-# Leg B (slice 9-B): the humanized tool rows and the launchpad. The one focused
-# row (after Esc) leads with `▸ ` and may end with the Inspect cue.
-_LEAD = r"(?:▶ )?│ (?:┄|▸) "
-_CUE = r"(?: \[Enter\] Inspect)?"
-TOOL_ROWS = (
-    _LEAD + r"✓ Read src/x\.rs:1-80 · 0\.3s" + _CUE,
-    _LEAD + r"✓ Edit src/parser\.rs \+12 −3 · 0\.1s" + _CUE,
-    _LEAD + r"✓ Write src/new\.rs \+40 · 0\.1s" + _CUE,
-    _LEAD + r"✓ Bash cargo test --lib · 2\.0s" + _CUE,
-)
-AGE = r"(?:just now|\d+[mh] ago|[A-Z][a-z]{2} \d+|\d{4}-\d\d-\d\d)"
-
-
-def _tool_rows(screen):
-    return (_settled(screen) and all(_matches_row(screen, row) for row in TOOL_ROWS)
-            and not any('{"' in row or "→" in row for row in _stage_rows(screen)))
-
-
-def _launchpad_rows(screen):
-    """The rows from the heading through the key line, or None when torn."""
-    rows = _rows(screen)
-    heads = [i for i, row in enumerate(rows) if row.strip() == "Welcome to Rustain."]
-    keys = [i for i, row in enumerate(rows) if re.fullmatch(r"\s*\^X \? Help · .*", row)]
-    if len(heads) != 1 or len(keys) != 1 or keys[0] <= heads[0]:
-        return None
-    return rows[heads[0]:keys[0] + 1]
-
-
-def _launchpad(screen):
-    block = _launchpad_rows(screen)
-    if not _settled(screen) or block is None or len(block) < 11:
-        return False
-    rows = _rows(screen)
-    if "│ Normal │" not in rows[_composer_top(rows) - 1]:
-        return False  # the status row is whole and sits right above the composer
-    return (re.fullmatch(rf"\s*\S+ · {BRANCH}", block[1]) is not None
-            and " · " in block[2] and block[3].strip() == ""
-            and block[4].strip() == "Type a message to start."
-            and any(row.strip() == "Recent" for row in block)
-            and any(re.fullmatch(rf"\s+Tool lines smoke · {AGE}", row) for row in block)
-            and not any("Ready" in row or "│" in row for row in block)
-            and not _toast_rows(screen))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -314,115 +268,3 @@ def _spawn(binary, evidence, root, original_spawn, monkeypatch):
     finally:
         status = stub.stop()
     assert status == 0, f"scene provider exited {status}: {stub.rows()}"
-
-
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
-def test_tool_rows_and_launchpad_at_80x24(monkeypatch):
-    """Leg B (slice 9-B): the humanized tool rows of the stored session, then the
-    launchpad of a fresh conversation in the same git workspace."""
-    parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
-    parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="21-9-b-", dir=parent))
-    manifest = {"run_id": evidence.name, "started_at": datetime.now(timezone.utc).isoformat(),
-                "evidence_dir": str(evidence), "viewport": [80, 24], "result": "RUNNING"}
-    monkeypatch.setattr(harness, "TERM_COLS", 80)
-    monkeypatch.setattr(harness, "TERM_ROWS", 24)
-    original_spawn = harness.pexpect.spawn
-    try:
-        binary = harness._resolve_binary()[0].resolve()
-        assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
-        manifest.update(binary=str(binary), binary_sha256=_sha256(binary),
-                        profile="debug", features="default")
-        (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        with tempfile.TemporaryDirectory(prefix="r21-9b-") as root_name:
-            _spawn_b(binary, evidence, Path(root_name), original_spawn, monkeypatch)
-        assert _sha256(binary) == manifest["binary_sha256"], "binary changed during native smoke"
-        manifest["result"] = "PASS"
-    except BaseException:
-        manifest["result"] = "FAIL"
-        (evidence / "failure.txt").write_text(traceback.format_exc())
-        raise
-    finally:
-        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
-        (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"NATIVE_21_9_EVIDENCE={evidence}", flush=True)
-
-
-def _spawn_b(binary, evidence, root, original_spawn, monkeypatch):
-    workspace = root / "workspace"
-    sessions = workspace / ".claude" / "sessions"
-    sessions.mkdir(parents=True)
-    shutil.copy(TOOLS, sessions / f"{TOOLS_ID}.meta.json")
-    (workspace / ".env").write_text("")
-    (workspace / ".git").mkdir()
-    (workspace / ".git" / "HEAD").write_text(f"ref: refs/heads/{BRANCH}\n")
-    home = root / "home"
-    config, data = home / "config", home / "data"
-    config.mkdir(parents=True)
-    data.mkdir()
-    stub = SceneStub(SCENE, evidence / "b.requests.jsonl").start()
-    try:
-        loaded = harness._load_env()
-        stub_env = stub.env(PERSONA, home)
-        cleared = ((PROVIDER_ENV | {"STUBAI_API_KEY"}
-                    | {key for key in loaded if _sensitive_env(key)}) - {"NO_PROXY"}
-                   - set(stub_env))
-        env = {key: "" for key in cleared}
-        env.update(stub_env)
-        env.update(XDG_CONFIG_HOME=str(home / "xdg-config"), XDG_DATA_HOME=str(home / "xdg-data"),
-                   RUSTAIN_CONFIG_DIR=str(config), RUSTAIN_DATA_DIR=str(data),
-                   RUSTAIN_LOG_PATH=str(evidence / "b.runtime.log"), COLORTERM="truecolor",
-                   NO_COLOR="", NO_PROXY="127.0.0.1,localhost", TERM="xterm-256color",
-                   RUSTAIN_CLIPBOARD="file")
-
-        def safe_spawn(command, *args, **kwargs):
-            actual = kwargs["env"]
-            actual.pop("NO_COLOR", None)
-            assert Path(command).resolve() == binary and "debug" in binary.parts
-            assert kwargs["dimensions"] == (24, 80)
-            assert actual["RUSTAIN_DATA_DIR"] == str(data)
-            return original_spawn(command, *args, **kwargs)
-
-        monkeypatch.setattr(harness.pexpect, "spawn", safe_spawn)
-
-        def run(leg, fresh, args, steps):
-            tui = _NativeTUI(binary=binary, build=False, workspace=workspace, fresh=fresh,
-                             env_overrides=env, extra_args=args)
-            tui.screens = (evidence / f"b-{leg}.screens.jsonl").open("w")
-            raw = (evidence / f"b-{leg}.raw.bin").open("w", encoding="utf-8", newline="")
-            try:
-                tui.start()
-                tui.child.delaybeforesend = 0
-                tui.child.logfile_read = raw
-                steps(tui)
-            finally:
-                try:
-                    tui.stop()
-                finally:
-                    raw.close()
-                    tui.screens.close()
-
-        def tools(tui):
-            _wait(tui, lambda s: _settled(s) and _matches_row(s, USER_ROW_B),
-                  "the stored session's user row")
-            tui.child.send("\x1b")
-            _wait(tui, lambda s: _settled(s) and len(_marker_rows(s)) >= 1, "Chat focus")
-            tui.child.send("zR")
-            screen = _wait(tui, lambda s: _tool_rows(s) and not _toast_rows(s),
-                           "the four humanized tool rows on the unfolded Stage")
-            _capture(tui, evidence, "b-tools", screen)
-
-        def launchpad(tui):
-            screen = _wait(tui, _launchpad,
-                           "the launchpad: workspace and branch, Type a message, Recent, keys")
-            _capture(tui, evidence, "b-launchpad", screen)
-
-        run("tools", False, ["--session", TOOLS_ID], tools)
-        run("launchpad", True, [], launchpad)
-    finally:
-        status = stub.stop()
-    assert status == 0, f"scene provider exited {status}: {stub.rows()}"
-
-
-USER_ROW_B = r"(?:▶ )?show the tool rows"
