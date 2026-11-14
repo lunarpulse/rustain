@@ -5,7 +5,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition_2024-orange.svg)](Cargo.toml)
-[![Status](https://img.shields.io/badge/status-v0.4.0--alpha-yellow.svg)](#project-status--roadmap)
+[![Status](https://img.shields.io/badge/status-v0.4.1--alpha-yellow.svg)](#project-status--roadmap)
 
 Rustain is a standalone Rust terminal application. By default it's an AI coding
 agent — streaming responses, tool execution, collapsible content blocks,
@@ -302,7 +302,7 @@ cargo install --locked --git https://github.com/lunarpulse/rustain --tag "v${VER
 `--features` adds to the default features, so this is the release feature set;
 `--bin rustain` skips a test helper binary the package also defines. Releases
 are built with the toolchain pinned in `rust-toolchain.toml` (1.98.1 at
-v0.4.0); to use the same one, run `rustup toolchain install 1.98.1` and then
+v0.4.1); to use the same one, run `rustup toolchain install 1.98.1` and then
 `cargo +1.98.1 install` with the same arguments. The build takes a while
 (link-time optimization).
 
@@ -603,12 +603,13 @@ Normal (prompt for each tool), YOLO (auto-approve safe tools), and Plan
 
 ## Project status & roadmap
 
-**Status: v0.4.0, alpha, actively developed.** Epics 1–18 are closed in the
+**Status: v0.4.1, alpha, actively developed.** Epics 1–18 are closed in the
 sprint ledger; Epics 19 (team journeys) and 20 (OAuth sign-in for the
 supported providers) are still open there for their remaining rows, and Epic 21 (TUI
 layered modals, notification lifecycle, keymap governance) has one story left,
 the three-viewport capture row 21-10. The release assets carry the
-`self-update`, `relay-server`, `a2a` and `p2p` features.
+`self-update`, `relay-server`, `a2a` and `p2p` features. v0.4.1 is a patch
+on v0.4.0: no new feature, only the fixes in the roadmap row below.
 
 | Phase | Milestone | Status |
 |---|---|---|
@@ -616,7 +617,8 @@ the three-viewport capture row 21-10. The release assets carry the
 | **v0.5 (early phase)** | Agent Skills, MCP, sub-agents, plan mode, multi-provider | Shipped (Epics 5–10) |
 | **v0.75 (early phase)** | Memory tiers, context assembly, windowing, vector search | Shipped (Epic 11) |
 | **v1.5 (early phase)** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18); release assets carry `a2a,p2p` from `v0.2.0` |
-| **v0.4.0** | OAuth sign-in (Epic 20), federation features in release assets, TUI layered modals (Epic 21) | Current release |
+| **v0.4.0** | OAuth sign-in (Epic 20), federation features in release assets, TUI layered modals (Epic 21) | Shipped |
+| **v0.4.1** | Patch: `--version` prints the real features and protocol versions; the OpenAI-compatible stream decoder accepts GitHub Copilot Chat chunks without an `object` field and reports empty, error and non-stream replies; clearer Copilot login and model-refusal messages; macOS install guide; TUI test-suite refinement | Current release |
 | **v0.5.0** | Completion lane: `cron` and `telegram` release features, Slack channel, persona loader, daemon MCP | Planned |
 | **v1.0** | Hardening: containment and cost control | Planned |
 | **v2.0** | Dynamic adapter loading, community hub | Planned |

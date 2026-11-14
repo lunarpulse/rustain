@@ -7,7 +7,7 @@ This document describes the release process for `rustain`, including the frozen 
 Every release publishes the following assets, with names and formats that are **FROZEN** — Story 13-3a's `verify_release` computes them byte-for-byte:
 
 - **Binary asset**: `rustain-{version}-{target-triple}[.exe]`  
-  Example: `rustain-0.4.0-x86_64-unknown-linux-gnu`
+  Example: `rustain-0.4.1-x86_64-unknown-linux-gnu`
 - **Manifest**: `SHA256SUMS` — one line per asset in GNU coreutils format:  
   `<sha256-hex>  <asset-filename>`
 - **Signature**: `SHA256SUMS.minisig` — detached minisign signature of the manifest (prehashed `ED` algorithm)
@@ -140,7 +140,7 @@ When rotating the signing key:
 
 1. Ensure all changes are on `main`, tests pass and CI is green on the commit to be tagged
 2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap, and run the checks in the release checklist for that version
-3. Push an annotated tag: `git tag -a v0.4.0 -m "rustain v0.4.0" && git push origin v0.4.0`
+3. Push an annotated tag: `git tag -a v0.4.1 -m "rustain v0.4.1" && git push origin v0.4.1`
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
    - Smokes the required release features on the Linux binary (`.github/scripts/release-smoke.sh`): first checks that `--version` lists the four release features and no unbuilt protocol, then that the served AgentCard agrees with it
@@ -161,7 +161,7 @@ If CI is unavailable, a maintainer can cut a release by hand:
 git status
 
 # 2. Set version
-VERSION="0.4.0"
+VERSION="0.4.1"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary
