@@ -65,6 +65,9 @@ pub struct FlowCtx {
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     http: reqwest::Client,
     pub validation_config: Option<ProviderConfig>,
+    /// Attempt-local lines a provider flow wants shown after a successful
+    /// login; `login` clears them on entry and drains them into the result.
+    notes: parking_lot::Mutex<Vec<String>>,
 }
 impl FlowCtx {
     /// One HTTP client per flow, built here so CLI and TUI hosts share its policy.
@@ -76,6 +79,7 @@ impl FlowCtx {
             #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
             http: token::client(),
             validation_config: None,
+            notes: parking_lot::Mutex::new(Vec::new()),
         }
     }
     pub fn with_validation_config(mut self, config: ProviderConfig) -> Self {
@@ -90,6 +94,10 @@ impl FlowCtx {
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     pub(crate) fn http(&self) -> &reqwest::Client {
         &self.http
+    }
+    /// Records a line for the host to show once this login succeeds.
+    pub fn note(&self, line: impl Into<String>) {
+        self.notes.lock().push(line.into());
     }
 }
 /// The whitelisted OAuth error id of a failed response body, if any; provider
@@ -143,6 +151,9 @@ pub struct LoginResult {
     pub identity: CredentialIdentity,
     /// The row the login wrote, now the provider's active row.
     pub credential_id: CredentialId,
+    /// Lines the provider's flow wants shown after the login, in order; empty
+    /// for every provider but GitHub Copilot.
+    pub notes: Vec<String>,
 }
 
 pub async fn login(
@@ -152,6 +163,8 @@ pub async fn login(
     store: &Arc<dyn AuthStorePort>,
 ) -> Result<LoginResult, FlowError> {
     let cancel = ctx.ui.cancel_token();
+    // Whatever an earlier failed or cancelled attempt noted is not this login's.
+    ctx.notes.lock().clear();
     let run = async {
         let (credential, validated) = match method {
             AuthMethod::ApiKey => api_key::run(provider_id, ctx).await?,
@@ -233,6 +246,7 @@ pub async fn login(
             validated,
             identity,
             credential_id,
+            notes: std::mem::take(&mut *ctx.notes.lock()),
         })
     };
     tokio::select! {

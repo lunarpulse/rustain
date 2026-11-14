@@ -364,7 +364,11 @@ After approval rustain asks `https://api.github.com/copilot_internal/user` (alwa
 the public API, also for Enterprise accounts) for the account's Copilot API
 endpoint, then prints `Enabling models...` and enables every bundled Copilot model
 for the account (`POST <endpoint>/models/<id>/policy`, five at a time). Both steps
-are best-effort: a failed probe or policy request never fails the login. The
+are best-effort: a failed probe or policy request never fails the login. After
+`Credentials saved to …`, stderr (also with `--json`, whose stdout stays the single
+result object) shows `Enabled N of M GitHub Copilot models.` (the policy requests
+GitHub accepted) and the model-availability hint below; the TUI posts them as two
+notices after the login summary, the hint as a warning. The
 GitHub token is stored as is (there is no token exchange) with the Enterprise
 domain and the API endpoint; its "refresh" sends no HTTP and re-serves the same
 token. A second `rustain auth login github-copilot` replaces every stored Copilot
@@ -399,8 +403,28 @@ with an authentication error and nothing can repair it except a new login. HTTP
 login is never disabled, and the error explains the Copilot plan, model policy and
 integration-id options.
 
+**Model availability may depend on the Copilot plan.** An account may be refused a
+specific model with HTTP 400 `model_not_supported`: the API refused that model
+for this account. A plan or policy restriction is one possible cause; the code
+does not say why, and a client-side cause (request shape, API version or
+endpoint) is not ruled out. It is not a broken login. The refusal reads
+`GitHub Copilot HTTP 400: <GitHub's message> — GitHub did not accept model '<id>'
+for this account.`, followed by the hint `Model availability can depend on your
+Copilot plan or policy; if a model is refused, choose another with Ctrl+X, M.` (the id is
+the one rustain sent, with terminal controls removed, so a `<id>-1m` pick names its base id). Observed on one
+Copilot Free account on 2026-11-14 `[one account]`: `gpt-4.1` was accepted by the
+API, while `gemini-3.8-flash` was refused with `model_not_supported`. GitHub's
+documentation says that for individual plans "Copilot Free and Copilot Student
+only have access to auto model selection" ([Configure access to AI
+models](https://docs.github.com/en/copilot/how-tos/copilot-on-github/set-up-copilot/configure-access-to-ai-models),
+"Setup for individual plans"); that describes GitHub's own interface and does not
+match the observed API behaviour, so rustain does not treat it as a limit.
+rustain cannot tell which plan an account has, so the same hint is shown after
+every Copilot login.
+
 Copilot discovers its live roster from `GET <root>/models` with the Copilot CLI
-identity (`copilot-developer-cli`, as omp; listing is not policy-gated); rows whose
+identity (`copilot-developer-cli`, as omp; listing is not policy-gated), so the
+model picker lists the bundled models whether or not the plan allows them; rows whose
 `capabilities.type` is not `chat` (embeddings) are dropped, and models with a
 long-context tier also get an opt-in `<id>-1m` sibling. Unlike other providers, a
 Copilot listing 403 keeps the cached roster (a plan or policy denial, not a

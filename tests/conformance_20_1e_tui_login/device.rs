@@ -6,10 +6,15 @@ use super::common::{Tui, World, assert_link_cells, decoded_text};
 use crate::conformance_20_1d2_device_and_xai::device::xai_access;
 use crate::conformance_20_1d3_copilot::common::{
     DEVICE_PATH as COPILOT_DEVICE_PATH, ENDPOINT_A, ENTERPRISE_CLIENT, PROMPT, PUBLIC_CLIENT,
-    Recorder, device_form, mount_login, probe_reply,
+    Recorder, SEED_IDS, device_form, mount_login, probe_reply,
 };
 use rustain::adapters::auth::flows::Sleeper;
 use rustain::adapters::auth_store::FileAuthStore;
+use rustain::adapters::github_copilot::{
+    plan,
+    policy::{self, PolicyReport},
+};
+use rustain::adapters::tui::notifications::{NoticeRecord, NoticeSeverity, NoticeSource};
 use rustain::domain::events::{DomainInputEvent, DomainKey, LoginEvent};
 use rustain::domain::models::{AppConfig, Credential};
 use rustain::domain::ports::AuthStorePort;
@@ -143,6 +148,20 @@ async fn k05_device_code_view_renders_links_and_copies() {
         "{}",
         tui.feedback()
     );
+    // K5: the plan notice belongs to Copilot logins only.
+    for record in login_notices(&tui) {
+        assert!(
+            !record.message.contains(plan::AVAILABILITY_HINT),
+            "{}",
+            record.message
+        );
+        assert_ne!(
+            record.severity,
+            NoticeSeverity::Warning,
+            "{}",
+            record.message
+        );
+    }
 }
 
 /// K05 (M05) + K04 (M04): a hostile verification URL and user code render
@@ -357,4 +376,87 @@ async fn k8_long_device_url_wraps_all_or_none_and_copies_the_full_url() {
     })
     .await;
     assert_eq!(tui.flash(), "Login cancelled");
+}
+
+/// The `Login` notices the store holds, oldest first.
+fn login_notices(tui: &Tui) -> Vec<NoticeRecord> {
+    tui.state
+        .notifications
+        .records()
+        .filter(|record| record.source == NoticeSource::Login)
+        .cloned()
+        .collect()
+}
+
+/// K5: a Copilot login posts the `Success` summary, then the enabled count as
+/// `Info` and the plan notice as `Warning`, each once; the notice is the
+/// newest `Login` notice and raises the unseen badge on every login, a repeat
+/// inside the suppression window included.
+#[tokio::test]
+#[serial]
+async fn k5_copilot_login_posts_the_count_and_the_plan_notice_as_notices() {
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    let mut tui = Tui::new(AppConfig::default());
+    tui.ctx = tui.ctx.clone().with_sleeper(instant());
+    let enabled = policy::enabled_line(PolicyReport {
+        accepted: SEED_IDS,
+        total: SEED_IDS,
+    });
+    let notice = plan::login_notice();
+
+    let recorder = Recorder::new();
+    let guards = mount_login(&server, &recorder, "t-k5-first", probe_reply(ENDPOINT_A)).await;
+    let unseen = tui.state.notifications.unseen();
+    tui.submit("/login github-copilot");
+    tui.until("enterprise prompt", Tui::field_pending).await;
+    tui.key(DomainKey::Enter);
+    tui.until_login("login finished", |event| {
+        matches!(event, LoginEvent::Finished { .. })
+    })
+    .await;
+    let records = login_notices(&tui);
+    let shown: Vec<(NoticeSeverity, &str, u32)> = records
+        .iter()
+        .map(|record| (record.severity, record.message.as_str(), record.count))
+        .collect();
+    assert_eq!(shown.len(), 3, "{shown:?}");
+    assert_eq!(shown[0].0, NoticeSeverity::Success);
+    assert!(
+        shown[0].1.starts_with("Logged in to GitHub Copilot"),
+        "{shown:?}"
+    );
+    assert_eq!(
+        shown[1..],
+        [
+            (NoticeSeverity::Info, enabled.as_str(), 1),
+            (NoticeSeverity::Warning, notice.as_str(), 1),
+        ]
+    );
+    assert_eq!(
+        tui.latest_notice(NoticeSource::Login),
+        Some((NoticeSeverity::Warning, notice.clone()))
+    );
+    let after_first = tui.state.notifications.unseen();
+    assert!(after_first > unseen, "{unseen} -> {after_first}");
+    drop(guards);
+
+    // A repeat inside the suppression window is counted silently, not shown
+    // again, yet still raises the unseen badge.
+    let recorder = Recorder::new();
+    let _guards = mount_login(&server, &recorder, "t-k5-second", probe_reply(ENDPOINT_A)).await;
+    tui.submit("/login github-copilot");
+    tui.until("enterprise prompt", Tui::field_pending).await;
+    tui.key(DomainKey::Enter);
+    tui.until_login("login finished", |event| {
+        matches!(event, LoginEvent::Finished { .. })
+    })
+    .await;
+    assert!(tui.state.notifications.unseen() > after_first);
+    let repeated: Vec<NoticeRecord> = login_notices(&tui)
+        .into_iter()
+        .filter(|record| record.message == notice)
+        .collect();
+    assert_eq!(repeated.len(), 1, "no second record");
+    assert_eq!(repeated[0].count, 2);
 }

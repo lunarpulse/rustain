@@ -84,6 +84,8 @@ struct MessagesAttempt {
     request: reqwest::Request,
     state: Option<Box<dyn RequestState>>,
     profile: Arc<dyn RequestProfile>,
+    /// The model id this request sent.
+    model: String,
 }
 
 impl MessagesAttempt {
@@ -101,7 +103,7 @@ impl MessagesAttempt {
     }
     fn error(&self, status: u16, headers: &HeaderMap, body: &str) -> ProviderError {
         self.profile
-            .error(status, headers, body, self.request.headers())
+            .error(status, headers, body, self.request.headers(), &self.model)
             .unwrap_or_else(|| legacy_error(status, headers, body))
     }
 }
@@ -163,6 +165,7 @@ impl AnthropicAdapter {
             request,
             state,
             profile: profile.clone(),
+            model: options.model.clone(),
         })
     }
 

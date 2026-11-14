@@ -1220,6 +1220,7 @@ mod k7_surfaces {
                     outcome: Ok(LoginSummary {
                         lines: vec!["Login completed".into()],
                         credential_id: rustain::domain::models::CredentialId(1),
+                        notes: Vec::new(),
                     }),
                 },
             );

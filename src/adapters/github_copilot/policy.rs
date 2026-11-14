@@ -65,36 +65,57 @@ fn base_headers(token: &str) -> Option<HeaderMap> {
     Some(out)
 }
 
-/// Enables every bundled model for the account. Every outcome is ignored: a
-/// denied, failed or unreachable request never fails the login.
+/// How many of the bundled models GitHub accepted the policy request for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyReport {
+    pub accepted: usize,
+    pub total: usize,
+}
+
+/// The login note stating `report`.
+pub fn enabled_line(report: PolicyReport) -> String {
+    format!(
+        "Enabled {} of {} GitHub Copilot models.",
+        report.accepted, report.total
+    )
+}
+
+/// Enables every bundled model for the account and reports how many requests
+/// GitHub accepted. A denied, failed or unreachable request never fails the
+/// login: it only is not counted.
 pub async fn enable_all(
     client: &reqwest::Client,
     token: &str,
     endpoint: Option<&str>,
     enterprise: Option<&str>,
-) {
+) -> PolicyReport {
+    let total = catalog::SEED.len();
     let Some(base) = base_headers(token) else {
-        return;
+        return PolicyReport { accepted: 0, total };
     };
     let root = root(endpoint, enterprise);
     let pin = identity::integration_pin();
+    let mut accepted = 0;
     for batch in catalog::SEED.chunks(BATCH) {
-        futures::future::join_all(
+        let outcomes = futures::future::join_all(
             batch
                 .iter()
                 .map(|row| enable(client, &root, row.id, &base, pin.clone())),
         )
         .await;
+        accepted += outcomes.into_iter().filter(|accepted| *accepted).count();
     }
+    PolicyReport { accepted, total }
 }
 
+/// Whether GitHub answered the policy request with a success.
 async fn enable(
     client: &reqwest::Client,
     root: &str,
     id: &str,
     base: &HeaderMap,
     pin: Option<String>,
-) {
+) -> bool {
     let mut state = identity::CopilotRequestState::policy(pin);
     let mut headers = base.clone();
     state.headers(&mut headers);
@@ -105,10 +126,13 @@ async fn enable(
         .timeout(TIMEOUT)
         .build()
     else {
-        return;
+        return false;
     };
-    // Outcomes are ignored; the identity alternate still applies once.
-    let _ = http_retry::send(client, &request, Some(&mut state), None).await;
+    // The identity alternate still applies once; a success after it counts.
+    matches!(
+        http_retry::send(client, &request, Some(&mut state), None).await,
+        Ok(http_retry::Outcome::Success(_))
+    )
 }
 
 #[cfg(test)]
@@ -149,5 +173,16 @@ mod tests {
         assert_eq!(headers["x-interaction-type"], "chat-policy");
         assert_eq!(headers["authorization"], "Bearer tok");
         assert_eq!(headers["x-github-api-version"], "2026-08-01");
+    }
+
+    #[test]
+    fn the_enabled_line_places_accepted_before_total() {
+        assert_eq!(
+            enabled_line(PolicyReport {
+                accepted: 7,
+                total: 55
+            }),
+            "Enabled 7 of 55 GitHub Copilot models."
+        );
     }
 }

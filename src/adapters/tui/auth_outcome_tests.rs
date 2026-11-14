@@ -583,6 +583,7 @@ mod ba_login_lifetime {
                 outcome: Ok(LoginSummary {
                     lines: vec!["Credential already persisted".into()],
                     credential_id: CredentialId(42),
+                    notes: Vec::new(),
                 }),
             },
         );

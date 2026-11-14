@@ -125,6 +125,10 @@ async fn run(
         println!("{}", success_line(method, &result, &display));
     }
     eprintln!("{}", credentials_saved_line()?);
+    // Human prose on stderr in both modes: `--json` stdout stays one object.
+    for note in &result.notes {
+        eprintln!("{note}");
+    }
     // Several accounts: name the one this login made active and how to change
     // it. The credential is already stored, so an unreadable store only skips
     // this hint and never fails the login.
@@ -386,6 +390,7 @@ mod tests {
             validated: true,
             identity,
             credential_id: crate::domain::models::CredentialId(5),
+            notes: Vec::new(),
         });
         assert_eq!(json["method"], "oauth");
         assert_eq!(json["id"], 5);
@@ -466,6 +471,7 @@ mod tests {
                 validated,
                 identity: CredentialIdentity::default(),
                 credential_id: crate::domain::models::CredentialId(2),
+                notes: Vec::new(),
             };
             assert_eq!(
                 success_line(minted, &result, "OpenRouter"),
@@ -478,6 +484,7 @@ mod tests {
             validated: true,
             identity: CredentialIdentity::default(),
             credential_id: crate::domain::models::CredentialId(3),
+            notes: Vec::new(),
         };
         assert_eq!(
             success_line(&AuthMethod::ApiKey, &pasted, "OpenRouter"),

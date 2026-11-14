@@ -96,6 +96,7 @@ const ALLOWLIST: &[Allow] = &[
     // `Tab` here is a browser-style tab (P2 matches the word), not a key
     ("src/infrastructure/runtime/event_loop.rs", &["Tab save timed out"], OWNER_PERMANENT, "a tab warning, not a key"),
     ("src/adapters/cli/peer/rows.rs", &["         Awaiting your decision.  [y] Confirm and pin", "         Awaiting your decision.  [y] Update the address"], OWNER_PERMANENT, "shared CLI/TUI peer-add card copy: `cli` may not import `tui` (adapter ratchet); the keys are truth-checked against the Confirm rows by K11"),
+    ("src/adapters/github_copilot/plan.rs", &["Model availability can depend on your Copilot plan or policy; if a model is refused, choose another with Ctrl+X, M."], OWNER_PERMANENT, "shared CLI/TUI Copilot hint: `github_copilot` may not import `tui` (adapter ratchet); `Ctrl+X, M` is the Model selector (docs/keyboard.md)"),
     // `[x]` / `[ ]` are checkbox markers, not keys
     ("src/adapters/tui/widgets/consolidation_card.rs", &["  [x] "], OWNER_PERMANENT, "checkbox markers, not keys"),
     ("src/adapters/tui/widgets/forget_card.rs", &["  [x] "], OWNER_PERMANENT, "checkbox markers, not keys"),

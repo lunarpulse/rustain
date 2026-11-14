@@ -11,6 +11,8 @@ use super::common::{
     options, requests, responses_ok, responses_path, rows, text_of, user,
 };
 use parking_lot::Mutex;
+use rustain::adapters::auth::PROVIDER_TEXT_CAP;
+use rustain::adapters::github_copilot::plan;
 use rustain::domain::errors::ProviderError;
 use rustain::domain::models::{StopReason, StreamChunk};
 use rustain::domain::ports::StreamingProvider;
@@ -1025,5 +1027,213 @@ async fn k09_stream_resilience_reissues_only_before_content() {
     assert_eq!(requests(&server, "POST", &messages).await.len(), 2);
     for chunk in &chunks {
         assert!(!format!("{chunk:?}").contains(token));
+    }
+}
+
+// ── cp-free-1: the refusal names the model ──────────────────────────────────
+
+const GITHUB_REFUSAL: &str = "The requested model is not supported.";
+
+/// GitHub's refusal of a model the plan does not allow.
+fn model_not_supported(message: &str) -> ResponseTemplate {
+    json_error(
+        400,
+        json!({"error":{"code":"model_not_supported","message":message,"param":"model","type":"invalid_request_error"}}),
+    )
+}
+
+/// One refused turn of `model` on `route` for a fresh github.com credential
+/// whose requests both identities (or the pinned one) answer with
+/// `refusal`; the POST identities seen and the error text.
+async fn refused_turn(
+    model: &str,
+    route: fn(&str) -> String,
+    token: &str,
+    pin: Option<&str>,
+    refusal: ResponseTemplate,
+) -> (Vec<String>, String) {
+    let server = MockServer::start().await;
+    let world = World::new(&server);
+    common::login(&server, token, ENDPOINT_A).await;
+    let gate = Gate::new(chat_sse("never"));
+    gate.mount(&server, &route(ROOT_A)).await;
+    let provider = build(model);
+    match pin {
+        Some(id) => {
+            world.set("COPILOT_INTEGRATION_ID", id);
+            gate.deny(&[id], refusal);
+        }
+        None => gate.deny(&[CHAT, CLI], refusal),
+    }
+    let error = turn(&provider, model)
+        .await
+        .expect_err("a refused model fails");
+    assert!(!format!("{error} {error:?}").contains(token), "{error:?}");
+    match error {
+        ProviderError::Other(text) => (gate.take(), text),
+        other => panic!("expected the Copilot refusal text, got {other:?}"),
+    }
+}
+
+/// K6: on every route a final `model_not_supported` after both identities
+/// names the model that was sent and says what the plan allows.
+#[tokio::test]
+#[serial]
+async fn k6_the_refusal_names_the_model_on_every_route() {
+    for (model, route, token) in [
+        (
+            "gemini-3.8-flash",
+            chat_path as fn(&str) -> String,
+            "cop-identity-cpfree1-k6-chat",
+        ),
+        (
+            MESSAGES_MODEL,
+            messages_path as fn(&str) -> String,
+            "cop-identity-cpfree1-k6-messages",
+        ),
+        (
+            RESPONSES_MODEL,
+            responses_path as fn(&str) -> String,
+            "cop-identity-cpfree1-k6-responses",
+        ),
+    ] {
+        let (posts, text) = refused_turn(
+            model,
+            route,
+            token,
+            None,
+            model_not_supported(GITHUB_REFUSAL),
+        )
+        .await;
+        assert_eq!(posts, [CHAT, CLI], "{model}");
+        assert_eq!(text, plan::model_refused(model, GITHUB_REFUSAL), "{model}");
+        assert!(!text.contains('{'), "{model}: {text}");
+    }
+}
+
+/// K6: GitHub's message is bounded and control-free, and a missing message
+/// yields the code, never the body.
+#[tokio::test]
+#[serial]
+async fn k6_the_refusal_bounds_hostile_text_and_never_dumps_the_body() {
+    let hostile = format!(
+        "evil\u{1b}]52;c;ZXZpbA==\u{7} \u{1b}[2J\n{}",
+        "x".repeat(4000)
+    );
+    let (posts, text) = refused_turn(
+        "gemini-3.8-flash",
+        chat_path,
+        "cop-identity-cpfree1-k6-hostile",
+        None,
+        model_not_supported(&hostile),
+    )
+    .await;
+    assert_eq!(posts, [CHAT, CLI]);
+    assert!(!text.chars().any(char::is_control), "{text:?}");
+    assert!(!text.contains("ZXZpbA"), "{text:?}");
+    let github = text
+        .strip_prefix("GitHub Copilot HTTP 400: ")
+        .and_then(|rest| rest.split(" — GitHub did not accept").next())
+        .expect("the GitHub text sits before the model sentence");
+    assert_eq!(github.chars().count(), PROVIDER_TEXT_CAP);
+
+    let (_, text) = refused_turn(
+        "gemini-3.8-flash",
+        chat_path,
+        "cop-identity-cpfree1-k6-no-message",
+        None,
+        json_error(
+            400,
+            json!({"error":{"code":"model_not_supported","param":"model"}}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        text,
+        plan::model_refused("gemini-3.8-flash", "model_not_supported")
+    );
+    assert!(!text.contains('{') && !text.contains("param"), "{text}");
+}
+
+/// K6/K8: another 400 code is not the plan text, even on the same turn.
+#[tokio::test]
+#[serial]
+async fn k6_a_plain_400_does_not_get_the_plan_text() {
+    let (posts, text) = refused_turn(
+        "gemini-3.8-flash",
+        chat_path,
+        "cop-identity-cpfree1-k6-plain",
+        None,
+        json_error(
+            400,
+            json!({"error":{"code":"bad_request","message":"nope"}}),
+        ),
+    )
+    .await;
+    assert_eq!(posts, [CHAT], "no alternate for a plain 400");
+    assert_eq!(text, "GitHub Copilot HTTP 400: nope");
+}
+
+/// K7: a pinned identity gets one POST and the same text.
+#[tokio::test]
+#[serial]
+async fn k7_a_pinned_identity_gets_one_post_and_the_same_text() {
+    for (model, route, token) in [
+        (
+            "gemini-3.8-flash",
+            chat_path as fn(&str) -> String,
+            "cop-identity-cpfree1-k7-chat",
+        ),
+        (
+            MESSAGES_MODEL,
+            messages_path as fn(&str) -> String,
+            "cop-identity-cpfree1-k7-messages",
+        ),
+        (
+            RESPONSES_MODEL,
+            responses_path as fn(&str) -> String,
+            "cop-identity-cpfree1-k7-responses",
+        ),
+    ] {
+        let (posts, text) = refused_turn(
+            model,
+            route,
+            token,
+            Some("custom-id"),
+            model_not_supported(GITHUB_REFUSAL),
+        )
+        .await;
+        assert_eq!(posts, ["custom-id"], "{model}");
+        assert_eq!(text, plan::model_refused(model, GITHUB_REFUSAL), "{model}");
+    }
+}
+
+/// K6: a control-bearing model id is sent as it is, but never shown raw.
+#[tokio::test]
+#[serial]
+async fn k6_a_hostile_model_id_is_sent_intact_and_shown_safe() {
+    let hostile = format!("evil\u{1b}]52;c;ZXZpbA==\u{7}\n{}", "m".repeat(400));
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    common::login(&server, "cop-identity-cpfree1-k6-hostile-id", ENDPOINT_A).await;
+    let gate = Gate::new(chat_sse("never"));
+    gate.mount(&server, &chat_path(ROOT_A)).await;
+    gate.deny(&[CHAT, CLI], model_not_supported(GITHUB_REFUSAL));
+    let provider = build(&hostile);
+    let error = turn(&provider, &hostile)
+        .await
+        .expect_err("a refused model fails");
+    let posts = requests(&server, "POST", &chat_path(ROOT_A)).await;
+    assert!(!posts.is_empty());
+    for post in &posts {
+        assert_eq!(common::json_body(post)["model"], hostile.as_str());
+    }
+    match error {
+        ProviderError::Other(text) => {
+            assert!(!text.chars().any(char::is_control), "{text:?}");
+            assert!(!text.contains("ZXZpbA"), "{text:?}");
+            assert!(text.contains("GitHub did not accept model"), "{text}");
+        }
+        other => panic!("expected the Copilot refusal text, got {other:?}"),
     }
 }

@@ -65,13 +65,15 @@ pub trait RequestProfile: Send + Sync + fmt::Debug {
         None
     }
     /// Provider-branded mapping of a final non-2xx response (`sent` holds the
-    /// request headers, for redaction); `None` keeps the transport's mapping.
+    /// request headers, for redaction; `model` is the id the request sent);
+    /// `None` keeps the transport's mapping.
     fn error(
         &self,
         _status: u16,
         _headers: &HeaderMap,
         _body: &str,
         _sent: &HeaderMap,
+        _model: &str,
     ) -> Option<ProviderError> {
         None
     }

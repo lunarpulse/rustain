@@ -203,6 +203,7 @@ impl RequestProfile for OpenRouterChatProfile {
         headers: &HeaderMap,
         body: &str,
         sent: &HeaderMap,
+        _model: &str,
     ) -> Option<ProviderError> {
         Some(errors::http_error(status, headers, body, sent))
     }

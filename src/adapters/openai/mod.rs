@@ -162,6 +162,8 @@ struct ChatAttempt {
     request: reqwest::Request,
     state: Option<Box<dyn RequestState>>,
     profile: Arc<dyn ChatProfile>,
+    /// The model id this request sent.
+    model: String,
 }
 
 impl ChatAttempt {
@@ -179,7 +181,7 @@ impl ChatAttempt {
     }
     fn error(&self, status: u16, headers: &HeaderMap, body: &str) -> ProviderError {
         self.profile
-            .error(status, headers, body, self.request.headers())
+            .error(status, headers, body, self.request.headers(), &self.model)
             .unwrap_or_else(|| legacy_error(status, headers, body))
     }
 }
@@ -378,6 +380,7 @@ impl OpenAiAdapter {
             request,
             state,
             profile: self.profile.clone(),
+            model: options.model.clone(),
         })
     }
 }

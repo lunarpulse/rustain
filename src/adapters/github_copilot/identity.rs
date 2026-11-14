@@ -142,12 +142,15 @@ pub fn cache_key(
     )
 }
 
+/// A 400 body whose `error.code` is exactly `model_not_supported`.
+pub(crate) fn model_not_supported(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .is_ok_and(|v| v["error"]["code"] == "model_not_supported")
+}
+
 /// omp `isCopilotIdentityDenied`: 403, or 400 with `error.code` `model_not_supported`.
 fn denied(status: u16, body: &[u8]) -> bool {
-    status == 403
-        || (status == 400
-            && serde_json::from_slice::<serde_json::Value>(body)
-                .is_ok_and(|v| v["error"]["code"] == "model_not_supported"))
+    status == 403 || (status == 400 && model_not_supported(body))
 }
 
 /// Identity state of one logical request. `snapshot` is the learned entry read

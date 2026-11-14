@@ -10,9 +10,11 @@ use super::common::{
     messages_path, messages_sse, mount_routes, options, probe_reply, reply, requests,
     responses_path, text_of, user,
 };
+use rustain::adapters::github_copilot::plan;
 use rustain::adapters::model_catalog_cache::{
     CachedDiscoveryEntry, DiscoveryTarget, ModelCatalogCache,
 };
+use rustain::domain::errors::ProviderError;
 use rustain::domain::models::provider::{DiscoveryStatus, LockedProvider};
 use rustain::domain::models::{AppConfig, ModelDescriptor};
 use rustain::infrastructure::model_discovery::{RefreshReport, refresh_target};
@@ -323,6 +325,49 @@ async fn k10_refresh_lists_the_probed_root_and_serves_sorted_rows_with_the_1m_si
     let posts = requests(&server, "POST", &messages_path(ROOT_A)).await;
     assert_eq!(posts.len(), 1);
     assert_eq!(json_body(&posts[0])["model"], LONG);
+}
+
+/// K6: a refused `-1m` sibling is reported under the base id GitHub was sent,
+/// not the id the user picked.
+#[tokio::test]
+#[serial]
+async fn k6_a_refused_1m_sibling_names_the_base_id_that_was_sent() {
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    login(&server, "t-refused-1m", ENDPOINT_A).await;
+    reply(
+        &server,
+        "GET",
+        &models_path(ROOT_A),
+        json_reply(200, live_payload()),
+    )
+    .await;
+    let github = "The requested model is not supported.";
+    reply(
+        &server,
+        "POST",
+        &messages_path(ROOT_A),
+        json_reply(
+            400,
+            json!({"error":{"code":"model_not_supported","message":github}}),
+        ),
+    )
+    .await;
+    let layer = init_provider_layer(&app_config());
+    assert_eq!(refresh(&layer, PROVIDER).await.status, DiscoveryStatus::Ok);
+    let provider = target(&layer, PROVIDER).provider.clone();
+    let error = complete(&provider, vec![user("hi")], options(LONG_1M, 1024, None))
+        .await
+        .expect_err("the refused sibling fails");
+    let posts = requests(&server, "POST", &messages_path(ROOT_A)).await;
+    assert!(!posts.is_empty());
+    for post in &posts {
+        assert_eq!(json_body(post)["model"], LONG);
+    }
+    match error {
+        ProviderError::Other(text) => assert_eq!(text, plan::model_refused(LONG, github)),
+        other => panic!("expected the Copilot refusal text, got {other:?}"),
+    }
 }
 
 /// K10 (M10): a row without an endpoint sits on the canonical root, so the

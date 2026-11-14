@@ -728,6 +728,9 @@ pub struct LoginSummary {
     /// The CLI's success line(s) and the credential path.
     pub lines: Vec<String>,
     pub credential_id: crate::domain::models::CredentialId,
+    /// Provider notes after the login, in order: each is its own notice, the
+    /// last one an attention (warning) notice, the others informational.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -129,6 +129,25 @@ async fn p3_inconclusive_stored_unvalidated() {
     assert!(snapshot.rows("anthropic")[0].last_validated.is_none());
 }
 #[tokio::test]
+async fn a_note_left_by_an_earlier_attempt_never_reaches_the_next_login() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn AuthStorePort> =
+        Arc::new(FileAuthStore::at(directory.path().join("auth.json")));
+    let context = context(&server.uri(), &["VALID-CANDIDATE"]);
+    // What a failed earlier attempt on this context would have left behind.
+    context.note("stale");
+    let result = flows::login("anthropic", &AuthMethod::ApiKey, &context, &store)
+        .await
+        .unwrap();
+    assert!(result.notes.is_empty(), "{:?}", result.notes);
+}
+#[tokio::test]
 async fn p14_a_second_distinct_key_coexists_and_becomes_active() {
     // No overwrite prompt: the first prompt is the key itself.
     let (result, snapshot) = run(200, &["SECOND-CANDIDATE"], true).await;

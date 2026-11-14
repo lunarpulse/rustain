@@ -18,6 +18,7 @@ use super::device::{
 use crate::conformance_20_1d_codex_subscription::auth::jwt;
 use crate::conformance_20_1d_codex_subscription::cli::Fixture;
 use rustain::adapters::auth_store::FileAuthStore;
+use rustain::adapters::github_copilot::plan;
 use rustain::domain::models::{Credential, CredentialOrigin, OAuthCredential, StoredCredential};
 use rustain::domain::ports::AuthStorePort;
 use serde_json::{Value, json};
@@ -461,6 +462,8 @@ async fn k05_k12_debug_binary_codex_device_login_status_ask_logout() {
             "{login_err}"
         );
         assert!(!login_err.contains("Local browser launch"), "{login_err}");
+        // K3: the Copilot plan notice belongs to Copilot logins only.
+        assert!(!login_err.contains(plan::AVAILABILITY_HINT), "{login_err}");
         assert!(!login_err.contains("Cannot bind"), "{login_err}");
         assert!(
             login_err.contains(&format!("Discovered 1 models for {CODEX_LOGIN_NAME}.")),
@@ -633,6 +636,8 @@ async fn k12_debug_binary_xai_oauth_login_status_ask_logout() {
             "{login_err}"
         );
         assert!(!login_err.contains("Local browser launch"), "{login_err}");
+        // K3: the Copilot plan notice belongs to Copilot logins only.
+        assert!(!login_err.contains(plan::AVAILABILITY_HINT), "{login_err}");
         assert!(
             login_err.contains(&format!("Discovered 11 models for {XAI_LOGIN_NAME}.")),
             "{login_err}"

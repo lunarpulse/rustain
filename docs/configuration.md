@@ -207,7 +207,10 @@ selects the login credential rows, so an alias map key with
 ### GitHub Copilot
 
 `github-copilot` is a built-in provider that needs no configuration; it defaults
-to `gpt-5.5` and bundles GitHub Copilot's 55 models. An explicit entry looks like:
+to `gpt-5.5` and bundles GitHub Copilot's 55 models. Which models an account may
+use depends on its Copilot plan; see "Model availability depends on the Copilot
+plan" in `docs/auth.md`. An
+explicit entry looks like:
 
 ```toml
 [provider.copilot]

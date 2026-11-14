@@ -21,6 +21,10 @@ use super::common::{
 };
 use crate::conformance_20_1d_codex_subscription::cli::Fixture;
 use rustain::adapters::auth_store::FileAuthStore;
+use rustain::adapters::github_copilot::{
+    plan,
+    policy::{self, PolicyReport},
+};
 use rustain::domain::models::{Credential, StoredCredential};
 use rustain::domain::ports::AuthStorePort;
 use serde_json::{Value, json};
@@ -177,8 +181,13 @@ async fn preflight(fixture: &Fixture, server: &MockServer) {
 /// `printf '\n' | rustain auth login github-copilot`: the Fixture's command with
 /// stdin replaced by a pipe that carries one blank line (github.com) and closes.
 async fn login_with_blank_answer(fixture: &Fixture) -> Output {
+    blank_answer_login(fixture, &["auth", "login", PROVIDER]).await
+}
+
+/// The same login with `args` (for example `--json`).
+async fn blank_answer_login(fixture: &Fixture, args: &[&str]) -> Output {
     let label = "login";
-    let mut command = fixture.command(label, &["auth", "login", PROVIDER]);
+    let mut command = fixture.command(label, args);
     command.stdin(Stdio::piped());
     fixture.json(
         "login.stdin.json",
@@ -591,4 +600,108 @@ async fn k20_status_reports_oauth_after_a_copilot_403() {
     })
     .await
     .expect("K20 Copilot 403 status flow exceeded its structural deadline");
+}
+
+/// The stderr lines strictly between the first line starting `after` and the
+/// first line starting `before`.
+fn lines_between<'a>(stderr: &'a str, after: &str, before: &str) -> Vec<&'a str> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with(after))
+        .unwrap_or_else(|| panic!("no `{after}` line: {stderr}"));
+    let end = lines
+        .iter()
+        .position(|line| line.starts_with(before))
+        .unwrap_or_else(|| panic!("no `{before}` line: {stderr}"));
+    assert!(start < end, "`{after}` precedes `{before}`: {stderr}");
+    lines[start + 1..end].to_vec()
+}
+
+/// K1: the debug binary prints the enabled count and the plan notice once each
+/// on stderr, after the saved line and before discovery; stdout carries only
+/// the success line.
+#[tokio::test]
+#[serial]
+async fn k1_login_prints_the_notes_once_on_stderr_and_not_on_stdout() {
+    const K1_TOKEN: &str = "gho_CpFree1K1CopilotSecretToken01";
+    tokio::time::timeout(Duration::from_secs(240), async {
+        let server = MockServer::start().await;
+        let fixture = fixture(&server, "cpfree1-k1", &copilot_config(TURNS[0].0));
+        preflight(&fixture, &server).await;
+        mount_session(&server, K1_TOKEN).await;
+        let login = login_with_blank_answer(&fixture).await;
+        let stderr = text(&login.stderr);
+        let stdout = text(&login.stdout);
+        let enabled = policy::enabled_line(PolicyReport {
+            accepted: SEED_IDS,
+            total: SEED_IDS,
+        });
+        let notice = plan::login_notice();
+        assert_eq!(
+            lines_between(&stderr, "Credentials saved to", "Discovered "),
+            [enabled.as_str(), notice.as_str()],
+            "{stderr}"
+        );
+        for line in [&enabled, &notice] {
+            assert_eq!(stderr.matches(line.as_str()).count(), 1, "{stderr}");
+            assert!(!stdout.contains(line.as_str()), "{stdout}");
+        }
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.trim() == format!("Logged in to {LOGIN_NAME}")),
+            "{stdout}"
+        );
+        assert_no_leak(&[&login], &[K1_TOKEN, DEVICE_CODE]);
+    })
+    .await
+    .expect("K1 exceeded its structural deadline");
+}
+
+/// K2: with `--json` stdout is exactly one object with the six keys and no
+/// plan text; the notice is on stderr once.
+#[tokio::test]
+#[serial]
+async fn k2_json_login_keeps_stdout_machine_clean_and_prints_the_notice_on_stderr() {
+    const K2_TOKEN: &str = "gho_CpFree1K2CopilotSecretToken02";
+    tokio::time::timeout(Duration::from_secs(240), async {
+        let server = MockServer::start().await;
+        let fixture = fixture(&server, "cpfree1-k2", &copilot_config(TURNS[0].0));
+        preflight(&fixture, &server).await;
+        mount_session(&server, K2_TOKEN).await;
+        let login = blank_answer_login(&fixture, &["auth", "login", PROVIDER, "--json"]).await;
+        let stdout = text(&login.stdout);
+        let stderr = text(&login.stderr);
+        let object: Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|error| panic!("stdout is one JSON value: {error}: {stdout}"));
+        let mut keys: Vec<&str> = object
+            .as_object()
+            .expect("stdout is one JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "identity",
+                "method",
+                "provider",
+                "status",
+                "validated"
+            ]
+        );
+        assert_eq!(object["status"], "authenticated");
+        assert!(!stdout.contains(plan::AVAILABILITY_HINT), "{stdout}");
+        assert_eq!(
+            stderr.matches(plan::login_notice().as_str()).count(),
+            1,
+            "{stderr}"
+        );
+        assert_no_leak(&[&login], &[K2_TOKEN, DEVICE_CODE]);
+    })
+    .await
+    .expect("K2 exceeded its structural deadline");
 }

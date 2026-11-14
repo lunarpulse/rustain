@@ -14,8 +14,10 @@ use super::common::{
     user,
 };
 use crate::conformance_20_1d2_device_and_xai::device::{display, get, post, progress};
-use rustain::adapters::auth::flows::FlowError;
+use rustain::adapters::auth::flows::{FlowError, LoginResult};
 use rustain::adapters::github_copilot::catalog::SEED;
+use rustain::adapters::github_copilot::plan;
+use rustain::adapters::github_copilot::policy::{self, PolicyReport};
 use rustain::domain::errors::ProviderError;
 use rustain::domain::models::{CredentialIdentity, CredentialOrigin, CredentialRouting};
 use serde_json::{Value, json};
@@ -105,7 +107,7 @@ async fn login_with_policy(
     token: &str,
     probe: ResponseTemplate,
     policy: ResponseTemplate,
-) -> Recorder {
+) -> (Recorder, LoginResult) {
     let recorder = Recorder::new();
     recorder
         .mount(server, "POST", DEVICE_PATH, vec![device_reply(5.0, 900.0)])
@@ -115,10 +117,10 @@ async fn login_with_policy(
         .await;
     recorder.mount(server, "GET", PROBE_PATH, vec![probe]).await;
     mount_policy(server, policy).await;
-    try_login(&recorder)
+    let result = try_login(&recorder)
         .await
         .expect("probe and policy failures never fail the login");
-    recorder
+    (recorder, result)
 }
 
 /// K01's policy responder: records the arrival order of model ids. The
@@ -217,6 +219,16 @@ async fn k01_public_login_paces_polls_probes_enables_models_in_batches_and_store
     assert_eq!(result.provider, PROVIDER);
     assert_eq!(result.method, "oauth");
     assert_eq!(result.identity, CredentialIdentity::default());
+    assert_eq!(
+        result.notes,
+        [
+            policy::enabled_line(PolicyReport {
+                accepted: SEED_IDS,
+                total: SEED_IDS
+            }),
+            plan::login_notice(),
+        ]
+    );
 
     // Pacing: 5 s × 1.2; slow_down adds 5 s and switches to × 1.4; a slow_down
     // with `interval: 7` replaces the interval.
@@ -705,13 +717,23 @@ async fn k03_denied_policy_resends_once_as_cli_and_the_login_stores_the_row() {
     let server = MockServer::start().await;
     let _world = World::new(&server);
     let token = "t-k03-denied";
-    login_with_policy(
+    let (_, result) = login_with_policy(
         &server,
         token,
         probe_reply(ENDPOINT_A),
         ResponseTemplate::new(403),
     )
     .await;
+    assert_eq!(
+        result.notes,
+        [
+            policy::enabled_line(PolicyReport {
+                accepted: 0,
+                total: SEED_IDS
+            }),
+            plan::login_notice(),
+        ]
+    );
 
     let posts = policy_posts(&server).await;
     assert_eq!(posts.len(), 2 * SEED_IDS);
@@ -771,13 +793,20 @@ async fn k03_pinned_integration_id_is_sent_on_every_policy_post_without_fallback
 async fn k03_policy_server_errors_are_not_retried_and_not_fatal() {
     let server = MockServer::start().await;
     let _world = World::new(&server);
-    login_with_policy(
+    let (_, result) = login_with_policy(
         &server,
         "t-k03-500",
         probe_reply(ENDPOINT_A),
         ResponseTemplate::new(500),
     )
     .await;
+    assert_eq!(
+        result.notes[0],
+        policy::enabled_line(PolicyReport {
+            accepted: 0,
+            total: SEED_IDS
+        })
+    );
 
     let posts = policy_posts(&server).await;
     assert_eq!(posts.len(), SEED_IDS);
@@ -788,6 +817,76 @@ async fn k03_policy_server_errors_are_not_retried_and_not_fatal() {
         );
     }
     assert_eq!(rows(PROVIDER).await.len(), 1);
+}
+
+/// The policy answers of K4: `accepted` ids succeed under any identity,
+/// `cli_only` succeeds only as the Copilot CLI, every other id is refused 403.
+struct PolicySubset {
+    accepted: BTreeSet<String>,
+    cli_only: String,
+}
+
+impl Respond for PolicySubset {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let id = policy_id(request);
+        let identity = header(request, "copilot-integration-id").unwrap_or_default();
+        if self.accepted.contains(&id)
+            || (id == self.cli_only && identity == "copilot-developer-cli")
+        {
+            json_reply(200, json!({}))
+        } else {
+            ResponseTemplate::new(403)
+        }
+    }
+}
+
+/// K4: the count is GitHub's answer, through the real `flows::login`: the
+/// accepted subset plus the id the CLI alternate rescued, out of the whole
+/// seed; refused ids are not counted.
+#[tokio::test]
+#[serial]
+async fn k4_the_enabled_count_is_the_number_of_accepted_policy_requests() {
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    let ids = seed_ids();
+    let accepted: BTreeSet<String> = ids[..10].iter().map(|id| (*id).to_owned()).collect();
+    let cli_only = ids[20].to_owned();
+    let recorder = Recorder::new();
+    recorder
+        .mount(&server, "POST", DEVICE_PATH, vec![device_reply(5.0, 900.0)])
+        .await;
+    recorder
+        .mount(
+            &server,
+            "POST",
+            TOKEN_PATH,
+            vec![token_reply("t-k4-subset")],
+        )
+        .await;
+    recorder
+        .mount(&server, "GET", PROBE_PATH, vec![probe_reply(ENDPOINT_A)])
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(POLICY_PATH))
+        .respond_with(PolicySubset {
+            accepted: accepted.clone(),
+            cli_only,
+        })
+        .mount(&server)
+        .await;
+    let result = try_login(&recorder)
+        .await
+        .expect("a partly refused policy never fails the login");
+    assert_eq!(
+        result.notes,
+        [
+            policy::enabled_line(PolicyReport {
+                accepted: accepted.len() + 1,
+                total: SEED_IDS
+            }),
+            plan::login_notice(),
+        ]
+    );
 }
 
 /// K03 (M03): an unusable probe answer stores no endpoint, the login succeeds

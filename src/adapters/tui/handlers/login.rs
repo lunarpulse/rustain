@@ -203,7 +203,7 @@ pub(super) fn close(state: &mut TuiState) {
     state.needs_redraw = true;
 }
 
-fn feedback(state: &mut TuiState, severity: NoticeSeverity, message: String) {
+fn feedback(state: &mut TuiState, severity: NoticeSeverity, message: impl Into<String>) {
     notifications::notify(state, NoticeSource::Login, severity, message);
     state.needs_redraw = true;
 }
@@ -349,6 +349,14 @@ fn finished(
         // cancelled after it was persisted.
         Ok(summary) => {
             feedback(state, NoticeSeverity::Success, summary.lines.join("\n"));
+            // The reopened picker covers toasts: the last note is a warning so
+            // it raises the unseen badge on every login.
+            if let [informational @ .., attention] = &summary.notes[..] {
+                for note in informational {
+                    feedback(state, NoticeSeverity::Info, note);
+                }
+                feedback(state, NoticeSeverity::Warning, attention);
+            }
             if owned {
                 let column = picker_column.unwrap_or_else(|| {
                     host::login_targets(app)

@@ -35,6 +35,7 @@ pub mod domain;
 pub mod headers;
 pub mod identity;
 pub mod login;
+pub mod plan;
 pub mod policy;
 pub mod routing;
 
@@ -273,6 +274,8 @@ fn listing_status(status: u16) -> Result<(), ProviderError> {
 /// The request-scoped Responses policy of one Copilot request.
 struct CopilotWire {
     inner: Arc<Inner>,
+    /// The model id this request sent.
+    model: String,
     cache_key: Option<String>,
     reasoning: bool,
     vision: bool,
@@ -342,7 +345,7 @@ impl Wire for CopilotWire {
         body: &str,
         request: &HeaderMap,
     ) -> ProviderError {
-        headers::http_error(status, headers, body, request)
+        headers::http_error(status, headers, body, request, &self.model)
     }
     fn redact(&self, message: &str, request: &HeaderMap) -> String {
         headers::redact(message, request)
@@ -504,6 +507,7 @@ impl CopilotAdapter {
         );
         let wire = CopilotWire {
             inner: self.inner.clone(),
+            model: options.model.clone(),
             cache_key: session
                 .as_ref()
                 .map(|(id, _)| crate::adapters::responses::prompt_cache_key(id)),
@@ -856,6 +860,7 @@ mod tests {
         assert_eq!(begun, canonical_root());
         let mut wire = CopilotWire {
             inner: adapter.inner.clone(),
+            model: "gpt-5".into(),
             cache_key: None,
             reasoning: false,
             vision: false,

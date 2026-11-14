@@ -35,7 +35,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use super::catalog::{self, Route};
 use super::domain::{enterprise_domain, enterprise_root, normalize_api_endpoint, parse_api_key};
 use super::identity::{self, CopilotRequestState};
-use super::{DEFAULT_BASE_URL, Shared};
+use super::{DEFAULT_BASE_URL, Shared, plan};
+use crate::adapters::auth::PROVIDER_TEXT_CAP;
 use crate::adapters::openai::profile::{ChatCompat, ChatImages, ChatProfile};
 use crate::adapters::provider::{
     http_retry::{HttpRetryPolicy, OPENAI_WIRE},
@@ -250,8 +251,15 @@ pub fn redact(message: &str, sent: &HeaderMap) -> String {
 }
 
 /// The Copilot mapping of a final non-2xx response. A 403 is a plan, policy or
-/// organization denial: never an authentication failure, never recovered.
-pub fn http_error(status: u16, headers: &HeaderMap, body: &str, sent: &HeaderMap) -> ProviderError {
+/// organization denial: never an authentication failure, never recovered. `model`
+/// is the id the failed request sent.
+pub fn http_error(
+    status: u16,
+    headers: &HeaderMap,
+    body: &str,
+    sent: &HeaderMap,
+    model: &str,
+) -> ProviderError {
     match status {
         401 => return ProviderError::AuthenticationFailed,
         403 => return ProviderError::Other(FORBIDDEN.into()),
@@ -268,6 +276,24 @@ pub fn http_error(status: u16, headers: &HeaderMap, body: &str, sent: &HeaderMap
     }
     let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let error = &value["error"];
+    if status == 400 && identity::model_not_supported(body.as_bytes()) {
+        // GitHub's text: terminal escapes and controls first (so an escape
+        // can neither hide nor rejoin a credential), then redaction of the whole
+        // text, then the cap; never the body.
+        let github = error["message"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || "model_not_supported".to_owned(),
+                |message| {
+                    redact(&plan::display_safe(message), sent)
+                        .chars()
+                        .take(PROVIDER_TEXT_CAP)
+                        .collect()
+                },
+            );
+        return ProviderError::Other(plan::model_refused(model, &github));
+    }
     let message = match error["message"]
         .as_str()
         .or_else(|| error.as_str())
@@ -374,8 +400,9 @@ impl RequestProfile for CopilotProfile {
         headers: &HeaderMap,
         body: &str,
         sent: &HeaderMap,
+        model: &str,
     ) -> Option<ProviderError> {
-        Some(http_error(status, headers, body, sent))
+        Some(http_error(status, headers, body, sent, model))
     }
     /// Messages: none — omp pins the client retries to 0 on the streaming
     /// Messages path; its retries are the `MESSAGES` provider loop.
@@ -612,17 +639,17 @@ mod tests {
         );
         let none = HeaderMap::new();
         assert!(matches!(
-            http_error(401, &none, "", &sent),
+            http_error(401, &none, "", &sent, "m"),
             ProviderError::AuthenticationFailed
         ));
-        match http_error(403, &none, "", &sent) {
+        match http_error(403, &none, "", &sent, "m") {
             ProviderError::Other(text) => assert_eq!(text, FORBIDDEN),
             other => panic!("{other:?}"),
         }
         let mut retry = HeaderMap::new();
         retry.insert("retry-after", HeaderValue::from_static("120"));
         assert!(matches!(
-            http_error(429, &retry, "", &sent),
+            http_error(429, &retry, "", &sent, "m"),
             ProviderError::RateLimited {
                 retry_after_ms: Some(120_000)
             }
@@ -632,6 +659,7 @@ mod tests {
             &none,
             r#"{"error":{"message":"boom Bearer gho_SENTTOKEN123"}}"#,
             &sent,
+            "m",
         ) {
             ProviderError::ConnectionFailed(text) => {
                 assert_eq!(text, "GitHub Copilot server error 500: boom [redacted]");
@@ -643,6 +671,7 @@ mod tests {
             &none,
             &format!("{} gho_SENTTOKEN123", "x".repeat(10)),
             &sent,
+            "m",
         ) {
             ProviderError::Other(text) => {
                 assert!(text.starts_with("GitHub Copilot HTTP 422: "));
@@ -650,13 +679,13 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match http_error(400, &none, r#"{"error":"plain"}"#, &sent) {
+        match http_error(400, &none, r#"{"error":"plain"}"#, &sent, "m") {
             ProviderError::Other(text) => assert_eq!(text, "GitHub Copilot HTTP 400: plain"),
             other => panic!("{other:?}"),
         }
         // Prose about tokens is not a credential; a token-length value is.
         let prose = r#"{"error":{"message":"prompt token count of 9 exceeds the limit of 8"}}"#;
-        let ProviderError::Other(text) = http_error(400, &none, prose, &sent) else {
+        let ProviderError::Other(text) = http_error(400, &none, prose, &sent, "m") else {
             panic!("a 400 maps to Other");
         };
         assert_eq!(
@@ -667,5 +696,120 @@ mod tests {
             redact("Authorization: token abcdefghij0123456789xyz", &none),
             "Authorization: [redacted]"
         );
+    }
+
+    fn refusal(body: &str, sent: &HeaderMap) -> String {
+        match http_error(400, &HeaderMap::new(), body, sent, "gemini-3.8-flash") {
+            ProviderError::Other(text) => text,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_model_not_supported_gets_the_plan_text() {
+        let sent = HeaderMap::new();
+        let refused = r#"{"error":{"code":"model_not_supported","message":"The requested model is not supported."}}"#;
+        assert_eq!(
+            refusal(refused, &sent),
+            plan::model_refused("gemini-3.8-flash", "The requested model is not supported.")
+        );
+        // No message: GitHub's code, never the body.
+        let text = refusal(r#"{"error":{"code":"model_not_supported"}}"#, &sent);
+        assert_eq!(
+            text,
+            plan::model_refused("gemini-3.8-flash", "model_not_supported")
+        );
+        assert!(!text.contains('{'), "{text}");
+        // Other codes and bodies keep today's exact text.
+        for (body, expected) in [
+            (
+                r#"{"error":{"code":"model_not_available_for_integrator","message":"nope"}}"#,
+                "GitHub Copilot HTTP 400: nope",
+            ),
+            (
+                r#"{"error":{"code":"model_not_supported_here","message":"nope"}}"#,
+                "GitHub Copilot HTTP 400: nope",
+            ),
+            (r#"{"error":"plain"}"#, "GitHub Copilot HTTP 400: plain"),
+            ("not json", "GitHub Copilot HTTP 400: not json"),
+        ] {
+            assert_eq!(refusal(body, &sent), expected, "{body}");
+        }
+        // The code only means a refused model on a 400.
+        match http_error(
+            422,
+            &HeaderMap::new(),
+            r#"{"error":{"code":"model_not_supported","message":"nope"}}"#,
+            &sent,
+            "m",
+        ) {
+            ProviderError::Other(text) => assert_eq!(text, "GitHub Copilot HTTP 422: nope"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_refusal_redacts_and_bounds_githubs_text() {
+        let mut sent = HeaderMap::new();
+        sent.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer gho_SENTTOKEN123"),
+        );
+        let leaking = serde_json::json!({"error":{"code":"model_not_supported","message":"bad Bearer gho_SENTTOKEN123 end"}}).to_string();
+        let text = refusal(&leaking, &sent);
+        assert!(!text.contains("SENTTOKEN"), "{text}");
+        assert!(text.contains("bad [redacted] end"), "{text}");
+
+        let hostile = serde_json::json!({"error":{"code":"model_not_supported","message":format!("evil\u{1b}]52;c;ZXZpbA==\u{7} \u{1b}[2J\n{}", "x".repeat(4000))}}).to_string();
+        let text = refusal(&hostile, &sent);
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(!text.contains("ZXZpbA"), "{text:?}");
+        let github = text
+            .strip_prefix("GitHub Copilot HTTP 400: ")
+            .and_then(|rest| rest.split(" — GitHub did not accept").next())
+            .expect("the GitHub text sits before the model sentence");
+        assert_eq!(
+            github.chars().count(),
+            crate::adapters::auth::PROVIDER_TEXT_CAP
+        );
+    }
+
+    #[test]
+    fn an_escape_split_credential_is_redacted_before_it_can_be_rejoined() {
+        let mut sent = HeaderMap::new();
+        sent.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer gho_SENTTOKEN123"),
+        );
+        let body = |message: &str| {
+            serde_json::json!({"error":{"code":"model_not_supported","message":message}})
+                .to_string()
+        };
+        for message in [
+            "x gho_\u{1b}[0mSENTTOKEN123 y".to_owned(),
+            "x Bear\u{1b}[0mer gho_SENTTOKEN123 y".to_owned(),
+            // The credential straddles the 500-character cap.
+            format!("{} gho_\u{1b}[0mSENTTOKEN123", "x".repeat(494)),
+        ] {
+            let text = refusal(&body(&message), &sent);
+            assert!(!text.contains("SENTTOKEN"), "{message:?} -> {text}");
+            assert!(!text.contains("gho_SENT"), "{message:?} -> {text}");
+            assert!(!text.chars().any(char::is_control), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn hostile_message_text_never_reaches_the_refusal_raw() {
+        let sent = HeaderMap::new();
+        for (input, forbidden) in plan::tests::HOSTILE {
+            let body = serde_json::json!({"error":{"code":"model_not_supported","message":input}})
+                .to_string();
+            let text = refusal(&body, &sent);
+            let github = text
+                .strip_prefix("GitHub Copilot HTTP 400: ")
+                .and_then(|rest| rest.split(" — GitHub did not accept").next())
+                .expect("the GitHub text precedes the model sentence");
+            plan::tests::assert_display_safe(github, forbidden, input);
+        }
     }
 }

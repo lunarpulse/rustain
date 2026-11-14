@@ -125,6 +125,7 @@ pub async fn run_login(
         outcome: Ok(LoginSummary {
             lines,
             credential_id: result.credential_id,
+            notes: result.notes,
         }),
     });
     for (target, report) in ctx.live.refresh_changed(targets).await {
@@ -486,6 +487,7 @@ mod tests {
                 outcome: Ok(LoginSummary {
                     lines: vec!["Logged in to Anthropic (Claude Pro/Max)".into()],
                     credential_id: crate::domain::models::CredentialId(1),
+                    notes: Vec::new(),
                 }),
             },
         );

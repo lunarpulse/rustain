@@ -28,7 +28,7 @@
 
 use std::time::Duration;
 
-use super::{domain, policy, routing};
+use super::{domain, plan, policy, routing};
 use crate::adapters::auth::flows::{FlowCtx, FlowError, safe_error_id};
 use crate::adapters::auth::policies::{COPILOT_GRANT_LIFETIME_MS, endpoint};
 use crate::domain::models::{
@@ -142,13 +142,15 @@ pub async fn run(ctx: &FlowCtx) -> Result<(Credential, bool), FlowError> {
     let token = poll(ctx, &login.oauth_host, client_id, &device).await?;
     let api_endpoint = routing::probe(ctx.http(), &token).await;
     ctx.ui.on_progress("Enabling models...");
-    policy::enable_all(
+    let report = policy::enable_all(
         ctx.http(),
         &token,
         api_endpoint.as_deref(),
         login.enterprise.as_deref(),
     )
     .await;
+    ctx.note(policy::enabled_line(report));
+    ctx.note(plan::login_notice());
     let now = (ctx.clock)();
     Ok((
         Credential::OAuth(OAuthCredential {
