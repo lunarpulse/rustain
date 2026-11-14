@@ -53,6 +53,15 @@ budget **760**. The independent **11,487-line** hard ceiling remains binding. A 
 change requires its own `RATCHET-SIGNOFF: CONSTANT_NAME — rationale; reviewer`
 in the commit range or PR body; an unrelated or partial approval is insufficient.
 
+`attach_loop.rs` (**10,273** lines) and `attach_keys.rs` (**11,187** lines) carry the
+same kind of line ratchet in `tests/conformance.rs`, but their hard ceiling equals the
+baseline: they never grow net (lane contract, boy-scout rule), and there is no soft
+band. A row that adds lines to either file extracts at least as many into a sibling
+module. Raising a ceiling means changing `ATTACH_LOOP_*` / `ATTACH_KEYS_*`
+(`BASELINE_LINES`, `BASELINE_SHA`, `HARD_BUDGET`) with a constant-named
+`RATCHET-SIGNOFF` per changed constant; `test_attach_*_baseline_integrity` checks that
+each baseline matches `git show <SHA>:<path>`.
+
 Lifetime/label words are excluded both in parsed Rust and inside unexpanded macro
 token trees, where the pinned grammar splits the apostrophe from its identifier.
 The adapter ignores intervening comments and only that identifier; following

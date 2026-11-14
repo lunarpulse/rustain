@@ -591,7 +591,9 @@ fn test_no_std_sync_lock_in_async_module() {
 ///
 /// GOVERNANCE (Epic 11 retro AI-11.3 / closes AI-10.3): this and every other
 /// tracked ratchet const (`MAX_KNOWN_BYPASSES`, `MAX_KNOWN_STD_SYNC_LOCKS`,
-/// `EVENT_LOOP_*`, `EXPECTED_HANDLE_COUNT`) are gated by
+/// `EVENT_LOOP_*`, `ATTACH_LOOP_BASELINE_{LINES,SHA}` / `ATTACH_LOOP_HARD_BUDGET`,
+/// `ATTACH_KEYS_BASELINE_{LINES,SHA}` / `ATTACH_KEYS_HARD_BUDGET`,
+/// `EXPECTED_HANDLE_COUNT`) are gated by
 /// `.github/workflows/ratchet-signoff-guard.yml`. Changing any of them requires a
 /// `RATCHET-SIGNOFF: <CONST_NAME> — <why>` trailer in a commit message or the PR
 /// body, or CI fails. Bumping a ratchet is a governance decision, never a silent edit.
@@ -891,6 +893,514 @@ fn test_event_loop_complexity_floor() {
         budget,
         EVENT_LOOP_RUN_BASELINE_CCN,
         COMPLEXITY_MULTIPLIER_PCT,
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// hygiene-1: line ratchets for `attach_loop.rs` and `attach_keys.rs`
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Same mechanism as `event_loop.rs` above, but the hard budget equals the
+// baseline: the lane contract says these files never grow net (boy-scout rule),
+// so there is no headroom and no soft band. A row that adds lines extracts at
+// least as many. All six constants are governed by
+// `.github/workflows/ratchet-signoff-guard.yml` (see the GOVERNANCE note above).
+
+/// Path of `attach_loop.rs`, shared by its budget and integrity tests.
+const ATTACH_LOOP_PATH: &str = "src/infrastructure/runtime/attach_loop.rs";
+
+/// Line count baseline for `attach_loop.rs`, measured at `ATTACH_LOOP_BASELINE_SHA`.
+const ATTACH_LOOP_BASELINE_LINES: usize = 10_273;
+
+/// Hard ceiling: CI failure. Equal to the baseline (never grow net).
+const ATTACH_LOOP_HARD_BUDGET: usize = ATTACH_LOOP_BASELINE_LINES;
+
+/// Commit where `git show <SHA>:src/infrastructure/runtime/attach_loop.rs | wc -l` is 10_273.
+const ATTACH_LOOP_BASELINE_SHA: &str = "aab1ccb794967a8e4d286e3d63f570b24c8a0a31";
+
+/// Path of `attach_keys.rs`, shared by its budget and integrity tests.
+const ATTACH_KEYS_PATH: &str = "src/infrastructure/runtime/attach_keys.rs";
+
+/// Line count baseline for `attach_keys.rs`, measured at `ATTACH_KEYS_BASELINE_SHA`.
+const ATTACH_KEYS_BASELINE_LINES: usize = 11_187;
+
+/// Hard ceiling: CI failure. Equal to the baseline (never grow net).
+const ATTACH_KEYS_HARD_BUDGET: usize = ATTACH_KEYS_BASELINE_LINES;
+
+/// Commit where `git show <SHA>:src/infrastructure/runtime/attach_keys.rs | wc -l` is 11_187.
+const ATTACH_KEYS_BASELINE_SHA: &str = "aab1ccb794967a8e4d286e3d63f570b24c8a0a31";
+
+fn line_budget_exceeded(lines: usize, hard_budget: usize) -> bool {
+    lines > hard_budget
+}
+
+fn assert_line_budget(path: &str, baseline: usize, hard_budget: usize) {
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("conformance: cannot read {path} ({e}) — wrong CWD?"));
+    let lines = content.lines().count();
+    assert!(
+        !line_budget_exceeded(lines, hard_budget),
+        "{path} HARD line-budget exceeded: {lines} > {hard_budget} (baseline {baseline}, no \
+         headroom). The lane contract forbids net growth. Either:\n\
+           (a) extract at least as many lines as the change adds into a sibling module, or\n\
+           (b) raise the baseline const in tests/conformance.rs with a RATCHET-SIGNOFF trailer + new SHA."
+    );
+}
+
+/// Event-loop pattern: the const must match `git show <SHA>:<path>`; inconclusive
+/// (not failing) when git cannot show the SHA, e.g. depth-1 CI clones.
+fn check_baseline_integrity(path: &str, sha: &str, baseline: usize) {
+    let output = std::process::Command::new("git")
+        .args(["show", &format!("{sha}:{path}")])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let actual_lines = String::from_utf8_lossy(&out.stdout).lines().count();
+            assert_eq!(
+                actual_lines, baseline,
+                "baseline drift: the {path} baseline const = {baseline} but \
+                 `git show {sha}:{path} | wc -l` = {actual_lines}; the const must match the SHA."
+            );
+        }
+        Ok(out) => eprintln!(
+            "baseline integrity for {path}: git show failed ({}), test inconclusive. stderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(e) => {
+            eprintln!("baseline integrity for {path}: git not available ({e}), test inconclusive.")
+        }
+    }
+}
+
+#[test]
+fn test_attach_loop_line_budget() {
+    assert_line_budget(
+        ATTACH_LOOP_PATH,
+        ATTACH_LOOP_BASELINE_LINES,
+        ATTACH_LOOP_HARD_BUDGET,
+    );
+}
+
+#[test]
+fn test_attach_loop_baseline_integrity() {
+    check_baseline_integrity(
+        ATTACH_LOOP_PATH,
+        ATTACH_LOOP_BASELINE_SHA,
+        ATTACH_LOOP_BASELINE_LINES,
+    );
+}
+
+#[test]
+fn test_attach_keys_line_budget() {
+    assert_line_budget(
+        ATTACH_KEYS_PATH,
+        ATTACH_KEYS_BASELINE_LINES,
+        ATTACH_KEYS_HARD_BUDGET,
+    );
+}
+
+#[test]
+fn test_attach_keys_baseline_integrity() {
+    check_baseline_integrity(
+        ATTACH_KEYS_PATH,
+        ATTACH_KEYS_BASELINE_SHA,
+        ATTACH_KEYS_BASELINE_LINES,
+    );
+}
+
+/// K4: the budget predicate is strict `>` with no headroom.
+#[test]
+fn line_budget_exceeded_is_strict_and_has_no_headroom() {
+    for budget in [ATTACH_LOOP_HARD_BUDGET, ATTACH_KEYS_HARD_BUDGET] {
+        assert!(!line_budget_exceeded(budget, budget));
+        assert!(line_budget_exceeded(budget + 1, budget));
+        assert!(!line_budget_exceeded(budget - 1, budget));
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// hygiene-1: tracked-receipt guard (one run per gate and viewport)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Superseded capture receipts live in the outer archive, not in this repository.
+// The guard judges committed content (`git ls-files`), never the disk, so an
+// untracked local capture cannot make `cargo test` red.
+
+/// A rule violation found among tracked paths.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ReceiptViolation {
+    /// Entry under `tests_tui/journeys/<journey>/receipts/` without a recognised run stamp.
+    Unclassifiable(String),
+    /// More than one run of the same family; `runs` is oldest to newest.
+    Superseded {
+        journey: String,
+        family: String,
+        runs: Vec<String>,
+        newest: String,
+    },
+    /// Story mutant receipts belong next to the story file in the outer repo (Rule A).
+    MutantsReceipt(String),
+}
+
+/// Split a receipt entry name into (family, newest-ordering key). Run directories end in
+/// `-YYYYMMDDTHHMMSS[fraction]Z[-<hex>]`; flat files in `-YYYY-MM-DDTHH-MM-SSZ.transcript.txt`.
+/// The key is the parsed instant, then the full fraction without trailing zeros (so digit-string
+/// order equals numeric order at any precision), then the name.
+fn receipt_family_and_key(
+    entry: &str,
+    is_run_dir: bool,
+) -> Option<(String, (String, String, String))> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static RUN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"-(\d{8})T(\d{6})(\d*)Z(?:-[0-9a-f]+)?$").unwrap());
+    static FLAT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})Z\.transcript\.txt$").unwrap()
+    });
+    let (run, flat) = (&*RUN, &*FLAT);
+    if is_run_dir {
+        let c = run.captures(entry)?;
+        let start = c.get(0)?.start();
+        let fraction = c[3].trim_end_matches('0').to_string();
+        Some((
+            entry[..start].to_string(),
+            (format!("{}{}", &c[1], &c[2]), fraction, entry.to_string()),
+        ))
+    } else {
+        let c = flat.captures(entry)?;
+        let start = c.get(0)?.start();
+        let instant: String = (1..=6).map(|i| &c[i]).collect();
+        Some((
+            entry[..start].to_string(),
+            (instant, String::new(), entry.to_string()),
+        ))
+    }
+}
+
+/// Apply the receipt rules to product-relative paths; returns the sorted violations.
+fn receipt_hygiene_violations<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Vec<ReceiptViolation> {
+    use std::collections::{BTreeMap, BTreeSet};
+    type Key = (String, String, String);
+    let mut violations = BTreeSet::new();
+    let mut families: BTreeMap<(String, String), BTreeMap<String, Key>> = BTreeMap::new();
+    for path in paths {
+        let parts: Vec<&str> = path.split('/').collect();
+        let last = parts.last().copied().unwrap_or("");
+        if parts.iter().any(|c| c.ends_with("-mutants"))
+            || last.ends_with("-mutants.txt")
+            || last.ends_with("-mutants.json")
+        {
+            violations.insert(ReceiptViolation::MutantsReceipt(path.to_string()));
+        }
+        if parts.len() < 5
+            || parts[0] != "tests_tui"
+            || parts[1] != "journeys"
+            || parts[3] != "receipts"
+        {
+            continue;
+        }
+        let (journey, entry) = (parts[2], parts[4]);
+        match receipt_family_and_key(entry, parts.len() > 5) {
+            Some((family, key)) => {
+                families
+                    .entry((journey.to_string(), family))
+                    .or_default()
+                    .insert(entry.to_string(), key);
+            }
+            None => {
+                let shown = parts[..5].join("/");
+                violations.insert(ReceiptViolation::Unclassifiable(shown));
+            }
+        }
+    }
+    for ((journey, family), runs) in families {
+        if runs.len() < 2 {
+            continue;
+        }
+        let mut ordered: Vec<(Key, String)> =
+            runs.into_iter().map(|(name, key)| (key, name)).collect();
+        ordered.sort();
+        let names: Vec<String> = ordered.into_iter().map(|(_, name)| name).collect();
+        let newest = names.last().cloned().unwrap_or_default();
+        violations.insert(ReceiptViolation::Superseded {
+            journey,
+            family,
+            runs: names,
+            newest,
+        });
+    }
+    violations.into_iter().collect()
+}
+
+/// Paths the index lists under `dir` that still exist in the working tree.
+/// `Err` on any git failure: a guard that passes without looking is worthless.
+fn tracked_present_paths(dir: &Path) -> Result<Vec<String>, String> {
+    let ceiling = dir.parent().unwrap_or(dir);
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "-z"])
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-files failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let text = String::from_utf8(out.stdout).map_err(|e| format!("non-UTF-8 path: {e}"))?;
+    Ok(text
+        .split('\0')
+        .filter(|p| !p.is_empty() && dir.join(p).symlink_metadata().is_ok())
+        .map(str::to_string)
+        .collect())
+}
+
+/// K1: committed receipts keep one run per (journey, family), and no story mutant
+/// receipt is committed in the product repository.
+#[test]
+fn committed_receipts_keep_one_run_per_gate_viewport() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tracked = tracked_present_paths(root)
+        .unwrap_or_else(|e| panic!("receipt guard cannot list tracked files: {e}"));
+    let violations = receipt_hygiene_violations(tracked.iter().map(String::as_str));
+    assert!(
+        violations.is_empty(),
+        "{} receipt hygiene violation(s). Move superseded runs to the outer archive in the same \
+         change (see tests_tui/README.md, \"Canonical receipt controls\"); story mutant receipts \
+         live next to the story file in the outer repo:\n{:#?}",
+        violations.len(),
+        violations
+    );
+}
+
+#[test]
+fn tracked_present_paths_fails_outside_a_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(tracked_present_paths(dir.path()).is_err());
+}
+
+#[test]
+fn tracked_present_paths_lists_the_real_repository() {
+    let paths = tracked_present_paths(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(paths.iter().any(|p| p == "Cargo.toml"));
+    assert!(paths.iter().any(|p| p == "tests/conformance.rs"));
+}
+
+/// K1d: an indexed path that was removed from the working tree no longer counts.
+#[test]
+fn tracked_present_paths_skips_indexed_but_removed_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    git(&["init", "--quiet"]);
+    std::fs::write(dir.path().join("kept.txt"), "k").unwrap();
+    std::fs::write(dir.path().join("gone.txt"), "g").unwrap();
+    git(&["add", "kept.txt", "gone.txt"]);
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    assert_eq!(
+        tracked_present_paths(dir.path()).unwrap(),
+        vec!["kept.txt".to_string()]
+    );
+}
+
+const CANONICAL_RECEIPTS: &[&str] = &[
+    "tests_tui/journeys/j10/receipts/80x24-20261111T203122824458Z-066843ba1cbf4c4faf592acc849c4944/a.transcript.txt",
+    "tests_tui/journeys/j10/receipts/130x30-20261111T203459630305Z-f15a76acca5b457f9fd4b656afa489b8/a.transcript.txt",
+    "tests_tui/journeys/j10/receipts/60x16-20261111T203901015377Z-fec765b193d04a76a86151fa0da83711/a.transcript.txt",
+    "tests_tui/journeys/j10/receipts/80-20261111T202908190976Z-0be8762110094b4bb7c7056f0b275e2f/a.transcript.txt",
+    "tests_tui/journeys/j10/receipts/130-20261111T203015256424Z-2d54d1e3669e4837a0380ea3c9b8999d/a.transcript.txt",
+    "tests_tui/journeys/j10/receipts/19-21b-80x24-20261111T204303Z-51a29360ed29499d8768539cd249c85e/s/1.txt",
+    "tests_tui/journeys/j10/receipts/19-21b-80x24-20261111T204303Z-51a29360ed29499d8768539cd249c85e/s/2.txt",
+    "tests_tui/journeys/j10/receipts/19-21b-130x30-20261111T204529Z-b151c282cd554ae7aeb59abbbf39d5ff/s/1.txt",
+    "tests_tui/journeys/j10/receipts/19-21b-60x16-20261111T204806Z-2d6869bb8eac40b6b1a1f0fb3e4ee088/s/1.txt",
+    "tests_tui/journeys/j0/receipts/journey-J0-2026-08-28T10-47-33Z.transcript.txt",
+    "tests_tui/journeys/j1/receipts/journey-J1-2026-08-26T05-59-58Z.transcript.txt",
+    "tests_tui/journeys/j2/receipts/journey-J2-2026-08-28T10-49-25Z.transcript.txt",
+    "tests_tui/journeys/j3/receipts/journey-J3-2026-09-12T04-57-07Z.transcript.txt",
+    "tests_tui/journeys/j8/receipts/journey-J8-2026-09-08T05-35-40Z.transcript.txt",
+];
+
+/// K2a: the canonical set (nested files included) has no violation.
+#[test]
+fn receipt_hygiene_accepts_the_canonical_set() {
+    assert_eq!(
+        receipt_hygiene_violations(CANONICAL_RECEIPTS.iter().copied()),
+        vec![]
+    );
+}
+
+/// K2b: a second Act 1 run of one family is a violation naming both runs, newest last.
+#[test]
+fn receipt_hygiene_flags_two_runs_of_one_family() {
+    let older = "80x24-20261110T165829830507Z-aaaa";
+    let newer = "80x24-20261111T203122824458Z-066843ba1cbf4c4faf592acc849c4944";
+    let extra = format!("tests_tui/journeys/j10/receipts/{older}/x");
+    let paths = CANONICAL_RECEIPTS.iter().copied().chain([extra.as_str()]);
+    assert_eq!(
+        receipt_hygiene_violations(paths),
+        vec![ReceiptViolation::Superseded {
+            journey: "j10".into(),
+            family: "80x24".into(),
+            runs: vec![older.into(), newer.into()],
+            newest: newer.into(),
+        }]
+    );
+}
+
+/// K2c: two flat J3 transcripts are one violation.
+#[test]
+fn receipt_hygiene_flags_two_flat_transcripts_of_one_journey() {
+    let paths = [
+        "tests_tui/journeys/j3/receipts/journey-J3-2026-09-12T04-57-07Z.transcript.txt",
+        "tests_tui/journeys/j3/receipts/journey-J3-2026-09-10T01-00-00Z.transcript.txt",
+    ];
+    assert_eq!(
+        receipt_hygiene_violations(paths),
+        vec![ReceiptViolation::Superseded {
+            journey: "j3".into(),
+            family: "journey-J3".into(),
+            runs: vec![
+                "journey-J3-2026-09-10T01-00-00Z.transcript.txt".into(),
+                "journey-J3-2026-09-12T04-57-07Z.transcript.txt".into(),
+            ],
+            newest: "journey-J3-2026-09-12T04-57-07Z.transcript.txt".into(),
+        }]
+    );
+}
+
+/// K2d: entries without a recognised stamp are violations, not passes.
+#[test]
+fn receipt_hygiene_flags_unclassifiable_entries() {
+    let paths = [
+        "tests_tui/journeys/j10/receipts/evidence/x.json",
+        "tests_tui/journeys/j10/receipts/story-19-21g-review-c9e6.capture-run.json",
+    ];
+    assert_eq!(
+        receipt_hygiene_violations(paths),
+        vec![
+            ReceiptViolation::Unclassifiable("tests_tui/journeys/j10/receipts/evidence".into()),
+            ReceiptViolation::Unclassifiable(
+                "tests_tui/journeys/j10/receipts/story-19-21g-review-c9e6.capture-run.json".into()
+            ),
+        ]
+    );
+}
+
+/// K2e: mutant receipts are flagged by suffix; look-alikes are not.
+#[test]
+fn receipt_hygiene_flags_mutant_receipts_only_by_suffix() {
+    let paths = [
+        "19-16-mutants.txt",
+        "a/21-6-mutants/b.txt",
+        "x-mutants.json",
+        "src/mutants_helper.rs",
+        "docs/mutants.md",
+    ];
+    assert_eq!(
+        receipt_hygiene_violations(paths),
+        vec![
+            ReceiptViolation::MutantsReceipt("19-16-mutants.txt".into()),
+            ReceiptViolation::MutantsReceipt("a/21-6-mutants/b.txt".into()),
+            ReceiptViolation::MutantsReceipt("x-mutants.json".into()),
+        ]
+    );
+}
+
+/// K2f: the same family name under two journeys is two families.
+#[test]
+fn receipt_hygiene_keys_families_by_journey() {
+    let paths = [
+        "tests_tui/journeys/j10/receipts/80x24-20261111T203122Z-aa/x",
+        "tests_tui/journeys/j11/receipts/80x24-20261111T203123Z-bb/x",
+    ];
+    assert_eq!(receipt_hygiene_violations(paths), vec![]);
+}
+
+/// K2g: stamps with or without fraction and hex suffix are recognised.
+#[test]
+fn receipt_hygiene_recognises_stamp_shapes() {
+    let key = |entry, dir| receipt_family_and_key(entry, dir).map(|(family, _)| family);
+    assert_eq!(
+        key(
+            "19-21b-80x24-20261111T204303Z-51a29360ed29499d8768539cd249c85e",
+            true
+        ),
+        Some("19-21b-80x24".to_string())
+    );
+    assert_eq!(
+        key(
+            "80x24-20261111T203122824458Z-066843ba1cbf4c4faf592acc849c4944",
+            true
+        ),
+        Some("80x24".to_string())
+    );
+    assert_eq!(key("80-20261111T202908Z", true), Some("80".to_string()));
+    assert_eq!(key("80x24-latest", true), None);
+}
+
+/// K2h: stamp-like names outside `tests_tui/journeys/*/receipts/` are ignored.
+#[test]
+fn receipt_hygiene_ignores_paths_outside_receipt_directories() {
+    let paths = [
+        "docs/80x24-20261111T203122Z-aa/x",
+        "docs/80x24-20261111T203123Z-bb/x",
+        "tests_tui/journeys/j10/80x24-20261111T203124Z-cc/x",
+        "tests_tui/journeys/j10/80x24-20261111T203125Z-dd/x",
+    ];
+    assert_eq!(receipt_hygiene_violations(paths), vec![]);
+}
+
+/// K2i: a fractional stamp is newer than the same second without fraction
+/// (parsed instant, not string order, where `Z` sorts after digits).
+#[test]
+fn receipt_hygiene_orders_fractional_stamps_by_instant() {
+    let plain = "80x24-20261111T120000Z-aa";
+    let fractional = "80x24-20261111T120000123Z-bb";
+    let paths = [
+        format!("tests_tui/journeys/j10/receipts/{plain}/x"),
+        format!("tests_tui/journeys/j10/receipts/{fractional}/x"),
+    ];
+    assert_eq!(
+        receipt_hygiene_violations(paths.iter().map(String::as_str)),
+        vec![ReceiptViolation::Superseded {
+            journey: "j10".into(),
+            family: "80x24".into(),
+            runs: vec![plain.into(), fractional.into()],
+            newest: fractional.into(),
+        }]
+    );
+}
+
+/// H2: fractions longer than nine digits are compared in full, not truncated.
+#[test]
+fn receipt_hygiene_orders_fractions_beyond_nine_digits() {
+    let shorter = "80x24-20261111T120000123456789Z-aa";
+    let longer = "80x24-20261111T1200001234567891Z-bb";
+    let paths = [
+        format!("tests_tui/journeys/j10/receipts/{shorter}/x"),
+        format!("tests_tui/journeys/j10/receipts/{longer}/x"),
+    ];
+    assert_eq!(
+        receipt_hygiene_violations(paths.iter().map(String::as_str)),
+        vec![ReceiptViolation::Superseded {
+            journey: "j10".into(),
+            family: "80x24".into(),
+            runs: vec![shorter.into(), longer.into()],
+            newest: longer.into(),
+        }]
     );
 }
 

@@ -90,6 +90,17 @@ retained historical scene bytes versus latest drift and the two exact historical
 stamp exceptions plus adjacent nonexceptions; fixtures are not runtime evidence.
 The checker asserts internal consistency, not authenticated-journal provenance.
 
+Committed receipts keep **one run per family**: for each journey directory, the
+newest run of each entry name without its run stamp (`80x24`, `130x30`, `60x16`,
+`80`, `130`, `19-21b-<viewport>`, `journey-J<n>`). The row that commits a new
+canonical receipt moves the superseded run to the outer receipt archive
+(`_bmad-output/implementation-artifacts/receipts-archive/rustain/<same path>`) in the
+same change. The conformance test
+`committed_receipts_keep_one_run_per_gate_viewport` (`tests/conformance.rs`) reads
+`git ls-files` and fails on a second run of a family, on an entry without a recognised
+run stamp, and on any committed `*-mutants.txt|json` or `*-mutants` directory (story
+mutant receipts live next to the story file in the outer repo).
+
 ### Executing conflict-flag capture (Story 19.21h)
 
 The original `19-21b` scene names are retained. Run from the product checkout with
