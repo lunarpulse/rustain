@@ -27,6 +27,12 @@ P1/P2 targets may be added incrementally, but the frozen target-triple artifact-
 
 **Note on Windows (P2):** The rustain codebase currently uses Unix-specific APIs (`tokio::signal::unix`, `std::os::unix::fs`, `tokio::net::UnixListener`/`UnixStream`, `libc` for PID files and daemon lifecycle) without `#[cfg(unix)]` gates in all paths. Windows builds will fail at compile time. Windows is future support and is currently excluded from both the release matrix and published assets. Full Windows support requires a dedicated Epic (not currently scheduled).
 
+## macOS Distribution Status
+
+The macOS assets (P1 above) are bare Mach-O executables. The project has no Apple Developer account and `release.yml` has no Developer ID signing or notarization step, so the macOS assets are neither Developer ID signed nor notarized; Apple's notary service requires a Developer ID signature ([Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution), read 2026-11-14). Gatekeeper's default policy expects software from outside the App Store to be Developer ID signed and notarized ([Safely open apps on your Mac](https://support.apple.com/102445), read 2026-11-14), so a browser download is quarantined and can be refused at first launch, and on managed Macs MDM, EDR or binary-authorization policy can block or remove it. Measured on 2026-11-14 on the published v0.4.0 assets (load commands read with a stdlib parser): the `aarch64-apple-darwin` asset carries one CodeDirectory with flags `adhoc,linker-signed` (`0x20002`), no Team ID and no CMS signature, i.e. only the linker's ad-hoc signature; the `x86_64-apple-darwin` asset has no `LC_CODE_SIGNATURE` load command, i.e. no code signature at all. Other releases were not inspected. User steps and diagnostics: README [Installing on macOS](README.md#installing-on-macos).
+
+Developer ID signing and notarization are a deferred decision: the owner deferred Apple Developer Program enrollment on 2026-11-14. The signing work is the future row `rel-3-macos-signing`; a `curl`-based installer script is `rel-4-install-script`. Until then no document describes a macOS asset as Developer ID signed or notarized. Asset names, `SHA256SUMS` and the minisign signature cover the macOS assets exactly as they cover every other asset.
+
 ## Federation Features in Published Assets
 
 A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5; verify with `git show v0.1.3:.github/workflows/release.yml` against `git show v0.2.0:.github/workflows/release.yml`); source builds need `--features a2a,p2p`. Automated and manual release builds must also include `self-update` and `relay-server`; the authoritative release feature set is `self-update,relay-server,a2a,p2p`.
@@ -120,6 +126,7 @@ When rotating the signing key:
 2. **Add new pubkey to 13-3a's `TRUSTED_KEYS`** — ship a release with the updated binary
 3. **Dual-sign during overlap window** — sign `SHA256SUMS` with BOTH old and new keys (two `.minisig` files, or concatenate signatures in one file per minisign multi-sig convention). In-field binaries with the old key still trust the release; binaries with the new key also trust it.
 4. **Drop old key after deprecation window** — remove from `TRUSTED_KEYS`, stop signing with old key
+5. **Update every doc that quotes the active key** — the Key Inventory, the Per-Release Checklist and the `minisign` command in README.md "Installing on macOS"
 
 ## No-Revocation Limitation
 
