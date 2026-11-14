@@ -7,7 +7,7 @@ This document describes the release process for `rustain`, including the frozen 
 Every release publishes the following assets, with names and formats that are **FROZEN** — Story 13-3a's `verify_release` computes them byte-for-byte:
 
 - **Binary asset**: `rustain-{version}-{target-triple}[.exe]`  
-  Example: `rustain-0.2.0-x86_64-unknown-linux-gnu`
+  Example: `rustain-0.4.0-x86_64-unknown-linux-gnu`
 - **Manifest**: `SHA256SUMS` — one line per asset in GNU coreutils format:  
   `<sha256-hex>  <asset-filename>`
 - **Signature**: `SHA256SUMS.minisig` — detached minisign signature of the manifest (prehashed `ED` algorithm)
@@ -38,6 +38,8 @@ The release pipeline asserts each published binary is **≤ 38 MiB (39,845,888 b
 Linux also runs `.github/scripts/release-size-guard.sh` on the already-built release and 19.21h capture binaries. The locked four-feature release on Linux with rustc 1.98.1 and mold measured **34,441,680 B** at `f5333224` and **36,700,776 B** at Lane B `64a718db`, a **2,259,096 B** increase. The unchanged NFR9 ceiling is **39,845,888 B**. Lane B (epic 20, auth) consumed **2,818,048 B** of the C-2 reserve; the remaining **2,555,904 B** reserve yields a **37,289,984 B** ratchet, leaving **589,208 B** above the measured binary. Lower `RESERVED_HEADROOM_BYTES` only in a reviewed change with a measured size table; C-2 also consumes it when adding `telegram,cron`. macOS retains only the NFR9 ceiling until measured.
 
 Epic 21 (TUI layered modals, 21-1 to 21-13) grew the locked four-feature Linux release to **37,339,664 B** at 21-13 (**37,017,904 B** at 21-3), **+638,888 B** over Lane B and **49,680 B** over the Lane B ratchet. By owner decision of 2026-11-07 the reserve was lowered by 1 MiB for the rest of Epic 21: `RESERVED_HEADROOM_BYTES` **2,555,904 B -> 1,507,328 B**, a **38,338,560 B** ratchet that leaves **998,896 B** above the 21-13 binary. Re-measure at each later Epic 21 story; the remaining reserve still belongs to C-2 (`telegram,cron`).
+
+The last measured four-feature Linux release is **37,838,648 B** at `fb6aca3b` (the 19-29/19-30 stack tip, `ci-parity` gate), which leaves **499,912 B** below the 38,338,560 B ratchet (arithmetic: 38,338,560 − 37,838,648); the NFR9 ceiling stays 39,845,888 B. A release that pushes the Linux binary above the ratchet fails at "Size ratchet" and needs an owner-reviewed ratchet change, not a tag retry.
 
 The workspace crate stays at `opt-level = 3`; cold dependencies use `z`. The reviewed hot list in `Cargo.toml` keeps level 3 for non-generic work per rendered frame, streamed chunk, TLS record/bulk byte, regex/glob match or signed message. Startup, CLI/config, connection setup and QUIC control are cold; generic monomorphizations in rustain keep its level.
 
@@ -129,16 +131,19 @@ When rotating the signing key:
 
 ## Automated Release Procedure (CI)
 
-1. Ensure all changes are on `main` and tests pass
-2. Update `Cargo.toml` version if needed
-3. Push a tag: `git tag v0.2.0 && git push origin v0.2.0`
-4. The `release.yml` workflow triggers automatically:
-   - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded)
-   - Size guard asserts ≤ 38 MiB / 39,845,888 bytes; Linux additionally enforces the reserved-headroom ratchet
+1. Ensure all changes are on `main`, tests pass and CI is green on the commit to be tagged
+2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap, and run the checks in the release checklist for that version
+3. Push an annotated tag: `git tag -a v0.4.0 -m "rustain v0.4.0" && git push origin v0.4.0`
+4. The `release.yml` workflow triggers automatically (tags matching `v*`):
+   - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
+   - Smokes the required release features on the Linux binary (`.github/scripts/release-smoke.sh`)
+   - Size guard asserts ≤ 38 MiB / 39,845,888 bytes; Linux additionally enforces the reserved-headroom ratchet (`.github/scripts/release-size-guard.sh`)
+   - Computes the asset-coverage disclosure (expected targets minus present) for the release body
+   - Fails the release if the P0 Linux artifact is missing
    - Generates `SHA256SUMS`
    - Signs manifest in the protected `release` environment
    - Verifies signature fail-closed before publishing
-   - Creates GitHub release with all assets
+   - Creates GitHub release with all assets, the coverage body and auto-generated notes
 
 ## Manual Release Procedure (CI-Down Fallback)
 
@@ -149,7 +154,7 @@ If CI is unavailable, a maintainer can cut a release by hand:
 git status
 
 # 2. Set version
-VERSION="0.2.0"
+VERSION="0.4.0"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary
@@ -186,14 +191,19 @@ minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY"
 
 For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; step 5 checks only the 38 MiB NFR9 ceiling, not the Linux reserved-headroom ratchet. Minimal/no-default builds, relay-role measurements and the NFR53 amendment remain in `DF-18-7-COMPOSABILITY-REMAINDER`.
 
-## First Release Checklist
+## One-Time Setup (done for v0.1.0)
 
-- [ ] Generate minisign keypair offline (trusted machine)
-- [ ] Store secret key in GitHub `release` environment (protected + required reviewers)
-- [ ] Add `MINISIGN_PUBLIC_KEY` secret to `release` environment
-- [ ] Hand the public key to 13-3a for embedding in `trust.rs`
+- [x] Generate minisign keypair offline (trusted machine)
+- [x] Store secret key in GitHub `release` environment (protected + required reviewers)
+- [x] Add `MINISIGN_PUBLIC_KEY` secret to `release` environment
+- [x] Hand the public key to 13-3a for embedding in `trust.rs`
 - [ ] Verify branch protection on `main` (no force-push, required status checks)
-- [ ] Push tag `v0.1.0` (or first version) to trigger release.yml
-- [ ] Verify assets published: binary, SHA256SUMS, SHA256SUMS.minisig
-- [ ] Verify signature validates: `minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -p minisign.pub`
+
+## Per-Release Checklist
+
+- [ ] Confirm the `release` environment, its required reviewers and both secrets still exist, and `main` branch protection is unchanged
+- [ ] Bump `Cargo.toml` and `Cargo.lock`, update the README status line and roadmap, and re-measure the four-feature Linux release against the size ratchet
+- [ ] Push the annotated tag for the new version to trigger `release.yml`, then approve the `release` deployment
+- [ ] Verify assets published: binary per target, `SHA256SUMS`, `SHA256SUMS.minisig`
+- [ ] Verify the signature against the pinned key from the Key Inventory (`PROD_KEY_1`): `minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF`
 - [ ] Verify 13-3a can update from this release (end-to-end test)

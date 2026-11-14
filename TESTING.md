@@ -17,7 +17,7 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
 
 `tests/*.rs` roots are **not** autodiscovered (`autotests = false`). Each root is a
 module of one area binary — `tests/{core,tui,skills,profile,cli,memory,daemon,acp,mcp,orchestration,a2a,p2p}/main.rs` —
-loaded via `#[path = "../<root>.rs"]`, so 272 roots link as 12 area binaries plus 19
+loaded via `#[path = "../<root>.rs"]`, so 287 roots link as 12 area binaries plus 19
 standalone roots. A root stays standalone when it needs the process to itself: it
 mutates the cwd, needs `--test-threads=1`, installs a process-global `tracing`
 subscriber, or asserts exact values of process-global `test-instrumentation`
@@ -165,7 +165,7 @@ These manual tests complement the automated suite:
 | `tests/init_wizard.rs` | 12 | Init wizard, TTY detection, config creation |
 | `tests/session_persistence.rs` | 3 | Save/load round-trip, atomic writes |
 | `tests/title_generation.rs` | 22 | Auto-title trigger, post-processing |
-| All integration roots | 272 roots in 12 area binaries + 4 standalone (`autotests = false`) | Full feature coverage |
+| All integration roots | 287 roots in 12 area binaries + 19 standalone (`autotests = false`) | Full feature coverage |
 
 Run all automated targets: `cargo test --all-targets --no-fail-fast`
 

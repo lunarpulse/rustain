@@ -5,7 +5,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition_2024-orange.svg)](Cargo.toml)
-[![Status](https://img.shields.io/badge/status-v0.1--alpha-yellow.svg)](#project-status--roadmap)
+[![Status](https://img.shields.io/badge/status-v0.4.0--alpha-yellow.svg)](#project-status--roadmap)
 
 Rustain is a standalone Rust terminal application. By default it's an AI coding
 agent — streaming responses, tool execution, collapsible content blocks,
@@ -487,19 +487,23 @@ Normal (prompt for each tool), YOLO (auto-approve safe tools), and Plan
 
 ## Project status & roadmap
 
-**Status: v0.1-alpha, actively developed.** Currently in **Epic 12** — daemon
-mode, multi-channel TUI, and cron scheduler. 12 epics completed to date covering
-the full agent lifecycle from streaming chat through memory, skills, MCP,
-sub-agents, context assembly, and daemon supervision.
+**Status: v0.4.0, alpha, actively developed.** Epics 1–18 are closed in the
+sprint ledger; Epics 19 (team journeys) and 20 (OAuth sign-in for the
+supported providers) are still open there for their remaining rows, and Epic 21 (TUI
+layered modals, notification lifecycle, keymap governance) has one story left,
+the three-viewport capture row 21-10. The release assets carry the
+`self-update`, `relay-server`, `a2a` and `p2p` features.
 
 | Phase | Milestone | Status |
 |---|---|---|
 | **v0.1** | Streaming chat, tool execution, permission system, session persistence | Shipped (Epics 1–4) |
-| **v0.5** | Agent Skills, MCP, sub-agents, plan mode, multi-provider | Shipped (Epics 5–10) |
-| **v0.75** | Memory tiers, context assembly, windowing, vector search | Shipped (Epic 11) |
-| **v1.0** | Daemon mode, Telegram channel, cron scheduler, multi-client attach | In progress (Epic 12) |
-| **v1.5** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18) |
-| **v2.0** | A2A server, dynamic adapter loading, community hub | A2A server shipped; dynamic loading and hub planned |
+| **v0.5 (early phase)** | Agent Skills, MCP, sub-agents, plan mode, multi-provider | Shipped (Epics 5–10) |
+| **v0.75 (early phase)** | Memory tiers, context assembly, windowing, vector search | Shipped (Epic 11) |
+| **v1.5 (early phase)** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18); release assets carry `a2a,p2p` from `v0.2.0` |
+| **v0.4.0** | OAuth sign-in (Epic 20), federation features in release assets, TUI layered modals (Epic 21) | Current release |
+| **v0.5.0** | Completion lane: `cron` and `telegram` release features, Slack channel, persona loader, daemon MCP | Planned |
+| **v1.0** | Hardening: containment and cost control | Planned |
+| **v2.0** | Dynamic adapter loading, community hub | Planned |
 
 Detailed sprint tracking in
 [`sprint-status.yaml`](../_bmad-output/implementation-artifacts/sprint-status.yaml).

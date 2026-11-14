@@ -20,7 +20,7 @@ pub struct ReleaseInfo {
 /// A single downloadable asset from a GitHub release.
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
-    /// Filename as published (e.g. `rustain-0.2.0-x86_64-unknown-linux-gnu`).
+    /// Filename as published (e.g. `rustain-0.4.0-x86_64-unknown-linux-gnu`).
     pub name: String,
     /// Direct download URL (browser_download_url from the API).
     pub download_url: String,
