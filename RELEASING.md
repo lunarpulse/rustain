@@ -29,7 +29,7 @@ P1/P2 targets may be added incrementally, but the frozen target-triple artifact-
 
 ## macOS Distribution Status
 
-The macOS assets (P1 above) are bare Mach-O executables. The project has no Apple Developer account and `release.yml` has no Developer ID signing or notarization step, so the macOS assets are neither Developer ID signed nor notarized; Apple's notary service requires a Developer ID signature ([Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution), read 2026-11-14). Gatekeeper's default policy expects software from outside the App Store to be Developer ID signed and notarized ([Safely open apps on your Mac](https://support.apple.com/102445), read 2026-11-14), so a browser download is quarantined and can be refused at first launch, and on managed Macs MDM, EDR or binary-authorization policy can block or remove it. Measured on 2026-11-14 on the published v0.4.0 assets (load commands read with a stdlib parser): the `aarch64-apple-darwin` asset carries one CodeDirectory with flags `adhoc,linker-signed` (`0x20002`), no Team ID and no CMS signature, i.e. only the linker's ad-hoc signature; the `x86_64-apple-darwin` asset has no `LC_CODE_SIGNATURE` load command, i.e. no code signature at all. Other releases were not inspected. User steps and diagnostics: README [Installing on macOS](README.md#installing-on-macos).
+The macOS assets (P1 above) are bare Mach-O executables. The project has no Apple Developer account and `release.yml` has no Developer ID signing or notarization step, so the macOS assets are neither Developer ID signed nor notarized; Apple's notary service requires a Developer ID signature ([Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution), read 2026-11-14). Gatekeeper's default policy expects software from outside the App Store to be Developer ID signed and notarized ([Safely open apps on your Mac](https://support.apple.com/102445), read 2026-11-14), so a browser download is quarantined and can be refused at first launch, and on managed Macs MDM, EDR or binary-authorization policy can block or remove it. Measured on 2026-11-14 on the published v0.4.0 assets (load commands read with a stdlib parser): the `aarch64-apple-darwin` asset carries one CodeDirectory with flags `adhoc,linker-signed` (`0x20002`), no Team ID and no CMS signature, i.e. only the linker's ad-hoc signature; the `x86_64-apple-darwin` asset has no `LC_CODE_SIGNATURE` load command, i.e. no code signature at all. Other releases were not inspected. User steps and diagnostics: [Installing rustain on macOS](docs/install-macos.md).
 
 Developer ID signing and notarization are a deferred decision: the owner deferred Apple Developer Program enrollment on 2026-11-14. The signing work is the future row `rel-3-macos-signing`; a `curl`-based installer script is `rel-4-install-script`. Until then no document describes a macOS asset as Developer ID signed or notarized. Asset names, `SHA256SUMS` and the minisign signature cover the macOS assets exactly as they cover every other asset.
 
@@ -126,7 +126,7 @@ When rotating the signing key:
 2. **Add new pubkey to 13-3a's `TRUSTED_KEYS`** — ship a release with the updated binary
 3. **Dual-sign during overlap window** — sign `SHA256SUMS` with BOTH old and new keys (two `.minisig` files, or concatenate signatures in one file per minisign multi-sig convention). In-field binaries with the old key still trust the release; binaries with the new key also trust it.
 4. **Drop old key after deprecation window** — remove from `TRUSTED_KEYS`, stop signing with old key
-5. **Update every doc that quotes the active key** — the Key Inventory, the Per-Release Checklist and the `minisign` command in README.md "Installing on macOS"
+5. **Update every doc that quotes the active key** — the Key Inventory, the Per-Release Checklist and the `minisign` command in `docs/install-macos.md`
 
 ## No-Revocation Limitation
 
@@ -139,7 +139,7 @@ When rotating the signing key:
 ## Automated Release Procedure (CI)
 
 1. Ensure all changes are on `main`, tests pass and CI is green on the commit to be tagged
-2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap, and run the checks in the release checklist for that version
+2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap and the `VERSION=` line in `docs/install-macos.md`, and run the checks in the release checklist for that version
 3. Push an annotated tag: `git tag -a v0.4.1 -m "rustain v0.4.1" && git push origin v0.4.1`
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
@@ -209,7 +209,7 @@ For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; st
 ## Per-Release Checklist
 
 - [ ] Confirm the `release` environment, its required reviewers and both secrets still exist, and `main` branch protection is unchanged
-- [ ] Bump `Cargo.toml` and `Cargo.lock`, update the README status line and roadmap, and re-measure the four-feature Linux release against the size ratchet
+- [ ] Bump `Cargo.toml` and `Cargo.lock`, update the README status line and roadmap and the `VERSION=` line in `docs/install-macos.md`, and re-measure the four-feature Linux release against the size ratchet
 - [ ] Push the annotated tag for the new version to trigger `release.yml`, then approve the `release` deployment
 - [ ] Verify assets published: binary per target, `SHA256SUMS`, `SHA256SUMS.minisig`
 - [ ] Verify the signature against the pinned key from the Key Inventory (`PROD_KEY_1`): `minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF`
