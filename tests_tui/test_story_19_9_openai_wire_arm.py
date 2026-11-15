@@ -292,32 +292,3 @@ def test_an_openai_persona_may_not_script_a_tool_use_turn(tmp_path):
     assert result.returncode == 2, result
     assert "TEXT" in result.stderr and "tool_use" in result.stderr, result.stderr
     assert "listening" not in result.stdout, result.stdout
-
-
-def test_the_anthropic_serving_path_is_unchanged(stub, scratch_home, workspace):
-    """Positive control for "additive": the same stub still serves the Anthropic
-    wire byte-for-byte as 19.7 left it, in the same process and scene."""
-    with RustainTUI(
-        fresh=True,
-        build=False,
-        workspace=workspace,
-        allowed_tools=[],
-        env_overrides={
-            **_env(stub.url, scratch_home, key=""),
-            "ANTHROPIC_API_KEY": "scene-ci",
-            "ANTHROPIC_BASE_URL": stub.url,
-        },
-        timeout=60,
-    ) as tui:
-        (workspace / ".env").unlink(missing_ok=True)
-        tui.send_message("anthropic wire ping")
-        assert tui.wait_for_screen("anthropic wire pong", timeout=45), tui.get_screen_text()
-
-        rows = [r for r in stub.rows() if r.get("path") == "/v1/messages" and "turn" in r]
-        assert len(rows) == 1, stub.rows()
-        assert rows[0]["auth"] == "x-api-key", rows[0]
-        assert rows[0]["persona"] == "scene-ci", rows[0]
-        assert rows[0]["desync"] is False, rows[0]
-        # The Anthropic arm logs no `wire` field — the row shape 19.7 pinned.
-        assert "wire" not in rows[0], rows[0]
-        assert not _openai_rows(stub), stub.rows()

@@ -2,15 +2,17 @@
 
 Default-feature, non-API (no `requires_api`, no new marker): a loopback
 Anthropic-shaped provider answers every request, so no credential or network
-is used; the isolated HOME carries `[notifications] info_ttl_secs = 30` (an Info toast outlives
-any poll: read at any toast row, then dismissed) and `warning_ttl_secs = 1`. The
+is used; the isolated HOME carries `[notifications] info_ttl_secs = 30` and
+`warning_ttl_secs = 60` for S1 (a toast outlives any poll: read at any toast row, then
+dismissed) and `warning_ttl_secs = 1` for S2. The
 single scenario drives the real binary under a PTY at 80x24:
 
 * local TUI  - an Info notice (`Permission mode: <Mode>` from Shift+Tab) is ONE borderless,
   right-aligned toast row at the chat pane's bottom edge (the row directly above the status row,
   starting with the severity word); it is dismissed with `Ctrl+X x`. A Warning notice (the Advisory
-  for an unknown `/nope`) is recorded (see below); the `Log !N` badge shows once it is no longer
-  a visible toast; `Ctrl+X n` opens the Notification Log (title ` System · Notifications `,
+  for an unknown `/nope`) is painted the same way on one of the three toast rows and dismissed
+  with `Ctrl+X x`; the `Log !N` badge shows (it rises when the notice is raised, not when its
+  toast is gone); `Ctrl+X n` opens the Notification Log (title ` System · Notifications `,
   `Notifications (N)`, newest-first `Severity · HH:MM:SS · source · message` rows, the S-LOG rail),
   clears the badge, `Enter` shows the FULL message and `Esc` closes it.
 * attached client - the Info notice of an unavailable chord (its remedy) is read on its row, dismissed
@@ -20,10 +22,13 @@ Every wait is a bounded structural screen predicate (no sleeps); no assertion ne
 have caught a toast that lives 4 s or less.
 
 What is proven: an Info toast is read on its row, still painted 5.5 s after its first confirmed paint
-(past the 4 s default, so the 30 s lifetime applied) and dismissed with `Ctrl+X x`; a Warning is RECORDED in the
-Notification Log and no toast for it persists past `started + 10 s` (the default lifetime), while its
-presence and its exact 1 s lifetime on screen are not asserted (exact lifetimes are covered by
-`tests/conformance_21_1_notification_lifecycle/k1_ttl.rs`).
+(past the 4 s default, so the 30 s lifetime applied) and dismissed with `Ctrl+X x`; the `/nope`
+Warning is painted on a toast row and dismissed with `Ctrl+X x` (a clear observed after the toast's
+own lifetime would have failed: `_clear_toast`), recorded in the Notification Log and badged. S2 shows
+only an upper bound: no matching Warning toast is painted past `started + 10 s` (the default lifetime),
+not its presence nor its 1 s lifetime. Exact lifetimes (the default 10 s and a configured 1 s Warning)
+are covered by `tests/conformance_21_1_notification_lifecycle/k1_ttl.rs:94-117,138-154`; no native run
+sees a 1 s Warning both painted and expired.
 Evidence (screens, raw PTY bytes, requests, runtime logs, binary hash) goes to
 `RUSTAIN_CAPTURE_EVIDENCE_DIR`.
 """
@@ -48,6 +53,7 @@ import harness
 import pexpect
 import pyte
 import pytest
+from decision_frame_helpers import BUDGET_RAIL, RECOVERY_RAIL, decision_frame
 from keys import BACKSPACE, CTRL_X, ENTER, ESC, SHIFT_TAB
 from test_story_20_9a_ephemeral_rows import _finish, _start_text
 
@@ -56,11 +62,12 @@ UNKNOWN = "Unknown command: /nope — not a built-in or a custom command."
 PROFILE_REMEDY = ("Profile switching is not available in an attached session. "
                   "Run `rustain profile list` or `rustain profile show <name>` in a terminal.")
 # Info toasts live 30 s so no poll can miss one (read at any toast row, then dismissed with
-# `Ctrl+X x`); Warnings live 1 s against the 10 s default (`src/domain/models/config.rs:324-326`).
-# `DEFAULT_WARNING_TTL` bounds a Warning toast from above (see `_expect_expired`).
+# `Ctrl+X x`); S1's Warning lives 60 s (the maximum, `src/domain/models/config.rs:294-345`), so
+# the same holds for it; S2's Warning lives 1 s against the 10 s default (`config.rs:324-326`).
+# `DEFAULT_WARNING_TTL` bounds a Warning toast from above (see `_expect_expired`, S2 only).
 DEFAULT_WARNING_TTL = 10.0
 _PERMISSIONS = '[permissions]\nalways_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]\n'
-S1_CONFIG = _PERMISSIONS + "\n[notifications]\ninfo_ttl_secs = 30\nwarning_ttl_secs = 1\n"
+S1_CONFIG = _PERMISSIONS + "\n[notifications]\ninfo_ttl_secs = 30\nwarning_ttl_secs = 60\n"
 S2_CONFIG = _PERMISSIONS + "\n[notifications]\ninfo_ttl_secs = 1\nwarning_ttl_secs = 1\n"
 _TOAST = re.compile(r"(?<![A-Za-z0-9])(Info|Success|Warning|Error) (\S.*)$")
 _EDGE_SLACK = 2  # a toast ends within this many columns of the 80-column pane edge
@@ -209,14 +216,21 @@ def _expect_toast(tui, evidence, name, severity, matches):
     return screen
 
 
-def _clear_toast(tui, severity, matches):
-    """`Ctrl+X x` clears the visible toasts: wait until the menu and that toast are gone."""
+def _clear_toast(tui, severity, matches, triggered, ttl):
+    """`Ctrl+X x` clears the visible toasts: wait until the menu and that toast are gone. The
+    toast was triggered at `triggered` (monotonic) with a lifetime of `ttl` seconds: a clear
+    observed once the toast could have expired by itself proves nothing about the chord, so it
+    is a failure. The wait is bounded at 10 s, far below `ttl`."""
     tui.send(CTRL_X)
     _wait(tui, lambda s: _menu_painted(s) and "[X] Clear toasts" in _menu(s),
           "the leader menu lists Clear toasts, fully painted")
     tui.send("x")
     _wait(tui, lambda s: not _menu(s) and _toast_row(s, severity, matches) is None,
-          f"the {severity} toast cleared")
+          f"the {severity} toast cleared", timeout=10)
+    elapsed = time.monotonic() - triggered
+    assert elapsed < ttl, (
+        f"the {severity} toast was gone {elapsed:.1f}s after its trigger: past its {ttl} s lifetime "
+        "it could have expired by itself, so the clear is not shown")
 
 
 def _expect_still_painted(tui, severity, matches, since, seconds):
@@ -423,25 +437,30 @@ def _exercise(binary, evidence, root, monkeypatch):
         # (a) Info: Shift+Tab cycles Normal -> AutoEdit -> Plan -> Normal; each change is an
         # Info toast `Permission mode: <Mode>`, read on its row and dismissed with `Ctrl+X x`.
         for mode, segment in (("AutoEdit", "AUTOEDIT"), ("Plan", "PLAN"), ("Normal", "Normal")):
-            tui.send(SHIFT_TAB)
             expected = _text(f"Permission mode: {mode}")
+            triggered = time.monotonic()
+            tui.send(SHIFT_TAB)
             screen = _expect_toast(tui, evidence, f"02-info-{mode.lower()}", "Info", expected)
             seen = time.monotonic()  # the first confirmed paint: it was painted at or before this read
             assert harness.mode_segment(screen) == segment, harness.status_row(screen)
             if mode == "AutoEdit":  # still painted 5.5 s after the first confirmed paint: past the 4 s default
                 _expect_still_painted(tui, "Info", expected, seen, 5.5)
-            _clear_toast(tui, "Info", expected)
+            _clear_toast(tui, "Info", expected, triggered, 30)
 
-        # (a) Warning: an unknown slash command is an Advisory -> Warning toast.
+        # (a) Warning: an unknown slash command is an Advisory -> Warning toast, painted on a
+        # toast row (`warning_ttl_secs = 60`: it outlives any poll) and cleared with `Ctrl+X x`.
         tui.send("/nope ")
         _wait(tui, lambda s: "/nope" in _composer(s), "the unknown slash typed")
-        started = time.monotonic()
+        triggered = time.monotonic()
         tui.send(ENTER)
         _wait(tui, lambda s: "/nope" not in _composer(s), "the unknown slash consumed")
+        _expect_toast(tui, evidence, "03-warning", "Warning", _text(UNKNOWN))
+        _clear_toast(tui, "Warning", _text(UNKNOWN), triggered, 60)
 
-        # (b) The unseen-warning badge shows once the Advisory is no longer a visible toast.
+        # (b) The unseen-warning badge rises at `notify`, whether or not the toast was painted;
+        # `Ctrl+X x` archived the toast and left the count alone.
         screen = _wait(tui, lambda s: _badge(s) is not None and "Ready" in harness.status_row(s),
-                       "the Log !N badge in the status row after the Warning expired", timeout=10)
+                       "the Log !N badge in the status row after the Warning was cleared", timeout=10)
         assert int(_badge(screen).rstrip("+")) >= baseline + 1, (baseline, harness.status_row(screen))
         _capture(tui, evidence, "05-badge", screen)
 
@@ -474,7 +493,6 @@ def _exercise(binary, evidence, root, monkeypatch):
         tui.close_notification_log()
         screen = _wait(tui, lambda _s: not tui._screen.cursor.hidden, "Input focus restored after S-LOG")
         assert _badge(screen) is None, "the badge stays clear after S-LOG closed"
-        _expect_expired(tui, "Warning", UNKNOWN, started)
         tui.send("\x11")
         assert await_exit(tui) == (0, None)
         check_server()
@@ -518,11 +536,12 @@ def _exercise(binary, evidence, root, monkeypatch):
         # (first line only, ellipsized to the pane width), dismissed with `Ctrl+X x`.
         tui.send(CTRL_X)
         _wait(tui, lambda s: "[P] Profile (n/a)" in _menu(s), "the attached leader menu")
-        tui.send("p")
         lead = "Profile switching is not available in an attached session."
         remedy = lambda text: text.startswith(lead) and text.endswith("…")  # noqa: E731
+        triggered = time.monotonic()
+        tui.send("p")
         _expect_toast(tui, evidence, "12-attached-toast", "Info", remedy)
-        _clear_toast(tui, "Info", remedy)
+        _clear_toast(tui, "Info", remedy, triggered, 30)
         assert _badge(tui.get_screen_text()) is None, "an Info notice never raises the Log badge"
 
         screen = _open_log(tui, evidence, "13-attached-log", attached=True)
@@ -585,6 +604,17 @@ def test_toast_helpers_ignore_transcript_text_that_only_looks_like_a_toast(monke
     assert not harness.toast_present(screen, "Permission mode: Plan", "Info", rows=9)
     toast = "Info Permission mode: Plan".rjust(80)
     assert harness.toast_present(_fixture_screen("older", toast), "Permission mode: Plan", "Info", rows=9)
+    # `_toast_row` (the Warning and Info readers of S1): a toast on the OLDEST of the three toast
+    # rows is found, the severity must match, the row must reach the pane edge, and a coalesced
+    # ` ×N` suffix is accepted while other text is not.
+    warning = _text(UNKNOWN)
+    oldest = f"Warning {UNKNOWN}".rjust(80)
+    stacked = _fixture_screen(oldest, "Info Newer notice".rjust(80), "Info Newest notice".rjust(80))
+    assert _toast_row(stacked, "Warning", warning) == oldest.rstrip()
+    assert _toast_row(_fixture_screen(f"Info {UNKNOWN}".rjust(80)), "Warning", warning) is None
+    assert _toast_row(_fixture_screen(f"Warning {UNKNOWN}", "older"), "Warning", warning) is None
+    assert _toast_row(_fixture_screen(f"Warning {UNKNOWN} ×2".rjust(80)), "Warning", warning) is not None
+    assert _toast_row(_fixture_screen(f"Warning {UNKNOWN}x ×2".rjust(80)), "Warning", warning) is None
 
 
 def test_status_row_untouched_predicate_tracks_the_documented_clip_only():
@@ -705,8 +735,9 @@ def _open_budget_from_list(tui, rail):
         screen = tui.get_screen_text()
         assert listed(screen), f"the Needs-you list changed before Enter:\n{screen}"
     tui.send(ENTER)
-    return _wait(tui, lambda s: _pane_open(s, "Daily budget", *rail),
-                 "Enter opens the budget decision with its rail")
+    return _wait(tui, lambda s: _pane_open(s, "Daily budget", *rail)
+                 and decision_frame(s, "Daily budget", BUDGET_RAIL) is not None and _cue(s) == 1,
+                 "Enter opens the budget decision with its rail, as the exact L3 sheet, cue 1")
 
 
 def _cue(screen):
@@ -957,10 +988,12 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
         assert not tui.child.isalive()
 
         tui = start("r2", fresh=False)
-        rail = ("[Enter/Esc] Continue", "[n] New session")
+        rail = RECOVERY_RAIL
         # The status row is below the pane and paints after it: wait for the cue (the last
-        # thing on the row) so the row is read whole, not between two chunks of one frame.
-        screen = _wait(tui, lambda s: _pane_open(s, "Session recovery", *rail) and _cue(s) == 1,
+        # thing on the row) so the row is read whole, not between two chunks of one frame. The
+        # frame is also the exact L3 sheet (`decision_frame`: title, breadcrumb, body, rail, borders).
+        screen = _wait(tui, lambda s: _pane_open(s, "Session recovery", *rail) and _cue(s) == 1
+                       and decision_frame(s, "Session recovery", RECOVERY_RAIL) is not None,
                        "the recovery pane with its Continue/New session rail and the status cue", timeout=20)
         _capture(tui, evidence, "21-recovery-pane", screen)
         assert "[y]" not in _pane(screen, "Session recovery"), "recovery paints no `y` key"
@@ -1042,8 +1075,7 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
         tui.send(CTRL_X)
         _wait(tui, lambda s: "[Q] Decisions" in _menu(s), "the leader menu lists Decisions")
         tui.send("q")
-        budget_rail = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "[Esc] Later")
-        screen = _open_budget_from_list(tui, budget_rail)
+        screen = _open_budget_from_list(tui, BUDGET_RAIL)
         assert "reached" in _pane(screen, "Daily budget"), _pane(screen, "Daily budget")
         _capture(tui, evidence, "32-budget-pane", screen)
         screen = _answer(tui, ESC, "Daily budget")  # Esc = Later: defers, never resolves
@@ -1058,7 +1090,7 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
         tui.send(CTRL_X)
         _wait(tui, lambda s: "[Q] Decisions" in _menu(s), "the leader menu before the second q")
         tui.send("q")
-        _open_budget_from_list(tui, budget_rail)
+        _open_budget_from_list(tui, BUDGET_RAIL)
         screen = _answer(tui, "y", "Daily budget")  # Continue: the effect runs once
         screen = _wait(tui, lambda s: _cue(s) is None, "an answered decision clears the cue")
         _capture(tui, evidence, "34-budget-answered", screen)

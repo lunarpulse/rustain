@@ -1,14 +1,16 @@
 """Story 9-2 TUI E2E — ``@MCP/`` autocomplete dropdown.
 
-Acceptance criteria (from ``docs/mcp.md`` and Story 9.2):
+Acceptance criteria (from ``docs/mcp.md`` and Story 9.2), proven by one launch:
   * Typing ``@MCP/`` in the input box opens the MCP autocomplete popup.
-  * The popup is titled ``MCP Tools @`` and lists ``[server] tool-name`` rows.
-  * Filtering after the slash narrows the list case-insensitively.
+  * The popup lists ``[server] tool-name`` rows.
+  * Filtering after the slash narrows the list.
   * Selecting a row inserts the canonical ``mcp__<server>__<tool>`` form.
+  * Esc closes the popup without inserting anything.
 
-These tests build on the ``tui_with_mcp`` fixture from conftest.py — the
-stdio echo MCP fixture exposes ``echo``, ``add``, ``slow_op``, ``error_op``,
-``file_writer``, ``large_result``, and ``image_content``.
+The ``tui_with_mcp`` fixture's stdio echo MCP server exposes ``echo``, ``add``, ``slow_op``,
+``error_op``, ``file_writer``, ``large_result`` and ``image_content``. The popup is populated
+from the connected server's tool list, so the survivor starts by waiting for the Adapters frame to
+show the server connected (``mcp_support.wait_mcp_ready``).
 """
 from __future__ import annotations
 
@@ -16,16 +18,11 @@ import time
 
 import pytest
 
-from keys import BACKSPACE, ENTER, ESC, TAB
+from keys import BACKSPACE, ESC, TAB
+from mcp_support import close_adapters, wait_mcp_ready
 
 
 pytestmark = [pytest.mark.story_9_2, pytest.mark.mcp]
-
-
-# Allow the MCP child to handshake and populate the autocomplete cache
-# before we look. The connection event posts a CapabilityRegistry update
-# asynchronously, so a small grace period is needed even after "Ready".
-MCP_HANDSHAKE_GRACE_S = 3.0
 
 
 def _type_at_mcp(tui) -> None:
@@ -44,123 +41,47 @@ def _clear_input(tui) -> None:
     # Generous Backspace count — bounded by Input buffer max.
     for _ in range(64):
         tui.send(BACKSPACE)
-    time.sleep(0.2)
-
-
-def test_at_mcp_slash_opens_mcp_autocomplete_popup(tui_with_mcp):
-    """``@MCP/`` opens the MCP autocomplete popup with the expected title.
-
-    AC-1: popup activation + title ``MCP Tools @``.
-    """
-    tui = tui_with_mcp
-    time.sleep(MCP_HANDSHAKE_GRACE_S)
-
-    _type_at_mcp(tui)
-
-    assert tui.wait_for_screen("MCP Tools", timeout=4.0), (
-        "Expected MCP autocomplete popup to open after typing '@MCP/'.\n"
-        f"Screen:\n{tui.get_screen_text()}"
-    )
-
-
-def test_mcp_autocomplete_lists_echo_server_tools(tui_with_mcp):
-    """The popup shows echo server's tools as ``[echo] <tool>`` rows.
-
-    AC-2: per-server grouping with canonical ``[server] tool`` rendering.
-    """
-    tui = tui_with_mcp
-    time.sleep(MCP_HANDSHAKE_GRACE_S)
-
-    _type_at_mcp(tui)
-    tui.wait_for_screen("MCP Tools", timeout=4.0)
-    screen = tui.get_screen_text()
-
-    # Fixture exposes echo + add as the two simplest read-only tools. We
-    # don't assert all seven (slow_op, error_op, etc.) because long popup
-    # entries can overflow the popup viewport on a 30-row terminal; the
-    # two canonical entries are a sufficient AC-2 check.
-    assert "[echo] echo" in screen, (
-        f"Expected '[echo] echo' row in popup. Screen:\n{screen}"
-    )
-    assert "[echo] add" in screen, (
-        f"Expected '[echo] add' row in popup. Screen:\n{screen}"
-    )
-
-
-def test_mcp_autocomplete_filters_by_typed_substring(tui_with_mcp):
-    """Typing after ``@MCP/`` narrows the list case-insensitively.
-
-    AC-3: filter substring matches tool name; non-matching tools are hidden.
-    """
-    tui = tui_with_mcp
-    time.sleep(MCP_HANDSHAKE_GRACE_S)
-
-    _type_at_mcp(tui)
-    tui.wait_for_screen("MCP Tools", timeout=4.0)
-
-    # Narrow to "add" — should remove "echo" from the list.
-    for ch in "add":
-        tui.send(ch)
-        time.sleep(0.05)
-    time.sleep(0.5)
-    screen = tui.get_screen_text()
-
-    assert "[echo] add" in screen, (
-        f"'add' filter should keep the 'add' tool visible. Screen:\n{screen}"
-    )
-    # 'echo' tool name should be filtered out (its description may still
-    # match — keep the assertion specific to the row prefix).
-    assert "[echo] echo" not in screen, (
-        f"'add' filter should hide the 'echo' tool row. Screen:\n{screen}"
-    )
 
 
 def test_mcp_autocomplete_selection_inserts_canonical_name(tui_with_mcp):
-    """Tab on a selected row inserts the canonical ``mcp__<server>__<tool>``.
-
-    AC-4: dropdown selection writes the prefixed wire name into the input.
-    """
+    """Popup opens and lists the echo tools; typing narrows it; Tab inserts the canonical
+    ``mcp__echo__add``; Esc closes a reopened popup without inserting."""
     tui = tui_with_mcp
-    time.sleep(MCP_HANDSHAKE_GRACE_S)
+    wait_mcp_ready(tui)
+    close_adapters(tui)
 
+    # 1. ``@MCP/`` opens the popup with the two canonical entries (the other tools can overflow
+    # the popup viewport on a 30-row terminal).
     _type_at_mcp(tui)
-    tui.wait_for_screen("MCP Tools", timeout=4.0)
+    tui.wait_until(
+        lambda s: "MCP Tools" in s and "[echo] echo" in s and "[echo] add" in s,
+        "the MCP popup listing '[echo] echo' and '[echo] add'",
+    )
 
-    # Narrow to a single match so Tab is deterministic.
+    # 2. Typing narrows the list: a transition from the screen that showed both rows.
     for ch in "add":
         tui.send(ch)
         time.sleep(0.05)
-    time.sleep(0.3)
+    tui.wait_until(
+        lambda s: "[echo] add" in s and "[echo] echo" not in s,
+        "the 'add' filter keeping '[echo] add' and hiding '[echo] echo'",
+    )
+
+    # 3. Tab inserts the canonical wire name.
     tui.send(TAB)
-    time.sleep(0.5)
+    tui.wait_until(lambda s: "mcp__echo__add" in s, "the canonical 'mcp__echo__add' in the input box")
 
-    screen = tui.get_screen_text()
-    assert "mcp__echo__add" in screen, (
-        "Expected canonical 'mcp__echo__add' in the input box after Tab. "
-        f"Screen:\n{screen}"
+    # 4. Esc closes a reopened popup and inserts nothing.
+    _clear_input(tui)
+    tui.wait_until(
+        lambda s: "mcp__echo__add" not in s and "@MCP" not in s,
+        "the input box emptied",
     )
-
-
-def test_mcp_autocomplete_esc_dismisses_without_inserting(tui_with_mcp):
-    """Esc closes the popup without modifying the input.
-
-    AC-5: Esc cancels — the input loses the ``@MCP/...`` filter scaffolding.
-    """
-    tui = tui_with_mcp
-    time.sleep(MCP_HANDSHAKE_GRACE_S)
-
     _type_at_mcp(tui)
-    tui.wait_for_screen("MCP Tools", timeout=4.0)
-
+    tui.wait_until(lambda s: "MCP Tools" in s, "the MCP popup reopened")
     tui.send(ESC)
-    # The popup title should disappear; allow one render tick.
-    closed = tui.wait_for_screen_not_contains("MCP Tools", timeout=3.0)
-    assert closed, (
-        "Expected the MCP autocomplete popup to close after Esc.\n"
-        f"Screen:\n{tui.get_screen_text()}"
-    )
-    # The canonical wire form must NOT have been inserted.
-    assert "mcp__echo__" not in tui.get_screen_text(), (
-        "Esc must not insert the canonical name. "
-        f"Screen:\n{tui.get_screen_text()}"
+    tui.wait_until(
+        lambda s: "MCP Tools" not in s and "mcp__echo__" not in s,
+        "the popup closed without inserting the canonical name",
+        timeout=5.0,
     )

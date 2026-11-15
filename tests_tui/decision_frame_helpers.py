@@ -1,5 +1,67 @@
-"""Structural waits for attached recipient decisions in native TUI journeys."""
+"""Structural waits for attached recipient decisions in native TUI journeys, and the exact L3
+decision-sheet predicate (`decision_frame`) that 21.1 S2 and 21.6 share."""
+import re
 import time
+
+WIDTH, HEIGHT = 80, 24
+REGION = HEIGHT - 4  # the modal region: everything above the composer and status row
+RECOVERY_RAIL = ("[Enter/Esc] Continue", "[n] New session")
+BUDGET_RAIL = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "[Esc] Later")
+
+
+def decision_frame(screen, title, rail, width=WIDTH, height=HEIGHT, crumb_title=None):
+    """The decision frame as the exact L3 sheet (full width below 100 columns),
+    every border painted: returns its content rows, or None while it is torn,
+    partial, bottom-anchored or missing a rail pair. Never accepts half a frame."""
+    lines = screen.split("\n")
+    if len(lines) != height or any(len(line) != width for line in lines):
+        return None
+    # Story 21.7: a mission strip row ("Decisions n", "Tasks d/n", the idle hint) sits between
+    # the sheet and the status row whenever the Stage can spare it; the sheet ends above it.
+    strip = re.fullmatch(
+        r"(?:(?:Agents|A|Tasks|T|Decisions|D|Writer decisions|W) .*|\^X \S+ (?:Mission Control|Messages))",
+        lines[height - 5].rstrip(),
+    )
+    region = height - 4 - (1 if strip else 0)
+    top, bottom = lines[0], lines[region - 1]
+    if not (top.startswith(f"┌ Decision: {title} ") and top.endswith("┐")):
+        return None
+    if not (bottom.startswith("└") and bottom.endswith("┘") and set(bottom[1:-1]) == {"─"}):
+        return None
+    interior = lines[1:region - 1]
+    if any(not (line.startswith("│") and line.endswith("│")) for line in interior):
+        return None
+    content = [line[1:-1].strip() for line in interior if line[1:-1].strip()]
+    if not content or not content[0].startswith(f"Needs you › {crumb_title or title} |"):
+        return None
+    # The rail sits under the body; a Ctrl+X menu may paint over the frame's bottom rows
+    # (the 21-1 scenario captures the frame with it open), so search the whole body.
+    body = " ".join(content[1:])
+    if not all(item in body for item in rail):
+        return None
+    return tuple(content)
+
+
+def sheet(title, body, rail_row, width=WIDTH, height=HEIGHT, crumb=None, tear=None):
+    """An offline 80x24 screen: the decision sheet over a composer and status row."""
+    region = height - 4
+    crumb = crumb or f"Needs you › {title} | 1 pending"
+    inner = width - 2
+    top = ("┌ Decision: " + title + " ").ljust(width - 1, "─") + "┐"
+    lines = [top]
+    content = [crumb, body]
+    for index in range(1, region - 1):
+        text = content[index - 1] if index <= len(content) else ""
+        if index == region - 2:
+            text = rail_row
+        lines.append("│" + text.ljust(inner) + "│")
+    lines.append("└" + "─" * inner + "┘")
+    lines += ["┌" + "─" * inner + "┐", "│" + " " * inner + "│", "└" + "─" * inner + "┘",
+              "Ready".ljust(width)]
+    if tear == "no-bottom":
+        lines[region - 1] = " " * width
+    return "\n".join(lines)
+
 
 
 def rows(screen):

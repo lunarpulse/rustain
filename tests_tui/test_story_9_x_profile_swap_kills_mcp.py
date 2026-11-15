@@ -3,8 +3,14 @@
 The Rust integration tests in `tests/integration_mcp_resilience.rs` prove that
 `CompositeToolsetAdapter::prepare_detach()` kills a non-persistent MCP child.
 This test drives the same code path through the TUI: open the profile-switcher
-overlay (Ctrl+X, P), navigate to a profile without composite-MCP, confirm,
-and verify via pgrep that the child died.
+overlay (Ctrl+X, P), navigate to the ``base`` profile (tools ``builtin-only``, no
+MCP), confirm, and verify through the process tree of this TUI (``/proc``,
+identity = PID + start time) that the child died.
+
+The swap must have completed: the status row's profile segment names ``base``
+(``ProfileSwitched`` is the only event that sets it), the TUI is alive and no
+fixture process, recorded or descendant, survives. A quit, a failed swap or a swap
+to another profile leaves a missing or different segment.
 
 Risk closed:
   * R5 (TUI tier) — user-driven profile swap deterministically tears down
@@ -12,13 +18,16 @@ Risk closed:
 """
 from __future__ import annotations
 
-import time
+import re
 from pathlib import Path
 
 import pytest
 
+from harness import status_row
 from keys import CTRL_X, ENTER, UP
+from mcp_support import close_adapters, wait_mcp_ready
 
+SWAP_TARGET = "base"
 
 pytestmark = [pytest.mark.story_9_4, pytest.mark.mcp]
 
@@ -76,28 +85,68 @@ def _survivors(recorded, root_pid, proc_root=Path("/proc")):
 
 
 def _open_profile_switcher(tui) -> None:
-    tui.chat_mode()
-    tui.send(CTRL_X)
-    assert tui.wait_for_screen("Press a key", timeout=3.0), (
-        f"Ctrl+X must open which-key. Screen:\n{tui.get_screen_text()}"
-    )
-    tui.send("p")
-    # The switcher overlay renders a list of profiles; the active one is
-    # marked. Wait until it's visible.
-    assert tui.wait_for_screen("Profile", timeout=4.0), (
-        f"Profile switcher overlay did not open. Screen:\n{tui.get_screen_text()}"
-    )
+    """``Ctrl+X p`` from the Input focus the survivor starts in; wait for the list frame."""
+    tui.send(CTRL_X + "p")
+    tui.wait_until(lambda s: " Profile Switcher " in s, "the Profile Switcher list frame", timeout=10)
+
+
+# A list row: cursor marker (``> `` on the selected one), active marker, colour swatch, name.
+_PROFILE_ROW = re.compile(r"(>| ) (?:● |  )█ ([\w.-]+)")
+
+
+def _profile_rows(screen: str) -> list[tuple[bool, str]]:
+    """``(selected, name)`` of every profile row below the switcher's title, in list order."""
+    rows = screen.split("\n")
+    title = next((i for i, row in enumerate(rows) if " Profile Switcher " in row), None)
+    if title is None:
+        return []
+    found = (_PROFILE_ROW.search(row) for row in rows[title + 1:])
+    return [(match.group(1) == ">", match.group(2)) for match in found if match]
+
+
+def _selected_profile(screen: str) -> str | None:
+    selected = [name for is_selected, name in _profile_rows(screen) if is_selected]
+    return selected[0] if len(selected) == 1 else None
+
+
+def _select_profile(tui, name: str) -> None:
+    """Press ``UP`` one key at a time, waiting after each key for the selection to move, until the
+    selected row names ``name``: at most one full cycle of the list (the switcher wraps, so a
+    fixed number of presses lands anywhere); a list without ``name`` fails loudly."""
+    screen = tui.wait_until(lambda s: _selected_profile(s) is not None, "a selected profile row")
+    names = [profile for _, profile in _profile_rows(screen)]
+    seen = [_selected_profile(screen)]
+    for _ in range(len(names)):
+        if seen[-1] == name:
+            return
+        tui.send(UP)
+        previous = seen[-1]
+        screen = tui.wait_until(
+            lambda s: _selected_profile(s) not in (None, previous), "the profile selection to move")
+        seen.append(_selected_profile(screen))
+    assert seen[-1] == name, f"Profile {name!r} was not selected in one cycle of {names}; visited {seen}"
+
+
+def _profile_segment(screen: str, name: str) -> bool:
+    """The status row's profile segment (``█ <name>``, ``█ <name> (preview)`` for a preview
+    profile), read positionally on the status row."""
+    return re.search(rf"█ {re.escape(name)}(?: \(preview\))?(?:\s|│|$)", status_row(screen)) is not None
 
 
 def test_profile_swap_to_coding_kills_mcp_child(tui_with_mcp):
-    """Pre-swap: echo MCP child running. Swap to `coding` profile (which uses
-    the `builtin-full` tools adapter, no MCP). Post-swap: no fixture child
-    remains.
-    """
+    """Pre-swap: the echo MCP child runs under this TUI and the status row names ``tests-mcp``.
+    Swap to ``SWAP_TARGET`` (``base``: tools ``composite → builtin-only``, no MCP). Post-swap: the
+    status row names it (the one success-only state change, ``ProfileSwitched``), the TUI is
+    still alive and no fixture process, recorded or descendant, survives.
+
+    The node id keeps its historical ``coding`` name (ledger and CI history). ``coding`` is NOT
+    a target: it is the config's active profile, so the product answers a request for it with
+    the already-active shortcut (``ProfileSwitched``, no transition executed) and the child
+    keeps running (measured; the fault-injection negative control of the tui-3b record)."""
     tui = tui_with_mcp
-    # Let the MCP handshake settle so prepare_detach actually has something
-    # to disconnect.
-    time.sleep(3.0)
+    # The handshake completed: ``prepare_detach`` has something to disconnect.
+    wait_mcp_ready(tui)
+    close_adapters(tui)
 
     root_pid = tui.child.pid
     pre_pids = _fixture_children(root_pid)
@@ -105,43 +154,36 @@ def test_profile_swap_to_coding_kills_mcp_child(tui_with_mcp):
         "Pre-swap: at least one MCP fixture child of this TUI must be running. "
         "Fixture wiring or handshake timing is broken."
     )
-
-    _open_profile_switcher(tui)
-
-    # The switcher lists profiles; the cursor starts on the active profile
-    # (tests-mcp). Navigate up to a different profile. The embedded profiles
-    # ship in alphabetical order: base, coding, personal-assistant. "coding"
-    # is the default and the most stable swap target.
-    #
-    # We send Up arrows liberally — the switcher clamps at the top, so
-    # extras are harmless and keep the test resilient to profile-list
-    # additions.
-    for _ in range(5):
-        tui.send(UP)
-        time.sleep(0.1)
-
-    # Some switchers wrap the highlight to "coding" naturally; assert the
-    # selected highlight matches before confirming. We just look for the
-    # string "coding" in the visible region.
-    assert tui.wait_for_screen("coding", timeout=3.0), (
-        f"Profile 'coding' should appear in the switcher list. "
-        f"Screen:\n{tui.get_screen_text()}"
+    # Positive control: the predicate that proves the swap reads the real segment.
+    before = tui.get_screen_text()
+    assert _profile_segment(before, "tests-mcp") and not _profile_segment(before, SWAP_TARGET), (
+        f"Pre-swap: the status row should name 'tests-mcp'. Screen:\n{before}"
     )
 
-    # Enter opens the diff preview; press Enter again (or 'y') to confirm.
+    _open_profile_switcher(tui)
+    _select_profile(tui, SWAP_TARGET)
+
+    # Enter opens the diff preview; ``y`` is the explicit accept binding for the preview.
     tui.send(ENTER)
-    time.sleep(0.5)
-    # Confirm via 'y' which is the explicit accept binding for the preview.
+    tui.wait_until(lambda s: f" Preview: {SWAP_TARGET} " in s, f"the {SWAP_TARGET} diff preview")
     tui.send("y")
 
-    # Profile swap is async: prepare_detach disconnects clients, then the
-    # new composite is built. Give it generously.
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        if not _survivors(pre_pids, root_pid):
-            break
-        time.sleep(0.5)
+    # The swap completed: only ``ProfileSwitched`` sets the active profile; a failed swap closes
+    # the switcher too but leaves the segment on ``tests-mcp``.
+    tui.wait_until(
+        lambda s: _profile_segment(s, SWAP_TARGET) and " Preview: " not in s and " Profile Switcher " not in s,
+        f"the status row naming the swapped-to profile {SWAP_TARGET!r}",
+        timeout=15,
+    )
+    # Teardown is async: ``prepare_detach`` disconnects the clients, then the new composite is built.
+    tui.wait_until(
+        lambda _: not _survivors(pre_pids, root_pid),
+        f"no MCP fixture process of this TUI (recorded {sorted(pre_pids)}) to survive the swap",
+        timeout=10,
+    )
 
+    assert tui.child.isalive(), "The TUI exited during the swap."
+    assert _profile_segment(tui.get_screen_text(), SWAP_TARGET)
     survivors = _survivors(pre_pids, root_pid)
     assert not survivors, (
         "Post-swap: no MCP fixture children of this TUI should remain after swapping "

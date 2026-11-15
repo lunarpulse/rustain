@@ -197,6 +197,8 @@ tests_tui/
   harness.py              # RustainTUI class — pexpect wrapper
   keys.py                 # Keyboard constants (Chat, Confirm, Permission, etc.)
   manual_test_ledger.py   # Plain script: one scripted turn + the ledger rows it minted
+  mcp_support.py          # MCP group: READY_ROW, open_adapters/wait_mcp_ready (the echo server connected, one panel row)
+  decision_frame_helpers.py # Waits and the exact L3 decision-sheet predicate (decision_frame, sheet) shared by 21.1 S2 and 21.6
   fixtures/scene_provider.py    # Anthropic-API stand-in: scripted turns, no account
   fixtures/scenes/smoke.json    # The scene it serves (one text turn, one Write turn)
   test_story_3_x_input.py # Stories 3.1, 3.3, 3.5 — input, palette, help

@@ -1,9 +1,44 @@
-"""Desk regressions for queued decision opening and the first-paint safety window."""
+"""Desk regressions for queued decision opening and the first-paint safety window, and for the
+exact decision-sheet predicate (`decision_frame`)."""
 import itertools
 
 import pytest
 
 import decision_frame_helpers as helpers
+from decision_frame_helpers import BUDGET_RAIL, RECOVERY_RAIL, REGION, WIDTH, decision_frame, sheet
+
+
+def test_frame_predicate_accepts_the_whole_sheet_and_rejects_torn_frames():
+    rail = "[Enter/Esc] Continue  [n] New session"
+    whole = sheet("Session recovery", "Recovered the previous session.", rail)
+    found = decision_frame(whole, "Session recovery", RECOVERY_RAIL)
+    assert found is not None and found[0] == "Needs you › Session recovery | 1 pending"
+    assert found[-1] == rail
+    # A torn frame: the title and the first rail pair are painted, the rest of the rail is not.
+    half = sheet("Session recovery", "Recovered the previous session.", "[Enter/Esc] Continue")
+    assert decision_frame(half, "Session recovery", RECOVERY_RAIL) is None
+    # A frame without its closing border is never accepted.
+    assert decision_frame(sheet("Session recovery", "x", rail, tear="no-bottom"),
+                          "Session recovery", RECOVERY_RAIL) is None
+    # The old bottom-anchored pane title and a missing breadcrumb are rejected.
+    assert decision_frame(whole.replace("Decision: ", "System · "), "Session recovery", RECOVERY_RAIL) is None
+    assert decision_frame(sheet("Session recovery", "x", rail, crumb="no crumb here"),
+                          "Session recovery", RECOVERY_RAIL) is None
+    # A different decision is never mistaken for this one.
+    assert decision_frame(whole, "Daily budget", RECOVERY_RAIL) is None
+
+
+def test_frame_predicate_holds_for_the_budget_rail_and_a_wrapped_rail_row():
+    rail = "[y] Continue  [s] Switch model  [p] Pause until tomorrow  [Esc] Later"
+    assert decision_frame(sheet("Daily budget", "Daily budget ($0.00) reached.", rail),
+                          "Daily budget", BUDGET_RAIL) is not None
+    # At narrow widths the rail wraps by whole pairs onto two rows: the last two content
+    # rows together still hold every pair.
+    screen = sheet("Daily budget", "Daily budget ($0.00) reached.", "[p] Pause until tomorrow  [Esc] Later")
+    rows = screen.split("\n")
+    rows[REGION - 3] = "│" + "[y] Continue  [s] Switch model".ljust(WIDTH - 2) + "│"
+    assert decision_frame("\n".join(rows), "Daily budget", BUDGET_RAIL) is not None
+
 
 
 @pytest.mark.parametrize("kind,rail", [

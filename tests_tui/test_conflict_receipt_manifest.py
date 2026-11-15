@@ -46,13 +46,21 @@ def run_inputs(tmp_path, monkeypatch):
     return repository, binary, manifest
 
 
-def _publish(recorder, repository, viewport, *, label="current"):
+RECEIPT_NAME = "story-19-21b-conflict-flag-20261016T010203Z.transcript.txt"
+
+
+def _publish(recorder, repository, viewport, *, label="current", exported_staged=None):
     directory = repository / "receipts" / f"{label}-{viewport}"
     directory.mkdir(parents=True)
     staged = directory / "capture.staged"
     staged.write_bytes(f"complete retained capture for {viewport}\n".encode())
-    final = directory / "story-19-21b-conflict-flag-20261016T010203Z.transcript.txt"
-    recorder.publish_receipt(viewport, staged, final)
+    final = directory / RECEIPT_NAME
+    if exported_staged is None:
+        recorder.publish_receipt(viewport, staged, final)
+    else:
+        exported_staged.parent.mkdir(exist_ok=True)
+        exported_staged.write_bytes(staged.read_bytes())
+        recorder.publish_receipt(viewport, staged, final, exported_staged_path=exported_staged)
     return final
 
 
@@ -62,15 +70,20 @@ def _complete(inputs):
     return {viewport: _publish(recorder, repository, viewport) for viewport in VIEWPORTS}
 
 
-def test_complete_transition_publishes_only_selected_finalized_receipts(run_inputs):
+def test_complete_transition_publishes_only_selected_finalized_receipts(run_inputs, tmp_path):
     repository, binary, manifest = run_inputs
     recorder = begin_run(repository, binary, VIEWPORTS)
     assert json.loads(manifest.read_text())["complete"] is False
     published = {}
+    exported = tmp_path / "artifact/receipt.staged"
     for index, viewport in enumerate(VIEWPORTS):
-        published[viewport] = _publish(recorder, repository, viewport)
+        last = index == len(VIEWPORTS) - 1
+        # The last publish also exports its copy: the run is marked complete only once both
+        # finalized copies exist.
+        published[viewport] = _publish(recorder, repository, viewport,
+                                       exported_staged=exported if last else None)
         state = json.loads(manifest.read_text())
-        assert state["complete"] is (index == len(VIEWPORTS) - 1)
+        assert state["complete"] is last
         assert set(state["receipts"]) == set(published)
         assert all(not path.is_absolute() for path in
                    (Path(entry["path"]) for entry in state["receipts"].values()))
@@ -79,6 +92,12 @@ def test_complete_transition_publishes_only_selected_finalized_receipts(run_inpu
                 selected_receipts(repository, binary)
     assert selected_receipts(repository, binary) == published
     assert not list((repository / "receipts").rglob("*.staged"))
+    final = published[VIEWPORTS[-1]]
+    exported_final = exported.parent / final.name
+    assert final.read_bytes() == exported_final.read_bytes() == (
+        f"complete retained capture for {VIEWPORTS[-1]}\n".encode())
+    assert not exported.exists()
+    assert state["receipts"][VIEWPORTS[-1]]["path"] == final.relative_to(recorder.repository).as_posix()
 
 
 @pytest.fixture
@@ -93,20 +112,6 @@ def exported_publication(run_inputs, tmp_path):
     exported_staged.parent.mkdir()
     exported_staged.write_bytes(staged.read_bytes())
     return recorder, manifest, staged, final, exported_staged
-
-
-def test_exported_receipt_is_finalized_before_run_is_marked_complete(exported_publication):
-    recorder, manifest, staged, final, exported_staged = exported_publication
-    expected = staged.read_bytes()
-    recorder.publish_receipt(VIEWPORTS[0], staged, final,
-                             exported_staged_path=exported_staged)
-    exported_final = exported_staged.parent / final.name
-    assert final.read_bytes() == exported_final.read_bytes() == expected
-    assert not staged.exists() and not exported_staged.exists()
-    state = json.loads(manifest.read_text())
-    assert state["complete"] is True
-    assert state["receipts"][VIEWPORTS[0]]["path"] == final.relative_to(
-        recorder.repository).as_posix()
 
 
 @pytest.mark.parametrize("failure", ["missing", "drifted", "collision"])
@@ -134,23 +139,6 @@ def test_failed_export_never_publishes_success_or_overwrites_evidence(
         assert exported_final.read_bytes() == b"another run owns this receipt\n"
     else:
         assert not exported_final.exists()
-
-
-def test_failed_index_commit_rolls_back_both_finalized_copies(
-        exported_publication, monkeypatch):
-    recorder, manifest, staged, final, exported_staged = exported_publication
-    original_index = manifest.read_bytes()
-
-    def unavailable_replace(source, destination):
-        raise OSError("isolated index replacement failure")
-
-    monkeypatch.setattr("conflict_receipt_manifest.os.replace", unavailable_replace)
-    with pytest.raises(OSError, match="isolated index replacement failure"):
-        recorder.publish_receipt(VIEWPORTS[0], staged, final,
-                                 exported_staged_path=exported_staged)
-    assert manifest.read_bytes() == original_index
-    assert not final.exists()
-    assert not (exported_staged.parent / final.name).exists()
 
 
 def test_wrong_independent_intended_run_rejects_complete_old_run(run_inputs, monkeypatch):
@@ -253,22 +241,26 @@ def test_checker_mutation_is_not_runtime_source_drift(run_inputs):
     assert selected_receipts(repository, binary) == receipts
 
 
-def test_failed_index_replacement_rolls_back_only_own_publication(run_inputs, monkeypatch):
+def test_failed_index_replacement_rolls_back_only_own_publication(run_inputs, monkeypatch, tmp_path):
     repository, binary, manifest = run_inputs
     recorder = begin_run(repository, binary, VIEWPORTS)
     previous = _publish(recorder, repository, VIEWPORTS[0])
     previous_bytes = previous.read_bytes()
     index_bytes = manifest.read_bytes()
+    exported = tmp_path / "artifact/receipt.staged"
 
     def unavailable_replace(source, destination):
         raise OSError("isolated index replacement failure")
 
     monkeypatch.setattr("conflict_receipt_manifest.os.replace", unavailable_replace)
-    with pytest.raises(OSError, match="index replacement failure"):
-        _publish(recorder, repository, VIEWPORTS[1])
+    with pytest.raises(OSError, match="isolated index replacement failure"):
+        _publish(recorder, repository, VIEWPORTS[1], exported_staged=exported)
     assert manifest.read_bytes() == index_bytes
     assert previous.read_bytes() == previous_bytes
+    # Neither finalized copy of the failed publication survives: the repository holds only the
+    # previous receipt and the exported directory holds no final.
     assert list((repository / "receipts").rglob("*.transcript.txt")) == [previous]
+    assert not (exported.parent / RECEIPT_NAME).exists()
     assert not list(manifest.parent.glob(".conflict-index-*"))
 
 

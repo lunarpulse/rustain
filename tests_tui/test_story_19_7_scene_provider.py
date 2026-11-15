@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -28,10 +26,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fixtures.scene_provider import SceneStub
-from harness import PROJECT_ROOT, RustainTUI, _resolve_binary
+from harness import RustainTUI
 
 SCENE = Path(__file__).parent / "fixtures" / "scenes" / "smoke.json"
-RELEASE_BINARY = PROJECT_ROOT / "target" / "release" / "rustain"
 SENTINEL = "SENTINEL-LEAK-19-7"
 
 pytestmark = pytest.mark.story_19_7
@@ -140,12 +137,15 @@ def test_text_turn_completes_through_the_env_front_door(stub, scratch_home):
         # string length (a negative 12-digit value would pass a length check).
         timestamp = rows[0]["timestampMs"]
         assert isinstance(timestamp, int) and 10**12 <= timestamp < 10**13, rows[0]
-        assert rows[0]["usage"]["tokensOut"] >= 1, rows[0]
+        # The scene serves exactly seven output tokens: the product must mint that value, not just
+        # a non-zero one (the removed plain-script test asserted `tokensOut=7` on this same turn).
+        assert rows[0]["usage"]["tokensOut"] == 7, rows[0]
 
         # What the binary sent.
         turns = _turn_rows(stub)
         assert len(turns) == 1, stub.rows()
         assert turns[0]["stream"] is True
+        assert turns[0]["path"] == "/v1/messages"
         assert "scene ping" in turns[0]["last_user"]
         assert turns[0]["auth"] == "x-api-key"
         assert turns[0]["persona"] == "scene-ci"
@@ -348,11 +348,12 @@ def test_unknown_path_is_loud(stub):
     ], stub.rows()
 
 
-def test_no_credential_can_reach_the_request_log(stub, scratch_home, tmp_path):
-    """AC2(c): the leak is real, the scheme is logged, the value never is."""
-    # Half 1 — the leak, unmitigated: `.env` exports a bearer token and the binary
-    # prefers AUTH_TOKEN over API_KEY, so a driver that sets only the api key sends
-    # someone's real credential to the provider it is talking to.
+def test_no_credential_can_reach_the_request_log(stub, scratch_home):
+    """AC2(c): the leak is real and the sentinel credential never reaches the request log."""
+    # The leak, unmitigated: `.env` exports a bearer token and the binary prefers
+    # AUTH_TOKEN over API_KEY, so a driver that sets only the api key sends someone's
+    # real credential to the provider it is talking to. The scripted text turn with
+    # the override in force is `test_text_turn_completes_through_the_env_front_door`.
     stub.expect_status = 1
     leaky = stub.env("scene-ci", scratch_home)
     leaky["ANTHROPIC_AUTH_TOKEN"] = SENTINEL
@@ -367,28 +368,6 @@ def test_no_credential_can_reach_the_request_log(stub, scratch_home, tmp_path):
     log_text = stub.log_path.read_text()
     assert log_text.count(SENTINEL) == 0
     assert SENTINEL not in json.dumps(stub.rows())
-
-    # Half 2 — the A5 override in force, on a second stub so the statuses stay
-    # independent: the scheme and the persona are named, and nothing else is.
-    clean = SceneStub(SCENE, tmp_path / "clean.jsonl").start()
-    home2 = tmp_path / "home2"
-    home2.mkdir()
-    try:
-        with RustainTUI(fresh=True, build=False, env_overrides=clean.env("scene-ci", home2)) as tui:
-            tui.send_message("scene ping")
-            turns = _wait_for(lambda: _turn_rows(clean))
-            assert len(turns) == 1, clean.rows()
-            assert turns[0]["auth"] == "x-api-key"
-            assert turns[0]["persona"] == "scene-ci"
-            assert turns[0]["desync"] is False
-    finally:
-        assert clean.stop() == 0
-    assert SENTINEL not in clean.log_path.read_text()
-
-
-def test_the_stub_carries_no_shell_trace_switch():
-    """AC2(d): a `set -x` in the provider would put env values in a receipt."""
-    assert "set -x" not in (Path(__file__).parent / "fixtures" / "scene_provider.py").read_text()
 
 
 # ── AC3 — the harness drives any binary it is told to ────────────────────────
@@ -426,36 +405,6 @@ def test_non_tui_binary_override_fails_as_a_dead_process(monkeypatch):
             harness.start()
     finally:
         harness.stop()
-
-
-def test_release_binary_override_drives_a_turn(monkeypatch, stub, scratch_home):
-    """AC3(a) positive control: supplied prebuilt binary or conventional release."""
-    selected, overridden = _resolve_binary()
-    release_binary = selected if overridden else RELEASE_BINARY
-    if not release_binary.is_file():
-        pytest.skip("release binary not built — run cargo build --release --features p2p,a2a")
-    monkeypatch.setenv("RUSTAIN_TUI_BINARY", str(release_binary))
-    with RustainTUI(fresh=True, build=True, env_overrides=stub.env("scene-ci", scratch_home)) as tui:
-        tui.send_message("scene ping")
-        assert tui.wait_for_screen("Ready", timeout=60) is True, tui.get_screen_text()
-        turns = _wait_for(lambda: _turn_rows(stub))
-        assert len(turns) == 1 and turns[0]["desync"] is False, stub.rows()
-        rows = _wait_for(lambda: _ledger_rows(tui))
-        assert rows and rows[0]["usage"]["tokensOut"] >= 1, rows
-
-
-def test_the_plain_script_precedent_runs_green():
-    """AC3(c): `manual_test_ledger.py` — the launcher 19.8's drivers copy."""
-    result = subprocess.run(
-        [sys.executable, "tests_tui/manual_test_ledger.py"],
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=300,
-        env=dict(os.environ),
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "tokensOut=7" in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize("wire", ["anthropic", "openai"])

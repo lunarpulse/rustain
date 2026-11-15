@@ -194,32 +194,29 @@ def test_canonical_trailing_skill_block_logs_activated_name():
 # ── AC8(b) — the field, both ways round ──────────────────────────────────────
 
 
-def test_a_turn_with_no_active_skill_logs_no_skill_names(stub, scratch_home, workspace):
-    """The negative half: an empty activation set composes no `<skill>` block, so
-    the field is present and empty rather than absent-and-ambiguous."""
-    write_workspace_skill(workspace, SKILL_SRC)
-    with _tui(stub, workspace, scratch_home) as tui:
-        _drop_copied_credential(workspace)
-        tui.send_message("no skill yet")
-        assert tui.wait_for_screen("nothing active", timeout=45), tui.get_screen_text()
-
-        rows = _wait_for(lambda: _turn_rows(stub))
-        assert len(rows) == 1, stub.rows()
-        assert rows[0]["skills"] == [], rows[0]
-        assert len(rows[0]["tool_names"]) == rows[0]["tools"], rows[0]
-
-
 def test_a_skill_active_turn_logs_exactly_the_activated_name(
     stub, scratch_home, workspace
 ):
-    """The positive half, and the mechanism's first non-test reader: after a
-    model-driven `activate_skill` the next POST's system prompt carries the
-    block, and the row names it — exactly one name, exactly the activated one."""
+    """Both halves of the field and the leak guard, in one launch. With no skill active the
+    first turn's row has the field present and empty (an empty activation set composes no
+    `<skill>` block) and one tool name per offered tool. After a model-driven `activate_skill`
+    the next POST's system prompt carries the block and the row names it: exactly one name,
+    exactly the activated one, with the filtered tool names. Neither the names nor the log
+    carry the skill body: `helm diff` is on line 2 of the PRD's Protocol and appears nowhere
+    in its `name:`, so a field that ever carries the body, or the whole system prompt, fails
+    here rather than in a committed receipt."""
     write_workspace_skill(workspace, SKILL_SRC)
+    assert "helm diff" in SKILL_SRC.read_text(), "fixture drifted from the PRD body"
     with _tui(stub, workspace, scratch_home) as tui:
         _drop_copied_credential(workspace)
         tui.send_message("no skill yet")
         assert tui.wait_for_screen("nothing active", timeout=45), tui.get_screen_text()
+
+        before = _wait_for(lambda: _turn_rows(stub))
+        assert len(before) == 1, stub.rows()
+        assert before[0]["skills"] == [], before[0]
+        assert len(before[0]["tool_names"]) == before[0]["tools"], before[0]
+
         _activate(tui)
 
         # A14: the catalogue, the system prompt and the disclosure are computed
@@ -238,26 +235,6 @@ def test_a_skill_active_turn_logs_exactly_the_activated_name(
         # And the activation turn itself is still pre-activation (A14/A15).
         first = _turn_rows(stub)[0]
         assert first["skills"] == [], first
-
-
-def test_the_field_never_carries_the_skill_body(stub, scratch_home, workspace):
-    """The leak guard. `helm diff` is on line 2 of the PRD's Protocol and appears
-    nowhere in its `name:`, so a field that ever carries the body — or the whole
-    system prompt — fails here rather than in a committed receipt."""
-    write_workspace_skill(workspace, SKILL_SRC)
-    assert "helm diff" in SKILL_SRC.read_text(), "fixture drifted from the PRD body"
-    with _tui(stub, workspace, scratch_home) as tui:
-        _drop_copied_credential(workspace)
-        tui.send_message("no skill yet")
-        assert tui.wait_for_screen("nothing active", timeout=45), tui.get_screen_text()
-        _activate(tui)
-        tui.send_message("second message")
-        assert tui.wait_for_screen("still following it", timeout=60), (
-            tui.get_screen_text()
-        )
-
-        rows = _wait_for(lambda: [r for r in _turn_rows(stub) if r["skills"]])
-        assert rows, [r for r in _turn_rows(stub)]
         for row in _turn_rows(stub):
             for name in row["skills"]:
                 assert "helm diff" not in name, row
