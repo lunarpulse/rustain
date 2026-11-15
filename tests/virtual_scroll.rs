@@ -3,6 +3,8 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+#[cfg(debug_assertions)]
+use rustain::adapters::tui::state::RenderWork;
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
@@ -53,7 +55,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
 
 /// AC8: Virtual scrolling with viewport culling renders only visible messages.
 /// Local benchmark: 1000+ messages, assert render < 16ms.
-/// Ignored on CI — use relative scaling test instead.
+/// Ignored on CI — the count tests below assert culling without a clock.
 #[test]
 #[ignore]
 fn test_virtual_scroll_1000_messages_performance() {
@@ -89,81 +91,6 @@ fn test_virtual_scroll_1000_messages_performance() {
         elapsed.as_millis() < 16,
         "1000-message render took {:?} (should be < 16ms)",
         elapsed
-    );
-}
-
-/// AC8: CI-safe relative benchmark — 1000 msgs in <= 3x the time of 100 msgs.
-#[test]
-fn test_virtual_scroll_relative_scaling() {
-    let streaming = StreamingState::default();
-    let theme = Theme::dark();
-
-    // Benchmark 100 messages
-    let conv_100 = make_conversation(100);
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut tab_render_state = TabRenderState::default();
-
-    let start_100 = std::time::Instant::now();
-    for _ in 0..10 {
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                chat_pane::render(
-                    frame,
-                    area,
-                    &conv_100,
-                    &streaming,
-                    0,
-                    true,
-                    &theme,
-                    &mut tab_render_state,
-                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
-                );
-            })
-            .unwrap();
-    }
-    let time_100 = start_100.elapsed();
-
-    // Benchmark 1000 messages
-    let conv_1000 = make_conversation(1000);
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut tab_render_state = TabRenderState::default();
-
-    let start_1000 = std::time::Instant::now();
-    for _ in 0..10 {
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                chat_pane::render(
-                    frame,
-                    area,
-                    &conv_1000,
-                    &streaming,
-                    0,
-                    true,
-                    &theme,
-                    &mut tab_render_state,
-                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
-                );
-            })
-            .unwrap();
-    }
-    let time_1000 = start_1000.elapsed();
-
-    // 1000 messages should be ≤ 8x the time of 100 messages.
-    // Ratio increased from 3x to 8x after Story 3-6 replaced parse_inline_code
-    // with the full 5-stage markdown pipeline (pulldown-cmark + transform + layout).
-    // compute_height() runs the full pipeline for every uncached message, so the
-    // first draw is ~10x heavier per message; cached draws keep the ratio sublinear.
-    let ratio = time_1000.as_nanos() as f64 / time_100.as_nanos().max(1) as f64;
-    assert!(
-        ratio <= 8.0,
-        "1000-msg render ({:?}) should be ≤ 8x of 100-msg render ({:?}), ratio: {:.2}",
-        time_1000,
-        time_100,
-        ratio,
     );
 }
 
@@ -525,8 +452,10 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
     let mut turns = Vec::new();
 
     for i in 0..turn_count {
-        let msg_id = format!("msg-{}", i);
         let turn_id = TurnId(format!("turn-{}", i));
+        // Production joins an assistant row to its turn on the row id
+        // (`turn.rs`, `conversation.rs`): the row carries the turn's id.
+        let msg_id = turn_id.0.clone();
 
         let prose_count = (i % 3) + 1;
         let tool_count = i % 5;
@@ -662,73 +591,177 @@ fn test_no_recompute_during_scroll() {
     );
 }
 
-/// AC8: Turn-based ratio test — 500-turn render time ≤ 5× of 50-turn render time.
-/// Additive: does NOT modify the existing message-mirror benchmark (AC14).
-#[test]
-fn test_turn_render_scaling_500_vs_50() {
-    let conv_50 = make_turn_conversation_seeded(50);
-    let conv_500 = make_turn_conversation_seeded(500);
+/// Draw one frame of `conversation` at 80x24 (auto-scroll) and return the work
+/// that frame did. Counts, not time: they are per `TabRenderState`, so tests on
+/// parallel threads cannot disturb each other (infra-2).
+#[cfg(debug_assertions)]
+fn draw_work(conversation: &Conversation, tab: &mut TabRenderState) -> RenderWork {
     let streaming = StreamingState::default();
     let theme = Theme::dark();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            chat_pane::render(
+                frame,
+                area,
+                conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                tab,
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
+            );
+        })
+        .unwrap();
+    tab.render_work
+}
 
-    // Benchmark 50 turns (10 draws)
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut tab_render_state = TabRenderState::default();
-    let start_50 = std::time::Instant::now();
-    for _ in 0..10 {
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                chat_pane::render(
-                    frame,
-                    area,
-                    &conv_50,
-                    &streaming,
-                    0,
-                    true,
-                    &theme,
-                    &mut tab_render_state,
-                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
-                );
-            })
-            .unwrap();
+/// AC8 (infra-2, K-VS1/K-VS2): the first frame computes exactly one height per
+/// message, all of them through the turn cache or the message cache (never the
+/// uncached legacy fallback); an identical second frame computes none. Replaces
+/// the wall-clock 500-vs-50 ratio, which also measured the legacy fallback because
+/// the fixture's assistant rows did not join their turns.
+#[cfg(debug_assertions)]
+#[test]
+fn test_turn_cold_frame_computes_one_height_per_message_and_warm_frame_none() {
+    for turn_count in [50, 500] {
+        let conversation = make_turn_conversation_seeded(turn_count);
+        let mut tab = TabRenderState::default();
+
+        let cold = draw_work(&conversation, &mut tab);
+        assert_eq!(
+            cold.turn_layouts + cold.message_heights,
+            conversation.messages.len(),
+            "{turn_count} turns, cold frame: one height per message, got {cold:?}"
+        );
+        assert_eq!(cold.legacy_heights, 0, "{turn_count} turns: {cold:?}");
+        assert!(
+            cold.turn_layouts > 0 && cold.message_heights > 0,
+            "positive control: both caches are exercised, got {cold:?}"
+        );
+
+        let warm = draw_work(&conversation, &mut tab);
+        assert_eq!(
+            (warm.turn_layouts, warm.message_heights, warm.legacy_heights),
+            (0, 0, 0),
+            "{turn_count} turns, warm frame recomputes nothing, got {warm:?}"
+        );
     }
-    let time_50 = start_50.elapsed();
+}
 
-    // Benchmark 500 turns (10 draws)
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut tab_render_state = TabRenderState::default();
-    let start_500 = std::time::Instant::now();
-    for _ in 0..10 {
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                chat_pane::render(
-                    frame,
-                    area,
-                    &conv_500,
-                    &streaming,
-                    0,
-                    true,
-                    &theme,
-                    &mut tab_render_state,
-                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
-                );
-            })
-            .unwrap();
-    }
-    let time_500 = start_500.elapsed();
-
-    let ratio = time_500.as_nanos() as f64 / time_50.as_nanos().max(1) as f64;
-    assert!(
-        ratio <= 5.0,
-        "500-turn render ({:?}) should be ≤ 5× of 50-turn render ({:?}), ratio: {:.2}",
-        time_500,
-        time_50,
-        ratio,
+/// AC8 (infra-2, K-VS3): the paint phase materialises only messages that meet the
+/// viewport, so the count does not grow with the conversation. The message-only
+/// conversation (a shape loading no longer produces) measures its assistant rows
+/// through the legacy fallback on every frame; the test records that instead of
+/// hiding it.
+#[cfg(debug_assertions)]
+#[test]
+fn test_rendered_messages_do_not_grow_with_conversation_length() {
+    let rendered = |conversation: &Conversation| {
+        draw_work(conversation, &mut TabRenderState::default()).rendered_messages
+    };
+    let (turns_small, turns_large) = (
+        rendered(&make_turn_conversation_seeded(50)),
+        rendered(&make_turn_conversation_seeded(500)),
     );
+    assert!(turns_small > 0, "positive control");
+    assert_eq!(turns_small, turns_large, "turn fixture 50 vs 500");
+    assert!(turns_large <= 24, "no more messages than viewport rows");
+
+    for message_count in [100, 1000] {
+        let conversation = make_conversation(message_count);
+        let mut tab = TabRenderState::default();
+        let cold = draw_work(&conversation, &mut tab);
+        let warm = draw_work(&conversation, &mut tab);
+        let assistant_rows = message_count / 2;
+        assert_eq!(cold.legacy_heights, assistant_rows, "cold frame {cold:?}");
+        assert_eq!(
+            warm.legacy_heights, assistant_rows,
+            "legacy rows are uncached: {warm:?}"
+        );
+        assert_eq!(
+            cold.message_heights,
+            message_count - assistant_rows,
+            "{cold:?}"
+        );
+        assert_eq!(warm.message_heights, 0, "{warm:?}");
+        assert!(
+            warm.rendered_messages > 0 && warm.rendered_messages <= 24,
+            "{warm:?}"
+        );
+        assert_eq!(cold.rendered_messages, warm.rendered_messages);
+    }
+    let small = draw_work(&make_conversation(100), &mut TabRenderState::default());
+    let large = draw_work(&make_conversation(1000), &mut TabRenderState::default());
+    assert_eq!(
+        small.rendered_messages, large.rendered_messages,
+        "100 vs 1,000 messages"
+    );
+}
+
+/// AC8 (infra-2, K-VS4): every render call starts its counters from zero, so two
+/// different conversations drawn on one state report independent work.
+#[cfg(debug_assertions)]
+#[test]
+fn test_render_work_resets_on_every_render_call() {
+    let mut tab = TabRenderState::default();
+    let first = draw_work(&make_turn_conversation_seeded(50), &mut tab);
+    assert_eq!(first.turn_layouts + first.message_heights, 50, "{first:?}");
+    let second = draw_work(&make_conversation(20), &mut tab);
+    assert_eq!(second.message_heights, 10, "user rows only: {second:?}");
+    assert_eq!(second.legacy_heights, 10, "assistant rows only: {second:?}");
+    assert_eq!(second.turn_layouts, 0, "{second:?}");
+}
+
+/// AC8 (infra-2 review R4, K-VS5): the height pass resolves each assistant row's
+/// turn with exactly one hashed probe of a per-frame map built once with one entry
+/// per turn, at every size and on cold and warm frames. The probes are counted
+/// inside the lookup (hash computations), so a lookup that scans `conversation.turns`
+/// or the map instead — quadratic, invisible to the cache and culling counts, even
+/// behind the same helper — turns this RED.
+#[cfg(debug_assertions)]
+#[test]
+fn test_turn_lookups_are_one_probe_per_assistant_row_at_every_size() {
+    for turn_count in [50, 500] {
+        let conversation = make_turn_conversation_seeded(turn_count);
+        let mut tab = TabRenderState::default();
+        for frame in ["cold", "warm"] {
+            let work = draw_work(&conversation, &mut tab);
+            assert_eq!(
+                work.turn_lookups,
+                turn_count / 2,
+                "{turn_count} turns, {frame}: {work:?}"
+            );
+            assert_eq!(
+                work.turn_map_entries, turn_count,
+                "{turn_count} turns, {frame}: {work:?}"
+            );
+            // The work inside each lookup is one hashed probe, at 50 and at 500
+            // turns alike. A scan of the turns or of the map hashes nothing, so
+            // this is RED for it while `turn_lookups` still counts the call.
+            assert_eq!(
+                work.turn_lookup_hashes, work.turn_lookups,
+                "{turn_count} turns, {frame}: {work:?}"
+            );
+        }
+    }
+    for message_count in [100, 1000] {
+        let work = draw_work(
+            &make_conversation(message_count),
+            &mut TabRenderState::default(),
+        );
+        assert_eq!(
+            work.turn_lookups,
+            message_count / 2,
+            "{message_count} messages: {work:?}"
+        );
+        assert_eq!(work.turn_map_entries, 0, "{work:?}");
+        // An empty map is answered without hashing.
+        assert_eq!(work.turn_lookup_hashes, 0, "{work:?}");
+    }
 }
 
 /// AC12: Eviction gate — evict_turns_not_in drops stale entries after rewind.

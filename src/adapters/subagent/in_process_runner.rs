@@ -1999,6 +1999,10 @@ mod tests {
     use futures::{StreamExt, stream::BoxStream};
     use std::path::PathBuf;
 
+    /// Bound for a wait whose only failure is a hang (a deadlock or a lost wake-up).
+    /// It detects a hang; it is never a performance bound.
+    const HANG_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(60);
+
     #[test]
     fn launch_path_contains_no_production_agent_id_mint() {
         let source = include_str!("in_process_runner.rs");
@@ -2330,7 +2334,7 @@ mod tests {
         let mut status_rx = handle.status_rx;
 
         // Wait for Running (child is streaming from HangingProvider)
-        let saw_running = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let saw_running = tokio::time::timeout(HANG_BACKSTOP, async {
             while let Some(s) = status_rx.recv().await {
                 if matches!(s, NodeState::Running) {
                     return true;
@@ -2376,21 +2380,19 @@ mod tests {
         // Cancel the child — triggers drain_mailbox on the cancellation exit path
         cancel.cancel();
 
-        // Wait for terminal state
-        let reached_terminal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        // Wait for the child task to return: the status channel closes only after
+        // `drain_mailbox` ran, so the budget and the receipts are final (a join, not
+        // a sleep). The terminal status arrives on the way.
+        let reached_terminal = tokio::time::timeout(HANG_BACKSTOP, async {
+            let mut saw_terminal = false;
             while let Some(s) = status_rx.recv().await {
-                if s.is_terminal() {
-                    return true;
-                }
+                saw_terminal |= s.is_terminal();
             }
-            false
+            saw_terminal
         })
         .await
         .unwrap_or(false);
         assert!(reached_terminal, "child must reach terminal after cancel");
-
-        // Small delay for event_bus to deliver
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Collect MessageRefused{TerminalState} receipts from the event bus
         let mut terminal_receipts = 0usize;
@@ -7028,7 +7030,7 @@ mod tests {
         let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m").unwrap();
 
         let run = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            HANG_BACKSTOP,
             executor.run_fork_join_run(request, CancellationToken::new(), None),
         )
         .await
@@ -8389,6 +8391,16 @@ mod tests {
             .run_fork_join_run(request, CancellationToken::new(), None)
             .await
             .expect("flat-root wave");
+        // A spoke whose launch failed prints its outcome here instead of surfacing
+        // as a bare forwarder count below.
+        assert!(
+            run.outcome.spokes.iter().all(|(_, result)| matches!(
+                result,
+                crate::domain::models::SpokeResult::Completed { .. }
+            )),
+            "every spoke must complete; outcomes: {:?}",
+            run.outcome.spokes
+        );
         // Terminal delivery precedes the final meta rename. Channel closure
         // joins each child task, so directory iteration sees a stable set.
         let forwarders = std::mem::take(&mut *runner.forwarders.lock().await);

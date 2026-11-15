@@ -397,6 +397,29 @@ impl HeightCache {
     }
 }
 
+/// What one `chat_pane::render` call computed, counted at the cache-miss sites.
+/// A warm frame over unchanged content computes no heights at all; the per-frame
+/// bookkeeping that is not cached (turn map, content hashes) is not counted.
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RenderWork {
+    /// Turn layouts computed (turn height-cache misses).
+    pub turn_layouts: usize,
+    /// User/system message heights computed (message height-cache misses).
+    pub message_heights: usize,
+    /// Assistant rows without a joining turn, measured by the uncached fallback.
+    pub legacy_heights: usize,
+    /// Messages the paint phase materialised (those intersecting the viewport).
+    pub rendered_messages: usize,
+    /// Height-pass probes of the per-frame turn map: one per assistant row.
+    pub turn_lookups: usize,
+    /// Hash computations performed inside those probes: one per probe of a
+    /// non-empty map, whatever its size (a scan performs none).
+    pub turn_lookup_hashes: usize,
+    /// Entries the per-frame turn map was built with: one per turn.
+    pub turn_map_entries: usize,
+}
+
 /// Per-tab render state holding the height cache and related render metadata.
 /// Lives in the adapter layer (TuiState side-table) to respect hexagonal
 /// architecture — TabState in domain/ cannot hold adapter types.
@@ -433,6 +456,11 @@ pub struct TabRenderState {
     /// by `launchpad_facts::refresh` and replaced only when its key changes.
     /// `None` paints the receipt-bound rows only.
     pub launchpad: Option<crate::adapters::tui::launchpad::LaunchpadFacts>,
+    /// Work the latest `chat_pane::render` did (infra-2): one count per height
+    /// computed or message materialised. Per instance, so parallel tests cannot
+    /// interfere; reset by every render. Compiled out of release builds.
+    #[cfg(any(test, debug_assertions))]
+    pub render_work: RenderWork,
 }
 
 impl TabRenderState {

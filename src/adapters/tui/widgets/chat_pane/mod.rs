@@ -1978,6 +1978,55 @@ pub fn render_with_search(
     )
 }
 
+/// Test and debug builds count the hash computations of the per-frame turn map, so
+/// the probes performed inside [`resolve_turn`] are measured, not just its calls.
+#[cfg(any(test, debug_assertions))]
+#[derive(Clone, Default)]
+struct TurnMapState {
+    hashes: std::rc::Rc<std::cell::Cell<usize>>,
+    inner: std::collections::hash_map::RandomState,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl std::hash::BuildHasher for TurnMapState {
+    type Hasher = std::hash::DefaultHasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        self.hashes.set(self.hashes.get() + 1);
+        self.inner.build_hasher()
+    }
+}
+
+#[cfg(not(any(test, debug_assertions)))]
+type TurnMapState = std::collections::hash_map::RandomState;
+
+type TurnMap<'a> = std::collections::HashMap<&'a str, &'a Turn, TurnMapState>;
+
+/// The height pass's one way to find the turn an assistant row belongs to: one
+/// hashed probe of the per-frame `turn_map`. Debug builds count the calls
+/// (`turn_lookups`) and the hash computations performed inside them
+/// (`turn_lookup_hashes`): a replacement that scans `conversation.turns` or the map
+/// for each row — quadratic in the conversation, invisible to the cache and culling
+/// counts, and still passing through this function — performs no hashing and turns
+/// the one-hash-per-lookup assertion RED.
+fn resolve_turn<'a>(
+    turn_map: &TurnMap<'a>,
+    id: &str,
+    tab_render_state: &mut TabRenderState,
+) -> Option<&'a Turn> {
+    #[cfg(any(test, debug_assertions))]
+    let hashes_before = turn_map.hasher().hashes.get();
+    let found = turn_map.get(id).copied();
+    #[cfg(any(test, debug_assertions))]
+    {
+        tab_render_state.render_work.turn_lookups += 1;
+        tab_render_state.render_work.turn_lookup_hashes +=
+            turn_map.hasher().hashes.get() - hashes_before;
+    }
+    #[cfg(not(any(test, debug_assertions)))]
+    let _ = tab_render_state;
+    found
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_with_search_impl(
     frame: &mut Frame,
@@ -2003,6 +2052,10 @@ fn render_with_search_impl(
     show_terminal_origin_prefix: bool,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> RenderResult {
+    #[cfg(any(test, debug_assertions))]
+    {
+        tab_render_state.render_work = crate::adapters::tui::state::RenderWork::default();
+    }
     // Preserve the existing Stage focus resolution independently of decoration.
     let current_focus = focus.current;
     let bookmarks = live_bookmarks(conversation, bookmarks);
@@ -2049,11 +2102,15 @@ fn render_with_search_impl(
 
     // turn_map borrows &Turn from conversation.turns; height_cache lives on tab (separate root);
     // open_turn is a separate parameter borrow root — no aliasing.
-    let turn_map: std::collections::HashMap<&str, &Turn> = conversation
+    let turn_map: TurnMap<'_> = conversation
         .turns
         .iter()
         .map(|t| (t.id.0.as_str(), t))
         .collect();
+    #[cfg(any(test, debug_assertions))]
+    {
+        tab_render_state.render_work.turn_map_entries = turn_map.len();
+    }
 
     // Eviction gate: only evict when turn count shrinks (Amelia P0-4 / AC15)
     let turn_count = conversation.turns.len();
@@ -2091,7 +2148,7 @@ fn render_with_search_impl(
         let mut h: usize;
         match msg.role {
             MessageRole::Assistant => {
-                let turn = turn_map.get(msg.id.as_str()).copied();
+                let turn = resolve_turn(&turn_map, msg.id.as_str(), tab_render_state);
                 if let Some(turn) = turn {
                     let collapsed = effective_is_collapsed(turn, view_state);
                     let key = crate::adapters::tui::state::HeightKey {
@@ -2154,6 +2211,10 @@ fn render_with_search_impl(
                                     false,
                                 )
                             };
+                            #[cfg(any(test, debug_assertions))]
+                            {
+                                tab_render_state.render_work.turn_layouts += 1;
+                            }
                             #[cfg(debug_assertions)]
                             {
                                 crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
@@ -2200,6 +2261,10 @@ fn render_with_search_impl(
                     }
                 } else {
                     // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
+                    #[cfg(any(test, debug_assertions))]
+                    {
+                        tab_render_state.render_work.legacy_heights += 1;
+                    }
                     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
                     let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
                     h = compute_message_height(MessageHeightParams {
@@ -2238,6 +2303,10 @@ fn render_with_search_impl(
                         cached_h
                     }
                     None => {
+                        #[cfg(any(test, debug_assertions))]
+                        {
+                            tab_render_state.render_work.message_heights += 1;
+                        }
                         #[cfg(debug_assertions)]
                         {
                             crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
@@ -2448,6 +2517,10 @@ fn render_with_search_impl(
         let msg_end = line_offset + msg_height;
 
         if msg_end > visible_start && line_offset < visible_end {
+            #[cfg(any(test, debug_assertions))]
+            {
+                tab_render_state.render_work.rendered_messages += 1;
+            }
             let is_fork_point = conversation.fork_source.is_some()
                 && i == conversation.messages.len().saturating_sub(1);
             let focused_local_ordinal: Option<usize> = focused_search_match.and_then(|focused| {

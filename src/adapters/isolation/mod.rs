@@ -13,6 +13,7 @@ use crate::domain::ports::IsolationProvider;
 pub struct CowIsolationProvider {
     clock: Arc<dyn Clock>,
     periodic_reaper_started: Arc<AtomicBool>,
+    entry_hook: EntryHook,
 }
 
 impl Default for CowIsolationProvider {
@@ -26,7 +27,18 @@ impl CowIsolationProvider {
         Self {
             clock,
             periodic_reaper_started: Arc::new(AtomicBool::new(false)),
+            entry_hook: EntryHook::none(),
         }
+    }
+
+    /// Test seam: see [`EntryHook`].
+    #[cfg(test)]
+    fn with_entry_hook(
+        mut self,
+        hook: impl Fn(&Path) -> Option<std::io::Error> + Send + Sync + 'static,
+    ) -> Self {
+        self.entry_hook = EntryHook(Some(Arc::new(hook)));
+        self
     }
 
     /// Wall clock read through the injected `Clock`, converted to `u64` ms at
@@ -115,11 +127,14 @@ impl IsolationProvider for CowIsolationProvider {
         // (large `target/`, vendored deps). (P14)
         let lower_owned = lower.to_path_buf();
         let dest_owned = temp_dir.path().to_path_buf();
-        tokio::task::spawn_blocking(move || copy_tree_without_git(&lower_owned, &dest_owned))
-            .await
-            .map_err(|join_err| IsolationError::FailClosed {
-                reason: format!("scratch copy task failed: {join_err}"),
-            })??;
+        let hook = self.entry_hook.clone();
+        tokio::task::spawn_blocking(move || {
+            copy_tree_without_git(&lower_owned, &dest_owned, &hook)
+        })
+        .await
+        .map_err(|join_err| IsolationError::FailClosed {
+            reason: format!("scratch copy task failed: {join_err}"),
+        })??;
 
         init_git_baseline(temp_dir.path()).await?;
         tracing::info!(backend = ?backend, path = %temp_dir.path().display(), "isolation active");
@@ -252,24 +267,113 @@ fn process_is_live(_pid: u32) -> bool {
 /// and bounds copy cost (P14).
 const SKIP_DIR_NAMES: &[&str] = &["target", "node_modules", ".next", ".nuxt", "dist", "build"];
 
-fn copy_tree_without_git(from: &Path, to: &Path) -> Result<(), IsolationError> {
-    let from = from.to_path_buf();
-    let to = to.to_path_buf();
-    copy_dir_recursive(&from, &to, &from)
+/// Test seam (infra-2): called with each listed source entry before it is
+/// processed. It may change the file system to stand in for a concurrent
+/// writer, or return an `io::Error` that replaces a file entry's copy result.
+/// Production builds carry a zero-sized value that does nothing.
+#[cfg(test)]
+#[derive(Clone)]
+struct EntryHook(Option<Arc<dyn Fn(&Path) -> Option<std::io::Error> + Send + Sync>>);
+
+#[cfg(not(test))]
+#[derive(Clone)]
+struct EntryHook;
+
+impl EntryHook {
+    #[cfg(test)]
+    fn none() -> Self {
+        Self(None)
+    }
+
+    #[cfg(not(test))]
+    fn none() -> Self {
+        Self
+    }
+
+    #[cfg(test)]
+    fn call(&self, path: &Path) -> Option<std::io::Error> {
+        self.0.as_ref().and_then(|hook| hook(path))
+    }
+
+    #[cfg(not(test))]
+    fn call(&self, _path: &Path) -> Option<std::io::Error> {
+        None
+    }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path, root: &Path) -> Result<(), IsolationError> {
+/// True when `error` is `NotFound`, the SOURCE `path` is itself gone, and the
+/// workspace ROOT is still there: a concurrent deletion or rename of one entry
+/// (rsync's "file has vanished"). A `NotFound` with the source present (a missing
+/// destination, a broken link) is not; neither is any `NotFound` once the root
+/// itself is gone (the whole workspace vanished: fail closed).
+fn source_vanished(root: &Path, path: &Path, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        && matches!(
+            std::fs::symlink_metadata(path),
+            Err(probe) if probe.kind() == std::io::ErrorKind::NotFound
+        )
+        && root_present(root)
+}
+
+fn root_present(root: &Path) -> bool {
+    std::fs::symlink_metadata(root).is_ok()
+}
+
+fn copy_tree_without_git(from: &Path, to: &Path, hook: &EntryHook) -> Result<(), IsolationError> {
+    let from = from.to_path_buf();
+    let to = to.to_path_buf();
+    copy_dir_recursive(&from, &to, &from, hook)?;
+    // A root that vanished during the traversal leaves a partial scratch copy of
+    // a workspace that no longer exists: fail closed.
+    match std::fs::symlink_metadata(&from) {
+        Ok(_) => Ok(()),
+        Err(source) => Err(IsolationError::CopyFailed { from, to, source }),
+    }
+}
+
+/// Copies `src` into `dst`. The scratch copy has never been a point-in-time
+/// snapshot (a file modified during the copy is copied in whatever state it
+/// had); a listed entry whose source disappears before it is copied (an atomic
+/// rename over a live workspace file) is skipped instead of failing the launch.
+/// Every other error, a destination-side `NotFound` and a missing ROOT included,
+/// still fails closed.
+fn copy_dir_recursive(
+    src: &Path,
+    dst: &Path,
+    root: &Path,
+    hook: &EntryHook,
+) -> Result<(), IsolationError> {
     std::fs::create_dir_all(dst).map_err(|source| IsolationError::CopyFailed {
         from: src.to_path_buf(),
         to: dst.to_path_buf(),
         source,
     })?;
 
-    for entry in std::fs::read_dir(src).map_err(|source| IsolationError::CopyFailed {
-        from: src.to_path_buf(),
-        to: dst.to_path_buf(),
-        source,
-    })? {
+    let entries = match std::fs::read_dir(src) {
+        Ok(entries) => entries,
+        Err(source) if src != root && source_vanished(root, src, &source) => {
+            tracing::debug!(dir = %src.display(), "source directory vanished during scratch copy; skipped");
+            // Nothing of it was copied yet: leave no partial copy of it behind.
+            return match std::fs::remove_dir_all(dst) {
+                Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                    Err(IsolationError::CopyFailed {
+                        from: src.to_path_buf(),
+                        to: dst.to_path_buf(),
+                        source,
+                    })
+                }
+                _ => Ok(()),
+            };
+        }
+        Err(source) => {
+            return Err(IsolationError::CopyFailed {
+                from: src.to_path_buf(),
+                to: dst.to_path_buf(),
+                source,
+            });
+        }
+    };
+    for entry in entries {
         let entry = entry.map_err(|source| IsolationError::CopyFailed {
             from: src.to_path_buf(),
             to: dst.to_path_buf(),
@@ -277,6 +381,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path, root: &Path) -> Result<(), Isolati
         })?;
         let path = entry.path();
         let name = entry.file_name();
+        let injected = hook.call(&path);
         // Exclude `.git` (the clone gets its own fresh repo; excluded at every
         // depth), the source ROOT's ownership marker only (the destination
         // publishes its own; a nested user file of the same name is preserved),
@@ -288,21 +393,40 @@ fn copy_dir_recursive(src: &Path, dst: &Path, root: &Path) -> Result<(), Isolati
             continue;
         }
         let target = dst.join(&name);
-        let file_type = entry
-            .file_type()
-            .map_err(|source| IsolationError::CopyFailed {
-                from: path.clone(),
-                to: target.clone(),
-                source,
-            })?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(source) if source_vanished(root, &path, &source) => {
+                tracing::debug!(entry = %path.display(), "source entry vanished during scratch copy; skipped");
+                continue;
+            }
+            Err(source) => {
+                return Err(IsolationError::CopyFailed {
+                    from: path.clone(),
+                    to: target.clone(),
+                    source,
+                });
+            }
+        };
         if file_type.is_dir() {
-            copy_dir_recursive(&path, &target, root)?;
+            copy_dir_recursive(&path, &target, root, hook)?;
         } else if file_type.is_file() {
-            std::fs::copy(&path, &target).map_err(|source| IsolationError::CopyFailed {
-                from: path.clone(),
-                to: target.clone(),
-                source,
-            })?;
+            let copied = match injected {
+                Some(error) => Err(error),
+                None => std::fs::copy(&path, &target).map(drop),
+            };
+            match copied {
+                Ok(()) => {}
+                Err(source) if source_vanished(root, &path, &source) => {
+                    tracing::debug!(entry = %path.display(), "source file vanished during scratch copy; skipped");
+                }
+                Err(source) => {
+                    return Err(IsolationError::CopyFailed {
+                        from: path.clone(),
+                        to: target.clone(),
+                        source,
+                    });
+                }
+            }
         } else if file_type.is_symlink() {
             // §3.7 #3 symlink-out: refuse to recreate a symlink whose target
             // resolves outside the clone root — otherwise the clone carries a
@@ -799,5 +923,165 @@ mod tests {
         );
 
         provider.stop(handle).await.unwrap();
+    }
+
+    // ── infra-2: a source entry that vanishes mid-copy (rc5 flake) ──
+
+    fn live_workspace() -> tempfile::TempDir {
+        let parent = tempfile::TempDir::new().unwrap();
+        std::fs::write(parent.path().join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(parent.path().join("vanish.txt"), "gone soon\n").unwrap();
+        std::fs::create_dir(parent.path().join("sub")).unwrap();
+        std::fs::write(parent.path().join("sub").join("also.txt"), "also\n").unwrap();
+        std::fs::create_dir(parent.path().join("gone")).unwrap();
+        std::fs::write(parent.path().join("gone").join("inner.txt"), "inner\n").unwrap();
+        parent
+    }
+
+    fn provider_with(
+        hook: impl Fn(&Path) -> Option<std::io::Error> + Send + Sync + 'static,
+    ) -> CowIsolationProvider {
+        CowIsolationProvider::new(Arc::new(MockClock::at_wall_ms(1))).with_entry_hook(hook)
+    }
+
+    /// Removes `name` from the source tree the moment the copier lists it.
+    fn remove_when_listed(name: &'static str) -> impl Fn(&Path) -> Option<std::io::Error> {
+        move |path: &Path| {
+            if path.file_name() == Some(std::ffi::OsStr::new(name)) {
+                if path.is_dir() {
+                    std::fs::remove_dir_all(path).unwrap();
+                } else {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+            None
+        }
+    }
+
+    // K-R1 (RED before the tolerance): through `start`, a listed file that is
+    // renamed or deleted before its copy no longer fails the launch.
+    #[tokio::test]
+    async fn scratch_copy_skips_a_file_that_vanishes_mid_copy() {
+        let parent = live_workspace();
+        let provider = provider_with(remove_when_listed("vanish.txt"));
+        let handle = provider.start(parent.path()).await.unwrap();
+        assert!(!handle.path().join("vanish.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(handle.path().join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(handle.path().join("sub").join("also.txt")).unwrap(),
+            "also\n"
+        );
+        // Every surviving file is byte-identical, the nested one included.
+        assert_eq!(
+            std::fs::read_to_string(handle.path().join("gone").join("inner.txt")).unwrap(),
+            "inner\n"
+        );
+        provider.stop(handle).await.unwrap();
+    }
+
+    // K-R8 (infra-2 review R3): the workspace ROOT vanishing mid-traversal is not
+    // "a vanished entry". Once the hook has removed the root, every listed entry's
+    // copy fails with NotFound and its source is gone too; `start` must still fail.
+    #[tokio::test]
+    async fn scratch_copy_fails_closed_when_the_root_vanishes_mid_copy() {
+        let parent = live_workspace();
+        let root = parent.path().to_path_buf();
+        let provider = provider_with(move |path: &Path| {
+            if path.file_name() == Some(std::ffi::OsStr::new("vanish.txt")) {
+                std::fs::remove_dir_all(&root).unwrap();
+            }
+            None
+        });
+        let error = provider.start(parent.path()).await.unwrap_err();
+        assert!(
+            matches!(&error, IsolationError::CopyFailed { source, .. }
+                if source.kind() == std::io::ErrorKind::NotFound),
+            "{error:?}"
+        );
+    }
+
+    // K-R2: a listed subdirectory that vanishes leaves no destination directory.
+    #[tokio::test]
+    async fn scratch_copy_skips_a_directory_that_vanishes_mid_copy() {
+        let parent = live_workspace();
+        let provider = provider_with(remove_when_listed("gone"));
+        let handle = provider.start(parent.path()).await.unwrap();
+        assert!(
+            !handle.path().join("gone").exists(),
+            "no partial copy of the vanished directory"
+        );
+        assert!(handle.path().join("keep.txt").is_file());
+        provider.stop(handle).await.unwrap();
+    }
+
+    // K-R3: any other error for a present file still fails closed, naming it.
+    #[tokio::test]
+    async fn scratch_copy_still_fails_closed_on_a_non_notfound_error() {
+        let parent = live_workspace();
+        let provider = provider_with(|path: &Path| {
+            (path.file_name() == Some(std::ffi::OsStr::new("keep.txt")))
+                .then(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        let error = provider.start(parent.path()).await.unwrap_err();
+        assert!(
+            matches!(&error, IsolationError::CopyFailed { from, source, .. }
+                if from.ends_with("keep.txt") && source.kind() == std::io::ErrorKind::PermissionDenied),
+            "{error:?}"
+        );
+    }
+
+    // K-R4: a missing ROOT is never "vanished": the launch fails.
+    #[tokio::test]
+    async fn scratch_copy_fails_closed_when_the_root_is_missing() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let provider = CowIsolationProvider::new(Arc::new(MockClock::at_wall_ms(1)));
+        let error = provider
+            .start(&parent.path().join("missing"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, IsolationError::CopyFailed { source, .. }
+                if source.kind() == std::io::ErrorKind::NotFound),
+            "{error:?}"
+        );
+    }
+
+    // K-R5 (positive control): an installed but inert hook copies everything the
+    // exclusions allow, so K-R1..K-R3 skip only what they remove.
+    #[tokio::test]
+    async fn scratch_copy_with_an_inert_hook_copies_every_entry() {
+        let parent = live_workspace();
+        let provider = provider_with(|_: &Path| None);
+        let handle = provider.start(parent.path()).await.unwrap();
+        for rel in ["keep.txt", "vanish.txt", "sub/also.txt", "gone/inner.txt"] {
+            assert!(handle.path().join(rel).is_file(), "{rel} must be copied");
+        }
+        provider.stop(handle).await.unwrap();
+    }
+
+    // K-R7: a destination-side NotFound (the source is still there) fails closed.
+    #[test]
+    fn scratch_copy_fails_closed_when_the_destination_parent_vanishes() {
+        let parent = live_workspace();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let dst = scratch.path().to_path_buf();
+        let hook = EntryHook(Some(Arc::new({
+            let dst = dst.clone();
+            move |path: &Path| {
+                if path.file_name() == Some(std::ffi::OsStr::new("also.txt")) {
+                    std::fs::remove_dir_all(dst.join("sub")).unwrap();
+                }
+                None
+            }
+        })));
+        let error = copy_dir_recursive(parent.path(), &dst, parent.path(), &hook).unwrap_err();
+        assert!(
+            matches!(&error, IsolationError::CopyFailed { from, source, .. }
+                if from.ends_with("also.txt") && source.kind() == std::io::ErrorKind::NotFound),
+            "{error:?}"
+        );
     }
 }
