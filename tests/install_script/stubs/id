@@ -1,0 +1,7 @@
+#!/bin/sh
+# rel-4 harness stub for id -u.
+if [ "$*" != -u ]; then
+  printf 'id stub: unexpected arguments: %s\n' "$*" >&2
+  exit 98
+fi
+printf '%s\n' "${STUB_UID:-1000}"

@@ -1,0 +1,14 @@
+#!/bin/sh
+# rel-4 harness wrapper for shasum -a 256: logs, then hashes with the real tool.
+PATH=$STUB_REAL_PATH
+export PATH
+printf '%s\n' "$*" >>"$STUB_LOG/shasum.log"
+if command -v shasum >/dev/null 2>&1; then
+  exec shasum "$@"
+fi
+if [ "${1:-}" != -a ] || [ "${2:-}" != 256 ]; then
+  printf 'shasum wrapper: only -a 256 is supported\n' >&2
+  exit 98
+fi
+shift 2
+exec sha256sum "$@"

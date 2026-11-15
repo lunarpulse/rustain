@@ -661,3 +661,22 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
                 .unwrap()
     );
 }
+
+/// rel-4: the sign job publishes `dist/install.sh` as `install.sh`, only when its
+/// `DEFAULT_VERSION` is the tag, and lists it in the signed `SHA256SUMS`.
+#[test]
+fn k10_release_publishes_the_install_script_in_the_signed_manifest() {
+    const STAGE: &str = "      - name: Stage install script\n        shell: bash\n        run: |\n          # dist/install.sh installs its DEFAULT_VERSION by default; publish it only for that tag.\n          grep -qxF \"DEFAULT_VERSION=${GITHUB_REF_NAME#v}\" dist/install.sh\n          cp dist/install.sh release/install.sh\n";
+    const SUMS: &str = "          sha256sum rustain-* install.sh > SHA256SUMS\n";
+    let stage = WORKFLOW.find(STAGE).expect("stage step");
+    let sums = WORKFLOW.find(SUMS).expect("SHA256SUMS lists install.sh");
+    let sign = WORKFLOW
+        .find("      - name: Sign SHA256SUMS (prehashed ED)")
+        .expect("sign step");
+    assert!(stage < sums && sums < sign);
+    assert_eq!(
+        WORKFLOW.matches("sha256sum ").count(),
+        1,
+        "one manifest command"
+    );
+}

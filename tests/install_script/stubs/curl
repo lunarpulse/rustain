@@ -1,0 +1,68 @@
+#!/bin/sh
+# rel-4 harness stub for curl: serves $STUB_MIRROR/<tag>/<name> for
+# https://github.com/lunarpulse/rustain/releases/download/<tag>/<name>.
+PATH=$STUB_REAL_PATH
+export PATH
+set -eu
+printf '%s\n' "$*" >>"$STUB_LOG/curl.log"
+printf '%s\n' "$PWD" >>"$STUB_LOG/curl.cwd"
+out=
+fmt=
+url=
+remote_name=0
+proto=0
+redir=0
+tls=0
+prev=
+for a in "$@"; do
+  case "$prev" in
+    -o) out=$a; prev=; continue ;;
+    -w) fmt=$a; prev=; continue ;;
+    --proto) if [ "$a" = '=https' ]; then proto=1; fi; prev=; continue ;;
+    --proto-redir) if [ "$a" = '=https' ]; then redir=1; fi; prev=; continue ;;
+    --max-redirs) prev=; continue ;;
+  esac
+  case "$a" in
+    -o | -w | --proto | --proto-redir | --max-redirs) prev=$a ;;
+    --tlsv1.2) tls=1 ;;
+    -O) remote_name=1 ;;
+    -fsSL | -fL) ;;
+    -*) printf 'curl stub: unexpected option %s\n' "$a" >&2; exit 98 ;;
+    *) url=$a ;;
+  esac
+done
+if [ "${STUB_CURL_REQUIRE_TLS:-0}" = 1 ] && [ "$proto$redir$tls" != 111 ]; then
+  printf 'curl stub: HTTPS-only flags missing (proto=%s proto-redir=%s tlsv1.2=%s)\n' "$proto" "$redir" "$tls" >&2
+  exit 99
+fi
+prefix=https://github.com/lunarpulse/rustain/releases/download/
+case "$url" in
+  "$prefix"*) ;;
+  *) printf 'curl stub: unexpected URL %s\n' "$url" >&2; exit 97 ;;
+esac
+rest=${url#"$prefix"}
+tag=${rest%%/*}
+name=${rest#*/}
+if [ -z "$out" ]; then
+  if [ "$remote_name" = 1 ]; then out=$name; else printf 'curl stub: no output file\n' >&2; exit 96; fi
+fi
+src=$STUB_MIRROR/$tag/$name
+if [ ! -f "$src" ]; then
+  printf 'curl: (22) The requested URL returned error: 404\n' >&2
+  exit 22
+fi
+if [ "${STUB_CURL_PARTIAL:-}" = "$name" ]; then
+  size=$(wc -c <"$src")
+  head -c "$((size / 2))" "$src" >"$out"
+  if [ "${STUB_CURL_KILL_PARENT:-0}" = 1 ]; then
+    kill -TERM "$PPID"
+  fi
+  printf 'curl: (18) transfer closed with outstanding read data remaining\n' >&2
+  exit 18
+fi
+cp "$src" "$out"
+# Real curl output is not executable; never inherit the fixture's mode.
+chmod 644 "$out"
+if [ -n "$fmt" ]; then
+  printf '%s\n' "${STUB_CURL_FINAL_URL:-https://release-assets.githubusercontent.com/github-production-release-asset/$name}"
+fi

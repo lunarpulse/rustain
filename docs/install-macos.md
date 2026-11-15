@@ -9,6 +9,24 @@ signature ([details](../RELEASING.md#macos-distribution-status)). macOS can
 refuse to open a copy downloaded with a web browser, so download it with
 `curl`, verify it, and install it into `~/.local/bin`.
 
+## Install with the script
+
+Releases after 0.4.1 publish `install.sh`, which runs the checks of step 2
+below for you. Install `minisign` first (step 1), then run:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/lunarpulse/rustain/releases/latest/download/install.sh | sh
+```
+
+It downloads the same three files over HTTPS, verifies `SHA256SUMS` with the
+same key, selects the asset's entry with the same exact-name rule, checks the
+SHA-256, refuses a download that carries `com.apple.quarantine`, and only then
+moves the binary to `~/.local/bin/rustain` and prints its `--version`. Without
+`minisign` it checks only the SHA-256 and says so. From a Rosetta terminal on
+Apple silicon it still installs the `aarch64-apple-darwin` asset. The `PATH`
+notes in step 3 apply. For `VERSION` and for reading the script before running
+it, see [Installing a release](../README.md#installing-a-release).
+
 ## Download, verify and install
 
 **1. Install the signature verifier.** If `minisign` is not already installed,
@@ -90,7 +108,10 @@ they do not prove that it is free of malware.
 ```
 
 If quarantine is listed, follow [Downloaded with a browser?](#downloaded-with-a-browser)
-before running it. Do not remove quarantine automatically.
+before running it. Do not remove quarantine automatically. An entry
+`com.apple.provenance:` is expected and is not the quarantine attribute: after
+a `curl` install on the project owner's company-managed Mac, `xattr -l` listed
+only that entry and nothing was blocked.
 
 If `~/.local/bin` is not on your `PATH`, enable it for the current terminal:
 
@@ -178,3 +199,6 @@ printed 0.4.1; with `minisign` missing, the block printed the install command
 and stopped before downloading. That block still had the `TARGET` explanation
 as a comment, since moved into the text.
 The Intel asset, the browser route, the source build and the diagnostics are not verified on macOS by the project.
+`install.sh` is tested in CI with stubbed downloads, in Linux shells and in
+the macOS `sh` and `zsh`; an installation with it has not been run on a Mac by
+the project.

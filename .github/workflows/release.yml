@@ -196,6 +196,13 @@ jobs:
             exit 1
           fi
 
+      - name: Stage install script
+        shell: bash
+        run: |
+          # dist/install.sh installs its DEFAULT_VERSION by default; publish it only for that tag.
+          grep -qxF "DEFAULT_VERSION=${GITHUB_REF_NAME#v}" dist/install.sh
+          cp dist/install.sh release/install.sh
+
       - name: Generate SHA256SUMS
         run: |
           cd release
@@ -203,7 +210,7 @@ jobs:
             echo "ERROR: No release artifacts found"
             exit 1
           fi
-          sha256sum rustain-* > SHA256SUMS
+          sha256sum rustain-* install.sh > SHA256SUMS
           cat SHA256SUMS
 
       - name: Sign SHA256SUMS (prehashed ED)

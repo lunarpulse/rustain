@@ -1,0 +1,26 @@
+#!/bin/sh
+# rel-4 harness stub for minisign -Vm SHA256SUMS -P <key>: accepts only the
+# trusted key and a SHA256SUMS.minisig that names the SHA-256 of this SHA256SUMS.
+PATH=$STUB_REAL_PATH
+export PATH
+set -eu
+printf '%s\n' "$*" >>"$STUB_LOG/minisign.log"
+if [ "$#" != 4 ] || [ "$1" != -Vm ] || [ "$2" != SHA256SUMS ] || [ "$3" != -P ]; then
+  printf 'minisign stub: unexpected arguments: %s\n' "$*" >&2
+  exit 98
+fi
+if [ "$4" != "$STUB_TRUSTED_KEY" ]; then
+  printf 'Signature key id in SHA256SUMS.minisig does not match the public key\n' >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  sum=$(sha256sum SHA256SUMS)
+else
+  sum=$(shasum -a 256 SHA256SUMS)
+fi
+read -r signed <SHA256SUMS.minisig || signed=
+if [ "$signed" != "stub-signature ${sum%% *}" ]; then
+  printf 'Signature verification failed\n' >&2
+  exit 1
+fi
+printf 'Signature and comment signature verified\n'

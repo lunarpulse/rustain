@@ -1,0 +1,11 @@
+#!/bin/sh
+# rel-4 harness stub for sysctl -n sysctl.proc_translated (absent on Intel Macs).
+if [ "$*" != '-n sysctl.proc_translated' ]; then
+  printf 'sysctl stub: unexpected arguments: %s\n' "$*" >&2
+  exit 98
+fi
+if [ -z "${STUB_PROC_TRANSLATED:-}" ]; then
+  printf 'sysctl: unknown oid '"'"'sysctl.proc_translated'"'"'\n' >&2
+  exit 1
+fi
+printf '%s\n' "$STUB_PROC_TRANSLATED"

@@ -26,6 +26,7 @@ lines of Rust. One binary.
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Pick your door](#pick-your-door)
   - [Run Rustain](#-run-rustain)
+  - [Installing a release](#installing-a-release)
   - [Installing on macOS](#installing-on-macos)
   - [Develop Rustain](#-develop-rustain)
   - [Understand Rustain](#-understand-rustain)
@@ -209,6 +210,25 @@ carries an always-present absolute `workspace` field.
 
 For full semantics, guards, exit codes, and bulk-delete behavior see
 [`docs/sessions.md`](docs/sessions.md).
+
+### Installing a release
+
+Release assets exist for Linux x86_64 and macOS (Apple silicon and Intel).
+Releases after 0.4.1 also publish an installer script, `install.sh`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/lunarpulse/rustain/releases/latest/download/install.sh | sh
+```
+
+It downloads the asset for your platform with `SHA256SUMS` and
+`SHA256SUMS.minisig`, checks the minisign signature of `SHA256SUMS` when
+`minisign` is installed (and says plainly when it is not), checks the asset's
+SHA-256 and only then installs it as `~/.local/bin/rustain`. It never uses
+`sudo`, never edits shell startup files and refuses to run as root. To install
+another release, set `VERSION` (for example `… | VERSION=0.4.0 sh`). To read
+the script first, download it with `-O` instead of `| sh`; it is listed in the
+release's signed `SHA256SUMS`. Update an installed rustain with
+`rustain update`.
 
 ### Installing on macOS
 

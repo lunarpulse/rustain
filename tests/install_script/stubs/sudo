@@ -1,0 +1,4 @@
+#!/bin/sh
+# rel-4 harness tripwire: the installer must never call sudo.
+printf '%s\n' "$*" >>"$STUB_LOG/sudo.log"
+exit 1

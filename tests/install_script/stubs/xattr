@@ -1,0 +1,15 @@
+#!/bin/sh
+# rel-4 harness stub for xattr -p com.apple.quarantine FILE and xattr -l FILE.
+printf '%s\n' "$*" >>"$STUB_LOG/xattr.log"
+case "$1" in
+  -p)
+    if [ "${STUB_QUARANTINE:-0}" = 1 ]; then
+      printf '0081;00000000;curl;\n'
+      exit 0
+    fi
+    printf 'xattr: %s: No such xattr: %s\n' "$3" "$2" >&2
+    exit 1
+    ;;
+  -l) printf 'com.apple.provenance:\n' ;;
+  *) printf 'xattr stub: unexpected arguments: %s\n' "$*" >&2; exit 98 ;;
+esac

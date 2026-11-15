@@ -96,6 +96,9 @@ mod doctor_health;
 #[path = "../doctor_offline.rs"]
 mod doctor_offline;
 
+#[path = "../install_script.rs"]
+mod install_script;
+
 #[path = "../model_catalog_e2e.rs"]
 mod model_catalog_e2e;
 

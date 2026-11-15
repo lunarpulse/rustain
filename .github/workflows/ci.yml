@@ -296,6 +296,18 @@ jobs:
       - name: Run macOS daemon integration tests (non-ignored)
         if: steps.filter.outputs.daemon-paths == 'true' || github.event_name == 'push'
         run: "cargo test --test daemon daemon_crash_recovery::"
+  install-script-macos:
+    name: Install script (macOS shells)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # The rel-4 harness with stubbed downloads, under macOS's /bin/sh and zsh and
+      # its BSD tools; Linux shells run it from `cargo test` (tests/install_script.rs).
+      - name: Install script harness (/bin/sh, zsh)
+        run: |
+          sh tests/install_script/harness.sh
+          INSTALL_SH=zsh sh tests/install_script/harness.sh
   tui-tests:
     name: Python TUI Tests
     runs-on: ubuntu-latest
