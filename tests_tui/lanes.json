@@ -63,9 +63,6 @@
   },
   "tests": {
     "test_story_19_7_scene_provider.py::test_desync_is_loud_product_side": "native_nightly",
-    "test_story_21_14_onboarding.py::test_leg_b_coach_line_highlight_and_team_defaults_at_80x24": "native_nightly",
-    "test_story_21_1_notification_lifecycle.py::test_s1_toasts_expire_and_notification_log_local_and_attached_80x24": "native_nightly",
-    "test_story_21_3_keymap_truth.py::test_keymap_truth_leader_rows_local_80x24": "native_nightly",
     "test_story_21_6_decision_queue.py::test_d_deferred_list_and_forked_predicates": "native_nightly",
     "test_story_21_6_decision_queue.py::test_d_fork_predicate_accepts_the_whole_sheet_and_rejects_torn_frames": "native_nightly",
     "test_story_21_6_decision_queue.py::test_e_proposal_predicate_whole_sheets_and_torn_frames": "native_nightly",

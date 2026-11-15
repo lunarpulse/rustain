@@ -1374,11 +1374,7 @@ pub async fn run() -> Result<()> {
     let plan_manager = Arc::new(PlanManager::new(plans_dir));
     let plan_injector = Arc::new(DefaultPlanInjector::new());
 
-    let initial_mode = if app_config.default_plan_mode {
-        PermissionMode::Plan
-    } else {
-        PermissionMode::Normal
-    };
+    let initial_mode = app_config.initial_permission_mode();
     let sandbox_policy = SandboxPolicy::from_mode(initial_mode, &workspace_path);
 
     let usage_ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
@@ -1531,7 +1527,7 @@ pub async fn run() -> Result<()> {
     security_adapter.set_mode(initial_mode);
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
 
-    if app_config.default_plan_mode {
+    if initial_mode == PermissionMode::Plan {
         let _ = plan_manager.ensure_dir().await;
         plan_injector.as_ref().reset_reentry();
     }

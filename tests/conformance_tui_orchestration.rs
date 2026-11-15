@@ -828,6 +828,88 @@ fn bookmark_wave_history_and_scroll_arms_delegate_to_their_handlers() {
     );
 }
 
+// Keystone K1 (tui-5c): the leader-mode, login, adapters, usage-panel, permission-mode, /tour
+// and notification-store joins in `event_loop::run`, which has no test seam. Each positive
+// `contains` is paired with the wrong-seam `!contains`. Mutants (not executed): MC1 `Login`
+// arm body emptied, MC2 `OpenAdapters` -> `room_bridge::refresh_mission_tab`, MC3
+// `OpenUsagePanel` body emptied, MC4 `announce_permission_mode` removed from the handler,
+// MC5 `security.set_mode(mode)` removed, MC6 `/tour` -> `tour::tick(&mut state, false)`,
+// MC13 the local store built from `NotificationsConfig::default()`, MC14 a `submit_turn!`
+// added to the `CycleMode` arm. `OpenHistory` is already pinned in
+// `bookmark_wave_history_and_scroll_arms_delegate_to_their_handlers`; a bare Ctrl+Q decodes
+// to `InputAction::Quit` (app.rs `convert_crossterm_event` Ctrl+Q -> `CtrlQ`; the Input row of
+// the Ctrl+Q table expects Quit), so no Quit arm is added here.
+#[test]
+fn leader_mode_and_tour_arms_delegate_to_their_handlers() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+
+    let login = input_action_arm(event_loop, "InputAction::Login(action) =>");
+    assert!(
+        login.contains("handlers::login::on_action(") && login.contains(", action)"),
+        "the Login arm must hand its action to the login handler: {login}"
+    );
+
+    let adapters = input_action_arm(event_loop, "InputAction::OpenAdapters =>");
+    assert!(
+        adapters.contains("mission_bridge::open_adapters(")
+            && !adapters.contains("refresh_mission_tab("),
+        "OpenAdapters must open the adapters panel, not refresh the mission tab: {adapters}"
+    );
+
+    let usage = input_action_arm(event_loop, "InputAction::OpenUsagePanel =>");
+    assert!(
+        usage.contains("handlers::usage_panel::handle_open_usage_panel(")
+            && !usage.contains("submit_turn!"),
+        "OpenUsagePanel must open the usage panel through its handler: {usage}"
+    );
+
+    let cycle = input_action_arm(event_loop, "InputAction::CycleMode =>");
+    assert!(
+        cycle.contains("AppEvent::SetPermissionMode(next)") && !cycle.contains("submit_turn!"),
+        "CycleMode must emit SetPermissionMode and start no turn: {cycle}"
+    );
+
+    let set_mode = event_loop
+        .split("AppEvent::SetPermissionMode(mode) =>")
+        .nth(1)
+        .expect("the SetPermissionMode event arm must exist in event_loop.rs")
+        .split("AppEvent::RetryMessage")
+        .next()
+        .expect("the SetPermissionMode arm is bounded by the RetryMessage arm");
+    assert!(
+        set_mode.contains("security.set_mode(mode)")
+            && set_mode.contains("notice_actions::announce_permission_mode(&mut state, mode)")
+            && !set_mode.contains("submit_turn!"),
+        "SetPermissionMode must set the mode, announce it and start no turn: {set_mode}"
+    );
+
+    let tour = event_loop
+        .split("cmd_name == \"tour\"")
+        .nth(1)
+        .expect("the /tour branch must exist in event_loop.rs")
+        .split("} else if")
+        .next()
+        .expect("the /tour branch is bounded by the next else-if");
+    assert!(
+        tour.contains("crate::adapters::tui::tour::command(&mut state)")
+            && !tour.contains("tour::tick("),
+        "/tour must run the tour command, not tick it: {tour}"
+    );
+
+    let store = event_loop
+        .split("state.notifications = notifications::NotificationStore::from_config(")
+        .nth(1)
+        .expect("the local notification store construction must exist in event_loop.rs")
+        .split(");")
+        .next()
+        .expect("the store construction ends at its closing call");
+    assert!(
+        store.trim_start().starts_with("&config.notifications,")
+            && !store.contains("NotificationsConfig::default()"),
+        "the local store must be built from the loaded [notifications] config: {store}"
+    );
+}
+
 // The real dispatch/effect seam reuses the retained run; provider-count evidence is native.
 #[test]
 fn diverge_toggle_arms_never_dispatch() {

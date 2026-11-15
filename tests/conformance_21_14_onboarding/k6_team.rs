@@ -108,6 +108,96 @@ fn the_team_switch_supplies_the_four_defaults_from_any_source() {
     );
 }
 
+/// K2 (AD-C2, PC-4): the mode a session starts in follows the loaded config through the
+/// production accessor `AppConfig::initial_permission_mode`. Mutants: MC7 (the accessor returns
+/// `PermissionMode::Normal` unconditionally) and MC8 (it returns `Plan` unconditionally).
+#[test]
+fn the_team_switch_starts_the_session_in_plan_mode() {
+    use rustain::domain::models::PermissionMode;
+    assert_eq!(
+        load(Some("[onboarding]\nteam = true"), &[]).initial_permission_mode(),
+        PermissionMode::Plan,
+        "team via the workspace file"
+    );
+    assert_eq!(
+        load(None, &["onboarding.team=true"]).initial_permission_mode(),
+        PermissionMode::Plan,
+        "team via -c onboarding.team=true"
+    );
+    assert_eq!(
+        load(None, &[]).initial_permission_mode(),
+        PermissionMode::Normal,
+        "default load"
+    );
+    assert_eq!(
+        load(None, &["default_plan_mode=true"]).initial_permission_mode(),
+        PermissionMode::Plan,
+        "-c default_plan_mode=true alone"
+    );
+}
+
+/// K2: an explicit `default_plan_mode = false` beats the team switch for the start mode.
+/// Mutant: MC8 (the accessor answers Plan unconditionally: this and the default case go RED).
+#[test]
+fn an_explicit_plan_off_beats_the_team_switch_for_the_start_mode() {
+    use rustain::domain::models::PermissionMode;
+    assert_eq!(
+        load(
+            Some("default_plan_mode = false\n\n[onboarding]\nteam = true"),
+            &[]
+        )
+        .initial_permission_mode(),
+        PermissionMode::Normal,
+        "workspace file"
+    );
+    assert_eq!(
+        load(
+            Some("[onboarding]\nteam = true"),
+            &["default_plan_mode=false"]
+        )
+        .initial_permission_mode(),
+        PermissionMode::Normal,
+        "-c default_plan_mode=false"
+    );
+}
+
+/// K3 (AD-C2): startup seeds the sandbox policy, the security adapter and the plan warmup from
+/// the one `initial_mode`, never from the raw `default_plan_mode` flag. Mutants: MC9
+/// (`security_adapter.set_mode(PermissionMode::Normal)`), MC10 (the inline derivation restored,
+/// the accessor unused), MC11 (the warmup keyed on `app_config.default_plan_mode` again), MC12
+/// (`ensure_dir()` or `reset_reentry()` dropped from the warmup).
+#[test]
+fn startup_seeds_security_and_sandbox_from_the_initial_permission_mode() {
+    let text = include_str!("../../src/infrastructure/startup.rs");
+    for anchor in [
+        "let initial_mode = app_config.initial_permission_mode();",
+        "SandboxPolicy::from_mode(initial_mode, &workspace_path)",
+        "security_adapter.set_mode(initial_mode);",
+    ] {
+        assert!(text.contains(anchor), "startup.rs must contain `{anchor}`");
+    }
+    let warmup = text
+        .split("if initial_mode == PermissionMode::Plan {")
+        .nth(1)
+        .expect("the warmup branch exists");
+    let warmup = warmup
+        .split("\n    }")
+        .next()
+        .expect("the warmup branch closes");
+    assert!(
+        warmup.contains("plan_manager.ensure_dir()"),
+        "the Plan branch creates the plan directory: {warmup}"
+    );
+    assert!(
+        warmup.contains("plan_injector.as_ref().reset_reentry()"),
+        "the Plan branch resets the re-entry state: {warmup}"
+    );
+    assert!(
+        !text.contains("app_config.default_plan_mode"),
+        "startup must not read the raw flag"
+    );
+}
+
 #[test]
 fn explicit_user_values_beat_team_defaults() {
     let workspace =

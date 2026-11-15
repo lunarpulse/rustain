@@ -1,33 +1,16 @@
-"""Story 21.1 K12 (S1 leg): 80x24 native notification-lifecycle smoke on a DEBUG binary.
+"""Story 21.1 K12 (S2 leg): the interim decision pane through the real binary at 80x24.
 
 Default-feature, non-API (no `requires_api`, no new marker): a loopback
 Anthropic-shaped provider answers every request, so no credential or network
-is used; the isolated HOME carries `[notifications] info_ttl_secs = 30` and
-`warning_ttl_secs = 60` for S1 (a toast outlives any poll: read at any toast row, then
-dismissed) and `warning_ttl_secs = 1` for S2. The
-single scenario drives the real binary under a PTY at 80x24:
+is used; the isolated HOME carries `[notifications] info_ttl_secs = 1` and
+`warning_ttl_secs = 1` for S2. Every wait is a bounded structural screen
+predicate (no sleeps); no assertion needs a read to have caught a toast that
+lives 4 s or less.
 
-* local TUI  - an Info notice (`Permission mode: <Mode>` from Shift+Tab) is ONE borderless,
-  right-aligned toast row at the chat pane's bottom edge (the row directly above the status row,
-  starting with the severity word); it is dismissed with `Ctrl+X x`. A Warning notice (the Advisory
-  for an unknown `/nope`) is painted the same way on one of the three toast rows and dismissed
-  with `Ctrl+X x`; the `Log !N` badge shows (it rises when the notice is raised, not when its
-  toast is gone); `Ctrl+X n` opens the Notification Log (title ` System · Notifications `,
-  `Notifications (N)`, newest-first `Severity · HH:MM:SS · source · message` rows, the S-LOG rail),
-  clears the badge, `Enter` shows the FULL message and `Esc` closes it.
-* attached client - the Info notice of an unavailable chord (its remedy) is read on its row, dismissed
-  with `Ctrl+X x`, and listed in the Notification Log with its full text in the Details; no wire change.
-
-Every wait is a bounded structural screen predicate (no sleeps); no assertion needs a read to
-have caught a toast that lives 4 s or less.
-
-What is proven: an Info toast is read on its row, still painted 5.5 s after its first confirmed paint
-(past the 4 s default, so the 30 s lifetime applied) and dismissed with `Ctrl+X x`; the `/nope`
-Warning is painted on a toast row and dismissed with `Ctrl+X x` (a clear observed after the toast's
-own lifetime would have failed: `_clear_toast`), recorded in the Notification Log and badged. S2 shows
-only an upper bound: no matching Warning toast is painted past `started + 10 s` (the default lifetime),
-not its presence nor its 1 s lifetime. Exact lifetimes (the default 10 s and a configured 1 s Warning)
-are covered by `tests/conformance_21_1_notification_lifecycle/k1_ttl.rs:94-117,138-154`; no native run
+S2 shows only an upper bound for a Warning toast: no matching Warning toast is painted past
+`started + 10 s` (the default lifetime), not its presence nor its 1 s lifetime. Exact lifetimes
+(the default 10 s and a configured 1 s Warning) are covered by
+`tests/conformance_21_1_notification_lifecycle/k1_ttl.rs:94-117,138-154`; no native run
 sees a 1 s Warning both painted and expired.
 Evidence (screens, raw PTY bytes, requests, runtime logs, binary hash) goes to
 `RUSTAIN_CAPTURE_EVIDENCE_DIR`.
@@ -42,7 +25,6 @@ from pathlib import Path
 import queue
 import re
 import signal
-import subprocess
 import tempfile
 import threading
 import time
@@ -54,24 +36,18 @@ import pexpect
 import pyte
 import pytest
 from decision_frame_helpers import BUDGET_RAIL, RECOVERY_RAIL, decision_frame
-from keys import BACKSPACE, CTRL_X, ENTER, ESC, SHIFT_TAB
+from keys import BACKSPACE, CTRL_X, ENTER, ESC
 from test_story_20_9a_ephemeral_rows import _finish, _start_text
 
 KEY = "sk-ant-21-1-loopback-key-canary"
 UNKNOWN = "Unknown command: /nope — not a built-in or a custom command."
-PROFILE_REMEDY = ("Profile switching is not available in an attached session. "
-                  "Run `rustain profile list` or `rustain profile show <name>` in a terminal.")
-# Info toasts live 30 s so no poll can miss one (read at any toast row, then dismissed with
-# `Ctrl+X x`); S1's Warning lives 60 s (the maximum, `src/domain/models/config.rs:294-345`), so
-# the same holds for it; S2's Warning lives 1 s against the 10 s default (`config.rs:324-326`).
+# S2's Warning lives 1 s against the 10 s default (`config.rs:324-326`).
 # `DEFAULT_WARNING_TTL` bounds a Warning toast from above (see `_expect_expired`, S2 only).
 DEFAULT_WARNING_TTL = 10.0
 _PERMISSIONS = '[permissions]\nalways_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]\n'
-S1_CONFIG = _PERMISSIONS + "\n[notifications]\ninfo_ttl_secs = 30\nwarning_ttl_secs = 60\n"
 S2_CONFIG = _PERMISSIONS + "\n[notifications]\ninfo_ttl_secs = 1\nwarning_ttl_secs = 1\n"
 _TOAST = re.compile(r"(?<![A-Za-z0-9])(Info|Success|Warning|Error) (\S.*)$")
 _EDGE_SLACK = 2  # a toast ends within this many columns of the 80-column pane edge
-_NOT_BORDERED = "┌┐└┘│─"
 
 
 def _chunk(data):
@@ -204,48 +180,6 @@ def _toast_row(screen, severity, matches):
     return None
 
 
-def _expect_toast(tui, evidence, name, severity, matches):
-    """Wait for a `severity` toast on any toast row, then check ITS geometry: borderless and
-    right-aligned to the pane edge. Returns the screen it was painted on."""
-    screen = _wait(tui, lambda s: _toast_row(s, severity, matches) is not None,
-                   f"the {severity} toast", timeout=15)
-    row = _toast_row(screen, severity, matches)
-    assert len(row) >= 78, f"toast must be right-aligned to the pane edge: {row!r}"
-    assert not any(ch in row for ch in _NOT_BORDERED), f"below 100 columns a toast is borderless: {row!r}"
-    _capture(tui, evidence, name, screen)
-    return screen
-
-
-def _clear_toast(tui, severity, matches, triggered, ttl):
-    """`Ctrl+X x` clears the visible toasts: wait until the menu and that toast are gone. The
-    toast was triggered at `triggered` (monotonic) with a lifetime of `ttl` seconds: a clear
-    observed once the toast could have expired by itself proves nothing about the chord, so it
-    is a failure. The wait is bounded at 10 s, far below `ttl`."""
-    tui.send(CTRL_X)
-    _wait(tui, lambda s: _menu_painted(s) and "[X] Clear toasts" in _menu(s),
-          "the leader menu lists Clear toasts, fully painted")
-    tui.send("x")
-    _wait(tui, lambda s: not _menu(s) and _toast_row(s, severity, matches) is None,
-          f"the {severity} toast cleared", timeout=10)
-    elapsed = time.monotonic() - triggered
-    assert elapsed < ttl, (
-        f"the {severity} toast was gone {elapsed:.1f}s after its trigger: past its {ttl} s lifetime "
-        "it could have expired by itself, so the clear is not shown")
-
-
-def _expect_still_painted(tui, severity, matches, since, seconds):
-    """The toast is still painted `seconds` after `since`, the first confirmed paint (it was
-    painted at or before `since`). With the default 4 s Info lifetime it would be gone by
-    `since + 4 s`, so being painted at `since + seconds` > 4 proves the 30 s lifetime applied,
-    however late the toast arrived."""
-    while True:
-        screen = tui.get_screen_text()
-        assert _toast_row(screen, severity, matches) is not None, (
-            f"the {severity} toast was gone {time.monotonic() - since:.1f}s after its trigger:\n{screen}")
-        if time.monotonic() >= since + seconds:
-            return
-
-
 def _expect_expired(tui, severity, text, started):
     """The toast is ABSENT within the default Warning lifetime of its trigger. Called once its
     S-LOG record was read, so the notice was raised; absence is the fact, never a read that
@@ -281,310 +215,6 @@ def _open_log(tui, evidence, name, attached):
     return _capture(tui, evidence, name, screen)
 
 
-def _exercise(binary, evidence, root, monkeypatch):
-    monkeypatch.setattr(harness, "TERM_COLS", 80)
-    monkeypatch.setattr(harness, "TERM_ROWS", 24)
-    errors = queue.Queue()
-    requests = []
-    lock = threading.Lock()
-    ws_local, ws_att = root / "wl", root / "wa"
-    for ws in (ws_local, ws_att):
-        (ws / ".rustain").mkdir(parents=True)
-        (ws / ".rustain" / "config.toml").write_text(S1_CONFIG)
-        (ws / ".env").write_text("")  # keep the shared harness from copying a developer .env
-    assert len(str(root / "da" / "daemons" / ("a" * 16 + ".sock"))) <= 90
-    (root / "dl").mkdir()
-    (root / "da").mkdir()
-
-    def check_server():
-        try:
-            error = errors.get_nowait()
-        except queue.Empty:
-            return
-        raise AssertionError(f"loopback handler failed:\n{error}")
-
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, *_args):
-            pass
-
-        def respond(self, content, kind="application/json"):
-            self.send_response(200)
-            self.send_header("Content-Type", kind)
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-
-        def do_GET(self):
-            try:
-                path = urlsplit(self.path).path
-                assert path in ("/api.json", "/v1/models", "/models"), path
-                self.respond(b"{}" if path == "/api.json" else b'{"data":[],"has_more":false}')
-            except Exception:
-                errors.put(traceback.format_exc())
-                self.close_connection = True
-
-        def do_POST(self):
-            try:
-                assert urlsplit(self.path).path == "/v1/messages", self.path
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                if "stream" not in body and body.get("max_tokens") == 1:
-                    self.respond(b'{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}')
-                    return
-                with lock:
-                    requests.append({"kind": "turn", "body": body})
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
-                self.wfile.write(_chunk(_start_text("S1 reply") + _finish()))
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                errors.put(traceback.format_exc())
-            except Exception:
-                errors.put(traceback.format_exc())
-                self.close_connection = True
-
-    with ExitStack() as stack:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        server.daemon_threads = True
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-
-        def close_server():
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-            assert not thread.is_alive()
-
-        stack.callback(close_server)
-        origin = f"http://127.0.0.1:{server.server_port}"
-        loaded = harness._load_env()
-        cleared = {name for name in loaded if re.search(
-            r"(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN|BASE_URL|ENDPOINT|PROXY|CREDENTIALS|PROJECT|PROJECT_ID)$", name, re.I)
-            or name.startswith("RUSTAIN_")
-            or name in {"OLLAMA_HOST", "OPENAI_CODEX_OAUTH_TOKEN"}}
-
-        def environment(tag, ws, data):
-            env = {name: "" for name in cleared}
-            env.update(HOME=str(root / "home"), XDG_CONFIG_HOME=str(root / "home" / "xdg-config"),
-                       XDG_DATA_HOME=str(root / "home" / "xdg-data"), XDG_CACHE_HOME=str(root / "home" / "xdg-cache"),
-                       RUSTAIN_CONFIG_DIR=str(ws / ".rustain"), RUSTAIN_DATA_DIR=str(data),
-                       RUSTAIN_LOG_PATH=str(evidence / f"{tag}.runtime.log"), RUST_LOG="debug",
-                       ANTHROPIC_API_KEY=KEY, ANTHROPIC_AUTH_TOKEN="", ANTHROPIC_BASE_URL=origin,
-                       RUSTAIN_MODELS_DEV_URL=origin, NO_PROXY="*", no_proxy="*", TERM="xterm-256color")
-            return env
-
-        (root / "home").mkdir()
-        envs = {"local": environment("local", ws_local, root / "dl"),
-                "daemon": environment("daemon", ws_att, root / "da"),
-                "attach": environment("attach", ws_att, root / "da")}
-        terminals = {tag: stack.enter_context((evidence / f"{tag}.terminal.txt").open("w"))
-                     for tag in ("local", "attach")}
-        screens = {tag: stack.enter_context((evidence / f"{tag}.screens.jsonl").open("w"))
-                   for tag in ("local", "attach")}
-        original_spawn = harness.pexpect.spawn
-        spawn_tag = {}
-
-        def spawn(command, *args, **kwargs):
-            tag = spawn_tag["next"]
-            actual = kwargs["env"]
-            assert Path(command).resolve() == binary and kwargs["dimensions"] == (24, 80)
-            assert actual["ANTHROPIC_BASE_URL"] == origin and actual["ANTHROPIC_API_KEY"] == KEY
-            kwargs["logfile"] = terminals[tag]
-            return original_spawn(command, *args, **kwargs)
-
-        monkeypatch.setattr(harness.pexpect, "spawn", spawn)
-
-        def start(tag, ws, **kwargs):
-            spawn_tag["next"] = tag
-            tui = _NativeTUI(binary=binary, build=False, workspace=ws, env_overrides=envs[tag], **kwargs)
-            tui.screens, tui.check_server = screens[tag], check_server
-            stack.callback(tui.stop)
-            tui.start()
-            tui.child.delaybeforesend = 0
-            return tui
-
-        def await_exit(tui, timeout=30):
-            """Read until EOF (answering a System/Quit decision with `y` once)."""
-            deadline = time.monotonic() + timeout
-            answered = False
-            while True:
-                try:
-                    data = tui.child.read_nonblocking(size=65536, timeout=1)
-                except pexpect.TIMEOUT:
-                    assert time.monotonic() < deadline, "process did not exit"
-                    continue
-                except pexpect.EOF:
-                    break
-                tui._stream.feed(data)
-                if not answered and "System · Quit" in "\n".join(tui._screen.display):
-                    tui.send("y")
-                    answered = True
-            tui.child.close()
-            return tui.child.exitstatus, tui.child.signalstatus
-
-        # ------------------------------------------------------------ local TUI
-        tui = start("local", ws_local, fresh=True)
-        screen = _wait(tui, lambda s: "Ready" in harness.status_row(s), "an idle chat", timeout=20)
-        assert re.search(r"│ Normal(?: │|\s*$)", harness.status_row(screen)), harness.status_row(screen)
-        assert not tui._screen.cursor.hidden, "Input focus at start"
-        baseline = int((_badge(screen) or "0").rstrip("+"))
-        _capture(tui, evidence, "01-idle")
-
-        # (a) Info: Shift+Tab cycles Normal -> AutoEdit -> Plan -> Normal; each change is an
-        # Info toast `Permission mode: <Mode>`, read on its row and dismissed with `Ctrl+X x`.
-        for mode, segment in (("AutoEdit", "AUTOEDIT"), ("Plan", "PLAN"), ("Normal", "Normal")):
-            expected = _text(f"Permission mode: {mode}")
-            triggered = time.monotonic()
-            tui.send(SHIFT_TAB)
-            screen = _expect_toast(tui, evidence, f"02-info-{mode.lower()}", "Info", expected)
-            seen = time.monotonic()  # the first confirmed paint: it was painted at or before this read
-            assert harness.mode_segment(screen) == segment, harness.status_row(screen)
-            if mode == "AutoEdit":  # still painted 5.5 s after the first confirmed paint: past the 4 s default
-                _expect_still_painted(tui, "Info", expected, seen, 5.5)
-            _clear_toast(tui, "Info", expected, triggered, 30)
-
-        # (a) Warning: an unknown slash command is an Advisory -> Warning toast, painted on a
-        # toast row (`warning_ttl_secs = 60`: it outlives any poll) and cleared with `Ctrl+X x`.
-        tui.send("/nope ")
-        _wait(tui, lambda s: "/nope" in _composer(s), "the unknown slash typed")
-        triggered = time.monotonic()
-        tui.send(ENTER)
-        _wait(tui, lambda s: "/nope" not in _composer(s), "the unknown slash consumed")
-        _expect_toast(tui, evidence, "03-warning", "Warning", _text(UNKNOWN))
-        _clear_toast(tui, "Warning", _text(UNKNOWN), triggered, 60)
-
-        # (b) The unseen-warning badge rises at `notify`, whether or not the toast was painted;
-        # `Ctrl+X x` archived the toast and left the count alone.
-        screen = _wait(tui, lambda s: _badge(s) is not None and "Ready" in harness.status_row(s),
-                       "the Log !N badge in the status row after the Warning was cleared", timeout=10)
-        assert int(_badge(screen).rstrip("+")) >= baseline + 1, (baseline, harness.status_row(screen))
-        _capture(tui, evidence, "05-badge", screen)
-
-        # (b) Ctrl+X n: S-LOG.
-        screen = _open_log(tui, evidence, "06-log", attached=False)
-        lines = screen.split("\n")
-        title = next(line for line in lines if harness.NOTIFICATION_LOG_TITLE in line)
-        assert title.strip().startswith("┌ System · Notifications "), title
-        text = harness.notification_log_text(screen)
-        header = re.search(r"Notifications \((\d+)\)", text)
-        assert header and int(header.group(1)) >= 4, text
-        for item in ("[j/k] Move", "[Enter] Detail", "[c] Copy", "[x] Dismiss", "[Esc] Close"):
-            assert item in text, (item, text)
-        assert "[r] Retry" not in text, "Retry is only offered on an eligible Error row"
-        rows = harness.notification_log_rows(screen)
-        assert re.match(r"Warning · \d{2}:\d{2}:\d{2} · system · Unknown command: /nope", rows[0]), rows
-
-        def row_index(mode):
-            return next(i for i, row in enumerate(rows)
-                        if re.match(rf"Info · \d{{2}}:\d{{2}}:\d{{2}} · \S+ · Permission mode: {mode}", row))
-
-        assert 0 < row_index("Normal") < row_index("Plan") < row_index("AutoEdit"), rows  # newest first
-        assert _badge(screen) is None and "Ready" in harness.status_row(screen), harness.status_row(screen)
-
-        # (b) Enter: the FULL message; Esc closes and restores Input focus.
-        detail = tui.read_notification_detail("Unknown command: /nope")
-        assert re.search(r"Warning · \d{2}:\d{2}:\d{2} · system", detail), detail
-        assert " ".join(UNKNOWN.split()) in detail, detail
-        _capture(tui, evidence, "07-log-detail")
-        tui.close_notification_log()
-        screen = _wait(tui, lambda _s: not tui._screen.cursor.hidden, "Input focus restored after S-LOG")
-        assert _badge(screen) is None, "the badge stays clear after S-LOG closed"
-        tui.send("\x11")
-        assert await_exit(tui) == (0, None)
-        check_server()
-
-        # ------------------------------------------------------ attached client
-        daemon_log = stack.enter_context((evidence / "daemon.stdout.txt").open("w"))
-        daemon = subprocess.Popen([str(binary), "daemon", "start", "--foreground"], cwd=ws_att,
-                                  env={**os.environ, **envs["daemon"]}, stdout=daemon_log,
-                                  stderr=subprocess.STDOUT, start_new_session=True)
-
-        def stop_daemon():
-            subprocess.run([str(binary), "daemon", "stop"], cwd=ws_att, env={**os.environ, **envs["daemon"]},
-                           capture_output=True, timeout=20)
-            if daemon.poll() is None:
-                os.killpg(daemon.pid, signal.SIGTERM)
-                try:
-                    daemon.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(daemon.pid, signal.SIGKILL)
-            daemon.wait(timeout=10)
-
-        stack.callback(stop_daemon)
-        deadline = time.monotonic() + 60
-        while True:
-            status = subprocess.run([str(binary), "daemon", "status"], cwd=ws_att,
-                                    env={**os.environ, **envs["daemon"]}, capture_output=True, text=True, timeout=10)
-            if status.returncode == 0 and "running" in (status.stdout + status.stderr).lower():
-                break
-            try:
-                daemon.wait(timeout=0.25)  # structural pacing: also notices a dead daemon
-                raise AssertionError("daemon exited before becoming ready")
-            except subprocess.TimeoutExpired:
-                pass
-            assert time.monotonic() < deadline, status.stdout + status.stderr
-
-        tui = start("attach", ws_att, fresh=False, extra_args=["daemon", "attach"])
-        screen = _wait(tui, lambda s: "attached" in harness.status_row(s), "the attached status chip", timeout=20)
-        _capture(tui, evidence, "11-attached")
-
-        # (c) An unavailable chord answers with an Info toast carrying its remedy
-        # (first line only, ellipsized to the pane width), dismissed with `Ctrl+X x`.
-        tui.send(CTRL_X)
-        _wait(tui, lambda s: "[P] Profile (n/a)" in _menu(s), "the attached leader menu")
-        lead = "Profile switching is not available in an attached session."
-        remedy = lambda text: text.startswith(lead) and text.endswith("…")  # noqa: E731
-        triggered = time.monotonic()
-        tui.send("p")
-        _expect_toast(tui, evidence, "12-attached-toast", "Info", remedy)
-        _clear_toast(tui, "Info", remedy, triggered, 30)
-        assert _badge(tui.get_screen_text()) is None, "an Info notice never raises the Log badge"
-
-        screen = _open_log(tui, evidence, "13-attached-log", attached=True)
-        text = harness.notification_log_text(screen)
-        assert re.search(r"Notifications \((\d+)\)", text), text
-        rows = harness.notification_log_rows(screen)
-        # The list row is one ellipsized line at 80 columns; the FULL remedy is the
-        # detail assertion below.
-        assert re.match(r"Info · \d{2}:\d{2}:\d{2} · chord · Profile switching is not available in an attached",
-                        rows[0]), rows
-        detail = tui.read_notification_detail("Profile switching is not available")
-        assert " ".join(PROFILE_REMEDY.split()) in detail, detail
-        _capture(tui, evidence, "14-attached-log-detail")
-        tui.close_notification_log()
-        screen = _wait(tui, lambda s: "attached" in harness.status_row(s) and not tui._screen.cursor.hidden,
-                       "still attached with Input focus after S-LOG closed")
-        assert _badge(screen) is None and _toast_row(screen, "Info", remedy) is None, screen
-
-        # Ctrl+X d detaches this client only; the daemon keeps running.
-        tui.send(CTRL_X)
-        _wait(tui, lambda s: "[D] Detach" in _menu(s), "the leader menu before d")
-        tui.send("d")
-        assert await_exit(tui) == (0, None)
-
-        # ------------------------------------------------------ evidence checks
-        with lock:
-            observed = list(requests)
-        (evidence / "requests.json").write_text(json.dumps(observed, indent=2) + "\n")
-        assert observed == [], "no provider turn: every notice here is a local producer"
-        check_server()
-        for handle in (*terminals.values(), *screens.values(), daemon_log):
-            handle.flush()
-        logs = sorted(evidence.glob("*.runtime.log.*"))
-        for tag in ("local", "daemon", "attach"):
-            assert any(path.name.startswith(f"{tag}.runtime.log.") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.suffix[1:])
-                       for path in logs), f"dated {tag} debug log missing"
-        for path in [*(evidence / f"{tag}.terminal.txt" for tag in terminals),
-                     *(evidence / f"{tag}.screens.jsonl" for tag in screens),
-                     evidence / "daemon.stdout.txt", evidence / "requests.json", *logs,
-                     *evidence.glob("*.screen.txt")]:
-            assert KEY not in path.read_text(errors="replace"), f"credential leaked to {path}"
-
-
 def _fixture_screen(*chat_rows):
     """A composer-anchored 80-column screen whose chat pane ends with `chat_rows`."""
     box = ["┌" + "─" * 78 + "┐", "│" + " " * 78 + "│", "└" + "─" * 78 + "┘"]
@@ -604,7 +234,7 @@ def test_toast_helpers_ignore_transcript_text_that_only_looks_like_a_toast(monke
     assert not harness.toast_present(screen, "Permission mode: Plan", "Info", rows=9)
     toast = "Info Permission mode: Plan".rjust(80)
     assert harness.toast_present(_fixture_screen("older", toast), "Permission mode: Plan", "Info", rows=9)
-    # `_toast_row` (the Warning and Info readers of S1): a toast on the OLDEST of the three toast
+    # `_toast_row` (the toast reader behind S2's `_expect_expired`): a toast on the OLDEST of the three toast
     # rows is found, the severity must match, the row must reach the pane edge, and a coalesced
     # ` ×N` suffix is accepted while other text is not.
     warning = _text(UNKNOWN)
@@ -628,31 +258,6 @@ def test_status_row_untouched_predicate_tracks_the_documented_clip_only():
     assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Normal │  Needs you (1) ^X q")
     assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Ready │ █ coding  Needs you (1) ^X q")
     assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Normal │ Ready │ █ coding")
-
-
-def test_s1_toasts_expire_and_notification_log_local_and_attached_80x24(monkeypatch):
-    binary = harness._resolve_binary()[0].resolve()
-    assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
-    parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
-    parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="21-1-s1-", dir=parent))
-    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-    manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
-                "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING"}
-    try:
-        # Short root: the daemon socket path must fit sockaddr_un.
-        with tempfile.TemporaryDirectory(prefix="r211-", dir="/tmp") as root:
-            _exercise(binary, evidence, Path(root), monkeypatch)
-        assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
-        manifest["result"] = "PASS"
-    except BaseException:
-        manifest["result"] = "FAIL"
-        (evidence / "failure.txt").write_text(traceback.format_exc())
-        raise
-    finally:
-        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
-        (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"NATIVE_21_1_S1_EVIDENCE={evidence}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

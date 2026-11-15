@@ -864,6 +864,17 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// The permission mode a session starts in: `Plan` when `default_plan_mode` is on
+    /// (explicitly or through the `onboarding.team` switch), otherwise `Normal`.
+    pub fn initial_permission_mode(&self) -> crate::domain::models::permission::PermissionMode {
+        use crate::domain::models::permission::PermissionMode;
+        if self.default_plan_mode {
+            PermissionMode::Plan
+        } else {
+            PermissionMode::Normal
+        }
+    }
+
     fn default_model() -> String {
         "claude-sonnet-4-6".to_string()
     }
