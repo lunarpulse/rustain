@@ -133,8 +133,6 @@ def _settle_no_tour(tui, polls=30):
     return tui.get_screen_text()
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_a_tour_offer_steps_and_persistence_at_80x24(monkeypatch):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
@@ -266,8 +264,6 @@ def _submit_tour_command(tui):
     tui.send(ENTER)
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_b_coach_line_highlight_and_team_defaults_at_80x24(monkeypatch):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)

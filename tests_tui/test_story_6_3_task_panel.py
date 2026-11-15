@@ -106,7 +106,6 @@ def _plan_reached_terminal_state(tui: RustainTUI, timeout: float = 180.0) -> boo
 # ── Scenario 1, 2, 8, 10: the chord, Esc and the chord over History ─────────
 
 
-@pytest.mark.story_6_3
 def test_chord_opens_panel(tui_monitor: RustainTUI):
     """Ctrl+X, t opens Mission Control on its Tasks tab (zero state: no plan) at the default
     130x30 terminal (no narrow guard); Esc closes it; the chord opens it again over History.
@@ -130,8 +129,6 @@ def test_chord_opens_panel(tui_monitor: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_panel_navigation(tui: RustainTUI):
     """After plan execution, the Tasks tab lists the tasks and j/k moves selection."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
@@ -154,8 +151,6 @@ def test_panel_navigation(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_drill_down(tui: RustainTUI):
     """Enter on a task in the Tasks tab opens the ``Task <n> · <title>`` window."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
@@ -174,8 +169,6 @@ def test_drill_down(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_drill_down_back(tui: RustainTUI):
     """Esc from the task window returns to the Tasks tab."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
@@ -197,8 +190,6 @@ def test_drill_down_back(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_failed_task_action_row(tui: RustainTUI):
     """Window for a Failed task shows [r] Retry, [s] Skip, [e] Edit."""
     prompt = (
@@ -245,8 +236,6 @@ def test_failed_task_action_row(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_auto_open_on_execution_started(tui: RustainTUI):
     """Story 21.7: plan execution start opens NO Tasks surface (auto-open deleted)."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
@@ -280,8 +269,6 @@ PROMPT_AGI_TREND_PLAN = (
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_task_detail_content_varies_per_task(tui: RustainTUI):
     """Opening different tasks must show different window content.
 
@@ -330,8 +317,6 @@ CLIPBOARD_FALLBACK = Path.home() / ".rustain" / "clipboard.txt"
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
 def test_task_detail_copy_result_differs_per_task(tui: RustainTUI):
     """Task windows for different tasks show distinct headers (and copy payloads).
 

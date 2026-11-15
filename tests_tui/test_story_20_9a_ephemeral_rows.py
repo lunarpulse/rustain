@@ -423,8 +423,6 @@ def _exercise(binary, evidence, root, monkeypatch):
             assert KEY not in path.read_text(errors="replace"), f"credential leaked to {path}"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(300)
 def test_ephemeral_rows_cancel_quit_and_restart_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary

@@ -67,7 +67,6 @@ def _permission_ready(tui):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_bash_tool_prompts_with_five_options(tui_strict: RustainTUI):
     """AC3: Permission prompt shows all 5 action glyphs."""
     tui_strict.send_message("Run `echo hello` using Bash")
@@ -82,7 +81,6 @@ def test_bash_tool_prompts_with_five_options(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_session_allow_auto_approves_next_call(tui: RustainTUI):
     """AC4: Session-allow auto-approves subsequent calls for same tool."""
     tui.send_message("Run `echo first` using Bash")
@@ -95,7 +93,6 @@ def test_session_allow_auto_approves_next_call(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_deny_with_feedback_sends_feedback_to_llm(tui: RustainTUI):
     """AC5: Deny + feedback emits FeedbackBlock with exact string."""
     tui.send_message("Run `rm -rf /tmp/test` using Bash")
@@ -103,7 +100,6 @@ def test_deny_with_feedback_sends_feedback_to_llm(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_plan_mode_blocks_standard_tools(tui: RustainTUI):
     """AC7: Plan mode blocks Standard (Write/Edit) tools without prompt."""
     tui.set_permission_mode("plan")
@@ -115,7 +111,6 @@ def test_plan_mode_blocks_standard_tools(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_autoedit_mode_auto_allows_write(tui: RustainTUI):
     """AC7: AutoEdit mode auto-allows Write/Edit (Standard)."""
     tui.set_permission_mode("autoedit")
@@ -126,7 +121,6 @@ def test_autoedit_mode_auto_allows_write(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_yolo_mode_status_bar_shows_warning(tui: RustainTUI):
     """AC7: Yolo mode shows YOLO indicator in status bar."""
     tui.set_permission_mode("yolo")
@@ -136,7 +130,6 @@ def test_yolo_mode_status_bar_shows_warning(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_mode_switch_preserves_session_allow(tui: RustainTUI):
     """AC4: Mode switch does NOT clear session-allow set."""
     tui.send_message("Run `echo setup` using Bash")
@@ -155,7 +148,6 @@ def test_mode_switch_preserves_session_allow(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0b
 def test_queue_indicator_shows_count(tui: RustainTUI):
     """AC6: Queue indicator shows 'N more queued'."""
     # This test requires a prompt that triggers multiple concurrent tool calls.

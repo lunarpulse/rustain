@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from harness import RustainTUI, composer_top, status_row
 from keys import DOWN, ENTER
 
@@ -66,7 +64,6 @@ def _composer_text(screen: str) -> str:
     return "\n".join(lines[top:]) if top is not None else ""
 
 
-@pytest.mark.story_5_4
 def test_select_agent_with_enter_activates_and_shows_in_status_bar(build_binary, tmp_path):
     """AC2/AC3/AC4/AC7: one workspace, one launch; the whole ``@Agents/`` flow.
 

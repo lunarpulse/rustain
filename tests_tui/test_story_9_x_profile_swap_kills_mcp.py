@@ -29,7 +29,7 @@ from mcp_support import close_adapters, wait_mcp_ready
 
 SWAP_TARGET = "base"
 
-pytestmark = [pytest.mark.story_9_4, pytest.mark.mcp]
+pytestmark = [pytest.mark.mcp]
 
 
 MCP_FIXTURE_SIG = "fixtures/mcp_fixture.py"

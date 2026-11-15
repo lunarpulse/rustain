@@ -4,10 +4,7 @@ Plan-card latency is 30-40s; completion latency is 2-5s per Bash task.
 All timeouts are generous to absorb LLM variance.
 
 Markers:
-    @pytest.mark.story_6_4  — all tests
     @pytest.mark.requires_api — needs ANTHROPIC_API_KEY
-    @pytest.mark.slow
-@pytest.mark.story_6_4        — >30s
 """
 
 from __future__ import annotations
@@ -74,8 +71,6 @@ def _drive_plan(tui: RustainTUI) -> bool:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_4
 def test_all_panel_keys_after_plan(tui: RustainTUI):
     """Execute one plan, then exercise p/s/x/Enter on the Tasks tab and
     p/s/r/e/c/Esc in the task window."""
@@ -143,8 +138,6 @@ def test_all_panel_keys_after_plan(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_4
 def test_cancel_during_execution(tui: RustainTUI):
     """Press 'x' while a plan is still running; expect cancel UI."""
 

@@ -36,7 +36,6 @@ SCENE = Path(__file__).parent / "fixtures" / "scenes" / "openai_wire.json"
 OR_PERSONA = "scene-ci-or"
 OR_MODEL = "anthropic/claude-sonnet-4.6"
 
-pytestmark = pytest.mark.story_19_9
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

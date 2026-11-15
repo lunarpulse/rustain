@@ -2431,32 +2431,22 @@ def _run_modal_stack_smoke(part):
         print(f"{label}={evidence}", flush=True)
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_modal_stack_a1_a2a_local_and_attached_80x24():
     _run_modal_stack_smoke("bb1a")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_modal_stack_bb1b_i_local_80x24():
     _run_modal_stack_smoke("bb1b-i")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_modal_stack_bb1b_ii_local_cross_search():
     _run_modal_stack_smoke("bb1b-ii")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_modal_stack_bb2b_inspector_fields_both_hosts_and_cross_query():
     _run_modal_stack_smoke("bb2b")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(360)
 def test_modal_stack_c_shared_composer_and_view_both_hosts(monkeypatch):
     if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
         def forbidden(*_args, **_kwargs):

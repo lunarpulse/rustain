@@ -24,7 +24,6 @@ import traceback
 from urllib.parse import urlsplit
 
 import harness
-import pytest
 
 from test_story_20_1c_locked_providers import (
     PROVIDER_ENV, _NativeTUI, _capture, _plain, _sensitive_env, _sha256, _wait,
@@ -338,8 +337,6 @@ def _exercise(binary, evidence, root, monkeypatch):
         assert KEY not in log.read_text(encoding="utf-8", errors="replace"), log.name
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_tui_login_bloom_and_browser_cancel_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

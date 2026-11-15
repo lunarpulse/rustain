@@ -13,8 +13,6 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import pytest
-
 from harness import _resolve_binary
 
 

@@ -17,7 +17,7 @@ import pytest
 from mcp_support import adapters_frame_open, echo_row_ready, wait_mcp_ready
 
 
-pytestmark = [pytest.mark.story_9_1, pytest.mark.mcp]
+pytestmark = [pytest.mark.mcp]
 
 
 def test_adapter_status_panel_shows_echo_server(tui_with_mcp):

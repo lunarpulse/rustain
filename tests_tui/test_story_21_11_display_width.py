@@ -20,7 +20,6 @@ import traceback
 import unicodedata
 
 import harness
-import pytest
 
 from test_story_20_1c_locked_providers import (
     PROVIDER_ENV, _NativeTUI, _capture, _sensitive_env, _sha256, _wait,
@@ -158,8 +157,6 @@ def _exercise(binary, evidence, root, monkeypatch):
     assert list(evidence.glob("display-width.runtime.log*")), "dated runtime log missing"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(300)
 def test_composer_wraps_and_edits_whole_graphemes_at_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

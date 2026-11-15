@@ -20,8 +20,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pytest
-
 from harness import RustainTUI, composer_top
 from keys import ESC
 
@@ -105,7 +103,6 @@ def _composer_text(screen: str) -> str:
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.story_5_2
 def test_workspace_skill_triggers_trust_prompt(tmp_path):
     """AC4/AC8: a workspace skill is listed by the slash popup; accepting and submitting it shows
     the ``Decision: Skill trust`` frame; Esc defers it (the frame closes, the ``Needs you (1)``

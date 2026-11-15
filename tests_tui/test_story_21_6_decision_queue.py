@@ -193,8 +193,6 @@ def _b_first_permission(tui, evidence, name):
     return screen
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(400)
 def test_leg_b_permission_both_hosts_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     if not binary.is_file():
@@ -490,8 +488,6 @@ def test_c_deferred_list_and_reply_predicates():
     assert not _c_reply("┌ Decision: Question ┐\n│ Colour acknowledged: blue")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(400)
 def test_leg_c_question_compose_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     if not binary.is_file():
@@ -648,8 +644,6 @@ def test_d_deferred_list_and_forked_predicates():
     assert not _d_forked('┌ Decision: Fork ┐\nForked from "x" at message 1')
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(400)
 def test_leg_d_user_confirmation_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     if not binary.is_file():
@@ -838,7 +832,6 @@ def test_e_queue_draft_and_dismissed_rows():
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(400)
 def test_leg_e_team_proposal_80x24(tmp_path, monkeypatch):
     binary = Path(os.environ.get("RUSTAIN_TUI_BINARY", harness.BINARY)).resolve()

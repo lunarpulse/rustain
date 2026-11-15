@@ -150,8 +150,6 @@ def build_binary():
     assert harness._resolve_binary()[0].is_file()
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(600)
 def test_block_viewer_cue_window_and_horizontal_scroll_at_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

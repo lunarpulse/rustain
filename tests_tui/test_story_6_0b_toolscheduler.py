@@ -20,8 +20,6 @@ from harness import RustainTUI
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0b
 class TestToolStatusChips:
     """TUI renders status chips inline with tool blocks (AC1-AC7)."""
 
@@ -65,8 +63,6 @@ class TestToolStatusChips:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0b
 class TestToolBatchScheduling:
     """Multiple tools in one turn execute via the scheduler's batch path."""
 
@@ -127,8 +123,6 @@ class TestToolBatchScheduling:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0b
 class TestToolExecutionStability:
     """Scheduler stability under edge conditions visible in the TUI."""
 

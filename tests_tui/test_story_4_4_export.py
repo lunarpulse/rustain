@@ -11,9 +11,6 @@ from keys import ENTER
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_4
-@pytest.mark.story_5_0
 class TestExportToMarkdown:
     """AC11: /export command creates a markdown file with conversation content."""
 

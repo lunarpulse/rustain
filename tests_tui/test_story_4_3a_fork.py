@@ -12,8 +12,6 @@ from harness import RustainTUI
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3a
 class TestForkTrigger:
     """AC1: f key in Chat focus opens the fork confirmation card."""
 
@@ -32,8 +30,6 @@ class TestForkTrigger:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3a
 class TestForkExecution:
     """AC2: Fork creates a new tab with messages up to the fork point."""
 
@@ -56,8 +52,6 @@ class TestForkExecution:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3a
 class TestForkFileIndependence:
     """AC4: Fork does NOT revert files (unlike rewind)."""
 

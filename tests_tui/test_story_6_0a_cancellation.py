@@ -38,8 +38,6 @@ def _assert_tui_alive(tui: RustainTUI, timeout: float = 3.0) -> None:
     pytest.fail(f"TUI did not respond to input within {timeout}s")
 
 
-@pytest.mark.slow
-@pytest.mark.story_6_0a
 class TestTabCancellationLifecycleNoApi:
     """Tab lifecycle stability with CancellationToken integration.
     These tests do NOT send messages to the AI, so they run without an API key.
@@ -88,8 +86,6 @@ class TestTabCancellationLifecycleNoApi:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0a
 class TestTabCancellationLifecycleWithApi:
     """Tab lifecycle tests that send messages to the AI (require API key)."""
 
@@ -136,8 +132,6 @@ class TestTabCancellationLifecycleWithApi:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0a
 class TestCancellationDuringToolExecution:
     """TUI-visible cancellation while a tool is running.
 

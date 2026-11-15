@@ -17,8 +17,6 @@ from keys import (
 # ── Story 3.1: Multi-line Input & History ────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.story_3_1
-@pytest.mark.story_5_0
 class TestMultilineInput:
     """Story 3.1: Multi-line editing and history navigation."""
 
@@ -75,8 +73,6 @@ class TestMultilineInput:
 # ── Story 3.3: Command Palette ───────────────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.story_3_3
-@pytest.mark.story_5_0
 class TestCommandPalette:
     """Story 3.3: Ctrl+P opens command palette; Esc closes it."""
 
@@ -116,8 +112,6 @@ class TestCommandPalette:
 # ── Story 3.5: Help Overlay ──────────────────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.story_3_5
-@pytest.mark.story_5_0
 class TestHelpOverlay:
     """Story 3.5: ? key in Chat focus opens help; Esc or ? closes it."""
 

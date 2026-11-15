@@ -657,8 +657,6 @@ def _exercise(binary, evidence, root, monkeypatch):
         (evidence / "counts.json").write_text(json.dumps(counts, indent=2) + "\n")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(480)
 def test_shortcut_truth_local_and_attached_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary

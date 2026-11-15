@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from harness import RustainTUI, composer_top, mode_segment
 from keys import ESC, ENTER, BACKSPACE, CTRL_U
 from fixtures.commands import write_custom_command
@@ -74,7 +72,6 @@ def _reset(t: RustainTUI, token: str, anchor: str) -> None:
     assert t.wait_for_screen_not_contains(token, timeout=5.0), t.get_screen_text()
 
 
-@pytest.mark.story_5_3
 def test_custom_command_appears_in_autocomplete(build_binary, tmp_path):
     """AC1/AC3/AC4/AC5/AC11/AC12: one workspace, one launch; every popup leg reads the rows above the composer.
 

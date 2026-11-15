@@ -20,7 +20,6 @@ from test_story_19_20a_authorship_marks import _sha256
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_act5_recipient_marks_and_bug_report_actions(monkeypatch):
     binary = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve()

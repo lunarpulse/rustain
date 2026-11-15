@@ -11,7 +11,7 @@ Per the team's MCP/LLM testing policy (see ``feedback_mcp_llm_test_prompts``),
 prompts are strict and deterministic: short, imperative, "do this exact thing,
 output nothing else." This buys realism without open-ended-prompt flakiness.
 
-Marked ``@requires_api @slow``. Without an API key the conftest auto-skips;
+Marked ``@requires_api``. Without an API key the conftest auto-skips;
 each test also runtime-checks that a provider is actually reachable in the
 fresh test workspace and skips cleanly otherwise (the deterministic tier
 already covers the wire).
@@ -36,10 +36,8 @@ from keys import CTRL_X
 
 
 pytestmark = [
-    pytest.mark.story_10_x,
     pytest.mark.subagent,
     pytest.mark.requires_api,
-    pytest.mark.slow,
 ]
 
 

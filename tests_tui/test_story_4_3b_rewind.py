@@ -15,8 +15,6 @@ from harness import RustainTUI
 # ── AC1: Rewind Trigger ─────────────────────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3b
 class TestRewindTrigger:
     """AC1: R key in Chat focus opens the rewind confirmation card."""
 
@@ -39,8 +37,6 @@ class TestRewindTrigger:
 # ── AC2 + AC3: Checkpoint & Revert ──────────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3b
 class TestRewindRevert:
     """AC2 + AC3: Checkpoint is created before tool execution; rewind reverts files."""
 
@@ -93,8 +89,6 @@ class TestRewindRevert:
 # ── AC4: Fork-Instead Path ──────────────────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3b
 class TestRewindForkInstead:
     """AC4: Pressing f in the rewind overlay forks instead of rewinding."""
 
@@ -120,8 +114,6 @@ class TestRewindForkInstead:
 # ── AC5: Conflict Handling ───────────────────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3b
 class TestRewindConflict:
     """AC5: Externally modified files are detected as conflicts."""
 
@@ -158,8 +150,6 @@ class TestRewindConflict:
 # ── Multi-checkpoint: no false conflict ──────────────────────────────────────
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_3b
 class TestMultiCheckpointRewind:
     """Regression: file modified by tools across multiple turns must NOT
     show as 'modified externally' on rewind."""

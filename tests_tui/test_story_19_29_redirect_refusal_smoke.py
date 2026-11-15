@@ -30,7 +30,6 @@ from fixtures.scene_provider import SceneStub
 from fixtures.skills import write_workspace_skill
 from harness import RustainTUI
 
-pytestmark = pytest.mark.story_19_29
 
 SKILL_NAME = "redirect-probe"
 SKILL_MD = (
@@ -226,8 +225,6 @@ def _exercise(binary: Path, evidence: Path, scratch: Path, monkeypatch) -> None:
     assert status == 0, f"scene provider exited {status}"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_redirect_under_a_command_pattern_is_refused_80x24(monkeypatch):
     if not os.environ.get("RUSTAIN_TUI_BINARY"):
         pytest.skip("no native binary: build `cargo build --bin rustain` and set RUSTAIN_TUI_BINARY")

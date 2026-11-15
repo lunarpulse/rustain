@@ -11,9 +11,6 @@ from keys import CTRL_T, TAB, SHIFT_TAB
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_4
-@pytest.mark.story_5_0
 class TestMultiTab:
     """Multi-tab creation and switching."""
 
@@ -63,9 +60,6 @@ class TestMultiTab:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_4
-@pytest.mark.story_5_0
 class TestTabLifecycle:
     """Tab lifecycle: close tab, last-tab-close behavior."""
 

@@ -44,7 +44,6 @@ from keys import CTRL_X
 SCENE = Path(__file__).parent / "fixtures" / "scenes" / "smoke.json"
 PEER = "12204bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0"
 
-pytestmark = pytest.mark.story_19_16g
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

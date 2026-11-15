@@ -701,8 +701,6 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
             assert KEY not in path.read_text(errors="replace"), f"credential leaked to {path}"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(480)
 def test_keymap_truth_leader_rows_local_80x24(monkeypatch):
     rows = _fixture_rows()
     binary = harness._resolve_binary()[0].resolve()
@@ -810,8 +808,6 @@ def _permission_daemon(stack, ws, env, tmp_path):
     pytest.fail("Daemon socket did not become ready:\n" + (tmp_path / "daemon.log").read_text())
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(300)
 def test_keymap_truth_attached_permission_card_takes_chat_focus_80x24(tmp_path, monkeypatch):
     """Leg D (3-C patch round, FR-21-3-c, AC19): the permission card natively, attached at 80x24."""
     monkeypatch.setattr(harness, "TERM_COLS", 80)

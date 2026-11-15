@@ -28,7 +28,6 @@ import traceback
 from urllib.parse import urlsplit
 
 import harness
-import pytest
 
 from test_story_20_1c_locked_providers import (
     PROVIDER_ENV, _NativeTUI, _capture, _plain, _sensitive_env, _sha256, _wait,
@@ -248,8 +247,6 @@ def _spawn_case(name, binary, evidence, root, original_spawn, monkeypatch, expec
     return osc8_bytes
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(300)
 def test_sign_in_link_is_complete_for_herdr_and_screen_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

@@ -61,8 +61,6 @@ def _wait(tui, predicate, what: str, timeout: float = 15.0) -> str:
     raise AssertionError(f"{what}\nScreen:\n{screen}")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_room_and_peer_rows_leave_at_the_next_submission(tui_80x24):
     tui = tui_80x24
     evidence = os.environ.get("RUSTAIN_21_17_EVIDENCE")

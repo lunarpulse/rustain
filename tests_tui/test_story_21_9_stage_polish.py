@@ -145,8 +145,6 @@ def build_binary():
     assert harness._resolve_binary()[0].is_file()
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_thinking_row_marker_window_and_copy_at_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

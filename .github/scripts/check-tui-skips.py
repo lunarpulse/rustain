@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Fail the Python TUI lane on a skip that tests_tui/skip-allowlist.json does not name.
 
-Usage: check-tui-skips.py <junit.xml> <allowlist.json>
+Usage: check-tui-skips.py <junit.xml>... <allowlist.json>
 
 The allowlist is a JSON object `"<classname>::<name>": "<reason naming the owner row>"`,
-keys exactly as pytest's JUnit file records them.
+keys exactly as pytest's JUnit file records them; it may be empty. With several JUnit
+files the skipped keys are their union (a lane split across runs is judged as one).
 Exit 0: every skip is listed and every entry was skipped.
-Exit 1: an unlisted skip, or a stale entry (listed but not skipped in this run).
-Exit 2: unreadable or empty JUnit, or a malformed allowlist.
+Exit 1: an unlisted skip, or a stale entry (listed but not skipped in any file).
+Exit 2: an unreadable or empty JUnit file (every file must hold a testcase), or a malformed allowlist.
 """
 
 import json
@@ -51,25 +52,28 @@ def skipped_keys(path) -> set:
     return skipped
 
 
-def skip_violations(junit_path, allowlist_path) -> dict:
-    skipped = skipped_keys(junit_path)
+def skip_violations(junit_paths, allowlist_path) -> dict:
+    skipped = set()
+    for path in junit_paths:
+        skipped |= skipped_keys(path)
     allowed = set(load_allowlist(allowlist_path))
     return {"unlisted": skipped - allowed, "stale": allowed - skipped}
 
 
 def main(argv) -> int:
-    if len(argv) != 2:
+    if len(argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
+    *junit_paths, allowlist = argv
     try:
-        violations = skip_violations(argv[0], argv[1])
+        violations = skip_violations(junit_paths, allowlist)
     except (OSError, ET.ParseError, ValueError) as error:
         print(f"::error title=Python TUI skip check::{escape(str(error))}")
         return 2
     for key in sorted(violations["unlisted"]):
-        print(f"::error title=Unlisted Python TUI skip::{escape(key)} is skipped but not in {argv[1]}")
+        print(f"::error title=Unlisted Python TUI skip::{escape(key)} is skipped but not in {allowlist}")
     for key in sorted(violations["stale"]):
-        print(f"::error title=Stale Python TUI skip entry::{escape(key)} is listed in {argv[1]} but was not skipped")
+        print(f"::error title=Stale Python TUI skip entry::{escape(key)} is listed in {allowlist} but was not skipped")
     unlisted, stale = len(violations["unlisted"]), len(violations["stale"])
     print(f"python TUI skip check: {unlisted} unlisted skip(s), {stale} stale entr(y/ies)")
     return 1 if unlisted or stale else 0

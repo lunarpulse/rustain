@@ -132,7 +132,6 @@ def _assert_messages_populated(tui: RustainTUI) -> None:
     tui.wait_until(lambda s: "append-only" in s, "the closing structural-replay claim")
 
 
-@pytest.mark.story_18_2
 def test_panel_renders_real_rows_from_the_durable_journal(tui_with_journal: RustainTUI):
     """The Messages tab shows rows that are actually on disk, opened by the chord and by `/team log`.
 

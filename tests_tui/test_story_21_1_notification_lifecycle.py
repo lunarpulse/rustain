@@ -630,8 +630,6 @@ def test_status_row_untouched_predicate_tracks_the_documented_clip_only():
     assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Normal │ Ready │ █ coding")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(300)
 def test_s1_toasts_expire_and_notification_log_local_and_attached_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
@@ -1121,8 +1119,6 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
             assert KEY not in path.read_text(errors="replace"), f"credential leaked to {path}"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(400)
 def test_s2_decision_pane_recovery_and_arrival_protection_80x24(monkeypatch):
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary

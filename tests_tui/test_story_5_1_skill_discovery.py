@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from harness import NotificationMark, RustainTUI, composer_top
 from keys import CTRL_U, ESC
 
@@ -119,7 +117,6 @@ def _reset(tui: RustainTUI, token: str, anchor: str) -> None:
 # ── Tests ───────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.story_5_1
 def test_slash_autocomplete_shows_discovered_skills(build_binary, tmp_path):
     """AC3/AC4/AC7/AC10: one workspace, one launch; every popup leg reads the rows above the composer.
 

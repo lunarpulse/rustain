@@ -14,56 +14,13 @@ import pytest
 # Ensure tests_tui/ is on the import path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Lane guard: assigns every test to one lane (lanes.json) and fails collection otherwise.
+pytest_plugins = ("lane_guard",)
+
 from harness import RustainTUI, PROJECT_ROOT, BINARY, CTRL_X
 
 
 # ── Guards ───────────────────────────────────────────────────────────────────
-
-def pytest_configure(config):
-    """Register custom markers.
-
-    All story markers are declared in pyproject.toml; this is a fallback for
-    environments where pyproject.toml discovery is unreliable.
-    """
-    markers = [
-        "requires_api: test requires a live API key and network access",
-        "slow: test takes >30s (tool execution + AI response)",
-        "story_3_1: Story 3.1 — Multi-line Input & History",
-        "story_3_3: Story 3.3 — Command Palette & Which-Key",
-        "story_3_5: Story 3.5 — Help Overlay & Discoverability",
-        "story_4_3a: Story 4-3a — Fork Conversations",
-        "story_4_3b: Story 4-3b — Rewind with File Snapshot",
-        "story_4_4: Story 4-4 — Search, Bookmarks & Export",
-        "story_5_0: Story 5-0 — Python TUI Contract Test Infrastructure",
-        "story_5_0b: Story 5-0b — Permission System Redesign",
-        "story_5_1: Story 5-1 — Agent Skills Discovery & Catalog",
-        "story_5_2: Story 5-2 — Agent Skills Progressive Disclosure & Execution",
-        "story_5_3: Story 5-3 — Custom Slash Commands",
-        "story_5_4: Story 5-4 — Custom Agents",
-        "story_6_0a: Story 6-0a — Cancellation Token Tree & Dual-Channel EventBus",
-        "story_6_0b: Story 6-0b — ToolScheduler with ToolCall 7-Variant FSM",
-        "story_6_0c: Story 6-0c — ApprovalRuntime Pub/Sub",
-        "story_6_0d: Story 6-0d — Plan Mode Workflow",
-        "story_6_1a: Story 6-1a — Inline Plan Card",
-        "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
-        "story_6_3: Story 6-3 — Task Panel & Progress Monitoring",
-        "story_6_4: Story 6-4 — Task Control & Plan Deviation",
-        "story_9_1: Story 9-1 — MCP Server Configuration & Connection",
-        "story_9_2: Story 9-2 — MCP Tool Discovery & Invocation",
-        "story_9_3: Story 9-3 — Capability Provider Architecture / Built-in Refactor",
-        "story_9_4: Story 9-4 — Tool Exposure Strategy",
-        "story_9_5: Story 9-5 — Sandbox Policy (Landlock)",
-        "story_9_6: Story 9-6 — Skill Exposure Port",
-        "story_10_4: Story 10-4 — Subagent Panel & Agent Inspector",
-        "story_10_5: Story 10-5 — Task Delegation to Subagents",
-        "story_10_7: Story 10-7 — `task` Tool & Subagent Dispatch",
-        "story_10_x: Story 10-x — Live-LLM subagent / task-tool smoke",
-        "story_11: Story 11 — Memory Adapters & Context Assembly (memory/context commands)",
-        "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
-        "subagent: Tests that exercise in-process subagent spawning / the task tool",
-    ]
-    for marker in markers:
-        config.addinivalue_line("markers", marker)
 
 
 def pytest_collection_modifyitems(config, items):

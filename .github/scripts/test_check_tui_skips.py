@@ -31,8 +31,8 @@ class CheckTuiSkips(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
 
-    def junit(self, *cases, raw=None):
-        path = self.dir / "junit.xml"
+    def junit(self, *cases, raw=None, name="junit.xml"):
+        path = self.dir / name
         body = raw if raw is not None else f'<testsuites><testsuite name="pytest">{"".join(cases)}</testsuite></testsuites>'
         path.write_text(body, encoding="utf-8")
         return path
@@ -48,20 +48,20 @@ class CheckTuiSkips(unittest.TestCase):
     def test_k1_unlisted_skip_is_reported_and_exits_1(self):
         junit = self.junit(case("m", "test_a"), case("m", "test_b", "skip"))
         allow = self.allowlist({})
-        self.assertEqual(checker.skip_violations(junit, allow), {"unlisted": {"m::test_b"}, "stale": set()})
+        self.assertEqual(checker.skip_violations([junit], allow), {"unlisted": {"m::test_b"}, "stale": set()})
         self.assertEqual(self.run_main(junit, allow), 1)
 
     def test_k2_listed_skip_passes(self):
         junit = self.junit(case("m", "test_a"), case("m", "test_b", "skip"))
         allow = self.allowlist({"m::test_b": REASON})
-        self.assertEqual(checker.skip_violations(junit, allow), {"unlisted": set(), "stale": set()})
+        self.assertEqual(checker.skip_violations([junit], allow), {"unlisted": set(), "stale": set()})
         self.assertEqual(self.run_main(junit, allow), 0)
 
     def test_k3_stale_entries_fail(self):
         junit = self.junit(case("m", "test_passed"), case("m", "test_other", "skip"))
         allow = self.allowlist({"m::test_passed": REASON, "m::test_never_collected": REASON, "m::test_other": REASON})
         self.assertEqual(
-            checker.skip_violations(junit, allow),
+            checker.skip_violations([junit], allow),
             {"unlisted": set(), "stale": {"m::test_passed", "m::test_never_collected"}},
         )
         self.assertEqual(self.run_main(junit, allow), 1)
@@ -86,25 +86,42 @@ class CheckTuiSkips(unittest.TestCase):
         junit = self.junit(case("m", "test_x[1]", "skip"), case("m.C", "test_x", "skip"), case("m", spaced, "skip"))
         allow = self.allowlist({"m::test_x": REASON, f"m::{spaced}": REASON})
         self.assertEqual(
-            checker.skip_violations(junit, allow),
+            checker.skip_violations([junit], allow),
             {"unlisted": {"m::test_x[1]", "m.C::test_x"}, "stale": {"m::test_x"}},
         )
 
     def test_k7_xfail_counts_as_a_skip(self):
         junit = self.junit(case("m", "test_a", "xfail"))
-        self.assertEqual(checker.skip_violations(junit, self.allowlist({})), {"unlisted": {"m::test_a"}, "stale": set()})
+        self.assertEqual(checker.skip_violations([junit], self.allowlist({})), {"unlisted": {"m::test_a"}, "stale": set()})
         self.assertEqual(self.run_main(junit, self.allowlist({})), 1)
 
     def test_failed_case_is_not_a_skip(self):
         junit = self.junit(case("m", "test_a", "fail"))
-        self.assertEqual(checker.skip_violations(junit, self.allowlist({})), {"unlisted": set(), "stale": set()})
+        self.assertEqual(checker.skip_violations([junit], self.allowlist({})), {"unlisted": set(), "stale": set()})
 
     def test_k8_committed_allowlist_is_well_formed(self):
         entries = checker.load_allowlist(ALLOWLIST)
-        self.assertTrue(entries)
         for key, reason in entries.items():
             self.assertIn("::", key)
             self.assertIn("tui-", reason)
+
+    def test_k12_several_junit_files_are_judged_as_one_union(self):
+        first = self.junit(case("m", "test_a", "skip"), case("m", "test_b"), name="first.xml")
+        second = self.junit(case("m", "test_b", "skip"), case("m", "test_c"), name="second.xml")
+        allow = self.allowlist({"m::test_a": REASON, "m::test_b": REASON})
+        self.assertEqual(checker.skip_violations([first, second], allow), {"unlisted": set(), "stale": set()})
+        self.assertEqual(checker.main([str(first), str(second), str(allow)]), 0)
+        # an entry skipped in neither file is stale, a skip in either file must be listed
+        allow = self.allowlist({"m::test_a": REASON, "m::test_gone": REASON})
+        self.assertEqual(
+            checker.skip_violations([first, second], allow),
+            {"unlisted": {"m::test_b"}, "stale": {"m::test_gone"}},
+        )
+        self.assertEqual(checker.main([str(first), str(second), str(allow)]), 1)
+        # every file must hold a testcase; the two-argument form is unchanged
+        empty = self.junit(name="empty.xml")
+        self.assertEqual(checker.main([str(first), str(empty), str(allow)]), 2)
+        self.assertEqual(checker.main([str(allow)]), 2)
 
 
 if __name__ == "__main__":

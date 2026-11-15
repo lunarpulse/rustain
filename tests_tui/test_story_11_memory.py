@@ -49,7 +49,6 @@ import pytest
 from harness import RustainTUI, composer_top, status_row
 from keys import ENTER
 
-pytestmark = pytest.mark.story_11
 
 _ALLOWED = ["Read", "Glob", "Grep"]
 

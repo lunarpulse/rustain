@@ -47,7 +47,6 @@ PERSONA = "scene-ci-skills"
 SKILL_NAME = "safe-deploy"
 FILTERED_TOOL_NAMES = ["Bash", "Read", "activate_skill", "task"]
 
-pytestmark = pytest.mark.story_19_10
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

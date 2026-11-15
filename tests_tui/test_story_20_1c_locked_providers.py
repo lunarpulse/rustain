@@ -387,8 +387,6 @@ def _exercise(binary, evidence, root, monkeypatch):
         (evidence / "models-dev-extra-metadata.json").write_text(json.dumps(extra, indent=2) + "\n")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(180)
 def test_home_credentials_live_rejected_and_locked_providers_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

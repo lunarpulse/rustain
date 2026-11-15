@@ -324,8 +324,6 @@ def build_binary():
     assert harness._resolve_binary()[0].is_file()
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_a_room_tab_at_80x24(monkeypatch):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
@@ -400,8 +398,6 @@ def _seed_leg_b(journal: Path, workspace: Path) -> str:
     return artifact_id
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_b_messages_and_artifact_window_at_80x24(monkeypatch):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
@@ -490,8 +486,6 @@ def test_leg_b_messages_and_artifact_window_at_80x24(monkeypatch):
                 {"viewport": [80, 24], "binary": binary, "artifact": artifact_id, "result": "PASS"}) + "\n")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_c_agents_tab_and_adapters_window_at_80x24(monkeypatch):
     """Leg C (7-C): `Ctrl+X s` -> the Agents tab with its empty-state copy (no API, no agents);
     `Esc`; `Ctrl+X a` -> the Adapters window with the port rows. Hermetic, no sleeps."""
@@ -555,8 +549,6 @@ def _plan_session(session_id: str) -> dict:
     return {**base, "id": session_id, "title": "Plan smoke", "messages": [], "turns": [], "plans": {"p1": plan}}
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_d_tasks_tab_and_task_window_at_80x24(monkeypatch):
     """Leg D (7-D): a saved session with a plan; `Ctrl+X t` -> the Tasks tab with the task rows;
     select task 2, `Enter` -> `Task 2 · <title>` with the rendered result row; `c` copies the
@@ -627,8 +619,6 @@ def _history_session(session_id: str, title: str, updated: int, with_turns: bool
     return session
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_e_history_window_at_80x24(monkeypatch):
     """Leg E (7-E): two saved sessions; the launchpad key line names `^X h History`; `Ctrl+X h`
     -> the `History` frame with both titles; `j`, `Enter` -> the older session's transcript row
@@ -680,8 +670,6 @@ def _start_leg_f(monkeypatch, workspace, env, cols, rows, session_id):
                       extra_args=["--session", session_id])
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24(monkeypatch):
     """Leg F (7-F, declared 130x30: the monitor exists only from 120 columns): a saved session
     with a plan; `Ctrl+X w` -> the right column titled `Monitor · Tasks` with the task rows
@@ -727,8 +715,6 @@ def test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24(monkeypatch):
             {"viewports": [[130, 30], [80, 24]], "binary": binary, "result": "PASS"}) + "\n")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_g_mission_strip_at_80x24_and_the_yield_at_60x16(monkeypatch):
     """Leg G (7-G): a saved session with a plan; the strip row above the status row reads
     `Tasks 2/3`; `Ctrl+X w` raises the width remedy toast on the row directly above the strip.

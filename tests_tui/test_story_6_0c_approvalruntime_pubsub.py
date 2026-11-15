@@ -28,8 +28,6 @@ from test_story_5_0b_permissions import _permission_ready, _stable_sheet
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_five_action_prompt_shows_all_glyphs(tui_strict: RustainTUI):
     """AC11 regression: permission prompt still renders all 5 action glyphs."""
     tui_strict.send_message("Use the Bash tool to run: echo hello")
@@ -46,8 +44,6 @@ def test_five_action_prompt_shows_all_glyphs(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_session_allow_auto_approves_subsequent_same_tool(tui_strict: RustainTUI):
     """AC4/AC5: [s] session-allow auto-approves next Bash call via fast-path."""
     tui_strict.send_message("Use the Bash tool to run: echo first")
@@ -62,8 +58,6 @@ def test_session_allow_auto_approves_subsequent_same_tool(tui_strict: RustainTUI
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_always_allow_persists_to_toml(tui_strict: RustainTUI):
     """AC10: [a] AlwaysAndSave persists to config.toml; survives restart."""
     tui_strict.send_message("Use the Bash tool to run: echo persist_test")
@@ -82,8 +76,6 @@ def test_always_allow_persists_to_toml(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_deny_with_feedback_shows_rejection_block(tui_strict: RustainTUI):
     """AC5 regression: [f] deny-with-feedback still shows rejection block."""
     tui_strict.send_message("Use the Bash tool to run: rm -rf /tmp/test_feedback")
@@ -91,8 +83,6 @@ def test_deny_with_feedback_shows_rejection_block(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_deny_returns_error_to_model(tui_strict: RustainTUI):
     """AC5: [n] Reject { feedback: None } produces error visible in chat."""
     tui_strict.send_message("Use the Bash tool to run: rm -rf /tmp/test_deny")
@@ -105,8 +95,6 @@ def test_deny_returns_error_to_model(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_session_allow_survives_mode_switch(tui_strict: RustainTUI):
     """AC5 regression: session-allow set persists across mode switch."""
     tui_strict.send_message("Use the Bash tool to run: echo setup")
@@ -124,8 +112,6 @@ def test_session_allow_survives_mode_switch(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_queue_indicator_appears_for_queued_permissions(tui_strict: RustainTUI):
     """AC11: Permission queue indicator shows 'N more queued' when multiple
     tools are pending. This test is best-effort — the indicator only appears
@@ -146,8 +132,6 @@ def test_queue_indicator_appears_for_queued_permissions(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_permission_prompt_displays_tool_input(tui_strict: RustainTUI):
     """AC11 fix #5 regression: permission prompt shows actual command, not empty."""
     tui_strict.send_message("Use the Bash tool to run: echo input_preview_test")
@@ -160,8 +144,6 @@ def test_permission_prompt_displays_tool_input(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_esc_never_decides_permission_prompt(tui_strict: RustainTUI):
     """Esc defers without deciding; the queued permission can be reopened and denied."""
     tui_strict.send_message("Use the Bash tool to run: echo cancel_test")
@@ -183,8 +165,6 @@ def test_esc_never_decides_permission_prompt(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_yolo_mode_auto_approves_elevated(tui_strict: RustainTUI):
     """AC5: YOLO mode auto-approves Elevated tools without prompt."""
     tui_strict.set_permission_mode("yolo")
@@ -195,8 +175,6 @@ def test_yolo_mode_auto_approves_elevated(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_plan_mode_blocks_standard_tools_without_prompt(tui_strict: RustainTUI):
     """AC5: Plan mode blocks Write/Edit without showing permission prompt."""
     tui_strict.set_permission_mode("plan")
@@ -210,8 +188,6 @@ def test_plan_mode_blocks_standard_tools_without_prompt(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_always_allow_then_restart_fast_paths(tmp_path):
     """AC10 full round-trip: AlwaysAndSave → restart → fast-path."""
     workspace = tmp_path / "ws"
@@ -243,8 +219,6 @@ def test_always_allow_then_restart_fast_paths(tmp_path):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0c
 def test_permission_rules_toml_seeds_session(tmp_path):
     """AC6: permissions.toml rules seed the session-allow set on startup."""
     workspace = tmp_path / "ws"

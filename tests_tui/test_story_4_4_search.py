@@ -16,9 +16,6 @@ from keys import CTRL_F, ESC, Chat
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_4
-@pytest.mark.story_5_0
 class TestSearchOverlay:
     """AC1 + AC2: Ctrl+F opens search; typing filters results."""
 
@@ -44,9 +41,6 @@ class TestSearchOverlay:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_4
-@pytest.mark.story_5_0
 class TestBookmarks:
     """AC8 + AC10: Bookmark toggle and list."""
 
@@ -90,9 +84,6 @@ class TestBookmarks:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_4_4
-@pytest.mark.story_5_0
 class TestCrossSearch:
     """AC5: Cross-conversation search from sidebar."""
 

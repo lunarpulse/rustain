@@ -288,7 +288,6 @@ def _exercise(binary, evidence, root, monkeypatch):
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
 def test_input_required_waiting_and_parked_cancel_80x24(monkeypatch):
     evidence_root = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()

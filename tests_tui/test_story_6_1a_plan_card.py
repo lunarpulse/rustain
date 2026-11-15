@@ -102,8 +102,6 @@ def _wait_for_plan_card(tui: RustainTUI, timeout: float = 30.0) -> None:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_propose_plan_renders_inline_card(tui: RustainTUI):
     """AC1/AC5: Agent calls propose_plan -> PlanCard renders with double
     border, numbered tasks, effort line, and [y][e][n] footer."""
@@ -134,8 +132,6 @@ def test_propose_plan_renders_inline_card(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_approve_plan_card(tui: RustainTUI):
     """AC7: Press [y] -> card status footer updates to [executing <ts>],
     next turn auto-fires (agent begins execution)."""
@@ -162,8 +158,6 @@ def test_approve_plan_card(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_reject_plan_card(tui: RustainTUI):
     """AC7: Press [n] -> [rejected <ts>] status footer, 'Plan rejected'
     notice, synthetic user message visible in scrollback."""
@@ -195,8 +189,6 @@ def test_reject_plan_card(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_edit_plan_card(tui_with_mock_editor: RustainTUI):
     """AC7: Press [e] -> editor opens (mock $EDITOR modifies title);
     on exit, card re-presents with updated title; press [y] to approve."""
@@ -229,8 +221,6 @@ def test_edit_plan_card(tui_with_mock_editor: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_yolo_auto_approve_plan(tui: RustainTUI):
     """AC8: YOLO mode -> propose_plan produces no pending card; a single
     info notice with 'auto-approved' appears; plan is visible in scrollback."""
@@ -269,8 +259,6 @@ def test_yolo_auto_approve_plan(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_snapshot_plan_card_80x24(tui_80x24: RustainTUI):
     """Snapshot: inline PlanCard at 80x24 renders with double border."""
     tui = tui_80x24
@@ -291,8 +279,6 @@ def test_snapshot_plan_card_80x24(tui_80x24: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_1a
 def test_snapshot_plan_card_60x16(tui_60x16: RustainTUI):
     """Snapshot: inline PlanCard at 60x16 renders with plain border."""
     tui = tui_60x16

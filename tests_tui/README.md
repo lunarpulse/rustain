@@ -28,8 +28,8 @@ pytest
 # Run only tests that don't need an API key
 pytest -m "not requires_api"
 
-# Run a single story
-pytest -m story_4_3b -v
+# Run the per-PR lanes (what CI runs)
+pytest -m "core or (governance and not a2a_binary)" --ignore=test_receipt_controls.py
 
 # Run with output visible
 pytest -v -s
@@ -322,8 +322,6 @@ import pytest
 from harness import RustainTUI
 
 @pytest.mark.requires_api    # Needs API key
-@pytest.mark.slow            # Takes >30s
-@pytest.mark.story_4_3b      # Story marker for filtering
 class TestMyFeature:
     def test_something(self, tui: RustainTUI):
         # 1. Setup: pre-create files if needed
@@ -396,37 +394,50 @@ class TestMyFeature:
 
 **Waits.** Waits are bounded by the wall clock (`wait_for_screen`, `wait_for_screen_not_contains` and `wait_for_export_file` check a monotonic deadline, however slow a read or a sleep is). Never wait on a toast with `wait_for_screen`: a short-lived toast can paint and expire between two reads. Wait on a durable fact (the status row's `mode_segment`, a file, a log line), or on `wait_for_notification(text, mark, severity)` after taking `mark = tui.notification_mark()` just before the triggering key (it returns `"log"` once the Notification Log lists the notice with a time at or after the mark's second: the log is the only freshness authority and a toast is never evidence). When the toast row itself is the claim, start the harness with `notification_ttl_secs=30` (Info and Success lifetime in the workspace config) and dismiss the toast with `Ctrl+X x`. A startup notice is read with a mark built before `start()` (`NotificationMark(int(time.time()))`), and a folded leg resets popup state (`Esc`, `Ctrl+U`, wait for the token to leave) before the next leg.
 
-## Markers
+## Lanes
+
+Every test belongs to exactly one lane:
+
+| Lane | Marker | Runs | Meaning |
+|------|--------|------|---------|
+| core | `core` | per PR | the regression stoppers: the native tests D1 keeps and the helper controls they run; no capability build |
+| governance | `governance` | per PR | receipt and conflict-manifest controls |
+| native_nightly | `native_nightly` | parity leg (debug) / named capture jobs | native or a2a/p2p tests kept out of the per-PR lane |
+| manual | `manual` | never selected | needs a build no lane makes; the table names the owner row |
+| API | `requires_api` | on request | needs a live key; skipped without one; no lane marker, never in `lanes.json` |
+
+`tests_tui/lanes.json` assigns lanes: `modules` (one lane per module file), `tests` (`<module>::<function>` or `<module>::<Class>::<function>` overrides, parametrized ids follow their function), `manual` (module or test key with a reason that names the owner `tui-` row). `tests_tui/lane_guard.py`, loaded by `conftest.py`, adds the lane marker from that table and fails collection (an `ERROR collecting lanes.json` naming each entry) on: an unassigned test, an entry that names an API test, a `core` test with `a2a_binary` or `p2p_binary`, a lane marker written in a test file, a stale entry, a malformed table. It runs before `-m`, `-k` and `--deselect` deselect anything, so a filtered run cannot hide an unassigned test. A stale entry is judged only for modules collected in full (not with `module::test` arguments, `--lf`, `--ignore`). Limits: only items under `tests_tui/` are judged (another suite collected in the same session is ignored; a test collected under `tests_tui/` through a symlink that leaves it fails collection as `symlink_escape`); a listed module that collects no item at all is not reported stale unless its file is missing; and any `--lf` run skips the stale check, even when an empty cache makes pytest collect everything. `--strict-markers` is on: a misspelled or unregistered marker is a collection error.
 
 ```bash
-pytest -m "not requires_api"   # CI without API key
-pytest -m story_4_3b           # Single story
-pytest -m "slow"               # Only slow tests
-pytest -m "not slow"           # Quick tests only
+pytest tests_tui -m core                          # the stoppers
+pytest tests_tui -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py   # CI
+pytest tests_tui -m "native_nightly and not a2a_binary and not p2p_binary" --timeout=300   # parity leg
+pytest tests_tui -m requires_api                  # API lane (needs a key)
+pytest tests_tui --collect-only -q                # also runs the lane guard
 ```
 
 ### CI lane
 
-The `tui-tests` job runs the generic lane against the debug binary the job already built, through `RUSTAIN_TUI_BINARY`:
+The `tui-tests` job runs the `core` and `governance` lanes against the debug binary the job already built, through `RUSTAIN_TUI_BINARY`:
 
 ```bash
 RUSTAIN_TUI_BINARY=$PWD/target/debug/rustain pytest tests_tui/ \
-  -m "not requires_api and not a2a_binary and not p2p_binary" \
+  -m "core or (governance and not a2a_binary)" \
   --ignore=tests_tui/test_receipt_controls.py \
   -n auto --timeout=120 -v --durations=0 --junitxml=tui-results.xml
 ```
 
+- The lane runs with no reruns (`reruns = 0` in `pyproject.toml`): a failure is a failure. `--timeout=120` is the lane's timeout; the integrator's parity leg runs the debug `native_nightly` lane with `--timeout=300` until a nightly CI job exists.
 - `test_receipt_controls.py` runs only in its own receipt-policy step, so the generic step ignores it.
-- Every skip must be listed with a reason that names its owner row in `tests_tui/skip-allowlist.json` (key `<module>::<test name>`). An unlisted skip and a listed test that did not skip (stale entry) both fail the lane (`.github/scripts/check-tui-skips.py`).
+- Every skip must be listed with a reason that names its owner row in `tests_tui/skip-allowlist.json` (key `<module>::<test name>`; the file is `{}` while nothing may skip). An unlisted skip and a listed test that did not skip (stale entry) both fail the lane (`.github/scripts/check-tui-skips.py <junit.xml>... <allowlist.json>`; several JUnit files are judged as one union).
 - The `python-tui-results` artifact holds `tui-results.xml` (JUnit) and `tui-results.log` (pytest output with `--durations=0`).
 
 ## Adding a New Story
 
 1. Create `test_story_X_Y_name.py`
-2. Add marker to `pyproject.toml` if new
+2. Add the module (and any test of another lane) to `tests_tui/lanes.json`: the lane guard fails collection for a test without a lane
 3. Use AC numbers in class/test names for traceability
-4. Mark with `@pytest.mark.requires_api` if test sends messages
-5. Mark with `@pytest.mark.slow` if test takes >30s
+4. Mark with `@pytest.mark.requires_api` if test sends messages (the API lane needs no `lanes.json` entry)
 
 ## Troubleshooting
 

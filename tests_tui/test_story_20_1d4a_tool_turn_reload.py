@@ -707,7 +707,6 @@ def _exercise(binary, evidence, root, monkeypatch):
         assert stored_png, "image bytes missing from the session store"
 
 
-@pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(300)
 def test_gemini_tool_turn_survives_tui_reload_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()

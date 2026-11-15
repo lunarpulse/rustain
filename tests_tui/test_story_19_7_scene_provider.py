@@ -31,7 +31,6 @@ from harness import RustainTUI
 SCENE = Path(__file__).parent / "fixtures" / "scenes" / "smoke.json"
 SENTINEL = "SENTINEL-LEAK-19-7"
 
-pytestmark = pytest.mark.story_19_7
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -27,7 +27,6 @@ from keys import SHIFT_TAB
 # ── Structural / non-API tests ─────────────────────────────────────────────
 
 
-@pytest.mark.story_6_0d
 def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
     """Bug-fix E2E: ``/plan on|off|toggle`` typed in the input box moves the mode segment.
 
@@ -47,7 +46,6 @@ def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
     tui.wait_until(lambda s: mode_segment(s) == "Normal", "Normal mode after the second /plan toggle")
 
 
-@pytest.mark.story_6_0d
 def test_shift_tab_in_input_cycles_modes(tui: RustainTUI):
     """AC5 + Story 21-2 AC9: Shift+Tab in input focus cycles Normal → AutoEdit → Plan → Normal;
     the command palette's ``mode:`` actions then move the same segment to Plan and back.
@@ -69,8 +67,6 @@ def test_shift_tab_in_input_cycles_modes(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0d
 def test_plan_mode_read_succeeds_write_denied(tui_strict: RustainTUI):
     """AC6: Read passes in Plan mode; Write is denied with canonical message.
 
@@ -99,8 +95,6 @@ def test_plan_mode_read_succeeds_write_denied(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0d
 def test_exit_plan_mode_triggers_approval_card(tui_strict: RustainTUI):
     """AC3/AC4: Agent calls exit_plan_mode → PlanApprovalCard renders.
 
@@ -123,8 +117,6 @@ def test_exit_plan_mode_triggers_approval_card(tui_strict: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_0d
 def test_approve_plan_switches_to_normal_and_auto_fires(tui_strict: RustainTUI):
     """AC4/AC9: [y] approve → Normal mode + synthetic message + auto-trigger.
 

@@ -6,12 +6,10 @@ Deterministic (non-API) coverage of the ``Ctrl+X, S`` chord: since
 
 The realism layer — a real LLM spawning a subagent via the ``task`` tool so the tab shows a live
 row and the agent window renders — lives in ``test_story_10_x_subagent_llm_smoke.py``
-(``@requires_api @slow``).
+(``@requires_api``).
 """
 
 from __future__ import annotations
-
-import pytest
 
 from harness import RustainTUI
 from keys import CTRL_X, ESC
@@ -33,7 +31,6 @@ def _send_chord_ctrl_x_s(tui: RustainTUI) -> None:
     assert tui.wait_for_screen(TITLE, timeout=5.0), tui.get_screen_text()
 
 
-@pytest.mark.story_10_4
 def test_chord_opens_agents_tab(tui_monitor: RustainTUI):
     """Ctrl+X, S opens Mission Control on the Agents tab; Esc closes the hub (a frame, not a
     toggled panel); the chord opens it again over the History panel."""

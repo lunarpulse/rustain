@@ -411,8 +411,6 @@ def _quit(tui):
     assert (tui.child.exitstatus, tui.child.signalstatus) == (0, None)
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(180)
 def test_tool_inspector_smoke_leg_a(monkeypatch):
     """Leg a: one launch of the real debug binary (the node name is historical)."""
     _live(monkeypatch)

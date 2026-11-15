@@ -96,8 +96,6 @@ def _wait_for_completion(tui: RustainTUI, timeout: float = 90.0) -> str:
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_2a
 def test_task_dispatch_after_approval(tui: RustainTUI):
     """After approving a 2-task plan, both tasks dispatch and reach a
     terminal Completed state. We assert on the final summary
@@ -120,8 +118,6 @@ def test_task_dispatch_after_approval(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_2a
 def test_plancard_shows_status_icons(tui: RustainTUI):
     """PlanCard renders ✓ icons on completed tasks after sequential walk."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
@@ -139,8 +135,6 @@ def test_plancard_shows_status_icons(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_2a
 def test_partial_failure_summary_counts(tui: RustainTUI):
     """Plan with a failing task (and dependent downstream tasks) produces a
     summary with failed and/or skipped counts.
@@ -214,8 +208,6 @@ def test_partial_failure_summary_counts(tui: RustainTUI):
 
 
 @pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_2a
 def test_cancellation_halts_plan(tui: RustainTUI):
     """Ctrl+C during plan execution triggers PlanCancelled and stops the walk.
 

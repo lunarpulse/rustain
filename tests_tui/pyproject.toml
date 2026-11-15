@@ -29,64 +29,29 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "requires_api: test requires a live API key and network access",
-    "slow: test takes >30s (tool execution + AI response)",
-    "story_3_1: Story 3.1 — Multi-line Input & History",
-    "story_3_2: Story 3.2 — Slash Commands & Autocomplete",
-    "story_3_3: Story 3.3 — Command Palette & Which-Key",
-    "story_3_4: Story 3.4 — Image Attachment & Clipboard",
-    "story_3_5: Story 3.5 — Help Overlay & Discoverability",
-    "story_3_6: Story 3.6 — Markdown Rendering",
-    "story_4_3a: Story 4-3a — Fork Conversations",
-    "story_4_3b: Story 4-3b — Rewind with File Snapshot",
-    "story_4_4: Story 4-4 — Search, Bookmarks & Export",
-    "story_4_5: Story 4-5 — History Import",
-    "story_4_6: Story 4-6 — Cleanup & Hardening",
-    "story_5_0: Story 5-0 — Python TUI Contract Test Infrastructure",
-    "story_5_0b: Story 5-0b — Permission System Redesign",
-    "story_5_1: Story 5-1 — Agent Skills Discovery & Catalog",
-    "story_5_2: Story 5-2 — Agent Skills Progressive Disclosure & Execution",
-    "story_5_3: Story 5-3 — Custom Slash Commands",
-    "story_5_4: Story 5-4 — Custom Agents",
-    "story_6_0a: Story 6-0a — Cancellation Token Tree & Dual-Channel EventBus",
-    "story_6_0b: Story 6-0b — ToolScheduler with ToolCall 7-Variant FSM",
-    "story_6_0c: Story 6-0c — ApprovalRuntime Pub/Sub",
-    "story_6_1a: Story 6-1a — Inline Plan Card",
-    "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
-    "story_6_3: Story 6-3 — Task Panel & Progress Monitoring",
-    "story_16_6: Story 16-6 — Vim Keymap (Fold & Motion)",
-    "story_9_1: Story 9-1 — MCP Server Configuration & Connection",
-    "story_9_2: Story 9-2 — MCP Tool Discovery & Invocation",
-    "story_9_3: Story 9-3 — Capability Provider Architecture / Built-in Refactor",
-    "story_9_4: Story 9-4 — Tool Exposure Strategy",
-    "story_9_5: Story 9-5 — Sandbox Policy (Landlock)",
-    "story_9_6: Story 9-6 — Skill Exposure Port",
-    "story_10_4: Story 10-4 — Subagent Panel & Agent Inspector",
-    "story_10_5: Story 10-5 — Task Delegation to Subagents",
-    "story_10_7: Story 10-7 — `task` Tool & Subagent Dispatch",
-    "story_10_x: Story 10-x — Live-LLM subagent / task-tool smoke",
-    "story_11: Story 11 — Memory Adapters & Context Assembly (memory/context commands)",
+    # Lane markers: added by tests_tui/lane_guard.py from tests_tui/lanes.json, never written in a test file.
+    "core: per-PR lane: the regression stoppers, no capability build (CI: -m 'core or (governance and not a2a_binary)')",
+    "governance: per-PR lane: receipt and conflict-manifest controls",
+    "native_nightly: native or capability-build tests kept out of the per-PR lane (the parity leg runs the debug ones)",
+    "manual: never selected by a lane; the table names the owner row",
+    "requires_api: API lane: test requires a live API key and network access (no lane marker, not in lanes.json)",
     "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
     "subagent: Tests that exercise in-process subagent spawning / the task tool",
-    "story_18_2: Story 18-2 — Transparency & Visible Surfacing (Ctrl+X L panel, /team log)",
-    "story_19_7: Story 19-7 — Deterministic scene provider + journey-capture harness",
-    "story_19_9: Story 19-9 — J0/J2 capture; the scene provider's OpenAI-compat wire arm",
-    "story_19_10: Story 19-10 — J3 Marco capture; the request log's `skills` field",
-    "story_19_16g: Story 19-16g — passive `log: N` transparency reminder (standalone + attached)",
-    "story_19_19: Story 19-19 — executing consultation and ADR fan-out capture",
-    "story_19_21: Story 19.21 — attached Act 1 distribution capture",
-    "story_19_29: Story 19.29 — Bash redirect targets under command patterns; native 80x24 smoke",
     "a2a_binary: test requires an explicitly built binary with the a2a feature",
     "p2p_binary: test requires an explicitly built binary with the p2p feature",
+    # Kept only because hash-bound capture drivers use them and cannot be edited (tui-7 owns them).
+    "story_19_19: Story 19-19 — executing consultation and ADR fan-out capture",
+    "story_19_21: Story 19.21 — attached Act 1 distribution capture",
 ]
-# Default: skip tests that need a live API unless explicitly requested.
-# Run all:      pytest
-# Skip API:     pytest -m "not requires_api"
-# Single story: pytest -m story_4_3b
+# Lanes (see README "Lanes"). CI per PR:
+#   pytest tests_tui/ -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py -n auto --timeout=120
+# Parity leg (until a nightly job exists):
+#   pytest tests_tui/ -m "native_nightly and not a2a_binary and not p2p_binary" -n auto --timeout=300
+# API lane: pytest tests_tui/ -m requires_api (needs a key; skipped without one).
 timeout = 180
-reruns = 2
-reruns_delay = 10
-addopts = "--dist loadgroup"
+# A red test is red: no retries (a retry needs a reviewed change here). Local --reruns=N stays available.
+reruns = 0
+addopts = "--dist loadgroup --strict-markers"
 filterwarnings = [
     # pexpect.spawn uses pty.forkpty() in a multi-threaded parent (pytest-xdist).
     # This is a known limitation of the PTY-based test harness; the warning

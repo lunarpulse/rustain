@@ -671,8 +671,6 @@ def test_leg_c_desk_warning_and_stage(cols, rows):
 # ── Live legs ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_a_local(tmp_path, stub, scene_env, monkeypatch):
     _small_terminal(monkeypatch)
     _begin_leg("test_leg_a_local")
@@ -721,8 +719,6 @@ def test_leg_a_local(tmp_path, stub, scene_env, monkeypatch):
     assert _turn_rows(stub) == [], "viewing never reaches the model"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_a_attached(tmp_path, stub, scene_env, monkeypatch):
     binary = _small_terminal(monkeypatch)
     _begin_leg("test_leg_a_attached")
@@ -959,8 +955,6 @@ def test_leg_b_desk_seek_up_reaches_a_header_below_a_long_body(monkeypatch):
     assert not _b_check(torn, header_3), "a torn frame is not accepted as the header"
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_b(tmp_path, stub, scene_env, monkeypatch):
     _small_terminal(monkeypatch)
     _begin_leg("test_leg_b")
@@ -1089,8 +1083,6 @@ def _c_seed_log(workspace: Path, env: dict[str, str]) -> None:
         os.close(lock)
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
 def test_leg_c(tmp_path, stub, scene_env, monkeypatch):
     from contextlib import ExitStack
 

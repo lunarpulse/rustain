@@ -5,7 +5,7 @@ and the deterministic Python TUI tests. They exercise the **same risks** with
 a live LLM in the loop, but with **strict deterministic prompts** to keep
 flakiness low (per the team's MCP-LLM testing policy).
 
-Marked ``@requires_api @slow``. Without an API key the conftest auto-skips.
+Marked ``@requires_api``. Without an API key the conftest auto-skips.
 Additionally, each test runtime-checks that a provider is actually reachable
 in the test workspace — the conftest creates a fresh ``RUSTAIN_CONFIG_DIR``
 without copying the user's ``[provider.*]`` config, so a passing API-key gate
@@ -37,10 +37,8 @@ from test_story_5_0b_permissions import _permission_ready
 
 
 pytestmark = [
-    pytest.mark.story_9_2,
     pytest.mark.mcp,
     pytest.mark.requires_api,
-    pytest.mark.slow,
 ]
 
 

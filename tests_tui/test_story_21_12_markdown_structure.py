@@ -17,7 +17,6 @@ import tempfile
 import traceback
 
 import harness
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -215,8 +214,6 @@ def _spawn_case(name, binary, evidence, root, original_spawn, monkeypatch, expec
     return osc8_bytes
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(600)
 def test_markdown_structure_and_stage_links_at_80x24(monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)

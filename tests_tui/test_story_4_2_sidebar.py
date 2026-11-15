@@ -19,7 +19,6 @@ def _close_history(tui: RustainTUI) -> None:
 
 
 @pytest.mark.requires_api
-@pytest.mark.story_5_0
 class TestSidebarToggle:
     """Sidebar toggle + visibility (4-2 AC)."""
 

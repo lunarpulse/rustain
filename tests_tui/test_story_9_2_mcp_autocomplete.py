@@ -22,7 +22,7 @@ from keys import BACKSPACE, ESC, TAB
 from mcp_support import close_adapters, wait_mcp_ready
 
 
-pytestmark = [pytest.mark.story_9_2, pytest.mark.mcp]
+pytestmark = [pytest.mark.mcp]
 
 
 def _type_at_mcp(tui) -> None:

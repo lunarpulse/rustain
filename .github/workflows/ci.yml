@@ -340,10 +340,10 @@ jobs:
             receipt-checker-evidence/**/negative.json
             receipt-checker-evidence/**/restored.json
 
-      - name: Run non-API Python TUI tests
+      - name: Run the Python TUI core and governance lanes
         shell: bash # GitHub then runs bash -eo pipefail: tee cannot hide a red pytest
         run: |
-          pytest tests_tui/ -m "not requires_api and not a2a_binary and not p2p_binary" \
+          pytest tests_tui/ -m "core or (governance and not a2a_binary)" \
             --ignore=tests_tui/test_receipt_controls.py \
             -n auto --timeout=120 -v --durations=0 --junitxml=tui-results.xml 2>&1 | tee tui-results.log
         env:
