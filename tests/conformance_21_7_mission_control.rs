@@ -1,7 +1,7 @@
 //! Story 21.7 conformance: the Mission Control hub (S-MC). Slice 7-A — the frame, its keys,
 //! the shared list builder and the Room tab — carries the keystones K1 (open and geometry),
-//! K2 (keys and route), K3 (identity), K4 (the presented-only Room poll) and the desk-check
-//! frame export of smoke leg A. Slice 7-B adds K5 (the Messages tab: 21-8's A2A log re-homed)
+//! K2 (keys and route), K3 (identity) and K4 (the presented-only Room poll). Slice 7-B adds
+//! K5 (the Messages tab: 21-8's A2A log re-homed)
 //! and K6 (the Artifacts tab and the artifact window). Slice 7-C adds K7 (the Agents tab and the
 //! agent window) and K8 (the Adapters window). Slice 7-D adds K9 (the Tasks tab and the task
 //! window). Slice 7-E adds K10 (History as an L2 frame) and the body half of K11 (the monitor
@@ -31,9 +31,6 @@ mod k3_identity;
 
 #[path = "conformance_21_7_mission_control/k4_room.rs"]
 mod k4_room;
-
-#[path = "conformance_21_7_mission_control/smoke_frames.rs"]
-mod smoke_frames;
 
 #[path = "conformance_21_7_mission_control/k5_messages.rs"]
 mod k5_messages;

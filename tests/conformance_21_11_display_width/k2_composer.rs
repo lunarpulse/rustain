@@ -4,6 +4,7 @@
 //! reading the backend cursor and the painted rows. The attached host's
 //! counterpart lives beside its private key/paste/draw seams in
 //! `infrastructure::runtime::attach_loop::display_width_tests`.
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use rustain::adapters::tui::{
     app::{InputAction, handle_input},
@@ -21,6 +22,12 @@ struct Drawn {
     rows: Vec<String>,
     caret: Position,
     input_area: Rect,
+    /// The compositor's own buffer after `input_box::render`: continuation cells
+    /// of wide glyphs are `reset()` there, so a clobbered one is visible (the
+    /// backend buffer is diffed and skips them).
+    frame: Buffer,
+    /// The terminal backend's buffer, as a user's terminal receives it.
+    screen: Buffer,
 }
 
 fn state_at(width: u16, height: u16) -> TuiState {
@@ -50,6 +57,7 @@ fn draw(state: &TuiState) -> Drawn {
     let (width, height) = (state.terminal_width, state.terminal_height);
     let theme = Theme::dark();
     let mut input_area = Rect::default();
+    let mut frame_buffer = Buffer::empty(Rect::new(0, 0, width, height));
     let painted = paint(width, height, |frame| {
         let layout = compute_layout(frame.area(), &theme, &state.input_buffer, 1, state.monitor)
             .expect("supported size");
@@ -65,11 +73,14 @@ fn draw(state: &TuiState) -> Drawn {
             state.input_scroll_offset,
             None,
         );
+        frame_buffer = frame.buffer_mut().clone();
     });
     Drawn {
         rows: rows(&painted.buffer),
         caret: painted.cursor.expect("focused composer sets a caret"),
         input_area,
+        frame: frame_buffer,
+        screen: painted.buffer,
     }
 }
 
@@ -100,6 +111,110 @@ fn k2_cjk_wraps_and_the_caret_follows_in_a_60_column_composer() {
     assert_eq!(drawn.input_area.height, 4);
     assert_eq!(text_rows(&drawn)[0].matches('a').count(), 58);
     assert_eq!(text_rows(&drawn)[1].matches('a').count(), 12);
+}
+
+/// Text between the composer's side borders, trailing blanks trimmed.
+fn inner_text(row: &str) -> &str {
+    row.trim_start_matches('│').trim_end_matches('│').trim_end()
+}
+
+/// Cell-level orphan oracle over the compositor's buffer: a wide glyph's
+/// continuation cell lies inside the composer and holds no glyph, and no cell
+/// inside the composer is an empty-symbol continuation without a wide glyph in
+/// front of it. (`glyphs`/`row_cells` skip continuation cells, so they cannot
+/// see either fault.)
+fn assert_no_orphan_cells(drawn: &Drawn) {
+    use unicode_width::UnicodeWidthStr;
+    let area = drawn.input_area;
+    for y in area.y + 1..area.bottom() - 1 {
+        let mut x = area.x + 1;
+        while x < area.right() - 1 {
+            let symbol = drawn.frame[(x, y)].symbol();
+            if symbol.width() >= 2 {
+                assert!(
+                    x + 1 < area.right() - 1,
+                    "wide glyph {symbol:?} at ({x},{y}) leaves no continuation cell inside the border"
+                );
+                let next = drawn.frame[(x + 1, y)].symbol();
+                assert!(
+                    next.trim().is_empty(),
+                    "continuation of {symbol:?} at ({x},{y}) holds {next:?}"
+                );
+                x += 2;
+            } else {
+                assert!(
+                    !symbol.is_empty(),
+                    "orphaned continuation cell at ({x},{y}) without a wide glyph in front"
+                );
+                x += 1;
+            }
+        }
+    }
+}
+
+fn assert_composer_whole(drawn: &Drawn) {
+    assert_whole_clusters(&drawn.screen);
+    for y in drawn.input_area.y..drawn.input_area.bottom() {
+        assert_eq!(row_cells(&drawn.screen, y), 80, "row {y} fills the width");
+    }
+    assert_no_orphan_cells(drawn);
+}
+
+#[test]
+fn k2_mixed_cag_draft_wraps_at_80x24_and_backspace_rewraps_whole_clusters() {
+    let mut state = state_at(80, 24);
+    let draft = format!("{}{A}{}{}{G}", C.repeat(30), C.repeat(8), C.repeat(2));
+    paste(&mut state, &draft);
+    let drawn = draw(&state);
+    assert_eq!(drawn.input_area.height, 4, "two text rows + borders");
+    let first = format!("{}{A}{}", C.repeat(30), C.repeat(8));
+    let text = text_rows(&drawn);
+    assert_eq!(
+        inner_text(&text[0]),
+        first,
+        "row 1 holds 77 cells: {:?}",
+        drawn.rows
+    );
+    assert_eq!(inner_text(&text[1]), format!("{}{G}", C.repeat(2)));
+    assert_eq!(
+        (drawn.caret.x, drawn.caret.y),
+        (drawn.input_area.x + 1 + 6, drawn.input_area.y + 2),
+        "caret after G on the continuation row"
+    );
+    assert_eq!(drawn.input_area.y, 20, "composer top at 80x24");
+    assert_eq!(
+        (drawn.caret.x, drawn.caret.y),
+        (7, 22),
+        "absolute caret after the paste"
+    );
+    assert_composer_whole(&drawn);
+
+    // Backspace removes the whole G cluster; the caret steps back two cells.
+    assert_eq!(key(&mut state, DomainKey::Backspace), InputAction::Consumed);
+    let drawn = draw(&state);
+    let text = text_rows(&drawn);
+    assert_eq!(inner_text(&text[1]), C.repeat(2), "{:?}", drawn.rows);
+    assert_eq!(drawn.caret.x, drawn.input_area.x + 1 + 4);
+    assert_eq!(
+        (drawn.caret.x, drawn.caret.y),
+        (5, 22),
+        "absolute caret after the first Backspace"
+    );
+    assert_composer_whole(&drawn);
+
+    // Backspace removes one C; row 1 is unchanged.
+    assert_eq!(key(&mut state, DomainKey::Backspace), InputAction::Consumed);
+    let drawn = draw(&state);
+    let text = text_rows(&drawn);
+    assert_eq!(inner_text(&text[0]), first);
+    assert_eq!(inner_text(&text[1]), C);
+    assert_eq!(drawn.caret.x, drawn.input_area.x + 1 + 2);
+    assert_eq!(
+        (drawn.caret.x, drawn.caret.y),
+        (3, 22),
+        "absolute caret after the second Backspace"
+    );
+    assert_composer_whole(&drawn);
 }
 
 #[test]

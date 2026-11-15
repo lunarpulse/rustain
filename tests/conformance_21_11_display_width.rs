@@ -8,8 +8,8 @@
 //! 1 cell) plus ASCII positive controls. See `support.rs`.
 //!
 //! K1 (shared units) lives as unit tests beside `text_geometry`, `modal`,
-//! `sidebar` and `chat_pane::word_wrap`; K8 is the one native 80x24 smoke in
-//! `tests_tui/test_story_21_11_display_width.py`.
+//! `sidebar` and `chat_pane::word_wrap`; K8's mixed C/A/G composer at 80x24 is
+//! `k2_composer::k2_mixed_cag_draft_wraps_at_80x24_and_backspace_rewraps_whole_clusters`.
 
 #[path = "conformance_21_11_display_width/support.rs"]
 mod support;

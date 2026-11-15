@@ -135,7 +135,16 @@ fn the_focused_row_shows_the_marker_and_the_generated_cue() {
 
 #[test]
 fn enter_opens_the_thinking_window_with_the_reasoning_body() {
-    let (mut f, ids) = fixture(80, 40);
+    enter_opens_the_thinking_window(80, 40);
+}
+
+#[test]
+fn enter_opens_the_thinking_window_at_80x24_inside_the_stage_region() {
+    enter_opens_the_thinking_window(80, 24);
+}
+
+fn enter_opens_the_thinking_window(width: u16, height: u16) {
+    let (mut f, ids) = fixture(width, height);
     open(&mut f, &ids.reasoning);
     f.compose();
     assert!(matches!(
@@ -158,6 +167,10 @@ fn enter_opens_the_thinking_window_with_the_reasoning_body() {
     assert_eq!(
         f.h.state.selected_item_id.as_deref(),
         Some(ids.reasoning.as_str())
+    );
+    assert!(
+        f.frame_rect().bottom() <= f.layout().status_bar.y,
+        "the frame stays above the application status row"
     );
 }
 
@@ -328,6 +341,41 @@ fn closing_the_window_leaves_stage_caches_viewstate_and_composer_identical() {
     assert!(f.h.state.modal_stack.is_empty() && f.h.state.block_viewers.is_empty());
     assert_eq!(stage(&f), before);
     assert!(presentation::consistent(&f.h.state));
+}
+
+/// The painted-row counterpart of the state comparison above, at 80x24 and with
+/// the focus seated by the production Tab key (the retired native leg's scope).
+#[test]
+fn closing_the_window_restores_every_painted_stage_row() {
+    let (mut f, ids) = fixture(80, 24);
+    for _ in 0..4 {
+        if tab(&mut f).as_deref() == Some(ids.reasoning.as_str()) {
+            break;
+        }
+    }
+    assert_eq!(
+        f.h.state.focused_item_id.as_deref(),
+        Some(ids.reasoning.as_str()),
+        "Tab reached the thinking row"
+    );
+    let before = rows(&f);
+    let marked: Vec<_> = before.iter().filter(|r| r.contains('▸')).collect();
+    assert_eq!(marked.len(), 1, "exactly one marked row: {before:?}");
+    assert!(
+        marked[0].contains("Thinking · 4.2s · 1.3k tokens"),
+        "{marked:?}"
+    );
+
+    open_focused(&mut f);
+    assert_ne!(
+        rows(&f),
+        before,
+        "control: the open window paints over the Stage"
+    );
+    press(&mut f, &[Key::Esc]);
+    f.paint();
+    assert!(f.h.state.modal_stack.is_empty());
+    assert_eq!(rows(&f), before, "every painted Stage row is restored");
 }
 
 fn attached(

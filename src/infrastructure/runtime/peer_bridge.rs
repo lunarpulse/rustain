@@ -1645,6 +1645,14 @@ mod tests {
 
         peer_command(&mut state, "c1", Some("list"), &app_state).await;
         peer_command(&mut state, "c1", Some("list"), &app_state).await;
+        let stacked = painted_rows(&state)
+            .iter()
+            .filter(|row| row.contains("Transport peers"))
+            .count();
+        assert_eq!(
+            stacked, 1,
+            "the second list replaces the first, no stacking"
+        );
         let second_list = state.feedback_blocks.get("peer").map(|b| b.message.clone());
         peer_command(&mut state, "c1", Some("revoke nobody"), &app_state).await;
 
@@ -1680,14 +1688,55 @@ mod tests {
         );
 
         submit(&mut state, &app_state, "/room role list").await;
+        assert!(
+            state.input_buffer.is_empty(),
+            "the composer clears on submit"
+        );
         assert!(state.feedback_blocks.contains_key("room-role"));
         assert!(painted(&state, "room roles"), "{:#?}", painted_rows(&state));
 
         submit(&mut state, &app_state, "/peer list").await;
+        assert!(
+            state.input_buffer.is_empty(),
+            "the composer clears on submit"
+        );
         assert!(state.feedback_blocks.contains_key("peer"));
         assert!(painted(&state, "Transport peers"));
         assert!(!state.feedback_blocks.contains_key("room-role"));
         assert!(!painted(&state, "room roles"));
+
+        // A slash command that paints no view (`/ml`), typed key by key with the
+        // autocomplete popup open, retires the peer view as the first effect of
+        // the submission. The popup may need a second Enter (accept, then run).
+        submit(&mut state, &app_state, "/peer list").await;
+        assert!(painted(&state, "Transport peers"));
+        for ch in "/ml".chars() {
+            let event = crate::domain::events::DomainInputEvent::KeyPress(ch);
+            crate::adapters::tui::app::handle_input(&mut state, &event);
+        }
+        assert!(state.autocomplete.is_open(), "the slash popup is open");
+        let enter = crate::domain::events::DomainInputEvent::SpecialKey(
+            crate::domain::events::DomainKey::Enter,
+        );
+        let mut enters = 0;
+        let action = loop {
+            enters += 1;
+            let action = crate::adapters::tui::app::handle_input(&mut state, &enter);
+            if matches!(action, InputAction::ExecuteCommand { .. }) || enters == 2 {
+                break action;
+            }
+        };
+        assert!(
+            matches!(&action, InputAction::ExecuteCommand { name, .. } if name == "ml"),
+            "Enter x{enters} must execute /ml, got {action:?}"
+        );
+        assert!(
+            state.input_buffer.is_empty(),
+            "the composer clears on submit"
+        );
+        assert!(!state.feedback_blocks.contains_key("peer"));
+        assert!(!painted(&state, "Transport peers"));
+        submit(&mut state, &app_state, "/peer list").await;
 
         let action = submit(&mut state, &app_state, "hello").await;
         assert!(matches!(&action, InputAction::SubmitMessage(text) if text == "hello"));

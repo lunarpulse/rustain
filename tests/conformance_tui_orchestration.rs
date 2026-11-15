@@ -605,6 +605,95 @@ fn fanout_consults_gate_decision_before_launch() {
     );
 }
 
+// ─── tui-5a (AD-3): dispatch arms with no in-process seam ──────────────────────
+// `event_loop::run` has no test seam; the key -> `InputAction` decoders and the
+// handlers each have Rust tests (21_9 K3, 21_13 K2/K5/K9, 21_17). These guards pin
+// the arm that joins them, the way the /fanout guard above does: the arm exists,
+// is bounded by its neighbour, calls the production handler and (for copy) passes
+// the production clipboard function, not a closure.
+const PRODUCTION_COPIER: &str = "&crate::adapters::tui::clipboard::copy_to_clipboard)";
+
+/// The text of the `InputAction::<head>` arm, bounded by the next `InputAction::`.
+fn input_action_arm<'a>(event_loop: &'a str, head: &str) -> &'a str {
+    event_loop
+        .split(head)
+        .nth(1)
+        .unwrap_or_else(|| panic!("the {head} arm must exist in event_loop.rs"))
+        .split("InputAction::")
+        .next()
+        .expect("the arm is bounded by the next InputAction arm")
+}
+
+#[test]
+fn stage_item_arms_delegate_to_their_seams() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+
+    let cycle = input_action_arm(event_loop, "InputAction::CycleInvocationInFocusedTurn =>");
+    assert!(
+        cycle.contains("handlers::tool_focus::cycle_item(")
+            && cycle.contains("select_item_explicitly("),
+        "Tab must cycle the focused turn's items and select the result: {cycle}"
+    );
+
+    let inspect = input_action_arm(event_loop, "InputAction::InspectTool =>");
+    assert!(
+        inspect.contains("block_viewer::inspect_focused(")
+            && !inspect.contains("tool_inspector::inspect_focused("),
+        "Enter must inspect through the block viewer seam (it opens tools, blocks and thinking): {inspect}"
+    );
+
+    let step = input_action_arm(event_loop, "InputAction::StepBlock { forward } =>");
+    assert!(
+        step.contains("block_viewer::step(")
+            && step.contains("open_turn.as_ref(), forward)")
+            && !step.contains("!forward"),
+        "`[`/`]` must step the block viewer with the unmodified requested direction: {step}"
+    );
+
+    let copy_block = input_action_arm(event_loop, "InputAction::CopyBlockSource =>");
+    assert!(
+        copy_block.contains("block_viewer::copy_source(")
+            && !copy_block.contains("tool_inspector::copy::copy_source(")
+            && copy_block.contains(PRODUCTION_COPIER),
+        "`c` in S-BLOCK must copy the block source through the production sink: {copy_block}"
+    );
+
+    let copy_chat = input_action_arm(event_loop, "InputAction::CopyToClipboard(content) =>");
+    assert!(
+        copy_chat.contains("handlers::clipboard::requested_in(")
+            && copy_chat.contains("content")
+            && copy_chat.contains(PRODUCTION_COPIER),
+        "Chat `c` must copy through the production sink: {copy_chat}"
+    );
+}
+
+#[test]
+fn room_and_peer_command_arms_delegate_to_their_bridges() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let room = event_loop
+        .split("cmd_name == \"room\"")
+        .nth(1)
+        .expect("the /room ExecuteCommand arm must exist in event_loop.rs")
+        .split("cmd_name == \"artifacts\"")
+        .next()
+        .expect("the /room arm must be bounded by the /artifacts branch");
+    assert!(
+        room.contains("room_bridge::room_command(") && !room.contains("peer_command("),
+        "/room must delegate to the room bridge: {room}"
+    );
+    let peer = event_loop
+        .split("cmd_name == \"peer\"")
+        .nth(1)
+        .expect("the /peer ExecuteCommand arm must exist in event_loop.rs")
+        .split("} else if")
+        .next()
+        .expect("the /peer arm must be bounded by the next branch");
+    assert!(
+        peer.contains("peer_bridge::peer_command(") && !peer.contains("room_command("),
+        "/peer must delegate to the peer bridge: {peer}"
+    );
+}
+
 // The real dispatch/effect seam reuses the retained run; provider-count evidence is native.
 #[test]
 fn diverge_toggle_arms_never_dispatch() {

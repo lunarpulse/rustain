@@ -152,33 +152,77 @@ mod tests {
         assert_eq!(std::str::from_utf8(&decoded).unwrap(), content);
     }
 
+    /// Restores `RUSTAIN_DATA_DIR` and `RUSTAIN_CLIPBOARD` on every path, panics included.
+    struct EnvRestore {
+        data_dir: Option<String>,
+        clipboard: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(data_dir: &std::path::Path) -> Self {
+            let saved = Self {
+                data_dir: std::env::var("RUSTAIN_DATA_DIR").ok(), // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+                clipboard: std::env::var("RUSTAIN_CLIPBOARD").ok(), // CONFORMANCE_EXCEPTION: test-only env var save/restore for the file clipboard strategy
+            };
+            unsafe {
+                std::env::set_var("RUSTAIN_DATA_DIR", data_dir.as_os_str()); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+                std::env::set_var("RUSTAIN_CLIPBOARD", "file"); // CONFORMANCE_EXCEPTION: test-only env var save/restore for the file clipboard strategy
+            }
+            saved
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.data_dir.take() {
+                Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+                None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+            }
+            match self.clipboard.take() {
+                Some(v) => unsafe { std::env::set_var("RUSTAIN_CLIPBOARD", v) }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for the file clipboard strategy
+                None => unsafe { std::env::remove_var("RUSTAIN_CLIPBOARD") }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for the file clipboard strategy
+            }
+        }
+    }
+
+    /// Front door: the production `copy_to_clipboard` every copy site injects, under
+    /// `RUSTAIN_CLIPBOARD=file` (the sink the native copy legs read back).
     #[test]
-    fn fallback_writes_to_file() {
-        // Test the actual write_fallback function by calling it
-        // (requires data_dir to be functional — use env override if available)
-        let result = write_fallback("clipboard test content");
-        match result {
-            Ok(path) => {
-                assert!(path.exists());
-                assert_eq!(
-                    std::fs::read_to_string(&path).unwrap(),
-                    "clipboard test content"
-                );
-                // Verify permissions on Unix
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = std::fs::metadata(&path).unwrap().permissions();
-                    assert_eq!(perms.mode() & 0o777, 0o600);
-                }
-            }
-            Err(e) => {
-                // In CI/sandboxed environments, data_dir may not be available
-                eprintln!(
-                    "write_fallback returned error (may be expected in CI): {}",
-                    e
-                );
-            }
+    #[serial_test::serial(rustain_data_dir)]
+    fn file_strategy_copy_writes_the_exact_bytes_under_the_data_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("clipboard.txt");
+        // Seed a wider-mode file so a dropped `set_permissions` stays visible under any umask.
+        std::fs::write(&target, "stale").expect("seed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+                .expect("seed mode");
+            let seeded = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                seeded, 0o644,
+                "control: the seeded file is wider than 0o600"
+            );
+        }
+
+        let text = "  Compare\n\x1b[0m end  ";
+        let result = {
+            let _env = EnvRestore::set(tmp.path());
+            copy_to_clipboard(text)
+        };
+
+        assert_eq!(result, ClipboardResult::FallbackSuccess(target.clone()));
+        assert_eq!(
+            std::fs::read(&target).expect("read"),
+            text.as_bytes(),
+            "the file holds the input byte for byte (whitespace, newline, raw ESC)"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
         }
     }
 

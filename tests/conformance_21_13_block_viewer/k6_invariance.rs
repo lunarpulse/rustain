@@ -7,7 +7,7 @@ use rustain::adapters::tui::{
 };
 use rustain::domain::models::Turn;
 
-use super::support::{Fixture, block, code, focus, mixed_turn, open_focused, part};
+use super::support::{Fixture, block, code, focus, mixed_turn, open_focused, part, screen_rows};
 
 /// Everything the Stage and composer own: both height-cache halves, the owning
 /// ViewState, the draft and the chat/input rectangles.
@@ -39,11 +39,17 @@ fn opening_scrolling_and_closing_the_viewer_leave_the_stage_untouched() {
     focus(&mut f, &ids[0]);
     f.paint();
     let before = stage(&f);
+    let painted_before = screen_rows(&f);
     open_focused(&mut f);
     assert_eq!(
         stage(&f),
         before,
         "opening must not edit the Stage or draft"
+    );
+    assert_ne!(
+        screen_rows(&f),
+        painted_before,
+        "control: the open frame paints over the Stage"
     );
     let mut chars: Vec<Key> = vec![Key::Char('j'); 5];
     chars.extend([Key::Char('$'), Key::Char('/'), Key::Char('x'), Key::Enter]);
@@ -61,6 +67,11 @@ fn opening_scrolling_and_closing_the_viewer_leave_the_stage_untouched() {
     f.paint();
     assert!(f.h.state.modal_stack.is_empty() && f.h.state.block_viewers.is_empty());
     assert_eq!(stage(&f), before);
+    assert_eq!(
+        screen_rows(&f),
+        painted_before,
+        "every painted Stage row is restored (80x24)"
+    );
     assert_eq!(f.h.state.focused_item_id.as_deref(), Some(ids[0].as_str()));
 }
 

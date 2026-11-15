@@ -45,13 +45,17 @@ fn with_turn(content: &str) -> Conversation {
 }
 
 fn paint(conversation: &Conversation, attached: bool) -> Pane {
+    paint_at(conversation, attached, 30)
+}
+
+fn paint_at(conversation: &Conversation, attached: bool, height: u16) -> Pane {
     if attached {
         paint_attached(
             conversation,
             &StreamingState::default(),
             &Theme::dark(),
             80,
-            30,
+            height,
         )
     } else {
         paint_local(
@@ -61,17 +65,24 @@ fn paint(conversation: &Conversation, attached: bool) -> Pane {
             None,
             &Theme::dark(),
             80,
-            30,
+            height,
         )
     }
 }
 
 #[test]
 fn typed_text_paints_verbatim_in_both_hosts_on_both_paths() {
-    for attached in [false, true] {
-        for conversation in [legacy(TYPED), with_turn(TYPED)] {
-            let pane = paint(&conversation, attached);
-            assert_eq!(user_row(&pane), expected(), "attached {attached}");
+    // 80x30 and the native 80x24 geometry of the retired thinking leg.
+    for height in [30, 24] {
+        for attached in [false, true] {
+            for conversation in [legacy(TYPED), with_turn(TYPED)] {
+                let pane = paint_at(&conversation, attached, height);
+                assert_eq!(
+                    user_row(&pane),
+                    expected(),
+                    "attached {attached}, height {height}"
+                );
+            }
         }
     }
 }

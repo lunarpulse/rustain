@@ -1,12 +1,12 @@
 //! Story 21.14 conformance: the onboarding tour and the voice pass. Slice 14-A — the tour card
 //! (`Surface::Tour`), `/tour`, the five real-action steps, the first-launch offer and the
 //! persistence of `tour_done` — carries the keystones K1 (the offer and hermeticity), K2 (the
-//! cards and their keys), K3 (the steps), K4 (key truth) and K5 (persistence and privacy), and
-//! the desk-check frame export of smoke leg A. Slice 14-B adds K6 (the team onboarding defaults
-//! and persistent hints) and K7 (the coach line and the step highlight) and the leg-B frame export.
+//! cards and their keys), K3 (the steps), K4 (key truth) and K5 (persistence and privacy).
+//! Slice 14-B adds K6 (the team onboarding defaults and persistent hints) and K7 (the coach
+//! line and the step highlight).
 //! Slice 14-C (the voice pass) adds K8 (the voice gate over every production literal, reusing the
 //! 21-3 K12 scanner), K9 (the rendered CLI help of every command at every depth) and K10 (failures
-//! state what happened, the next step and optional detail) and the leg-C frame export.
+//! state what happened, the next step and optional detail).
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every fixture goes
 //! through a production door: keys travel as crossterm events through the local host's decoder,
@@ -49,6 +49,3 @@ mod k9_cli_help;
 
 #[path = "conformance_21_14_onboarding/k10_failures.rs"]
 mod k10_failures;
-
-#[path = "conformance_21_14_onboarding/smoke_frames.rs"]
-mod smoke_frames;

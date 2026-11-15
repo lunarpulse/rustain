@@ -8,8 +8,8 @@ use rustain::domain::models::{Turn, turn::block_item_id_for};
 
 use super::k5_copy::copy;
 use super::support::{
-    Fixture, TABLE, block, body_row, code, mixed_turn, open, part, rail_row, screen_rows, single,
-    status_row,
+    Fixture, TABLE, block, body_row, code, focus, mixed_turn, open, open_focused, part, parts,
+    rail_row, screen_rows, single, status_row,
 };
 
 /// Press each key; a step request runs the production host effect.
@@ -207,6 +207,65 @@ fn neighbours_stay_in_the_turn_keep_their_view_and_hide_at_the_ends() {
     press(&mut f, &[Key::Char('[')]);
     assert_eq!(title(&f), "Block · rust #1");
     assert!(presentation::consistent(&f.h.state));
+}
+
+/// The deleted native leg's table: 8 columns, 3 data rows.
+const WIDE_TABLE: &str = "| c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 |\n|---|---|---|---|---|---|---|---|\n| r1c1 | r1c2 | r1c3 | r1c4 | r1c5 | r1c6 | r1c7 | r1c8 |\n| r2c1 | r2c2 | r2c3 | r2c4 | r2c5 | r2c6 | r2c7 | r2c8 |\n| r3c1 | r3c2 | r3c3 | r3c4 | r3c5 | r3c6 | r3c7 | r3c8 |\n";
+
+#[test]
+fn a_numbers_toggle_survives_a_step_into_a_rendered_table_and_v_then_shows_it() {
+    let mut turn = Turn::new("fixture-model".into(), 0);
+    let first = part(&mut turn, &code(20));
+    part(&mut turn, WIDE_TABLE);
+    let first_id = block_item_id_for(&turn.id, first, 0);
+    let mut f = Fixture::new(80, 24, turn);
+    focus(&mut f, &first_id);
+    f.paint();
+    let baseline = screen_rows(&f);
+    open_focused(&mut f);
+    press(&mut f, &[Key::Char('#'), Key::Char(']')]);
+    assert_eq!(title(&f), "Block · table #2");
+    assert_eq!(
+        status_row(&f),
+        "table 2/2 · 8 cols × 3 rows · Rendered",
+        "numbers are kept but never painted on a Rendered table"
+    );
+    assert!(block(&f).numbers, "the toggle survived the step");
+    press(&mut f, &[Key::Char('v')]);
+    assert!(
+        status_row(&f).starts_with("table 2/2 · 8 cols × 3 rows · Source · numbers"),
+        "{}",
+        status_row(&f)
+    );
+    assert!(
+        body_row(&f, 0).starts_with("1 │ | c1 | c2 | c3 "),
+        "{}",
+        body_row(&f, 0)
+    );
+    press(&mut f, &[Key::Esc]);
+    assert!(f.h.state.modal_stack.is_empty());
+    assert_eq!(
+        screen_rows(&f),
+        baseline,
+        "every painted Stage row is restored after the step and toggles"
+    );
+}
+
+#[test]
+fn rendered_numbers_gutter_reaches_a_two_digit_last_line() {
+    let (mut f, id) = single(80, 24, &code(45));
+    open(&mut f, &id);
+    press(&mut f, &[Key::Char('#'), Key::Char('G')]);
+    assert!(status_row(&f).contains("· numbers"), "{}", status_row(&f));
+    let painted: Vec<String> = (0..parts(&f).body.height)
+        .map(|y| body_row(&f, y))
+        .collect();
+    assert!(
+        painted
+            .iter()
+            .any(|r| r.starts_with("45 │ │fn line_45() {}")),
+        "{painted:?}"
+    );
 }
 
 #[test]

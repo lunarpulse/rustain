@@ -71,6 +71,39 @@ fn code_longer_than_the_cap_shows_cap_rows_and_the_exact_remainder() {
     assert_eq!(marker(&f).as_deref(), Some("… 44 more lines"));
 }
 
+/// The default cap (no direct `code_max_rows` write) on a 45-line block that
+/// ends at the bottom of an 80x24 Stage: the remainder row stays inside the box.
+#[test]
+fn a_capped_block_at_the_bottom_of_an_80x24_stage_shows_its_remainder_inside_the_box() {
+    let mut turn = Turn::new("fixture-model".into(), 0);
+    part(&mut turn, &code(45));
+    let mut f = Fixture::new(80, 24, turn);
+    assert_eq!(f.h.state.code_max_rows, 30, "the default cap");
+    let max =
+        f.h.state
+            .total_content_height
+            .saturating_sub(usize::from(f.h.state.viewport_height));
+    assert!(
+        max > 0,
+        "control: the capped block overflows an 80x24 Stage"
+    );
+    // The Stage's scroll offset counts up from the bottom: 0 shows the end.
+    f.tabs.active_tab_mut().view_state.scroll_offset = 0;
+    f.h.state.set_scroll_offset(0);
+    f.paint();
+    let rows = screen_rows(&f);
+    let at = rows
+        .iter()
+        .position(|r| r.contains("… 15 more lines"))
+        .unwrap_or_else(|| panic!("remainder row missing: {rows:#?}"));
+    let row = rows[at].trim_end();
+    assert!(
+        row.find('│') < row.find('…') && row.ends_with('│'),
+        "the remainder sits between the box sides: {row:?}"
+    );
+    assert!(rows[at + 1].contains('└'), "{rows:#?}");
+}
+
 #[test]
 fn the_capped_block_stays_focusable_and_reports_every_line() {
     let f = capped(5, &code(45));
