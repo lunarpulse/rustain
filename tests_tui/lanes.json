@@ -37,6 +37,7 @@
     "test_story_20_9a_ephemeral_rows.py": "core",
     "test_story_20_9g_relock_refresh_order.py": "native_nightly",
     "test_story_20_9j_sign_in_link.py": "native_nightly",
+    "test_story_21_10_epic21_capture.py": "native_nightly",
     "test_story_21_12_markdown_structure.py": "core",
     "test_story_21_14_onboarding.py": "core",
     "test_story_21_1_notification_lifecycle.py": "core",

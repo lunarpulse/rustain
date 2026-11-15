@@ -324,3 +324,113 @@ def sha256_of(path: Path) -> str:
     import hashlib
 
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# ── Epic 21 frames (Story 21.10) ────────────────────────────────────────────
+
+
+def _box(screen: str, title: str):
+    """The box whose top border reads `┌ <title> …┐`, wherever it sits: a decision sheet
+    fills the Stage, but while a turn streams the Needs-you list and the sheet are
+    CENTERED overlays over the chat. Returns the box's rows cut by its own columns
+    (so animation outside it cannot disturb a stability check), or None while the
+    top-left corner, the right corner or the bottom border is not painted."""
+    lines = screen.split("\n")
+    for top, line in enumerate(lines):
+        left = line.find("┌ " + title)
+        if left < 0:
+            continue
+        right = line.find("┐", left)
+        if right < 0:
+            continue
+        rows = [line[left : right + 1]]
+        for below in lines[top + 1 :]:
+            row = below[left : right + 1]
+            if row.startswith("└") and row.endswith("┘"):
+                return tuple(rows) + (row,)
+            if not (row.startswith("│") and row.endswith("│")):
+                return None
+            rows.append(row)
+    return None
+
+
+def present_decision(
+    tui, kind: str, rail: tuple, timeout: float = 45, listed: str | None = None
+) -> str:
+    """Present the queued `kind` decision at ANY width, streaming or not, and return the
+    screen on which its frame has been unchanged for 600 ms.
+
+    `decision_frame_helpers.open_decision` is built for a quiet 80x24: it needs the
+    status row to carry `^X q` (a 130-column row truncates it) and a screen that is
+    unchanged as a whole (a streaming spinner never is). Here the walk is keyed on the
+    boxes themselves: the chip text `Needs you (` -> `Ctrl+X q` (asked again every 2 s)
+    -> the list box with the `kind` row selected -> `Enter` (every 2 s) -> the
+    `┌ Decision: <kind> ` box carrying the `Needs you › ` breadcrumb and every `rail`
+    item, unchanged in ITS OWN columns for 600 ms (the 21.1 inert window passes before a
+    key may be sent). `listed` is the kind's label on its Needs-you list row when that
+    differs from the frame title (the plan's row reads `Plan card`).
+    Bounded: AssertionError on timeout.
+    """
+    title = "Decision: " + kind
+    listed = listed or kind
+    deadline = time.monotonic() + timeout
+    asked = entered = None
+    frame = since = None
+    while True:
+        screen = tui.get_screen_text()
+        now = time.monotonic()
+        box = _box(screen, title)
+        body = " ".join(" ".join(row.strip("┌┐└┘│─ ").split()) for row in box) if box else ""
+        if box and "Needs you › " in body and all(item in body for item in rail):
+            if box != frame:
+                frame, since = box, now
+            elif now - since >= 0.6:
+                return screen
+        else:
+            frame = since = None
+            listing = _box(screen, "Needs you")
+            if listing:
+                selected = any(
+                    row.strip("│ ").startswith((f"▸ {listed} ·", f"▶ {listed} ·"))
+                    for row in listing
+                )
+                if selected and (entered is None or now - entered >= 2.0):
+                    tui.send("\r")
+                    entered = now
+            elif "Needs you (" in screen and (asked is None or now - asked >= 2.0):
+                tui.send("\x18q")
+                asked = now
+        assert now < deadline, f"{title} arrival:\n{screen}"
+
+
+def _settled(tui, needle: str, timeout: float, present: bool) -> str:
+    """Bounded structural wait: `needle` present (or absent) on a screen unchanged for 600 ms."""
+    deadline = time.monotonic() + timeout
+    previous, since = None, None
+    while True:
+        screen = tui.get_screen_text()
+        now = time.monotonic()
+        if (needle in screen) == present:
+            if screen != previous:
+                previous, since = screen, now
+            elif now - since >= 0.6:
+                return screen
+        else:
+            previous, since = None, None
+        assert now < deadline, (
+            f"{needle!r} never {'settled' if present else 'left'}:\n{screen}"
+        )
+
+
+def open_tool_inspector(tui, name: str, k: int, timeout: float = 15) -> str:
+    """From Chat focus with the tool block already focused (`focus_block`), `Enter`
+    opens S-TOOL; wait for its box title `┌Tool · <name> #<k>` and return the
+    settled screen."""
+    tui.send("\r")
+    return _settled(tui, f"┌Tool · {name} #{k}", timeout, True)
+
+
+def close_tool_inspector(tui, timeout: float = 15) -> str:
+    """`Esc` closes the tool inspector; wait for every `┌Tool · ` title to leave."""
+    tui.send("\x1b")
+    return _settled(tui, "┌Tool · ", timeout, False)

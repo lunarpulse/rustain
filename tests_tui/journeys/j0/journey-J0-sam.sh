@@ -141,7 +141,7 @@ printf 'scene:       tests_tui/journeys/j0/scenes/j0-sam.json sha256:%s\n' "$SCE
 printf 'run dir:     %s\n' "$RUN"
 
 # ── The walk ─────────────────────────────────────────────────────────────────
-export RUSTAIN_TUI_BINARY="$BIN"
+export RUSTAIN_TUI_BINARY="$BIN" RUSTAIN_ROOT
 say "journey_j0_sam.py — the beats"
 if python3 "$HERE/journey_j0_sam.py" "$WS" "$STUB_URL" "$HOME_DIR"; then
   SCRIPT_STATUS=0
@@ -161,7 +161,7 @@ cat "$STUB_LOG"
 # ── What this run did not prove (AC5) — a reading aid; no gate greps it ─────
 say "--- what this run did not prove ---"
 cat <<'LIMITS'
-diff timing: shown in the expanded block AFTER execution; the approval prompt
+diff timing: shown in the tool inspector's Diff tab AFTER execution; the approval prompt
   renders the tool input only
 first-run config: the harness wrote .rustain/config.toml and .claude/settings.json
   with EMPTY allow-lists; the copied .env was deleted before the first keystroke
@@ -170,20 +170,18 @@ Glob: there is no Glob tool in this product (15 tool definitions on the wire,
   second driver-written file; the needle that came back is J0-SAM-LIB-NEEDLE
 <100ms first frame: not measured (host timing)
 vim j/k/i: recorded, not asserted
-tool-block focus: every block is expandable by keyboard as of this tree
-  (Story 19.9 A3); the Write opened here is the 4th tool call, reached by
-  ]] to its turn and Tab to its invocation
-  accepted limit: keyboard focus follows a block's FIRST line (start-anchored
-  visibility), so a block expanded taller than the 30-row pane releases focus
-  once its ┌─ header scrolls above the viewport top, and Enter cannot collapse
-  it until its start scrolls back into view
+tool-block expansion: S-TOOL, the tool inspector (Story 21.5). Chat focus, `]]` to
+  the Write's turn and Tab to its invocation, `Enter` opens `Tool · Write #2`
+  (the turn's 2nd block), Right x3 reaches the Diff tab, `Esc` closes it; the
+  permission prompt is the `Decision: Permission` frame, answered only after it
+  settled
 live-LLM variant: not recorded
 LIMITS
 printf 'input line: '
-sed -n '/--- pane: write-expanded ---/,/--- end pane ---/p' "$PENDING" \
-  | grep -m1 -F '{"content"' || printf '(no input line captured)\n'
-printf '  ^ DF-19-1-INPUT-LINE-DUMP evidence, not fixed: the compact tool input is\n'
-printf '    dumped verbatim and truncated at the 130-column pane\n'
+sed -n '/--- pane: write-prompt ---/,/--- end pane ---/p' "$PENDING" \
+  | grep -m1 -F 'content: fn main()' || printf '(no input line captured)\n'
+printf '  ^ the Permission frame renders the tool input as `key: value` rows and cuts it\n'
+printf '    with `[r] Review first`; the dump is capture-side evidence, not asserted\n'
 
 # ── Stub teardown, then the verdict is the checker's, not this file's ───────
 say "stopping the scene provider"

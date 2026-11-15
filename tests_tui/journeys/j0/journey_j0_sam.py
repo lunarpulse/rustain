@@ -3,8 +3,9 @@
 
 Walks PRD Journey 0 through the REAL binary under a PTY against the 19.7 scene
 stub: first run with nothing but an env key, streaming, real `Read` tool blocks,
-a `Write` that raises a real permission prompt, `y`, the **inline line diff** in
-the expanded tool block (Story 19.1), `Ctrl+Q` (Story 19.3), and a second launch
+a `Write` that raises a real `Decision: Permission` frame (answered only after the
+frame settled, Story 21.6), `y`, the line diff on the Diff tab of the tool
+inspector (S-TOOL, Story 21.5), `Ctrl+Q` (Story 19.3), and a second launch
 that restores the session from `.meta.json`. The SHELL driver
 (`journey-J0-sam.sh`) owns the stub lifecycle, the receipt header and the three
 trailers (ledger / sessions / requests); this script owns the keystrokes, the
@@ -27,11 +28,11 @@ Beats are pinned by the Task-0 discoveries (story Debug Log, 2026-08-28):
 * The `Write` is the conversation's **fourth** tool call and lives in the second
   assistant turn as its **second** invocation — reaching it by keyboard is what
   Story 19.9's A3 fix makes possible, and the front-door proof of AC7.
-* The diff renders AFTER execution, in the expanded block; the approval prompt
-  renders the tool input only.
+* The diff renders AFTER execution, on the Diff tab of the tool inspector (S-TOOL, Story 21.5);
+  the permission prompt is the `Decision: Permission` frame and renders the tool input only.
 
-Usage (normally invoked by journey-J0-sam.sh):
-    RUSTAIN_TUI_BINARY=<bin> python3 journey_j0_sam.py <workspace> <stub-url> <scratch-home>
+Usage (normally invoked by journey-J0-sam.sh, which exports RUSTAIN_ROOT; a direct call must set both):
+    RUSTAIN_ROOT=<product checkout> RUSTAIN_TUI_BINARY=<bin> python3 journey_j0_sam.py <workspace> <stub-url> <scratch-home>
 
 Exit status: 0 only if every beat reached its pinned screen state.
 """
@@ -44,13 +45,23 @@ import sys
 import time
 from pathlib import Path
 
-RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+RUSTAIN_SRC = Path(os.environ["RUSTAIN_ROOT"]).resolve()  # the sh exports it; the binary may live anywhere
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 
-from _lib import focus_block, log, pane, quit_ctrl_q, require, sha256_of  # noqa: E402
+from _lib import (  # noqa: E402
+    close_tool_inspector,
+    focus_block,
+    log,
+    open_tool_inspector,
+    pane,
+    present_decision,
+    quit_ctrl_q,
+    require,
+    sha256_of,
+)
 from harness import RustainTUI  # noqa: E402
-from keys import ENTER, ESC  # noqa: E402
+from keys import ESC  # noqa: E402
 
 PERSONA = "scene-sam"
 TITLE = "Scene capture"  # the 19.7 stub serves this fixed title
@@ -79,6 +90,9 @@ LIB_RS = "// J0-SAM-LIB-NEEDLE\npub fn run(_v: u32) {}\n"
 # The Write is turn 2's SECOND invocation (turn 2 is Read → Write).
 WRITE_TURN = 2
 WRITE_INVOCATION = 1
+# S-TOOL numbers a turn's tool blocks from 1: the Write is turn 2's second block,
+# so it opens as `Tool · Write #2` (measured against the binary).
+WRITE_ORDINAL = WRITE_INVOCATION + 1
 
 
 def env_block(stub_url: str, home: Path) -> dict[str, str]:
@@ -120,6 +134,17 @@ def launch(workspace: Path, stub_url: str, home: Path, *, fresh: bool) -> Rustai
     return tui
 
 
+def inspector_tab(tui, tab: str) -> None:
+    """Move the open tool inspector to `tab` with Right (Output → Input → Raw → Diff),
+    waiting on the `[tab]` marker of each step."""
+    for name in ("Input", "Raw", "Diff"):
+        tui.send("\x1b[C")
+        require(tui, f"[{name}]", 10, f"inspector tab {name}")
+        if name == tab:
+            return
+    raise AssertionError(f"no inspector tab {tab!r}")
+
+
 def main() -> int:
     workspace, stub_url, home = (Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]))
 
@@ -149,7 +174,9 @@ def main() -> int:
 
     # ── Beat 3 — the climax: Write → prompt → y → executed block ─────────────
     tui.send_message("refactor the error handling in main.rs")
-    require(tui, "[y] Allow", 60, "write permission prompt")
+    # A Permission decision is a FRAME: it never receives a key on first sight.
+    # Settled (unchanged 600 ms), recorded, and only then answered.
+    present_decision(tui, "Permission", ("[y] Allow", "[n] Deny"), 60)
     pane(tui, "write-prompt")  # `[y] Allow` + `Write:` — the tool INPUT only
     tui.send("y")
     require(tui, "Rewrote the error handling", 60, "turn-2 reply")
@@ -187,11 +214,11 @@ def main() -> int:
     focus_block(
         tui, turn_index=WRITE_TURN, invocation_index=WRITE_INVOCATION, label="write block"
     )
-    tui.send(ENTER)
-    time.sleep(1.5)
-    pane(tui, "write-expanded")  # `- …J0-SAM-OLD-LINE` and `+ …`, no fallback text
-    tui.send(ENTER)  # re-collapse, so `Ctrl+Q` is not taken by a peek
-    time.sleep(0.8)
+    open_tool_inspector(tui, "Write", WRITE_ORDINAL)
+    pane(tui, "write-inspector")  # S-TOOL opened on the Output tab
+    inspector_tab(tui, "Diff")
+    pane(tui, "write-expanded")  # the Diff tab: `- …J0-SAM-OLD-LINE` and `+ …`
+    close_tool_inspector(tui)  # Esc closes S-TOOL, so `Ctrl+Q` is not taken by it
     pane(tui, "write-recollapsed")
 
     quit_ctrl_q(tui)
@@ -214,10 +241,11 @@ def main() -> int:
         invocation_index=WRITE_INVOCATION,
         label="restored write block",
     )
-    tui.send(ENTER)
-    time.sleep(1.5)
+    open_tool_inspector(tui, "Write", WRITE_ORDINAL)
+    inspector_tab(tui, "Diff")
     pane(tui, "restore-expanded")  # the persisted ToolOutput.diff still carries `- `
-    tui.send(ENTER)
+    close_tool_inspector(tui)
+    pane(tui, "restore-recollapsed")
     time.sleep(0.8)
 
     quit_ctrl_q(tui)

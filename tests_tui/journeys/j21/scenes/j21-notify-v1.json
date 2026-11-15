@@ -1,0 +1,17 @@
+{
+  "scene": "j21-notify-v1",
+  "personas": {
+    "scene-j21-notify": {
+      "turns": [
+        {
+          "expect": "J21-NOTIFY-MSG-1",
+          "content": [
+            {"type": "text", "text": "J21-NOTIFY-REPLY-1 acknowledged."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 210, "output_tokens": 9}
+        }
+      ]
+    }
+  }
+}

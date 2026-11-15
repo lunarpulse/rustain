@@ -1,0 +1,17 @@
+{
+  "scene": "j21-keys-v1",
+  "personas": {
+    "scene-j21-keys": {
+      "turns": [
+        {
+          "expect": "J21-KEYS-MSG-1",
+          "content": [
+            {"type": "text", "text": "J21-KEYS-REPLY-1 acknowledged."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 190, "output_tokens": 8}
+        }
+      ]
+    }
+  }
+}

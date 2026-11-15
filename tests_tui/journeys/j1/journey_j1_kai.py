@@ -3,7 +3,7 @@
 
 Walks Kai's day through the REAL binary under a PTY against the 19.7 scene
 stub: multi-tab, auto-title, `@file` mention, `/command`, plan card + `y`,
-fork at a message, model switcher, context meter. The SHELL driver
+fork at a message, model switcher, token meter. The SHELL driver
 (`journey-J1-kai.sh`) owns the stub lifecycle, the receipt header and the
 three trailers (ledger / sessions / requests); this script owns the
 keystrokes, the screen-state waits and the labelled pane dumps.
@@ -12,7 +12,7 @@ Evidence discipline (19.7 A4 / 18.4e): the screen is a WITNESS. What the gate
 asserts on is the stub's request log, the session files and the usage ledger —
 all printed by the shell driver after this script exits. Every pane dump below
 is a reading aid except where `gate J1` slices it for a screen-STATE marker
-(overlay open/closed, `ctx:` meter, sidebar).
+(overlay open/closed, `↑in ↓out` token meter, History window).
 
 Beats are pinned by the Task-0 discoveries (story Debug Log, 2026-08-26):
 the title call fires at the TurnComplete of the SECOND user exchange, so the
@@ -22,8 +22,8 @@ wait-for-title belongs after the `@file` turn; the fork targets message 1
 chord (Story 21.3; the old Ctrl+H/palette attempt, `DF-19-8-CTRLH-PTY`, is
 retired) and the `sidebar` pane dumped after it is the marker gate J1 slices.
 
-Usage (normally invoked by journey-J1-kai.sh):
-    RUSTAIN_TUI_BINARY=<bin> python3 journey_j1_kai.py <workspace> <stub-url> <scratch-home>
+Usage (normally invoked by journey-J1-kai.sh, which exports RUSTAIN_ROOT; a direct call must set both):
+    RUSTAIN_ROOT=<product checkout> RUSTAIN_TUI_BINARY=<bin> python3 journey_j1_kai.py <workspace> <stub-url> <scratch-home>
 
 Exit status: 0 only if every beat reached its pinned screen state.
 """
@@ -35,9 +35,12 @@ import sys
 import time
 from pathlib import Path
 
-RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+RUSTAIN_SRC = Path(os.environ["RUSTAIN_ROOT"]).resolve()  # the sh exports it; the binary may live anywhere
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
+sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 
+from _lib import present_decision  # noqa: E402
+from decision_frame_helpers import wait_frame  # noqa: E402
 from harness import RustainTUI  # noqa: E402
 from keys import CTRL_T, CTRL_X, ENTER, ESC, TAB  # noqa: E402
 
@@ -110,10 +113,10 @@ def main() -> int:
     ).start()
     require(tui, "Ready", 30, "boot")
 
-    # ── Beat 1 — message 1: the ctx meter moves on the first turn ────────────
+    # ── Beat 1 — message 1: the token meter moves on the first turn ──────────
     tui.send_message("start the auth refactor review")
     require(tui, "notes are loaded", 30, "turn-1 reply")
-    pane(tui, "after-turn-1")  # gate J1 slices this for `ctx: ` + `%`
+    pane(tui, "after-turn-1")  # gate J1 slices this for the `↑in ↓out` token meter
 
     # ── Beat 2 — @file mention (Tab accepts the dropdown entry) ──────────────
     tui.send("@")
@@ -150,10 +153,12 @@ def main() -> int:
 
     # ── Beat 4 — plan card, y to approve, one post-approval executor POST ────
     tui.send_message("propose a plan for the auth refactor")
-    require(tui, "Plan: Auth refactor", 30, "plan card raised")
+    # The Plan decision is a frame (it may first sit behind the Needs-you chip):
+    # opened, settled, recorded, and only then answered.
+    present_decision(tui, "Plan card", ("[y] Approve", "[n] Reject"), 30)
     pane(tui, "plan-card")
     tui.send("y")
-    require_gone(tui, "Plan: Auth refactor", 10, "plan card resolved")
+    require_gone(tui, "Decision: Plan", 10, "plan frame resolved")
     require(tui, "Plan complete", 30, "plan executed")
     pane(tui, "after-plan-exec")
 
@@ -162,7 +167,8 @@ def main() -> int:
     tui.send("g")
     time.sleep(0.8)
     tui.send("f")
-    require(tui, "Fork conversation", 10, "fork overlay at message 1")
+    # The Fork decision is a frame: settled, recorded, then answered.
+    wait_frame(tui, "Decision: Fork", ("[y] Fork", "[n] Cancel"), 15)
     pane(tui, "fork-overlay")
     tui.send("y")
     # Story 21.1: `Forked from …` is a Success toast (4 s TTL, chat pane bottom
@@ -193,24 +199,22 @@ def main() -> int:
     require_gone(tui, "Select Model", 10, "model switcher closed")
     pane(tui, "model-switcher-closed")
 
-    # ── Sidebar — the `Ctrl+X h` leader chord (Story 21.3; was DF-19-8-CTRLH-PTY) ─
+    # ── History window — the `Ctrl+X h` leader chord (Story 21.3/21.7) ──────────
     # Raw \x08 is Ctrl+H in crossterm 0.29 (never Backspace) and is unbound now;
-    # the History panel opens through the leader chord `Ctrl+X h`, which also
-    # reveals the sidebar column from the default Focus density (harness.open_history).
-    # The pane label `sidebar` is what gate J1 marker 4 slices for the History header.
-    tui.send(CTRL_X)
-    tui.wait_for_screen("[Esc] Cancel", timeout=3.0)
-    tui.send("h")
-    tui.wait_for_screen("┌History", timeout=5.0)  # the panel's own box title, not the menu item
+    # History is a frame over the Stage at every width (no sidebar column, no
+    # density), opened through the leader chord (harness.open_history).
+    # The pane label `sidebar` is kept: gate J1 marker 4 slices it for the History title.
+    tui.open_history()  # Ctrl+X h; waits on the History window's own `┌History` box title
     time.sleep(1.2)
     pane(tui, "sidebar")  # gate J1 asserts the History header here
     print(
         f"[witness] sidebar after Ctrl+X h: "
-        f"{'History panel PRESENT' if 'History' in tui.get_screen_text() else 'History panel ABSENT'}",
+        f"{'History window PRESENT' if '┌History' in tui.get_screen_text() else 'History window ABSENT'}",
         flush=True,
     )
 
-    # ── Quit (Ctrl+Q, Story 19.3) ─────────────────────────────────────────────
+    # ── Quit (Ctrl+Q, Story 19.3) — Esc closes the History window first ───────
+    tui.close_history()
     tui.send("\x11")
     quit_deadline = time.monotonic() + 10
     while tui.child.isalive() and time.monotonic() < quit_deadline:

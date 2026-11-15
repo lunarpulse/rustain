@@ -35,10 +35,11 @@
 #
 # # Honest limits, printed in the receipt's final block
 #
-# * The diff is shown AFTER execution, inside the expanded block. The approval
-#   prompt renders the tool INPUT only, so the PRD's "reads the diff inline …
-#   presses y" sentence order is aspiration; the shipped order is prompt → `y`
-#   → executed block → expand → diff.
+# * The diff is shown AFTER execution, inside the tool inspector (Story 21.5:
+#   `Enter` on the focused block opens `Tool · Write #1`, the `Diff` tab). The
+#   approval frame renders the tool INPUT only, so the PRD's "reads the diff
+#   inline … presses y" sentence order is aspiration; the shipped order is
+#   `Decision: Permission` → `y` → executed block → inspector → diff.
 # * The PRD's `curl https://advisory-db…` is replaced by a local `printf`: a
 #   deterministic capture makes no network call. The prompt and the stdout
 #   round-trip are what J2 actually claims.
@@ -156,7 +157,7 @@ printf 'scene:       tests_tui/journeys/j2/scenes/j2-jordan.json sha256:%s\n' "$
 printf 'run dir:     %s\n' "$RUN"
 
 # ── The walk ─────────────────────────────────────────────────────────────────
-export RUSTAIN_TUI_BINARY="$BIN"
+export RUSTAIN_TUI_BINARY="$BIN" RUSTAIN_ROOT
 say "journey_j2_jordan.py — the beats"
 if python3 "$HERE/journey_j2_jordan.py" "$WS" "$STUB_URL" "$HOME_DIR"; then
   SCRIPT_STATUS=0
@@ -176,8 +177,8 @@ cat "$STUB_LOG"
 # ── What this run did not prove (AC5) — a reading aid; no gate greps it ─────
 say "--- what this run did not prove ---"
 cat <<'LIMITS'
-diff timing: shown in the expanded block AFTER execution; the approval prompt
-  renders the tool input only
+diff timing: shown in the tool inspector (`Tool · Write #1`, `Diff` tab) AFTER
+  execution; the `Decision: Permission` frame renders the tool input only
 front door: CONFIG provider path (two stubbed providers, scene + openrouter) —
   gate J0 is the env-path capture; the harness-copied .env was deleted before
   the first keystroke and both allow-lists are EMPTY
@@ -194,13 +195,10 @@ model switch: proved from the request log's per-row `model`/`path` fields; the
   bare "Switched to" cannot tell them apart)
 agents: activation is a persona / tool-filter / model swap, not a subagent
   dispatch — the ` Agents ` panel is never asserted for it
-tool-block focus: every block is expandable by keyboard as of this tree
-  (Story 19.9 A3); the Write opened here is the 3rd tool call and the Read the
-  1st, each reached by ]] to its turn and Tab to its invocation
-  accepted limit: keyboard focus follows a block's FIRST line (start-anchored
-  visibility), so a block expanded taller than the 30-row pane releases focus
-  once its ┌─ header scrolls above the viewport top, and Enter cannot collapse
-  it until its start scrolls back into view
+tool-block focus: the Read (assistant turn 1) and the Write (assistant turn 3)
+  are each the only invocation of their turn, each reached by ]] to its turn;
+  `Enter` on the focused block opens the tool inspector (`Tool · <name> #1`,
+  Story 21.5) and `Esc` closes it — there is no inline expansion any more
 fixture content: the scripted fix (`unwrap_or(0)`) was chosen for its diff
   shape and A16's <=60-character line limit; it silently defaults invalid
   input to 0 and is NOT a recommended remediation for the unchecked unwrap
@@ -210,8 +208,9 @@ LIMITS
 printf 'input line: '
 sed -n '/--- pane: fix-expanded ---/,/--- end pane ---/p' "$PENDING" \
   | grep -m1 -F '{"content"' || printf '(no input line captured)\n'
-printf '  ^ DF-19-1-INPUT-LINE-DUMP evidence, not fixed: the compact tool input is\n'
-printf '    dumped verbatim and truncated at the 130-column pane\n'
+printf '  ^ the fix-expanded pane is the tool inspector `Diff` tab, which does not print the\n'
+printf '    compact tool-input line, so no input line is expected here; the earlier\n'
+printf '    DF-19-1-INPUT-LINE-DUMP evidence (input dumped at the 130-column pane) is no longer captured\n'
 
 # ── Stub teardown, then the verdict is the checker's, not this file's ───────
 say "stopping the scene provider"

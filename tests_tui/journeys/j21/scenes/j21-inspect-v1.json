@@ -1,0 +1,25 @@
+{
+  "scene": "j21-inspect-v1",
+  "personas": {
+    "scene-j21-inspect": {
+      "wire": "anthropic",
+      "turns": [
+        {
+          "expect": "read the inspect notes",
+          "content": [
+            {"type": "text", "text": "J21-INSPECT-LEAD reading the notes file now."},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "j21-inspect-notes.txt"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 40, "output_tokens": 30}
+        },
+        {
+          "expect": "J21-INSPECT-FILE-LINE-2",
+          "content": [{"type": "text", "text": "J21-INSPECT-DONE the notes were read."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 80, "output_tokens": 12}
+        }
+      ]
+    }
+  }
+}

@@ -168,7 +168,7 @@ printf 'skill:       tests_tui/journeys/j3/skills/safe-deploy/SKILL.md sha256:%s
 printf 'run dir:     %s\n' "$RUN"
 
 # ── The walk ─────────────────────────────────────────────────────────────────
-export RUSTAIN_TUI_BINARY="$BIN"
+export RUSTAIN_TUI_BINARY="$BIN" RUSTAIN_ROOT
 say "journey_j3_marco.py — the beats"
 if python3 "$HERE/journey_j3_marco.py" "$WS" "$STUB_URL" "$HOME_DIR" "$WS_DECLINE" "$SCRATCH"; then
   SCRIPT_STATUS=0
@@ -235,13 +235,13 @@ permission prompts DO paint for admitted Bash. `helm diff` and `kubectl get`
   `allowed_tools = []`; no Bash request is silently pre-approved.
 
 safe-deploy emits NO FR42-a disclosure now that both patterns are enforceable.
-  Launch 1 still switches from Focus to Monitor before submission 2, making
-  that absence observable rather than an artefact of Focus queueing. The live
+  Story 21.7 deleted the densities, so the old Focus -> Monitor switch before
+  submission 2 is gone; Story 21.1 made every notice a toast in every layout,
+  so a disclosure would be visible on the permission pane. The live
   positive control is the cloned `canary-watch` runbook with `Read Glob`; its
   raw intersection with safe-deploy retains `Read`, avoiding the fatal disjoint
   branch, and its unavailable `Glob` produces exactly one Advisory after its
-  own trust prompt. Launch 2 also switches to Monitor because
-  DF-19-10-ADVISORY-QUEUED-IN-FOCUS remains open.
+  own trust prompt.
 
 the old blocking wait on product text `cannot be honoured in` was REMOVED when
   that safe-deploy disclosure became correctly absent. Its product-minted
@@ -264,16 +264,16 @@ invocation-form bypasses remain: `/bin/kubectl`, `bash -c '…'`, flag reorderin
   matcher is deliberately a conservative command allowlist, not a shell or
   program policy engine.
 
-`deploy-read` and `migration-read` are BLOCK HEADERS, not expanded bodies,
-  because a one-assistant-turn conversation cannot seat `focused_turn` through
-  `]]`/`[[`; therefore Tab cannot cycle its tool blocks
-  (DF-19-10-SINGLE-TURN-FOCUS-UNREACHABLE). The wire read-backs retain the
-  load-bearing evidence.
+`deploy-read` and `migration-read` are BLOCK HEADERS, not inspector bodies:
+  only invocation 0 (`Tool · activate_skill #1`) is opened, by `Enter` on the
+  turn's first visible block (Story 21.5); a one-assistant-turn conversation
+  cannot seat `focused_turn` through `]]`/`[[`, so Tab cannot reach the other
+  blocks (DF-19-10-SINGLE-TURN-FOCUS-UNREACHABLE). The wire read-backs retain
+  the load-bearing evidence.
 
 trust is PER-CONVERSATION and MEMORY-ONLY. Launch 2 creates a new conversation
-  and asks for safe-deploy again, behaviour consistent with the current prompt.
-  The separate wording/persistence question remains
-  DF-19-10-TRUST-PROMPT-SAYS-SESSION.
+  and asks for safe-deploy again; the `Decision: Skill trust` frame now says
+  "for this conversation" (Story 21.1 AC7), so the re-ask is truthful.
 
 tier 3 is NOT captured. Model-driven activation does not call
   `SecurityPort::add_active_skill_dir`; this fixture is harmless because it
@@ -297,8 +297,9 @@ waits on STUB-SERVED strings are: "Breaking migration detected",
   "Standing by on the preview step.", "The team runbooks are in place.",
   "Team control complete.", "Understood.", and the two Read block headers whose
   paths are scene tool inputs. Product-minted waits include `Ready`,
-  `/safe-deploy`, both trust prompts, `Inspect skill:`, both Bash `[y] Allow`
-  cards, the `Glob` Advisory, `Discovered skills:`, and activation/decline
+  `/safe-deploy`, every `Decision: Skill trust` frame, `Inspect skill:`, both
+  `Decision: Permission` `[y] Allow` frames, the `Glob` Advisory,
+  `Discovered skills:`, and activation/decline
   results.
 
 no live-LLM variant is recorded or gated.

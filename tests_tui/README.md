@@ -394,6 +394,32 @@ class TestMyFeature:
 
 **Waits.** Waits are bounded by the wall clock (`wait_for_screen`, `wait_for_screen_not_contains` and `wait_for_export_file` check a monotonic deadline, however slow a read or a sleep is). Never wait on a toast with `wait_for_screen`: a short-lived toast can paint and expire between two reads. Wait on a durable fact (the status row's `mode_segment`, a file, a log line), or on `wait_for_notification(text, mark, severity)` after taking `mark = tui.notification_mark()` just before the triggering key (it returns `"log"` once the Notification Log lists the notice with a time at or after the mark's second: the log is the only freshness authority and a toast is never evidence). When the toast row itself is the claim, start the harness with `notification_ttl_secs=30` (Info and Success lifetime in the workspace config) and dismiss the toast with `Ctrl+X x`. A startup notice is read with a mark built before `start()` (`NotificationMark(int(time.time()))`), and a folded leg resets popup state (`Esc`, `Ctrl+U`, wait for the token to leave) before the next leg.
 
+## Epic 21 capture journey (J21)
+
+J21 is an Epic 21 capture journey, **not a PRD journey**. `test_story_21_10_epic21_capture.py` drives the real binary through the scene provider, one leg per Epic 21 receipt theme, and writes a `journey-J21-<STAMP>.transcript.txt` receipt that the unchanged `.github/scripts/check-receipt.sh` accepts (the journey arm: product-minted ledger millisecond window, scene hash, stamp). The writer runs that verifier on its own receipt and fails the case on any `FAIL`; a duplicate pane label, a missing `source:` hash, a `/home/` substring or a write under `tests_tui/journeys/` raises.
+
+| Leg | Theme | Scene |
+|---|---|---|
+| `notify` | notification expiry and the S-LOG | `journeys/j21/scenes/j21-notify-v1.json` |
+| `keys` | portable key truth: the `Ctrl+X` menu from the generated registry fixture | `j21-keys-v1.json` |
+| `inspect` | layered inspection: S-TOOL, S-LOG breadcrumb, Mission Control | `j21-inspect-v1.json` |
+| `decide` | decision exactness: permission and plan frames, the queue | `j21-decide-v1.json` |
+| `attach` | attached parity: writer and read-only mirror, S-THREAD | `j21-attach-v1.json` |
+| `markdown` | markdown, display width and S-BLOCK | `j21-markdown-v1.json` |
+| `onboard` | the onboarding tour and the team start | `j21-onboard-v1.json` |
+
+Scenes are versioned and never edited (`-v2` for a change): receipts pin them by hash.
+
+- `RUSTAIN_J21_VIEWPORT` = `80x24` (default), `60x16` or `130x30`; anything else fails. The viewport is **not** a test id: `test_j21_leg[<leg>]` exists once per leg, so the suite has no 60x16/130x30 id for a demotion to touch.
+- `RUSTAIN_J21_RECEIPT_DIR` names the directory receipts are written to (`<leg>-<WxH>-<YYYYmmddTHHMMSSffffffZ>-<uuid32>/journey-J21-<STAMP>.transcript.txt`). Without it the receipt lives and dies in the run's scratch root (`/tmp/j21-<leg>-…`), removed after a clean run. `RUSTAIN_J21_BINARY_LABEL` overrides the `binary:` header (default: the binary's file name); the header never carries a home path.
+- **Nightly role.** The offline controls (`test_j21_receipt_writer_controls`, nine `test_j21_predicate_*`) and the seven 80x24 legs sit in the `native_nightly` lane and run in the parity nightly leg on the debug binary: the legs are the Epic 21 pre-release smoke. No J21 case enters a per-PR job.
+- **Campaign (capture row 21-10).** On the release binary the integrator's gate retained, once per leg and viewport: `RUSTAIN_TUI_BINARY=<release> RUSTAIN_J21_BINARY_LABEL=rustain-four-release RUSTAIN_J21_VIEWPORT=<WxH> RUSTAIN_J21_RECEIPT_DIR=<scratch>/receipts pytest 'tests_tui/test_story_21_10_epic21_capture.py::test_j21_leg[<leg>]' -p no:rerunfailures -n 0 --timeout=420`. The receipts go to the outer receipt archive (D-17), not into this tree; the outer `21-10-smoke/native/verify-sources.py` binds each receipt's `source:` and `scene:` hash to the product bytes at the commit its `tree:` line names (the verifier itself does not check `source:`).
+- **Single attempt.** Each campaign case runs once. A failure is quarantined byte-identically, classified (driver, product, environment) and reported; a second execution needs the integrator's approval naming the cause; a product defect stops that leg and becomes a DF.
+
+| A receipt proves | A receipt does not prove |
+|---|---|
+| The named binary (sha256) under the named scene (sha256), at the named viewport, painted the asserted rows when each structural wait settled; the run happened inside its recorded hour (ledger window); the receipt passes the unchanged verifier and, through `verify-sources.py`, its `source:` hash equals the driver bytes at the recorded `tree:` commit. | Authenticity (receipts are unsigned); colour, style or contrast (`NO_COLOR=1`); real terminal emulators, fonts, mouse, screen readers, Windows; a real provider (the scene stub serves the model); latency; sizes other than the three; behaviour the Rust tests own (each leg names them in its NOT PROVEN block); visual stability across runs (J21 is evidence, not a golden diff). |
+
 ## Lanes
 
 Every test belongs to exactly one lane:

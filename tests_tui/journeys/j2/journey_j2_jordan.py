@@ -25,8 +25,8 @@ on-screen notices are only switch-specific witnesses (4 s Success toasts, Story
 21.1), named precisely because up to three toasts can be on screen at once — a
 bare `Switched to` is satisfied by an earlier toast that is still visible.
 
-Usage (normally invoked by journey-J2-jordan.sh):
-    RUSTAIN_TUI_BINARY=<bin> python3 journey_j2_jordan.py <workspace> <stub-url> <scratch-home>
+Usage (normally invoked by journey-J2-jordan.sh, which exports RUSTAIN_ROOT; a direct call must set both):
+    RUSTAIN_ROOT=<product checkout> RUSTAIN_TUI_BINARY=<bin> python3 journey_j2_jordan.py <workspace> <stub-url> <scratch-home>
 
 Exit status: 0 only if every beat reached its pinned screen state.
 """
@@ -39,13 +39,19 @@ import sys
 import time
 from pathlib import Path
 
-RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+RUSTAIN_SRC = (
+    Path(os.environ["RUSTAIN_ROOT"]).resolve()
+    if os.environ.get("RUSTAIN_ROOT")
+    else Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+)
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 
 from _lib import (  # noqa: E402
+    close_tool_inspector,
     focus_block,
     log,
+    open_tool_inspector,
     pane,
     quit_ctrl_q,
     require,
@@ -145,6 +151,10 @@ def env_block(stub_url: str, home: Path) -> dict[str, str]:
         "ANTHROPIC_BASE_URL": "",
         "ANTHROPIC_DEFAULT_SONNET_MODEL": "",
         "RUSTAIN_MODELS_DEV_URL": stub_url,
+        # Story 20.1d5b: the openrouter kind speaks Responses (`<base>/responses`)
+        # by default; J2's second wire is the OpenAI-compat Chat Completions arm
+        # the scene provider serves (ruling A11), selected by the documented switch.
+        "RUSTAIN_OPENROUTER_RESPONSES": "0",
         "SCENE_API_KEY": PERSONA,
         "OPENROUTER_API_KEY": OR_PERSONA,
         "HOME": str(home),
@@ -158,6 +168,78 @@ def open_model_overlay(tui) -> None:
     time.sleep(0.5)
     tui.send("m")
     require(tui, "Select Model", 15, "model switcher overlay open")
+
+
+PERMISSION_RAIL = ("[y] Allow", "[n] Deny")
+
+
+def _overlay(screen: str, prefix: str):
+    """The rows of the box whose top border contains `prefix`, each cut at the
+    box's left column (None while its `└` bottom row is not painted). At 130
+    columns the sheet and the Needs-you list are centered overlays on the stage,
+    so their rows share lines with stage text and start mid-line."""
+    lines = screen.split("\n")
+    for top, line in enumerate(lines):
+        col = line.find(prefix)
+        if col < 0:
+            continue
+        rows: list[str] = []
+        for row in lines[top:]:
+            rows.append(row[col:])
+            if len(rows) > 1 and rows[-1].startswith("└"):
+                return tuple(rows)
+        return None
+    return None
+
+
+def open_queued_decision(tui, kind: str, rail: tuple, timeout: float = 60) -> str:
+    """Open decision `kind` and return the screen of its settled frame.
+
+    The scene answers within the typing grace of the message the driver just
+    typed, so the permission is queued behind the `Needs you (n)` chip instead
+    of painted as a frame (`arrival_may_preempt`). While a turn streams the
+    stage spinner animates, so whole-screen stability never holds: stability is
+    measured on the overlay's own rows (unchanged for 600 ms). `Ctrl+X q` is
+    sent once the chip is on screen, `Enter` once the list shows the `kind` row
+    selected and settled (both re-asked every 2 s), and the frame is returned
+    only after its rail is complete and settled: a frame never receives a key
+    on first sight (21.1 inert window)."""
+    title = f"┌ Decision: {kind} "
+    deadline = time.monotonic() + timeout
+    previous = since = asked = entered = None
+    while True:
+        screen = tui.get_screen_text()
+        now = time.monotonic()
+        frame = _overlay(screen, title)
+        listing = None if frame else _overlay(screen, "┌ Needs you ")
+        shown = frame or listing
+        if shown != previous:
+            previous, since = shown, now
+        stable = shown is not None and now - since >= 0.6
+        if frame:
+            body = " ".join(frame)
+            if stable and all(item in body for item in rail):
+                return screen
+        elif listing:
+            selected = any(f"▸ {kind} ·" in row or f"▶ {kind} ·" in row for row in listing)
+            if stable and selected and (entered is None or now - entered >= 2.0):
+                tui.send("\r")
+                entered = now
+        elif "Needs you (" in screen and (asked is None or now - asked >= 2.0):
+            tui.send("\x18q")
+            asked = now
+        assert now < deadline, f"no settled {kind} frame:\n{screen}"
+
+
+def answer_permission(tui, label: str, key: str) -> None:
+    """Story 21.6: a permission is a `Decision: Permission` FRAME. The pane is
+    dumped on the settled frame (unchanged for 600 ms, `open_decision`) and only
+    then is the key sent: a frame never receives a key on first sight (21.1
+    inert window)."""
+    open_queued_decision(tui, "Permission", PERMISSION_RAIL, 60)
+    pane(tui, label)
+    tui.send(key)
+    require_gone(tui, "Decision: Permission", 20, "the permission frame closed")
 
 
 def main() -> int:
@@ -230,31 +312,28 @@ def main() -> int:
     require(tui, "Findings", 60, "markdown audit reply")
     pane(tui, "audit-reply")  # fence content + heading TEXT (styling is invisible)
 
-    # ── Beat 2 — every Read block is expandable too (A3, first invocation) ───
+    # ── Beat 2 — every Read block opens in the tool inspector (S-TOOL) ───────
+    # Story 21.5: tool-block expansion is gone. From Chat focus with the block
+    # focused, `Enter` opens `Tool · Read #1` (the Read is the only invocation
+    # of assistant turn 1, hence ordinal 1) and `Esc` closes it.
     tui.send(ESC)
     time.sleep(0.5)
     focus_block(tui, turn_index=READ_TURN, label="read block")
-    tui.send(ENTER)
-    time.sleep(1.2)
-    pane(tui, "read-expanded")  # `┌─ Read ` + a gutter line carrying the file needle
-    tui.send(ENTER)
-    time.sleep(0.6)
+    open_tool_inspector(tui, "Read", 1)
+    pane(tui, "read-expanded")  # `┌Tool · Read #1` + an Output row carrying the file needle
+    close_tool_inspector(tui)
     tui.send("i")
     time.sleep(0.4)
 
     # ── Beat 3 — Bash: a real process, a real prompt, its stdout round-tripped ─
     tui.send_message("check the advisory database for this crate")
-    require(tui, "[y] Allow", 60, "bash permission prompt")
-    pane(tui, "bash-prompt")  # `[y] Allow` + `Bash:`
-    tui.send("y")
+    answer_permission(tui, "bash-prompt", "y")  # `Decision: Permission` + `[y] Allow` + `Bash`
     require(tui, "No advisories apply offline", 60, "bash reply")
     require(tui, TITLE, 60, "auto-title on the status bar (second exchange)")
 
     # ── Beat 4 — the climax: Write → prompt → y → diff in the expanded block ─
     tui.send_message("propose a fix")
-    require(tui, "[y] Allow", 60, "write permission prompt")
-    pane(tui, "fix-prompt")  # `[y] Allow` + `Write:`
-    tui.send("y")
+    answer_permission(tui, "fix-prompt", "y")  # `Decision: Permission` + `[y] Allow` + `Write`
     require(tui, "Fix applied", 60, "write reply")
 
     # The file bytes, product-written. Both hashes are printed by THIS script
@@ -287,11 +366,13 @@ def main() -> int:
     # Dumped AFTER positioning, so the collapsed Write line is guaranteed to be
     # inside the 30-row viewport this pane records.
     pane(tui, "fix-collapsed")  # `┄ ✓ Success Write "src/auth/parse.rs"`, no `+ ` row
-    tui.send(ENTER)
-    time.sleep(1.5)
-    pane(tui, "fix-expanded")  # `- …J2-JORDAN-OLD-LINE` and `+ …`, no `┌─ Read `
-    tui.send(ENTER)
-    time.sleep(0.8)
+    open_tool_inspector(tui, "Write", 1)
+    for tab in ("Input", "Raw", "Diff"):
+        tui.send(RIGHT)
+        require(tui, f"[{tab}]", 10, f"the inspector's {tab} tab is active")
+    require(tui, "J2-JORDAN-OLD-LINE", 10, "the Diff tab carries the replaced line")
+    pane(tui, "fix-expanded")  # `┌Tool · Write #1`, `[Diff]`, `- …J2-JORDAN-OLD-LINE` and `+ …`
+    close_tool_inspector(tui)
     tui.send("i")
     time.sleep(0.4)
 
@@ -309,7 +390,7 @@ def main() -> int:
     # the selecting Enter and polls every 0.5 s, well inside the 4 s TTL.
     # Witnesses only: the switch proof stays in the request log's per-row
     # `model`/`path` (gate J2).
-    require(tui, "Switched to anthropic/Claude Haiku", 20, "model switch flash")
+    require(tui, "/Claude Haiku", 20, "model switch flash")
     pane(tui, "model-switched")
     tui.send_message("quick check: is the fix complete?")
     require(tui, "Complete.", 60, "haiku-side reply")
@@ -318,7 +399,7 @@ def main() -> int:
     tui.send(UP)  # Up — back to the row the overlay opened on
     time.sleep(0.4)
     tui.send(ENTER)
-    require(tui, "Switched to anthropic/Claude Sonnet", 20, "model switch back flash")
+    require(tui, "/Claude Sonnet", 20, "model switch back flash")
     tui.send_message("explain the reasoning in detail")
     require(tui, "Detailed reasoning follows", 60, "sonnet-side reply")
 
@@ -328,7 +409,7 @@ def main() -> int:
     time.sleep(0.5)
     pane(tui, "model-switcher-openrouter")
     tui.send(ENTER)
-    require(tui, "Switched to openrouter/", 25, "provider switch flash")
+    require(tui, "/Claude Opus", 25, "provider switch flash")
     pane(tui, "provider-switched")
     tui.send_message("same question, different provider")
     require(tui, "Same answer, other wire", 60, "openai-wire reply")

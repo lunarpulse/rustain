@@ -1,0 +1,66 @@
+{
+  "scene": "j21-decide-v1",
+  "personas": {
+    "scene-j21-decide": {
+      "turns": [
+        {
+          "expect": "J21-DECIDE-MSG-1",
+          "content": [
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "j21-decide-one.txt", "content": "J21-DECIDE-BODY-ONE\n"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 210, "output_tokens": 40}
+        },
+        {
+          "expect": "Permission denied by user",
+          "content": [
+            {"type": "text", "text": "J21-DECIDE-REPLY-1 the first write was denied."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 300, "output_tokens": 12}
+        },
+        {
+          "expect": "J21-DECIDE-MSG-2",
+          "content": [
+            {"type": "tool_use", "name": "propose_plan", "input": {"title": "J21-DECIDE-PLAN", "tasks": [{"title": "J21-DECIDE-TASK-ONE", "description": "first task"}]}},
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "j21-decide-two.txt", "content": "J21-DECIDE-BODY-TWO\n"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 420, "output_tokens": 60}
+        },
+        {
+          "expect": "Plan proposed for user approval",
+          "content": [
+            {"type": "text", "text": "J21-DECIDE-REPLY-2 the plan was proposed and the second write was denied."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 600, "output_tokens": 16}
+        },
+        {
+          "expect": "Now executing task 1: J21-DECIDE-TASK-ONE",
+          "content": [
+            {"type": "text", "text": "J21-DECIDE-REPLY-3 task one acknowledged."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 700, "output_tokens": 10}
+        },
+        {
+          "expect": "J21-DECIDE-MSG-3",
+          "content": [
+            {"type": "tool_use", "name": "exit_plan_mode", "input": {"summary": "J21-DECIDE-PLAN-APPROVAL summary"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 800, "output_tokens": 30}
+        },
+        {
+          "expect": "Plan sent for user approval",
+          "content": [
+            {"type": "text", "text": "J21-DECIDE-REPLY-4 the plan was sent for approval."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 900, "output_tokens": 14}
+        }
+      ]
+    }
+  }
+}

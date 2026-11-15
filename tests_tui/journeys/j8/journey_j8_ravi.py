@@ -74,8 +74,8 @@ traversal refusal and `source.rs`'s collision refusal. ⛔ The turn's reply is
 stub-served and is asserted NOWHERE; what is asserted is that the turn HAPPENED
 under the installed profile.
 
-Usage (normally invoked by journey-J8-ravi.sh):
-    RUSTAIN_TUI_BINARY=<bin> python3 journey_j8_ravi.py <workspace> <stub-url> \
+Usage (normally invoked by journey-J8-ravi.sh, which exports RUSTAIN_ROOT; a direct call must set both):
+    RUSTAIN_ROOT=<product checkout> RUSTAIN_TUI_BINARY=<bin> python3 journey_j8_ravi.py <workspace> <stub-url> \
         <scratch-home> <run-dir>
 
 Exit status: 0 only if every beat reached its pinned state and every pinned exit
@@ -88,7 +88,7 @@ import os
 import sys
 from pathlib import Path
 
-RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+RUSTAIN_SRC = Path(os.environ["RUSTAIN_ROOT"]).resolve()  # the sh exports it; the binary may live anywhere
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 

@@ -43,8 +43,8 @@ disclosure (`turn_driver.rs:493-512`), both `activate_skill` results
 (`toolset_adapter.rs:1643`/`:1652`) — and the stub cannot make the binary say
 them. ⛔ Nothing asserts on a string THIS SCRIPT printed (the 19.9 HIGH).
 
-Usage (normally invoked by journey-J3-marco.sh):
-    RUSTAIN_TUI_BINARY=<bin> python3 journey_j3_marco.py \
+Usage (normally invoked by journey-J3-marco.sh, which exports RUSTAIN_ROOT; a direct call must set both):
+    RUSTAIN_ROOT=<product checkout> RUSTAIN_TUI_BINARY=<bin> python3 journey_j3_marco.py \
         <workspace> <stub-url> <scratch-home> <decline-workspace> <bare-repo>
 
 Exit status: 0 only if every beat reached its pinned screen state, the committed
@@ -59,12 +59,18 @@ import sys
 import time
 from pathlib import Path
 
-RUSTAIN_SRC = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+RUSTAIN_SRC = (
+    Path(os.environ["RUSTAIN_ROOT"]).resolve()
+    if os.environ.get("RUSTAIN_ROOT")
+    else Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve().parents[2]
+)
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui"))
 sys.path.insert(0, str(RUSTAIN_SRC / "tests_tui" / "journeys"))
 
 from _lib import (  # noqa: E402
+    close_tool_inspector,
     log,
+    open_tool_inspector,
     pane,
     quit_ctrl_q,
     require,
@@ -73,7 +79,7 @@ from _lib import (  # noqa: E402
 )
 from fixtures.skills import write_workspace_skill  # noqa: E402
 from harness import RustainTUI  # noqa: E402
-from keys import CTRL_X, ENTER, ESC, TAB  # noqa: E402
+from keys import ESC  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SKILL_SRC = HERE / "skills" / "safe-deploy" / "SKILL.md"
@@ -277,6 +283,93 @@ def _git(args: list[str], cwd: Path) -> None:
         sys.exit(1)
 
 
+PERMISSION_RAIL = ("[y] Allow", "[n] Deny")
+SKILL_TRUST_RAIL = ("[y] Trust", "[n] Decline", "[i] Inspect")
+
+
+def _overlay(screen: str, prefix: str):
+    """The rows of the box whose top border contains `prefix`, each cut at the
+    box's left column (None while its `└` bottom row is not painted). At 130
+    columns the sheet and the Needs-you list are centered overlays on the stage,
+    so their rows share lines with stage text and start mid-line."""
+    lines = screen.split("\n")
+    for top, line in enumerate(lines):
+        col = line.find(prefix)
+        if col < 0:
+            continue
+        rows: list[str] = []
+        for row in lines[top:]:
+            rows.append(row[col:])
+            if len(rows) > 1 and rows[-1].startswith("└"):
+                return tuple(rows)
+        return None
+    return None
+
+
+def open_queued_decision(tui, kind: str, rail: tuple, timeout: float = 60) -> str:
+    """Open decision `kind` and return the screen of its settled frame.
+
+    A decision that arrives within the typing grace of the driver's last
+    message (or while a turn streams) is queued behind the `Needs you (n)` chip
+    instead of painted as a frame (`arrival_may_preempt`). While a turn streams
+    the stage spinner animates, so whole-screen stability never holds:
+    stability is measured on the overlay's own rows (unchanged for 600 ms).
+    `Ctrl+X q` is sent once the chip is on screen, `Enter` once the list shows
+    the `kind` row selected and settled (both re-asked every 2 s), and the frame
+    is returned only after its rail is complete and settled: a frame never
+    receives a key on first sight (21.1 inert window)."""
+    title = f"┌ Decision: {kind} "
+    deadline = time.monotonic() + timeout
+    previous = since = asked = entered = None
+    while True:
+        screen = tui.get_screen_text()
+        now = time.monotonic()
+        frame = _overlay(screen, title)
+        listing = None if frame else _overlay(screen, "┌ Needs you ")
+        shown = frame or listing
+        if shown != previous:
+            previous, since = shown, now
+        stable = shown is not None and now - since >= 0.6
+        if frame:
+            body = " ".join(frame)
+            if stable and all(item in body for item in rail):
+                return screen
+        elif listing:
+            selected = any(f"▸ {kind} ·" in row or f"▶ {kind} ·" in row for row in listing)
+            if stable and selected and (entered is None or now - entered >= 2.0):
+                tui.send("\r")
+                entered = now
+        elif "Needs you (" in screen and (asked is None or now - asked >= 2.0):
+            tui.send("\x18q")
+            asked = now
+        assert now < deadline, f"no settled {kind} frame:\n{screen}"
+
+
+def answer_permission(tui, label: str, needle: str, key: str) -> None:
+    """Story 21.6: a permission is a `Decision: Permission` FRAME. Wait for the
+    settled frame (unchanged for 600 ms), assert it names the command, dump the
+    pane, and only then send the key: a frame never receives a key on first sight."""
+    screen = open_queued_decision(tui, "Permission", PERMISSION_RAIL, 60)
+    assert needle in screen, f"permission frame does not name {needle!r}:\n{screen}"
+    pane(tui, label)
+    tui.send(key)
+    require_gone(tui, "Decision: Permission", 20, "the permission frame closed")
+
+
+def answer_skill_trust(tui, label: str, key: str, timeout: float = 60) -> None:
+    """The `Decision: Skill trust` frame: settled, dumped, then the key."""
+    open_queued_decision(tui, "Skill trust", SKILL_TRUST_RAIL, timeout)
+    require(
+        tui,
+        "Trust and enable this skill for this conversation?",
+        5,
+        "the skill trust frame asks the security question",
+    )
+    pane(tui, label)
+    tui.send(key)
+    require_gone(tui, "Decision: Skill trust", 20, f"the trust frame closed on `{key}`")
+
+
 def midturn_probe(tui) -> None:
     """Run the A15 probe immediately after model-driven skill activation.
 
@@ -296,7 +389,17 @@ def midturn_probe(tui) -> None:
 
     Returns after dumping `midturn-bash`, whether or not a prompt appeared.
     """
-    prompted = tui.wait_for_screen("[y] Allow", timeout=45)
+    # The decision is queued behind the `Needs you (n)` chip while the turn
+    # streams (or already a frame): either state is "a prompt appeared".
+    deadline = time.monotonic() + 45
+    prompted = False
+    while time.monotonic() < deadline:
+        screen = tui.get_screen_text()
+        if "Decision: Permission" in screen or "Needs you (" in screen:
+            prompted = True
+            break
+    if prompted:
+        open_queued_decision(tui, "Permission", PERMISSION_RAIL, 30)
     pane(tui, "midturn-bash")
     if prompted:
         log("mid-turn Bash reached the risk gate and raised a prompt (stale snapshot)")
@@ -346,8 +449,7 @@ def unfold_finished_turn(tui) -> None:
     tui.send("z")
     tui.send("R")
     time.sleep(0.8)
-    tui.send(ENTER)
-    time.sleep(1.2)
+    open_tool_inspector(tui, "activate_skill", 1)
 
 
 def main() -> int:
@@ -393,11 +495,14 @@ def main() -> int:
     # ── SUBMISSION 1 — "deploy billing to production" ────────────────────────
     tui.send_message("deploy billing to production")
 
-    # The trust gate. Product-minted, all three lines (`skill_trust_prompt.rs`).
+    # The trust gate. Product-minted, all three lines (`skill_trust_prompt.rs`),
+    # painted inside the `Decision: Skill trust` frame (Story 21.6). The
+    # question is the frame's own text; the key waits for the settled frame.
+    open_queued_decision(tui, "Skill trust", SKILL_TRUST_RAIL, 60)
     require(
         tui,
         "Trust and enable this skill for this conversation?",
-        60,
+        5,
         "the first activation of a workspace skill is trust-gated",
     )
     pane(tui, "trust-prompt")  # + `New project skill detected:` + `[i] Inspect`
@@ -415,8 +520,9 @@ def main() -> int:
         "Esc returned to the trust prompt rather than declining",
     )
 
+    open_queued_decision(tui, "Skill trust", SKILL_TRUST_RAIL, 15)
     tui.send("y")
-    require_gone(tui, "Trust and enable", 20, "the trust prompt closed on `y`")
+    require_gone(tui, "Decision: Skill trust", 20, "the trust frame closed on `y`")
 
     # ⚑ A15 — the SAME turn, after `activate_skill` returned, requests a tool
     # excluded by the skill's `allowed-tools`. The fixed runtime refreshes the
@@ -433,25 +539,12 @@ def main() -> int:
 
     # …and only now are the blocks photographed, from the finished turn.
     unfold_finished_turn(tui)
-    pane(tui, "skill-active")  # invocation 0 expanded: `Skill 'safe-deploy' activated.`
-    tui.send(ENTER)  # re-collapse; the four block headers stay on one screen
+    pane(tui, "skill-active")  # `┌Tool · activate_skill #1`: `Skill 'safe-deploy' activated.`
+    close_tool_inspector(tui)
     time.sleep(0.8)
     pane(tui, "deploy-read")  # `Success Read "deploy.yaml"`
     pane(tui, "migration-read")  # `Success Read "migrations/0042_drop_column.sql"`
     tui.send("i")  # back to Input focus for submission 2
-    time.sleep(0.5)
-
-    # Story 21.1: Focus density no longer queues an Advisory — every notice is a
-    # toast with a TTL in every density — so this Monitor switch is no longer
-    # needed to surface it. It is kept only so the sub2 captures below stay
-    # framed in the density they were recorded in; the negative stays
-    # non-vacuous because a still-disclosed safe-deploy would now paint its
-    # Advisory toast on the first permission pane.
-    tui.send(CTRL_X)
-    time.sleep(0.5)
-    tui.send("w")
-    require(tui, "Density: Monitor", 20, "submission 2 switched to Monitor density")
-    tui.send(TAB)
     time.sleep(0.5)
 
     # ── SUBMISSION 2 — the pattern restriction admits only declared commands ─
@@ -461,15 +554,9 @@ def main() -> int:
     # Bash remains Elevated in Normal mode. Nothing is pre-approved, so each
     # admitted call reaches the product's real approval card and receives a
     # one-shot `y`; the later call must ask again.
-    require(tui, "helm diff release charts/billing", 60, "helm reached approval")
-    require(tui, "[y] Allow", 20, "the helm command raised the permission prompt")
-    pane(tui, "helm-permission")
-    tui.send("y")
+    answer_permission(tui, "helm-permission", "helm diff release charts/billing", "y")
 
-    require(tui, "kubectl get pods", 60, "kubectl reached approval")
-    require(tui, "[y] Allow", 20, "the kubectl command raised a fresh permission prompt")
-    pane(tui, "kubectl-permission")
-    tui.send("y")
+    answer_permission(tui, "kubectl-permission", "kubectl get pods", "y")
 
     # The scene next dispatches `kubectl … && printf …`. Its first segment is
     # declared and blocklist-clean; the second is not. The chain must be denied
@@ -477,6 +564,14 @@ def main() -> int:
     # after receiving that product-minted denial.
     require(tui, "Standing by on the preview step.", 60, "the denied chain returned")
     pane(tui, "post-pattern-execution")
+
+    # The helm/kubectl permission frames cover any toast (a modal always paints
+    # over one), so the absence of a safe-deploy FR42-a disclosure is witnessed
+    # in the persistent notification log instead: `launch1-notification-log`
+    # is the open S-LOG list, which must carry no `Tool restriction` row.
+    tui.open_notification_log()
+    pane(tui, "launch1-notification-log")
+    tui.close_notification_log()
 
     quit_ctrl_q(tui)
     log("launch 1 quit via Ctrl+Q")
@@ -503,45 +598,40 @@ def main() -> int:
     # on `conversation_id`, so a new conversation asks again. The prompt used to
     # say "for this session" (`DF-19-10-TRUST-PROMPT-SAYS-SESSION`); Story 21.1
     # AC7 made it say "for this conversation", so the re-ask is now truthful.
-    require(
-        tui,
-        "Trust and enable this skill for this conversation?",
-        90,
-        "a new conversation re-asks for trust the operator already granted",
-    )
-    pane(tui, "after-clone")
-    tui.send("y")
+    answer_skill_trust(tui, "after-clone", "y", 90)
 
     # The team persona immediately activates the cloned control runbook. It has
     # `Read Glob`, so its raw intersection with safe-deploy retains `Read` and
     # reaches the Advisory branch rather than the turn-fatal disjoint branch.
     require(tui, TEAM_CONTROL_SKILL, 60, "the team control requested activation")
-    require(
-        tui,
-        "Trust and enable this skill for this conversation?",
-        20,
-        "the cloned control runbook raised its own trust prompt",
-    )
-    pane(tui, "team-control-trust")
-    tui.send("y")
+    answer_skill_trust(tui, "team-control-trust", "y", 20)
     require(tui, "The team runbooks are in place.", 60, "both runbooks activated")
+    # The trust frame now covers the stage at `after-clone`, so the operator-visible
+    # catalogue (the collapsed `activate_skill audit` result row, `Discovered
+    # skills: [...]`) is captured here, once the frames are answered.
+    pane(tui, "after-clone-catalogue")
 
     # Story 21.1: `DF-19-10-ADVISORY-QUEUED-IN-FOCUS` is closed — the Advisory is
-    # a visible Warning toast in Focus density too, so the Monitor switch below
-    # is no longer required to surface the positive FR42-a control (it is kept
-    # so the capture stays in the density it was recorded in). The unavailable
-    # name is driver-owned `Glob`,
-    # not one of the now-honourable Bash patterns.
-    tui.send(CTRL_X)
-    time.sleep(0.5)
-    tui.send("w")
-    require(tui, "Density: Monitor", 20, "the control switched to Monitor density")
-    tui.send(TAB)
+    # a Warning notice. Story 21.7 deleted the densities, so there is no Monitor
+    # switch here any more. The unavailable name is driver-owned `Glob`, not one
+    # of the now-honourable Bash patterns.
+    #
+    # The toast paints only the notice's FIRST line, ellipsized to half the pane
+    # and expiring after its TTL, so the unavailable tool name never reliably
+    # reaches the screen as a toast. The persistent, untruncated witness is the
+    # notification log (S-LOG, `Ctrl+X n`): its Details frame holds the FULL
+    # message, and that frame is what `team-control-disclosure` captures.
     time.sleep(0.5)
     tui.send_message("exercise the team runbook disclosure control")
-    require(tui, "Glob", 60, "the unavailable team-runbook tool was disclosed")
-    pane(tui, "team-control-disclosure")
     require(tui, "Team control complete.", 60, "the control turn replied")
+    tui.open_notification_log()
+    detail = tui.read_notification_detail("Tool restriction")
+    if "[Glob] is unavailable for this turn." not in detail:
+        pane(tui, "FAILED-team-control-disclosure")
+        print(f"FAIL: the log detail does not name Glob: {detail}", flush=True)
+        sys.exit(1)
+    pane(tui, "team-control-disclosure")
+    tui.close_notification_log()
     quit_ctrl_q(tui)
     log("launch 2 quit via Ctrl+Q")
 
@@ -554,20 +644,12 @@ def main() -> int:
     tui = launch(decline_workspace, stub_url, home, DECLINE_PERSONA, shim_dir, fresh=True)
     require(tui, "Ready", 30, "boot (decline leg)")
     tui.send_message("deploy billing to production")
-    require(
-        tui,
-        "Trust and enable this skill for this conversation?",
-        60,
-        "the decline leg reached the same trust gate",
-    )
-    pane(tui, "decline-prompt")
-    tui.send("n")
+    answer_skill_trust(tui, "decline-prompt", "n", 60)
     # ⚑ The decline result is a TOOL RESULT in a collapsed block, not a
     # SystemNotice: the `Skill '…' not trusted — activation declined` notice at
     # `event_loop.rs:7783` belongs to the USER-driven route. On the model-driven
     # route the string reaches the MODEL, and that is where marker 2 asserts it
     # — in the decline leg's own request-log rows.
-    require_gone(tui, "Trust and enable", 20, "the trust prompt closed on `n`")
     require(tui, "Understood.", 60, "the decline leg's turn completed")
     pane(tui, "decline-refused")
     quit_ctrl_q(tui)

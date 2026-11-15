@@ -210,10 +210,10 @@ class Scene:
                 # an authoring error caught at load — never a turn served with
                 # its tool_use silently dropped.
                 if wire == WIRE_OPENAI and any(
-                    block.get("type") == "tool_use" for block in turn["content"]
+                    block.get("type") != "text" for block in turn["content"]
                 ):
                     raise SceneError(
-                        f"{path}: persona {key!r} turn {i} scripts a tool_use block, but this"
+                        f"{path}: persona {key!r} turn {i} scripts a non-text block (a tool_use or thinking block), but this"
                         f" persona is declared on the {WIRE_OPENAI!r} wire, which serves TEXT"
                         " turns only (Story 19.9 A11 — a tool_calls arm is future work)"
                     )
@@ -310,6 +310,9 @@ def _validate_turn(path: Path, persona: str, number: int, turn: object) -> None:
                 raise SceneError(f"{where}: a tool_use block needs a 'name' string")
             if not isinstance(block.get("input"), dict):
                 raise SceneError(f"{where}: a tool_use block needs an 'input' object")
+        elif kind == "thinking":
+            if not isinstance(block.get("thinking"), str):
+                raise SceneError(f"{where}: a thinking block needs a 'thinking' string")
         else:
             raise SceneError(f"{where}: unsupported content block type {kind!r}")
     has_tool_use = any(block.get("type") == "tool_use" for block in content)
@@ -400,6 +403,21 @@ def _turn_sse(scene: Scene, persona: str, number: int, turn: dict) -> bytes:
                     "type": "content_block_delta",
                     "index": index,
                     "delta": {"type": "text_delta", "text": block["text"]},
+                }
+            )
+        elif block["type"] == "thinking":
+            out += _event(
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                }
+            )
+            out += _event(
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "thinking_delta", "thinking": block["thinking"]},
                 }
             )
         else:
@@ -1226,14 +1244,17 @@ class SceneStub:
         }
 
     def rows(self) -> list[dict]:
-        """Every request the *binary* made, in order."""
+        """Every request the *binary* made, in order.
+
+        The log is appended by another process, so the read can land inside a
+        record: only newline-terminated lines are parsed, and a trailing partial
+        record is picked up on a later call once its newline arrives.
+        """
         if not self.log_path.exists():
             return []
-        return [
-            json.loads(line)
-            for line in self.log_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        data = self.log_path.read_bytes()
+        complete = data[: data.rfind(b"\n") + 1].decode("utf-8")
+        return [json.loads(line) for line in complete.splitlines() if line.strip()]
 
     def stop(self, timeout: float = 15.0) -> int:
         """SIGTERM, wait, return the exit status (0 clean, 1 desync/unknown path)."""

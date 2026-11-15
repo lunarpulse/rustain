@@ -1,0 +1,17 @@
+{
+  "scene": "j21-onboard-v1",
+  "personas": {
+    "scene-j21-onboard": {
+      "turns": [
+        {
+          "expect": "J21-ONBOARD-MSG-1",
+          "content": [
+            {"type": "text", "text": "J21-ONBOARD-REPLY-1 acknowledged."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 210, "output_tokens": 9}
+        }
+      ]
+    }
+  }
+}

@@ -570,3 +570,17 @@ def test_request_observation_registration_rejects_invalid_bounds(tmp_path):
         path.write_text(json.dumps({"request_observations": observations, "personas": valid_personas}))
         with pytest.raises(SceneError):
             Scene(path)
+
+
+def test_rows_ignore_a_partial_trailing_record(tmp_path):
+    """`rows()` reads a log another process is still appending to: a trailing
+    record without its newline is in flight, not malformed (DF-21-5-NATIVE-SCENE-PROVIDER-JSONL-RACE)."""
+    log = tmp_path / "requests.jsonl"
+    stub = SceneStub(SCENE, log)
+    first = '{"n":1,"method":"POST","path":"/v1/messages","turn":1}'
+    second = '{"n":2,"method":"POST","path":"/v1/messages","turn":2}'
+    log.write_text(first + "\n" + second[:25], encoding="utf-8")
+    assert [row["n"] for row in stub.rows()] == [1]
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(second[25:] + "\n")
+    assert [row["n"] for row in stub.rows()] == [1, 2]

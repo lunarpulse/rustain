@@ -2,7 +2,7 @@
 #
 # Epic 19 journey gate J1 — Kai's day in one session of the real binary
 # (Story 19.8): tabs, auto-title, @file, plan card + y, /command, fork,
-# model switcher, context meter — against the deterministic scene provider
+# model switcher, token meter — against the deterministic scene provider
 # (Story 19.7), asserted by `check-epic-close-gates.sh`'s `gate J1` section.
 #
 # # What this driver owns, and what it does not
@@ -127,7 +127,7 @@ printf 'scene:       tests_tui/journeys/j1/scenes/j1-kai.json sha256:%s\n' "$SCE
 printf 'run dir:     %s\n' "$RUN"
 
 # ── The walk ─────────────────────────────────────────────────────────────────
-export RUSTAIN_TUI_BINARY="$BIN"
+export RUSTAIN_TUI_BINARY="$BIN" RUSTAIN_ROOT
 say "journey_j1_kai.py — the beats"
 if python3 "$HERE/journey_j1_kai.py" "$WS" "$STUB_URL" "$HOME_DIR"; then
   SCRIPT_STATUS=0
@@ -148,9 +148,14 @@ cat "$STUB_LOG"
 cat <<'LIMITS'
 
 --- what this run did not prove ---
-Ctrl+X h: the History sidebar opened through the leader chord (Story 21.3);
-  the `sidebar` pane is the screen-state marker, nothing else was proven
-  about its entries
+Ctrl+X h: the History window opened through the leader chord (Story 21.3/21.7);
+  the `sidebar` pane (label kept) is the screen-state marker, nothing else was
+  proven about its entries; plan and fork are `Decision:` frames, each answered
+  only after it settled
+context meter: the status row's `ctx: used/window (%)` segment is not rendered in
+  this journey since Story 20-1c (the window comes from credential-gated model
+  discovery and the scene stub lists 0 models); the `↑in ↓out` token segment is
+  the meter asserted
 plan execution: 1 post-approval POST recorded, not asserted (A6)
 model switcher: overlay only, no model asserted (A7)
 title: served fixed "Scene capture" by the 19.7 stub — the quote-strip

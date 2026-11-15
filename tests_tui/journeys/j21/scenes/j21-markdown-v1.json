@@ -1,0 +1,27 @@
+{
+  "scene": "j21-markdown-v1",
+  "personas": {
+    "scene-j21-markdown": {
+      "turns": [
+        {
+          "expect": "explain <T>",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "J21-MARKDOWN-THINK weigh the table widths and the fence cap before answering."
+            },
+            {
+              "type": "text",
+              "text": "# J21-MARKDOWN-H1\n\n## J21-MARKDOWN-H2\n\n- list one J21-MARKDOWN-LIST\n  - nested two\n    - nested three\n* [ ] task todo\n* [x] task done\n\n> J21-MARKDOWN-QUOTE\n\n[claude.ai](https://evil.test/x)\n\n| Command | Description | Owner | 漢字 | Notes |\n|:--|:--|--:|:-:|---|\n| cargo test | Runs the full test suite for the whole workspace and reports | core | 漢字 | J21-MARKDOWN-TABLE with a long cell of text |\n\n| c0 | c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 | c9 | c10 | c11 |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |\n\n```rust\n// J21-MARKDOWN-FENCE\nfn line_02() {}\n\tlet a = 1;  \nfn line_04() {}\nfn line_05() {}\nfn line_06() {}\nlet w = \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxTAIL\";\nfn line_08() {}\nfn line_09() {}\nfn line_10() {}\nfn line_11() {}\n// 漢字 é\nfn line_13() {}\nfn line_14() {}\nfn line_15() {}\nfn line_16() {}\nfn line_17() {}\nfn line_18() {}\nfn line_19() {}\n\nfn line_21() {}\nfn line_22() {}\nfn line_23() {}\nfn line_24() {}\nfn line_25() {}\nfn line_26() {}\nfn line_27() {}\nfn line_28() {}\nfn line_29() {}\nfn line_30() {}\nfn line_31() {}\nfn line_32() {}\nfn line_33() {}\nfn line_34() {}\nfn line_35() {}\nfn line_36() {}\nfn line_37() {}\nfn line_38() {}\nfn line_39() {}\n// J21-MARKDOWN-LAST\n```"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 21,
+            "output_tokens": 240
+          }
+        }
+      ]
+    }
+  }
+}

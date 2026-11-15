@@ -175,7 +175,7 @@ printf 'profile:     tests_tui/journeys/j8/profiles/devops.toml sha256:%s\n' "$P
 printf 'run dir:     %s\n' "$RUN"
 
 # ── The walk ─────────────────────────────────────────────────────────────────
-export RUSTAIN_TUI_BINARY="$BIN"
+export RUSTAIN_TUI_BINARY="$BIN" RUSTAIN_ROOT
 say "journey_j8_ravi.py — the ten beats"
 if python3 "$HERE/journey_j8_ravi.py" "$WS" "$STUB_URL" "$HOME_DIR" "$RUN"; then
   SCRIPT_STATUS=0

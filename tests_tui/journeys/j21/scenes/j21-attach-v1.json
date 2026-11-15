@@ -1,0 +1,25 @@
+{
+  "scene": "j21-attach-v1",
+  "personas": {
+    "scene-j21-attach": {
+      "turns": [
+        {
+          "expect": "J21-ATTACH-WRITE",
+          "content": [
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "j21-attach-out.txt", "content": "J21-ATTACH-FILE\n"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 220, "output_tokens": 24}
+        },
+        {
+          "expect": "denied",
+          "content": [
+            {"type": "text", "text": "J21-ATTACH-REPLY-1 the write was declined."}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 260, "output_tokens": 12}
+        }
+      ]
+    }
+  }
+}
