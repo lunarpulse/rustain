@@ -14,44 +14,35 @@ from __future__ import annotations
 import pytest
 
 from harness import RustainTUI
-from keys import CTRL_X
+from keys import CTRL_X, ESC
 
 TITLE = "Mission Control · Agents"
 
 
+def _leader_menu_open(screen: str) -> bool:
+    """The Ctrl+X leader menu: a box whose top border names the chord."""
+    return any(line.strip().startswith("┌") and "Ctrl+X" in line for line in screen.split("\n"))
+
+
 def _send_chord_ctrl_x_s(tui: RustainTUI) -> None:
-    """Send Ctrl+X followed by 's': the hub opens on the Agents tab."""
+    """Ctrl+X, wait for the leader menu, then 's': the hub opens on the Agents tab
+    (the call returns once the frame title is on screen)."""
     tui.send(CTRL_X)
-    tui.wait(0.2)
+    tui.wait_until(_leader_menu_open, "the Ctrl+X leader menu")
     tui.send("s")
-    tui.wait(0.5)
+    assert tui.wait_for_screen(TITLE, timeout=5.0), tui.get_screen_text()
 
 
 @pytest.mark.story_10_4
 def test_chord_opens_agents_tab(tui_monitor: RustainTUI):
-    """Ctrl+X, S opens Mission Control on the Agents tab."""
+    """Ctrl+X, S opens Mission Control on the Agents tab; Esc closes the hub (a frame, not a
+    toggled panel); the chord opens it again over the History panel."""
     tui = tui_monitor
+    assert TITLE not in tui.get_screen_text(), "the Agents tab must be closed at spawn"
     _send_chord_ctrl_x_s(tui)
-    tui.assert_screen_contains(TITLE, msg="the Agents tab title should be visible")
 
+    tui.send(ESC)
+    assert tui.wait_for_screen_not_contains(TITLE, timeout=5.0), tui.get_screen_text()
 
-@pytest.mark.story_10_4
-def test_esc_closes_agents_tab(tui_monitor: RustainTUI):
-    """Esc closes the hub (the tab is a frame, not a toggled panel)."""
-    tui = tui_monitor
-    _send_chord_ctrl_x_s(tui)
-    tui.assert_screen_contains(TITLE, msg="Tab should be open")
-    tui.send("\x1b")
-    tui.wait(1.0)
-    tui.assert_screen_not_contains(TITLE, msg="Tab should close on Esc")
-
-
-@pytest.mark.story_10_4
-def test_chord_over_the_history_panel_opens_the_agents_tab(tui_monitor: RustainTUI):
-    """Ctrl+X, S while the History sidebar is open opens the hub over it."""
-    tui = tui_monitor
     tui.open_history()
-    tui.wait(0.5)
-    tui.assert_screen_contains("History", msg="History panel should be open")
     _send_chord_ctrl_x_s(tui)
-    tui.assert_screen_contains(TITLE, msg="Should have opened the Agents tab")

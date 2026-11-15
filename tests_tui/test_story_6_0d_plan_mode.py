@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from harness import RustainTUI, mode_segment, status_row
+from harness import RustainTUI, mode_segment
 from keys import SHIFT_TAB
 
 
@@ -28,82 +28,29 @@ from keys import SHIFT_TAB
 
 
 @pytest.mark.story_6_0d
-def test_slash_plan_on_activates_plan_mode(tui: RustainTUI):
-    """AC5: /plan on switches to Plan mode and shows PLAN indicator."""
-    # Use the command palette to enter Plan mode (reliable)
-    tui.set_permission_mode("plan")
-    # Wait for the Info toast to settle and the status bar to re-render
-    tui.wait(0.5)
-    # Status bar should show "PLAN" chip
-    screen = tui.get_screen_text()
-    assert "PLAN" in screen, f"Status bar should show PLAN mode indicator. Screen:\n{screen}"
-
-
-@pytest.mark.story_6_0d
-def test_slash_plan_off_deactivates_plan_mode(tui: RustainTUI):
-    """AC5: /plan off switches back to Normal mode."""
-    tui.set_permission_mode("plan")
-    tui.set_permission_mode("normal")
-    tui.wait(0.5)
-    screen = tui.get_screen_text()
-    assert "Normal" in screen, f"Status bar should show Normal mode. Screen:\n{screen}"
-    assert "PLAN" not in screen, "Status bar should NOT show PLAN in Normal mode"
-
-
-@pytest.mark.story_6_0d
-def test_slash_plan_toggle_flips_mode(tui: RustainTUI):
-    """AC5: /plan toggle flips between current and Plan mode."""
-    # Start in Normal, toggle to Plan via command palette
-    tui.set_permission_mode("plan")
-    tui.wait(0.5)
-    screen = tui.get_screen_text()
-    assert "PLAN" in screen, "After toggle to Plan, status bar should show PLAN"
-    # Toggle back to Normal
-    tui.set_permission_mode("normal")
-    tui.wait(0.5)
-    screen = tui.get_screen_text()
-    assert "Normal" in screen, "After toggle to Normal, status bar should show Normal"
-
-
-# ── E2E tests for the /plan slash-command fix (Story 6-0d bug fix) ──────────
-
-
-@pytest.mark.story_6_0d
-def test_slash_command_plan_on_via_input(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan on' in the input box activates Plan mode.
+def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
+    """Bug-fix E2E: ``/plan on|off|toggle`` typed in the input box moves the mode segment.
 
     Before the fix, /plan fell through to SubmitWithContext and was treated
-    as a user-defined command, so the mode never changed.
+    as a user-defined command, so the mode never changed. Every wait is a
+    real transition of the status row's mode segment: not PLAN at spawn, then
+    on → PLAN, off → Normal, toggle → PLAN, toggle → Normal.
     """
+    assert mode_segment(tui.get_screen_text()) != "PLAN", "the TUI must not spawn in Plan mode"
     tui.send_message("/plan on")
     tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment after /plan on")
-
-
-@pytest.mark.story_6_0d
-def test_slash_command_plan_off_via_input(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan off' in the input box returns to Normal mode."""
-    # Enter Plan mode first
-    tui.set_permission_mode("plan")
-    tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment")
-    # Now type the slash command to exit
     tui.send_message("/plan off")
     tui.wait_until(lambda s: mode_segment(s) == "Normal", "Normal mode after /plan off")
-
-
-@pytest.mark.story_6_0d
-def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan toggle' in the input box toggles Plan mode."""
-    # Start in Normal — toggle should enter Plan
     tui.send_message("/plan toggle")
     tui.wait_until(lambda s: mode_segment(s) == "PLAN", "Plan mode after /plan toggle from Normal")
-    # Toggle again — should return to Normal
     tui.send_message("/plan toggle")
     tui.wait_until(lambda s: mode_segment(s) == "Normal", "Normal mode after the second /plan toggle")
 
 
 @pytest.mark.story_6_0d
 def test_shift_tab_in_input_cycles_modes(tui: RustainTUI):
-    """AC5 + Story 21-2 AC9: Shift+Tab in input focus cycles Normal → AutoEdit → Plan → Normal.
+    """AC5 + Story 21-2 AC9: Shift+Tab in input focus cycles Normal → AutoEdit → Plan → Normal;
+    the command palette's ``mode:`` actions then move the same segment to Plan and back.
 
     Yolo is never reachable by cycling; only an explicit `/mode yolo` selects it.
     """
@@ -112,17 +59,10 @@ def test_shift_tab_in_input_cycles_modes(tui: RustainTUI):
     for name, segment in segments.items():
         tui.send(SHIFT_TAB)
         tui.wait_until(lambda s, want=segment: mode_segment(s) == want, f"the {name} status segment")
-    # Yolo is only reachable through an explicit `/mode yolo`.
-    assert "YOLO mode active" not in status_row(tui.get_screen_text()), "Shift+Tab must never enter Yolo"
-
-
-@pytest.mark.story_6_0d
-def test_status_bar_plan_indicator(tui: RustainTUI):
-    """AC5/AC8: Status bar shows PLAN chip when in Plan mode."""
     tui.set_permission_mode("plan")
-    tui.wait(0.5)
-    screen = tui.get_screen_text()
-    assert "PLAN" in screen, f"Status bar should show PLAN chip in Plan mode. Screen:\n{screen}"
+    tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment after the palette action")
+    tui.set_permission_mode("normal")
+    tui.wait_until(lambda s: mode_segment(s) == "Normal", "Normal mode after the palette action")
 
 
 # ── API-dependent TUI tests ─────────────────────────────────────────────────

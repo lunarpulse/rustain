@@ -13,6 +13,7 @@ These tests exercise the TUI-visible paths:
 import pytest
 
 from harness import RustainTUI
+from keys import BACKSPACE
 
 
 def _assert_tui_alive(tui: RustainTUI, timeout: float = 3.0) -> None:
@@ -45,85 +46,45 @@ class TestTabCancellationLifecycleNoApi:
     """
 
     def test_create_and_close_multiple_tabs_stays_responsive(self, tui: RustainTUI):
-        """AC4: Rapidly create and close tabs — TUI must remain responsive.
+        """AC4: Create four tabs, close them down to one, refuse the last close, stay responsive.
 
         Each tab carries a turn_cancel child token. Closing a tab cancels it.
-        This test verifies the cancellation path does not crash the TUI.
+        Closing the active tab removes exactly that tab and keeps its siblings;
+        closing the last tab is refused with an Info notice; a unique token typed
+        into the composer at the end proves the event loop still takes input.
         """
-        # Create several tabs
-        for i in range(3):
+        for n in (2, 3, 4):
             tui.new_tab()
-            tui.wait_for_screen(f"Tab {i + 2}", timeout=3.0)
+            assert tui.wait_for_screen(f"Tab {n}", timeout=3.0), tui.get_screen_text()
+        assert "Tab 1" in tui.get_screen_text()
 
-        # Close tabs one by one, verifying responsiveness each time
-        for _ in range(3):
-            tui.chat_mode()
-            tui.close_tab()
-            tui.wait(1.0)
-            tui.input_mode()
-            _assert_tui_alive(tui, timeout=3.0)
-
-        # Should end up with one tab still alive
-        tui.assert_screen_contains("Welcome to Rustain")
-        tui.input_mode()
-        _assert_tui_alive(tui, timeout=3.0)
-
-    def test_close_tab_switches_to_another_tab(self, tui: RustainTUI):
-        """AC4: Closing the active tab switches focus to another tab.
-
-        Verifies that close_tab's internal cancellation + refocus logic
-        leaves the TUI in a valid state.
-        """
-        tui.new_tab()
-        tui.wait_for_screen("Tab 2", timeout=3.0)
-
-        tui.new_tab()
-        tui.wait_for_screen("Tab 3", timeout=3.0)
-
-        # Close Tab 3 (currently active)
+        # Close the active (highest) tab each time: it goes, its siblings stay.
         tui.chat_mode()
         tui.close_tab()
-        tui.wait(1.0)
+        tui.wait_until(lambda s: "Tab 4" not in s and "Tab 3" in s and "Tab 2" in s,
+                       "Tab 4 closed with Tab 3 and Tab 2 kept")
+        tui.chat_mode()
+        tui.close_tab()
+        tui.wait_until(lambda s: "Tab 3" not in s and "Tab 2" in s and "Tab 1" in s,
+                       "Tab 3 closed with Tab 2 and Tab 1 kept")
+        tui.chat_mode()
+        tui.close_tab()
+        # One tab left: the tab bar is gone with its labels and the welcome screen shows.
+        tui.wait_until(lambda s: "Tab 2" not in s and "Welcome to Rustain" in s,
+                       "Tab 2 closed, one tab and the welcome screen left")
 
-        # Should no longer show Tab 3
-        tui.assert_screen_not_contains("Tab 3")
-        # Should still show Tab 2 (the new active tab)
-        tui.assert_screen_contains("Tab 2")
-        tui.input_mode()
-        _assert_tui_alive(tui, timeout=3.0)
-
-    def test_last_tab_close_is_noop(self, tui: RustainTUI):
-        """AC4: Closing the last tab is rejected — app stays alive.
-
-        Regression guard: the cancellation hook inside close_tab must not
-        panic or corrupt state when there's only one tab.
-        """
-        # Close the only tab — should be rejected
+        # The last tab cannot be closed: an Info notice says so.
         tui.chat_mode()
         mark = tui.notification_mark()
         tui.close_tab()
-        # An Info notice: a toast for 4 s, otherwise the Notification Log keeps it.
         tui.wait_for_notification("Only one tab open", mark, "Info")
-        _assert_tui_alive(tui, timeout=3.0)
 
-    def test_tab_bar_shows_correct_count_after_creates_and_closes(self, tui: RustainTUI):
-        """Tab bar renders correctly through create/close cycles."""
-        tui.new_tab()
-        tui.wait_for_screen("Tab 2", timeout=3.0)
-
-        tui.new_tab()
-        tui.wait_for_screen("Tab 3", timeout=3.0)
-
-        # Close Tab 3
-        tui.chat_mode()
-        tui.close_tab()
-        tui.wait(1.0)
-
-        # Tab bar should show Tab 1 and Tab 2 only
-        screen = tui.get_screen_text()
-        assert "Tab 1" in screen or "1" in screen, "Tab 1 should be visible in tab bar"
-        assert "Tab 2" in screen, "Tab 2 should be visible in tab bar"
-        assert "Tab 3" not in screen, "Tab 3 should NOT be visible after close"
+        # The event loop is alive and takes input.
+        tui.input_mode()
+        tui.send("zq9")
+        assert tui.wait_for_screen("zq9", timeout=3.0), tui.get_screen_text()
+        tui.send_keys(BACKSPACE, BACKSPACE, BACKSPACE, delay=0.05)
+        assert tui.child.isalive(), "TUI process is dead"
 
 
 @pytest.mark.requires_api

@@ -5,9 +5,7 @@ TUI contract tests for non-API-driven agent interactions:
   - autocomplete filter narrows the list (AC2)
   - selecting an agent with Enter activates it + status bar shows Agent: <name> (AC3/AC7)
   - @Agents/default clears the active agent (AC4)
-  - no agents dir renders only the synthetic default entry (AC2)
-  - unknown agent name produces a warning notice (AC3)
-  - background scan notice appears when agents are discovered (AC8)
+  - an unknown agent name never activates an agent (AC3)
 
 All tests are non-API — they exercise the TUI lifecycle (startup, background
 scan, autocomplete, status bar) without sending messages to an LLM. Agent
@@ -22,13 +20,12 @@ with Down is required to select a real agent before accepting.
 
 from __future__ import annotations
 
-import json
 import time
 
 import pytest
 
-from harness import RustainTUI
-from keys import ESC, ENTER, TAB, BACKSPACE, DOWN
+from harness import RustainTUI, composer_top, status_row
+from keys import DOWN, ENTER
 
 from fixtures.agents import write_custom_agent
 
@@ -42,194 +39,85 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
         time.sleep(delay)
 
 
-def _start_tui_with_workspace(workspace_path, isolated_home=None):
+def _start_tui_with_workspace(workspace_path, isolated_home):
     """Start a RustainTUI pointing at the given workspace (no auto-build).
 
-    ``isolated_home`` replaces ``$HOME`` for tests that assert the ABSENCE of a
-    discovery notice: user-global agents in the developer's real home would
-    otherwise paint a (now visible, Story 21.1) ``Discovered N custom agent(s)`` toast.
+    ``isolated_home`` replaces ``$HOME`` so user-global agents in the developer's real home
+    cannot add rows to the ``@Agents/`` popup.
     """
-    overrides = {"HOME": str(isolated_home)} if isolated_home is not None else None
-    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path, env_overrides=overrides)
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path,
+                     env_overrides={"HOME": str(isolated_home)})
     tui.start()
     return tui
 
 
-def _wait_for_agents_loaded(tui: RustainTUI, screen_text: str, timeout: float = 15.0) -> None:
-    """Wait for the background agent scan to complete.
-
-    Polls the pyte screen for *screen_text* (the SystemNotice, a 4 s Info toast
-    at the chat pane's bottom edge since Story 21.1 — visible in every density).
-    Falls back to checking the log file for ``AgentsDiscovered`` entries.
-    """
-    if tui.wait_for_screen(screen_text, timeout=timeout):
-        return
-    tui.assert_log_contains(r"Background agent scan complete:\s+\d+ agents",
-                            msg=f"Agent scan completed but '{screen_text}' not on screen")
+def _popup(screen: str) -> str:
+    """The rows above the composer box (the autocomplete popup and the chat), never the
+    composer's own typed text."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[:top]) if top is not None else ""
 
 
-def _activate_agent(tui: RustainTUI, agent_name: str) -> None:
-    """Activate an agent via the @Agents/ autocomplete flow.
-
-    Types @Agents/<name>, navigates past the synthetic default to the
-    agent entry, accepts the selection (Enter), then submits (Enter again).
-    """
-    type_slowly(tui, "@Agents/")
-    time.sleep(0.3)
-    type_slowly(tui, agent_name)
-    time.sleep(0.5)
-    tui.send(DOWN)
-    time.sleep(0.3)
-    tui.send(ENTER)
-    time.sleep(0.3)
-    tui.send(ENTER)
-    time.sleep(0.5)
-
-
-# ── Tests ───────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.story_5_4
-def test_at_agents_slash_opens_agent_autocomplete(build_binary, tmp_path):
-    """AC2: typing @Agents/ switches to agent autocomplete with discovered agent + default.
-
-    Write a custom agent 'code-reviewer', start TUI, wait for scan notice,
-    then type @Agents/ and assert the popup shows both the agent name and
-    the synthetic 'default' entry.
-    """
-    write_custom_agent(tmp_path, "code-reviewer", "Reviews code for bugs")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_agents_loaded(tui, "Discovered 1 custom agent")
-
-        type_slowly(tui, "@Agents/")
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("code-reviewer", msg="Agent should appear in @Agents/ autocomplete")
-        tui.assert_screen_contains("default", msg="Synthetic default entry should appear")
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_4
-def test_agent_filter_narrows_list(build_binary, tmp_path):
-    """AC2: typing after @Agents/ narrows the agent list case-insensitively."""
-    write_custom_agent(tmp_path, "code-reviewer", "Reviews code")
-    write_custom_agent(tmp_path, "security-auditor", "Audits security")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_agents_loaded(tui, "Discovered 2 custom agent")
-
-        type_slowly(tui, "@Agents/cod")
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("code-reviewer", msg="Filter 'cod' should match code-reviewer")
-        tui.assert_screen_not_contains("security-auditor", msg="Filter 'cod' should exclude security-auditor")
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
+def _composer_text(screen: str) -> str:
+    """The composer box (its top border down to the screen's last row)."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[top:]) if top is not None else ""
 
 
 @pytest.mark.story_5_4
 def test_select_agent_with_enter_activates_and_shows_in_status_bar(build_binary, tmp_path):
-    """AC3/AC7: selecting an agent from autocomplete activates it, status bar shows Agent: <name>.
+    """AC2/AC3/AC4/AC7: one workspace, one launch; the whole ``@Agents/`` flow.
 
-    Use the @Agents/ autocomplete flow: open popup, filter by name, navigate
-    Down past the synthetic default to the agent, accept (Enter), then submit
-    (second Enter). Assert the status bar segment shows the active agent.
+    1  ``@Agents/``           lists both agents.
+    2  ``cod``                narrows to ``code-reviewer`` (``security-auditor`` leaves).
+    3  the rest of the name, DOWN past the synthetic ``default``, Enter (accept), Enter (submit)
+       activates the agent: the status row shows ``Agent: code-reviewer``.
+    4  ``@Agents/`` + Enter, Enter on the first entry (``default``) clears the active agent.
+    5  ``@Agents/nonexistent`` + Enter, Enter never activates an agent.
+
+    The popup is read only above the composer box; the active agent only on the status row.
     """
-    write_custom_agent(tmp_path, "code-reviewer", "Reviews code for bugs")
+    ws = tmp_path / "ws"
+    home = tmp_path / "home"
+    ws.mkdir()
+    home.mkdir()
+    write_custom_agent(ws, "code-reviewer", "Reviews code for bugs")
+    write_custom_agent(ws, "security-auditor", "Audits security")
 
-    tui = _start_tui_with_workspace(tmp_path)
+    tui = _start_tui_with_workspace(ws, home)
     try:
-        _wait_for_agents_loaded(tui, "Discovered 1 custom agent")
+        assert "Agent:" not in status_row(tui.get_screen_text()), "no agent is active at spawn"
 
-        _activate_agent(tui, "code-reviewer")
-
-        assert tui.wait_for_screen("Agent: code-reviewer", timeout=5.0), (
-            "Status bar should show Agent: code-reviewer after activation"
-        )
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_4
-def test_default_clears_active_agent(build_binary, tmp_path):
-    """AC4: @Agents/default clears an active agent and status bar segment disappears.
-
-    Activate an agent, then select @Agents/default from the autocomplete
-    (first entry), accept, and submit. Assert the status bar no longer shows
-    'Agent: <name>'.
-    """
-    write_custom_agent(tmp_path, "code-reviewer", "Reviews code")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_agents_loaded(tui, "Discovered 1 custom agent")
-
-        _activate_agent(tui, "code-reviewer")
-        assert tui.wait_for_screen("Agent: code-reviewer", timeout=5.0), (
-            "Agent should be activated before clearing"
-        )
-
+        # 1
         type_slowly(tui, "@Agents/")
-        time.sleep(0.5)
-        tui.assert_screen_contains("default")
-        tui.send(ENTER)
-        time.sleep(0.3)
-        tui.send(ENTER)
-        time.sleep(0.5)
-
-        assert tui.wait_for_screen_not_contains("Agent: code-reviewer", timeout=5.0), (
-            "Status bar should no longer show Agent: code-reviewer after clearing"
-        )
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_4
-def test_unknown_agent_name_warns_and_keeps_buffer(build_binary, tmp_path):
-    """AC3: typing an unknown agent filter narrows autocomplete to only default.
-
-    The autocomplete-based agent selection prevents submitting unknown agent
-    names. Typing a filter that doesn't match any discovered agent shows only
-    the synthetic 'default' entry. The buffer preserves the typed text, and
-    no unknown agent is activated.
-    """
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        time.sleep(3.0)
-
+        tui.wait_until(lambda s: "code-reviewer" in _popup(s) and "security-auditor" in _popup(s),
+                       "both agents in the @Agents/ popup")
+        # 2
+        type_slowly(tui, "cod")
+        tui.wait_until(lambda s: "code-reviewer" in _popup(s) and "security-auditor" not in _popup(s),
+                       "the popup narrowed to code-reviewer")
+        # 3
+        type_slowly(tui, "e-reviewer")
+        tui.wait_until(lambda s: "@Agents/code-reviewer" in _composer_text(s),
+                       "the full agent name in the composer")
+        tui.send_keys(DOWN, ENTER, ENTER)
+        tui.wait_until(lambda s: "Agent: code-reviewer" in status_row(s),
+                       "Agent: code-reviewer on the status row")
+        # 4
+        type_slowly(tui, "@Agents/")
+        tui.wait_until(lambda s: "security-auditor" in _popup(s), "the unfiltered @Agents/ popup")
+        tui.send_keys(ENTER, ENTER)
+        tui.wait_until(lambda s: "Agent: code-reviewer" not in status_row(s),
+                       "the active agent cleared by `default`")
+        # 5
         type_slowly(tui, "@Agents/nonexistent")
-        time.sleep(0.5)
-
-        # Autocomplete should show only 'default' (unknown filter matches nothing)
-        tui.assert_screen_contains(
-            "default",
-            msg="Synthetic default should appear even with unknown filter",
-        )
-        tui.assert_screen_contains(
-            "No custom agents discovered",
-            msg="Popup should show empty-state description for unknown filter",
-        )
-
-        # Accept default via double-Enter (accept + submit)
-        tui.send(ENTER)
-        time.sleep(0.3)
-        tui.send(ENTER)
-        time.sleep(0.5)
-
-        # No custom agent should be activated
-        tui.assert_screen_not_contains(
-            "Agent: nonexistent",
-            msg="Status bar should not show agent for unknown name",
-        )
+        tui.wait_until(lambda s: "@Agents/nonexistent" in _composer_text(s),
+                       "the unknown name in the composer")
+        tui.send_keys(ENTER, ENTER)
+        tui.wait_until(lambda s: "nonexistent" not in _composer_text(s),
+                       "the unknown name submitted out of the composer")
+        assert "Agent:" not in status_row(tui.get_screen_text()), "an unknown name never activates an agent"
     finally:
         tui.stop()

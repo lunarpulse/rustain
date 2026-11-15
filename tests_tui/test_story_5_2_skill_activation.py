@@ -3,8 +3,6 @@
 TUI contract tests for non-API-driven user interactions:
  - autocomplete insertion (AC8)
  - workspace-tier trust prompt appearance + key handling (AC4)
- - `/deactivate` feedback messages (AC5)
- - status-bar `Skills: N active` segment visibility (AC12)
 
 Full activation + turn-kickoff tests (AC1/AC6/AC8/AC12 end-to-end) require a
 real LLM provider and are covered by the Rust integration suite
@@ -24,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from harness import RustainTUI
-from keys import ESC, TAB
+from harness import RustainTUI, composer_top
+from keys import ESC
 
 
 CHAR_DELAY = 0.015  # seconds per keystroke — matches harness.send_message default
@@ -39,27 +37,6 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
     for c in text:
         t.send(c)
         time.sleep(delay)
-
-
-def submit_slash(t: RustainTUI, cmd: str, delay: float = CHAR_DELAY) -> None:
-    """Type ``cmd`` and dispatch it as a slash command.
-
-    The TUI autocomplete intercepts the first Enter to accept the matching
-    suggestion (rewriting the buffer and dismissing autocomplete).  A second
-    Enter then submits through the normal handler.  This double-Enter pattern
-    is the only reliable way to submit a slash command that has an
-    autocomplete match — the autocomplete unconditionally captures Enter/Tab
-    when active, consuming the event without submitting.
-
-    ``submit_message`` parses via ``split_whitespace().next()`` which trims
-    the trailing space injected by ``apply_autocomplete_selection``, so the
-    command name is extracted correctly.
-    """
-    type_slowly(t, cmd, delay)
-    time.sleep(0.2)
-    t.send("\r")
-    time.sleep(0.3)
-    t.send("\r")
 
 
 def settle(t: RustainTUI, timeout: float = 30.0, duration: float = 0.7) -> str:
@@ -110,134 +87,75 @@ def write_workspace_skill(
     return skill_dir / "SKILL.md"
 
 
-def _wait_for_skills_loaded(tui: RustainTUI, count: int, timeout: float = 15.0) -> None:
-    """Wait for the background skill scan to complete.
+def _popup(screen: str) -> str:
+    """The rows above the composer box (the autocomplete popup and the chat), never the
+    composer's own typed text."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[:top]) if top is not None else ""
 
-    Polls the screen for the ``Loaded N skill(s)`` SystemNotice (a 4 s Info toast
-    since Story 21.1, visible in the default Focus density), then falls back to
-    log inspection if the toast expired before a poll caught it.
-    """
-    screen_text = f"Loaded {count} skill"
-    if tui.wait_for_screen(screen_text, timeout=timeout):
-        return
-    # Fallback: check log for evidence the scan ran
-    log_pattern = rf"Background skill scan complete:\s+{count}\s+skills?"
-    tui.assert_log_contains(
-        log_pattern,
-        msg=f"Skill scan completed but '{screen_text}' not on screen",
-    )
+
+def _composer_text(screen: str) -> str:
+    """The composer box (its top border down to the screen's last row)."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[top:]) if top is not None else ""
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.story_5_2
-def test_skill_appears_in_slash_autocomplete(tmp_path):
-    """AC8: a discovered workspace skill shows up when the user types ``/``."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    write_workspace_skill(ws, "review-code", description="Review a Rust file")
-    with RustainTUI(build=False, workspace=ws) as t:
-        _wait_for_skills_loaded(t, count=1)
-        t.send("/")
-        time.sleep(0.3)
-        # Narrow autocomplete filter — built-in commands fill the first 8
-        # visible slots, so the skill is off-screen without a filter prefix.
-        for ch in "review-code":
-            t.send(ch)
-            time.sleep(0.05)
-        time.sleep(0.5)
-        assert t.wait_for_screen("review-code", timeout=5.0), (
-            "workspace skill should appear in slash autocomplete"
-        )
-
-
-@pytest.mark.story_5_2
 def test_workspace_skill_triggers_trust_prompt(tmp_path):
-    """AC4: activating a workspace-tier skill shows the trust decision frame with canonical text.
+    """AC4/AC8: a workspace skill is listed by the slash popup; accepting and submitting it shows
+    the ``Decision: Skill trust`` frame; Esc defers it (the frame closes, the ``Needs you (1)``
+    chip waits, nothing is declined); ``i`` inspects the skill file and Esc returns to the frame;
+    ``n`` declines (Info notice, frame gone). ``y`` is never pressed: activation starts a turn.
 
-    21.6: the prompt is the `Decision: Skill trust` frame; its rail is generated from the keymap."""
+    21.6: the prompt is the `Decision: Skill trust` frame; its keys are generated from the keymap.
+    """
     ws = tmp_path / "ws"
+    home = tmp_path / "home"
     ws.mkdir()
-    write_workspace_skill(ws, "risky-skill")
-    with RustainTUI(build=False, workspace=ws) as t:
-        _wait_for_skills_loaded(t, count=1)
-        submit_slash(t, "/risky-skill")
-        assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
-        screen = settle(t)
-        assert "Decision: Skill trust" in screen, screen
-        assert "[y] Trust  [n] Decline  [i] Inspect" in screen, screen
-
-
-@pytest.mark.story_5_2
-def test_trust_prompt_decline_via_n_key(tmp_path):
-    """AC4: pressing ``n`` on the trust prompt aborts activation and emits the decline notice."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    write_workspace_skill(ws, "declined-skill")
-    # Story 21.1: the default Focus density no longer hides notices, so the
-    # "not trusted" Info toast is visible without the old Monitor-density workaround.
-    t = RustainTUI(build=False, workspace=ws)
-    t.start()
-    try:
-        _wait_for_skills_loaded(t, count=1)
-        submit_slash(t, "/declined-skill")
-        assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
-        settle(t)  # decision keys are inert 500 ms after the frame's first paint
-        mark = t.notification_mark()
-        t.send("n")
-        t.wait_for_notification("not trusted", mark, "Info")
-    finally:
-        t.stop()
-
-
-@pytest.mark.story_5_2
-def test_trust_prompt_esc_never_declines(tmp_path):
-    """21.3 AC16 (was 5-2 AC4 "Esc is equivalent to ``n``"): Esc never decides a card. 21.6: Esc
-    defers the trust decision (the frame closes, the ``Needs you (1)`` chip waits), nothing is
-    declined, and the explicit ``n`` on the reopened frame is the only decline."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    write_workspace_skill(ws, "esc-decline")
-    t = RustainTUI(build=False, workspace=ws)
-    t.start()
-    try:
-        _wait_for_skills_loaded(t, count=1)
-        submit_slash(t, "/esc-decline")
-        assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
-        settle(t)
-        t.send(ESC)
-        assert t.wait_for_screen_not_contains("Decision: Skill trust", timeout=3.0)
-        assert t.wait_for_screen("Needs you (1)", timeout=3.0)
-        t.assert_screen_not_contains("not trusted", msg="Esc must not decline the skill")
-        reopen_from_list(t, "Trust and enable this skill")
-        settle(t)
-        mark = t.notification_mark()
-        t.send("n")
-        t.wait_for_notification("not trusted", mark, "Info")
-    finally:
-        t.stop()
-
-
-@pytest.mark.story_5_2
-def test_trust_prompt_inspect_shows_file_content(tmp_path):
-    """AC4: pressing ``i`` on the trust prompt opens inspect overlay with file contents."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
+    home.mkdir()
     write_workspace_skill(
         ws,
-        "inspectable",
-        description="Inspect me",
+        "zzz-trust-skill",
+        description="Trust me",
         body="# Unique Inspect Marker 7c4f\nContent body.\n",
     )
-    with RustainTUI(build=False, workspace=ws) as t:
-        _wait_for_skills_loaded(t, count=1)
-        submit_slash(t, "/inspectable")
-        assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
+    t = RustainTUI(build=False, workspace=ws, env_overrides={"HOME": str(home)})
+    t.start()
+    try:
+        # L1: the skill is listed, accepted, submitted; the trust frame opens.
+        type_slowly(t, "/zzz")
+        t.wait_until(lambda s: "zzz-trust-skill" in _popup(s), "the workspace skill in the slash popup")
+        t.send("\r")
+        t.wait_until(lambda s: "/zzz-trust-skill" in _composer_text(s), "the accepted skill name in the composer")
+        t.send("\r")
+        assert t.wait_for_screen("Decision: Skill trust", timeout=5.0), t.get_screen_text()
         settle(t)
+
+        # L2: Esc defers the decision: the frame closes, the chip waits, nothing is declined.
+        t.send(ESC)
+        t.wait_until(lambda s: "Decision: Skill trust" not in s and "Needs you (1)" in s,
+                     "the frame closed with the Needs you (1) chip")
+        reopen_from_list(t, "Decision: Skill trust")
+        settle(t)
+
+        # L3: inspect shows the skill file; Esc returns to the frame.
         t.send("i")
-        assert t.wait_for_screen("Unique Inspect Marker 7c4f", timeout=3.0)
+        assert t.wait_for_screen("Unique Inspect Marker 7c4f", timeout=3.0), t.get_screen_text()
         settle(t)
         t.send(ESC)
-        assert t.wait_for_screen("Trust and enable this skill", timeout=3.0)
-        assert "Decision: Skill trust" in t.get_screen_text()
+        t.wait_until(lambda s: "Unique Inspect Marker 7c4f" not in s and "Decision: Skill trust" in s,
+                     "the trust frame after the inspect view closed")
+        settle(t)
+
+        # L4: the explicit decline is the only decline.
+        mark = t.notification_mark()
+        t.send("n")
+        t.wait_for_notification("not trusted", mark, "Info")
+        assert t.wait_for_screen_not_contains("Decision: Skill trust", timeout=3.0), t.get_screen_text()
+    finally:
+        t.stop()

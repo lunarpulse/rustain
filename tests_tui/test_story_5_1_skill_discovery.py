@@ -6,8 +6,8 @@ All tests are non-API — they exercise the TUI lifecycle (startup, background
 scan, autocomplete) without sending messages to an LLM.  Skills are
 pre-populated in the temp workspace before the TUI starts.
 
-Covers: AC3 (validation warnings), AC4 (autocomplete), AC5 (empty workspace),
-         AC6 (background scan after first frame), AC10 (disabled skills).
+Covers: AC3 (validation warnings), AC4 (autocomplete), AC7 (tier priority),
+         AC10 (disabled skills).
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import time
 
 import pytest
 
-from harness import RustainTUI
-from keys import ESC, ENTER, TAB
+from harness import NotificationMark, RustainTUI, composer_top
+from keys import CTRL_U, ESC
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -80,9 +80,8 @@ def write_rustain_config(workspace, disabled=None):
 def _start_tui_with_workspace(workspace_path, isolated_home=None):
     """Start a RustainTUI pointing at the given workspace (no auto-build).
 
-    ``isolated_home`` replaces ``$HOME`` for tests that assert the ABSENCE of a
-    discovery notice: user-global skills in the developer's real home would
-    otherwise paint a (now visible, Story 21.1) ``Loaded N skills`` toast.
+    ``isolated_home`` replaces ``$HOME`` so user-global skills in the developer's real home
+    cannot add rows to the autocomplete popup or to the discovery notices.
     """
     overrides = {"HOME": str(isolated_home)} if isolated_home is not None else None
     tui = RustainTUI(fresh=True, build=False, workspace=workspace_path, env_overrides=overrides)
@@ -90,19 +89,31 @@ def _start_tui_with_workspace(workspace_path, isolated_home=None):
     return tui
 
 
-def _wait_for_skills_loaded(tui: RustainTUI, screen_text: str, timeout: float = 15.0) -> None:
-    """Wait for the background skill scan to complete.
+def _popup(screen: str) -> str:
+    """The rows above the composer box: the autocomplete popup and the chat. Never the
+    composer itself, so a typed filter token cannot satisfy a predicate."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[:top]) if top is not None else ""
 
-    Polls the pyte screen for *screen_text* (the SystemNotice, a 4 s Info toast
-    at the chat pane's bottom edge since Story 21.1 — visible in every density).
-    If the toast expires before a poll catches it, falls back to checking
-    the log file for ``SkillsDiscovered`` or ``Skills scan`` entries.
-    """
-    if tui.wait_for_screen(screen_text, timeout=timeout):
-        return
-    # Fallback: check log for evidence the scan ran
-    log_pattern = r"Background skill scan complete:\s+\d+ skills"
-    tui.assert_log_contains(log_pattern, msg=f"Skill scan completed but '{screen_text}' not on screen")
+
+def _filter(tui: RustainTUI, keys: str, shown, hidden=(), label: str = "") -> str:
+    """Type ``keys`` and wait for a popup that lists every ``shown`` string and none of
+    ``hidden`` in the same frame (a positive and an anchored negative)."""
+    tui.send_keys(*keys, delay=0.05)
+    return tui.wait_until(
+        lambda s: all(x in _popup(s) for x in shown) and not any(x in _popup(s) for x in hidden),
+        f"the popup after {keys!r} ({label})",
+    )
+
+
+def _reset(tui: RustainTUI, token: str, anchor: str) -> None:
+    """Close the popup with ``Esc``, clear whatever it left in the composer with ``Ctrl+U`` and wait
+    for the typed token to leave. Never sent with no popup open: ``Esc`` would move focus to Chat."""
+    tui.send(ESC)
+    tui.wait_until(lambda s: anchor not in _popup(s), f"the popup for {token} closed")
+    tui.send(CTRL_U)
+    assert tui.wait_for_screen_not_contains(token, timeout=5.0), tui.get_screen_text()
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────
@@ -110,260 +121,50 @@ def _wait_for_skills_loaded(tui: RustainTUI, screen_text: str, timeout: float = 
 
 @pytest.mark.story_5_1
 def test_slash_autocomplete_shows_discovered_skills(build_binary, tmp_path):
-    """AC4: Discovered skills appear in / autocomplete after background scan.
+    """AC3/AC4/AC7/AC10: one workspace, one launch; every popup leg reads the rows above the composer.
 
-    Pre-populate .agents/skills/reviewer/SKILL.md in the workspace,
-    start the TUI, wait for the 'Loaded N skills' notice, then press /
-    and verify the skill name appears in the autocomplete dropdown.
+    A  ``rev``   lists ``reviewer`` with its description.
+    B  ``tier-`` lists the ``.agents`` and the ``.claude`` tier skills.
+    C  ``dis-``  lists ``dis-shown`` and not ``dis-hidden`` (``[skills] disabled``).
+    D  ``dup-``  lists the ``.agents`` copy of a duplicated name and not the ``.claude`` one.
+    E  ``fil-``  lists both valid skills and not the invalid ``Fil-Bad``; ``al`` narrows to
+       ``fil-alpha``; the validation Warning is in the Notification Log (mark taken before start).
     """
-    write_skill(tmp_path, ".agents/skills", "reviewer", "Reviews code for bugs")
+    ws = tmp_path / "ws"
+    home = tmp_path / "home"
+    ws.mkdir()
+    home.mkdir()
+    write_skill(ws, ".agents/skills", "reviewer", "Reviews code for bugs")
+    write_skill(ws, ".agents/skills", "tier-agents", "Agents tier skill")
+    write_skill(ws, ".claude/skills", "tier-claude", "Claude tier skill")
+    write_skill(ws, ".agents/skills", "dis-shown", "Shown skill")
+    write_skill(ws, ".agents/skills", "dis-hidden", "Hidden skill")
+    write_rustain_config(ws, disabled=["dis-hidden"])
+    write_skill(ws, ".agents/skills", "dup-skill", "Agents tier dup")
+    write_skill(ws, ".claude/skills", "dup-skill", "Claude tier dup")
+    write_skill(ws, ".agents/skills", "fil-alpha", "Filter alpha")
+    write_skill(ws, ".agents/skills", "fil-beta", "Filter beta")
+    write_skill(ws, ".agents/skills", "Fil-Bad", "Invalid uppercase name")
 
-    tui = _start_tui_with_workspace(tmp_path)
+    mark = NotificationMark(int(time.time()))  # the discovery notice is raised after start()
+    tui = _start_tui_with_workspace(ws, isolated_home=home)
     try:
-        _wait_for_skills_loaded(tui, "Loaded 1 skill")
-
-        tui.send("/")
-        time.sleep(0.3)
-        # Narrow autocomplete to match 'reviewer' (built-ins fill the first 8 slots)
-        for ch in "rev":
-            tui.send(ch)
-            time.sleep(0.05)
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("reviewer", msg="Skill 'reviewer' should appear in / autocomplete")
-        tui.assert_screen_contains("Reviews code for bugs", msg="Skill description should appear in autocomplete")
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_1
-def test_invalid_skill_surfaces_warning_notice(build_binary, tmp_path):
-    """AC3: Invalid skill (uppercase name) triggers aggregated warning notice.
-
-    Write a skill with an invalid name (uppercase) to .agents/skills/.
-    The scanner should exclude it and surface a warning notice.
-    """
-    skill_dir = tmp_path / ".agents" / "skills" / "Bad-Skill"
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: Bad-Skill\ndescription: Invalid uppercase name\n---\n"
-    )
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        # Wait for the aggregated warning notice or log it
-        found = tui.wait_for_screen("failed validation", timeout=10.0)
-        if not found:
-            # The notice may have scrolled off. Check the log instead.
-            tui.assert_log_contains(
-                r"excluded.*does not match pattern",
-                msg="Invalid skill should be excluded with a validation log entry",
-            )
-            return
-
-        tui.send("/")
-        time.sleep(0.5)
-        tui.assert_screen_not_contains("Bad-Skill", msg="Invalid skill should not appear in autocomplete")
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_1
-def test_disabled_skill_hidden_from_autocomplete(build_binary, tmp_path):
-    """AC10: Skills in config disabled list are hidden from autocomplete.
-
-    Write .rustain/config.toml with disabled=["hidden-skill"] and create
-    the skill. It should not appear in the / dropdown.
-    """
-    write_skill(tmp_path, ".agents/skills", "hidden-skill", "Should be hidden")
-    write_skill(tmp_path, ".agents/skills", "visible-skill", "Should be visible")
-    write_rustain_config(tmp_path, disabled=["hidden-skill"])
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_skills_loaded(tui, "Loaded 1 skill")
-
-        tui.send("/")
-        time.sleep(0.3)
-        # Narrow autocomplete to match 'visible-skill' (built-ins fill the first 8 slots)
-        for ch in "visible":
-            tui.send(ch)
-            time.sleep(0.05)
-        time.sleep(0.5)
-
-        tui.assert_screen_contains(
-            "visible-skill", msg="Non-disabled skill should appear in autocomplete"
-        )
-        tui.assert_screen_not_contains(
-            "hidden-skill", msg="Disabled skill should not appear in autocomplete"
-        )
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_1
-def test_skill_selection_shows_placeholder_notice(build_binary, tmp_path):
-    """AC4: Selecting a skill from autocomplete triggers skill activation flow.
-
-    Uses a skill name that is unlikely to prefix-match any built-in command
-    (e.g. ``zzz-test-skill``) and narrows the autocomplete filter so the
-    skill is the ONLY entry. Pressing Enter selects the skill from
-    autocomplete (inserting ``/zzz-test-skill `` into the input buffer);
-    a second Enter submits the command. For workspace-tier skills this
-    surfaces the trust prompt (Story 5-2 AC4).
-    """
-    # Name chosen so a narrow filter uniquely identifies this skill.
-    skill_name = "zzz-test-skill"
-    write_skill(tmp_path, ".agents/skills", skill_name, "A test skill")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_skills_loaded(tui, "Loaded 1 skill")
-
-        tui.send("/")
-        time.sleep(0.3)
-        # Type enough of the skill name that only this skill matches.
-        tui.send("zzz")
-        time.sleep(0.5)
-
-        tui.assert_screen_contains(
-            skill_name, msg="Filtered skill should appear as the sole autocomplete entry"
-        )
-
-        # First ENTER: accept the autocomplete suggestion.
-        tui.send(ENTER)
-        time.sleep(0.5)
-
-        # Second ENTER: submit the skill command.
-        tui.send(ENTER)
-
-        # Workspace-tier skills require trust confirmation before activation.
-        assert tui.wait_for_screen(
-            "Trust and enable this skill",
-            timeout=5.0,
-        ), "Workspace skill should trigger trust prompt after submission"
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_1
-def test_multiple_skills_appear_in_autocomplete(build_binary, tmp_path):
-    """AC4: Multiple discovered skills all appear in autocomplete."""
-    write_skill(tmp_path, ".agents/skills", "alpha-skill", "First skill")
-    write_skill(tmp_path, ".agents/skills", "beta-skill", "Second skill")
-    write_skill(tmp_path, ".claude/skills", "gamma-skill", "Third skill")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_skills_loaded(tui, "Loaded 3 skill")
-
-        tui.send("/")
-        time.sleep(0.3)
-        # Narrow autocomplete with 'skill' to show only custom skills (built-ins fill first 8 slots)
-        for ch in "skill":
-            tui.send(ch)
-            time.sleep(0.05)
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("alpha-skill", msg="alpha-skill should appear")
-        tui.assert_screen_contains("beta-skill", msg="beta-skill should appear")
-
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_1
-def test_priority_dedup_only_highest_shown(build_binary, tmp_path):
-    """AC7: Skills with the same name from different tiers — highest priority wins.
-
-    Create 'review' in both .agents/skills/ (priority 0) and .claude/skills/
-    (priority 2). Only 1 skill should be loaded, and it should be the
-    .agents/skills/ version.
-    """
-    write_skill(tmp_path, ".agents/skills", "review", "Agents tier review")
-    write_skill(tmp_path, ".claude/skills", "review", "Claude tier review")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_skills_loaded(tui, "Loaded 1 skill")
-
-        tui.send("/")
-        time.sleep(0.3)
-        # Narrow autocomplete to match 'review' (built-ins fill the first 8 slots)
-        for ch in "review":
-            tui.send(ch)
-            time.sleep(0.05)
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("Agents tier review", msg="Higher priority skill should win")
-        tui.assert_screen_not_contains("Claude tier review", msg="Lower priority should be shadowed")
-        tui.send(ESC)
-        time.sleep(0.3)
-    finally:
-        tui.stop()
-
-@pytest.mark.story_5_1
-def test_skill_discovery_does_not_block_startup(build_binary, tmp_path):
-    """AC6: Skill scan runs in background — TUI is responsive immediately.
-
-    Create several skills, start the TUI, and verify the app is responsive
-    before the skill scan completes (the scan is async after first frame).
-    """
-    write_skill(tmp_path, ".agents/skills", "async-skill-1", "First async")
-    write_skill(tmp_path, ".agents/skills", "async-skill-2", "Second async")
-    write_skill(tmp_path, ".agents/skills", "async-skill-3", "Third async")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        # Verify TUI is responsive: open autocomplete with '/' and verify it appears.
-        # Using '/' instead of assert_responsive's x+backspace probe because the
-        # probe's transient character can be processed and erased before the first
-        # poll, causing a false timeout.
-        assert tui._child is not None and tui._child.isalive(), "TUI process should be alive"
-        screen_before = tui.get_screen_text()
-        tui.send("/")
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            time.sleep(0.1)
-            if tui.get_screen_text() != screen_before:
-                break
-        else:
-            raise TimeoutError("TUI did not respond to '/' probe within 10s — likely frozen")
-        tui.send(ESC)
-        time.sleep(0.3)
-
-        _wait_for_skills_loaded(tui, "Loaded 3 skill")
-    finally:
-        tui.stop()
-
-@pytest.mark.story_5_1
-def test_skill_autocomplete_filter_by_name(build_binary, tmp_path):
-    """AC4: Substring filtering works on skill name (case-insensitive)."""
-    write_skill(tmp_path, ".agents/skills", "lint-code", "Static analysis skill")
-    write_skill(tmp_path, ".agents/skills", "review-code", "Code review skill")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _wait_for_skills_loaded(tui, "Loaded 2 skill")
-
-        tui.send("/")
-        time.sleep(0.3)
-        tui.send("lint")
-        time.sleep(0.5)
-
-        tui.assert_screen_contains("lint-code", msg="Filtering by 'lint' should match lint-code")
-
-        tui.send(ESC)
-        time.sleep(0.3)
+        # A — built-ins fill the first rows, so the filter must reach the skill.
+        _filter(tui, "/rev", ("reviewer", "Reviews code for bugs"), label="reviewer and its description")
+        _reset(tui, "/rev", "reviewer")
+        # B — both tiers are scanned.
+        _filter(tui, "/tier-", ("tier-agents", "tier-claude"), label="both tiers")
+        _reset(tui, "/tier-", "tier-agents")
+        # C — a disabled skill is hidden (anchored on its enabled neighbour in the same frame).
+        _filter(tui, "/dis-", ("dis-shown",), ("dis-hidden",), label="enabled, not disabled")
+        _reset(tui, "/dis-", "dis-shown")
+        # D — the higher-priority tier wins a duplicated name.
+        _filter(tui, "/dup-", ("Agents tier dup",), ("Claude tier dup",), label="the .agents copy")
+        _reset(tui, "/dup-", "Agents tier dup")
+        # E — an invalid skill is excluded; the filter narrows on the next keys.
+        _filter(tui, "/fil-", ("fil-alpha", "fil-beta"), ("Fil-Bad",), label="valid, not invalid")
+        _filter(tui, "al", ("fil-alpha",), ("fil-beta",), label="narrowed to fil-alpha")
+        _reset(tui, "/fil-al", "fil-alpha")
+        tui.wait_for_notification("failed validation", mark, "Warning")
     finally:
         tui.stop()

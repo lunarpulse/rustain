@@ -3,7 +3,7 @@
 TUI contract tests for non-API-driven user interactions:
  - custom command discovery from ``.claude/commands/`` (AC1, AC6)
  - subdirectory namespacing ``ns:name`` (AC4)
- - autocomplete rendering and ordering (AC11)
+ - autocomplete membership and filter narrowing (AC11)
  - re-scan on ``/`` popup open (AC5)
  - built-in command dispatch unchanged (AC12 regression)
 
@@ -15,14 +15,12 @@ This file focuses on TUI mechanics observable without an API key.
 
 from __future__ import annotations
 
-import json
 import time
 
 import pytest
 
-from harness import RustainTUI
-from keys import ESC, ENTER, TAB, BACKSPACE, CTRL_U
-from harness import Chat, mode_segment
+from harness import RustainTUI, composer_top, mode_segment
+from keys import ESC, ENTER, BACKSPACE, CTRL_U
 from fixtures.commands import write_custom_command
 
 
@@ -35,239 +33,111 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
         time.sleep(delay)
 
 
-def _start_tui_with_workspace(workspace_path) -> RustainTUI:
-    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path)
+def _start_tui_with_workspace(workspace_path, isolated_home) -> RustainTUI:
+    """``isolated_home`` keeps the developer's user-level commands out of the popup."""
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path,
+                     env_overrides={"HOME": str(isolated_home)})
     tui.start()
     return tui
 
 
-def _open_slash_autocomplete(t: RustainTUI) -> None:
-    t.send("/")
-    time.sleep(0.5)
+def _popup(screen: str) -> str:
+    """The rows above the composer box (the autocomplete popup and the chat), never the
+    composer's own typed text."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[:top]) if top is not None else ""
 
 
-def _close_autocomplete(t: RustainTUI) -> None:
+def _composer_text(screen: str) -> str:
+    """The composer box (its top border down to the screen's last row)."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[top:]) if top is not None else ""
+
+
+def _expect_popup(t: RustainTUI, shown, hidden=(), label: str = "") -> str:
+    """Wait for a popup frame that lists every ``shown`` string and none of ``hidden``
+    (a positive and an anchored negative in the same frame)."""
+    return t.wait_until(
+        lambda s: all(x in _popup(s) for x in shown) and not any(x in _popup(s) for x in hidden),
+        f"the popup listing {shown} without {hidden} ({label})",
+    )
+
+
+def _reset(t: RustainTUI, token: str, anchor: str) -> None:
+    """Close the popup with ``Esc``, clear whatever it left in the composer with ``Ctrl+U`` and wait
+    for the typed token to leave. Never sent with no popup open: ``Esc`` would move focus to Chat."""
     t.send(ESC)
-    time.sleep(0.3)
+    t.wait_until(lambda s: anchor not in _popup(s), f"the popup for {token} closed")
+    t.send(CTRL_U)
+    assert t.wait_for_screen_not_contains(token, timeout=5.0), t.get_screen_text()
 
 
 @pytest.mark.story_5_3
 def test_custom_command_appears_in_autocomplete(build_binary, tmp_path):
-    """AC1: a ``.claude/commands/review.md`` file produces ``/review`` in autocomplete."""
-    write_custom_command(tmp_path, "review.md", body="Review the code.\n", description="Review code")
+    """AC1/AC3/AC4/AC5/AC11/AC12: one workspace, one launch; every popup leg reads the rows above the composer.
 
-    tui = _start_tui_with_workspace(tmp_path)
+    A  ``rev``       lists ``review`` with its frontmatter description.
+    B  ``hello``     lists ``hello`` with the first body line as its description (no frontmatter).
+    C  ``deploy``    lists ``deploy:staging`` and ``deploy-prod``; ``-`` narrows to ``deploy-prod``;
+       Backspace re-filters; ``ci`` lists the depth-3 ``ci:github:actions`` without the deploys.
+    D  ``emp``       lists the empty-body ``empty``.
+    E  ``/refresh-`` lists ``refresh-gone``; after the file is replaced on disk the next ``/``
+       open lists ``refresh-new`` and not ``refresh-gone`` (re-scan adds and removes).
+    F  ``/mode plan`` still dispatches the built-in although ``mode.md`` shadows it (last: leaves PLAN).
+    """
+    ws = tmp_path / "ws"
+    home = tmp_path / "home"
+    ws.mkdir()
+    home.mkdir()
+    write_custom_command(ws, "review.md", body="Review the code.\n", description="Review code")
+    write_custom_command(ws, "hello.md", body="Greet the user warmly\nMore details here.\n")
+    write_custom_command(ws, "deploy/staging.md", body="Deploy to staging.\n", description="Deploy staging")
+    write_custom_command(ws, "deploy-prod.md", body="Deploy prod.\n", description="Deploy prod")
+    write_custom_command(ws, "ci/github/actions.md", body="Run CI.\n", description="CI GitHub Actions")
+    write_custom_command(ws, "empty.md", body="")
+    gone = write_custom_command(ws, "refresh-gone.md", body="Soon gone.\n", description="Refresh gone")
+    write_custom_command(ws, "mode.md", body="Shadow attempt.\n", description="Shadow mode")
+
+    tui = _start_tui_with_workspace(ws, home)
     try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "rev")
-        time.sleep(0.5)
-        tui.assert_screen_contains("review", msg="Custom command /review should appear in autocomplete")
-        tui.assert_screen_contains("Review code", msg="Description should appear in autocomplete")
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_namespaced_command_appears_in_autocomplete(build_binary, tmp_path):
-    """AC4: ``.claude/commands/deploy/staging.md`` shows ``deploy:staging``."""
-    write_custom_command(
-        tmp_path, "deploy/staging.md", body="Deploy to staging.\n", description="Deploy staging"
-    )
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "deploy")
-        time.sleep(0.5)
-        tui.assert_screen_contains(
-            "deploy:staging", msg="Namespaced command deploy:staging should appear in autocomplete"
-        )
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_custom_command_without_frontmatter_uses_first_line_description(build_binary, tmp_path):
-    """AC3: command file without frontmatter shows first body line as description."""
-    write_custom_command(tmp_path, "hello.md", body="Greet the user warmly\nMore details here.\n")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "hello")
-        time.sleep(0.5)
-        tui.assert_screen_contains("hello", msg="Command /hello should appear")
-        tui.assert_screen_contains(
-            "Greet the user warmly", msg="First body line should be used as description"
-        )
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_multiple_custom_commands_sorted_alphabetically(build_binary, tmp_path):
-    """AC11: user-defined commands sort alphabetically in autocomplete."""
-    write_custom_command(tmp_path, "zebra.md", body="Zebra command.\n", description="Zebra")
-    write_custom_command(tmp_path, "alpha.md", body="Alpha command.\n", description="Alpha")
-    write_custom_command(tmp_path, "middle.md", body="Middle command.\n", description="Middle")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "alpha")
-        time.sleep(0.5)
-        tui.assert_screen_contains("alpha", msg="alpha should appear")
-
-        # Clear filter back to '/' by backspacing the typed chars
-        for _ in range(5):
-            tui.send(BACKSPACE)
-            time.sleep(0.05)
-        type_slowly(tui, "middle")
-        time.sleep(0.5)
-        tui.assert_screen_contains("middle", msg="middle should appear")
-
-        for _ in range(6):
-            tui.send(BACKSPACE)
-            time.sleep(0.05)
-        type_slowly(tui, "zebra")
-        time.sleep(0.5)
-        tui.assert_screen_contains("zebra", msg="zebra should appear")
-
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_refresh_sees_newly_added_file(build_binary, tmp_path):
-    """AC5: adding a command file mid-session makes it appear on next ``/`` open."""
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        tui.assert_screen_not_contains("added-later", msg="No command file exists yet")
-        tui.send(ESC)
-        time.sleep(0.3)
-        tui.send(BACKSPACE)
-        time.sleep(0.2)
-
-        write_custom_command(
-            tmp_path, "added-later.md", body="Added mid-session.\n", description="Added later"
-        )
-
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "added")
-        time.sleep(0.5)
-        tui.assert_screen_contains(
-            "added-later", msg="Newly added command should appear after re-scan"
-        )
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_refresh_removes_deleted_file(build_binary, tmp_path):
-    """AC5: deleting a command file mid-session removes it from autocomplete."""
-    cmd_file = write_custom_command(
-        tmp_path, "ephemeral.md", body="Temporary command.\n", description="Ephemeral"
-    )
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "eph")
-        time.sleep(0.5)
-        tui.assert_screen_contains("ephemeral", msg="Command should appear initially")
-        _close_autocomplete(tui)
-
-        cmd_file.unlink()
-
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "eph")
-        time.sleep(0.5)
-        tui.assert_screen_not_contains(
-            "ephemeral", msg="Deleted command should disappear after re-scan"
-        )
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_builtin_commands_still_dispatch(build_binary, tmp_path):
-    """AC12 regression: built-in ``/mode plan`` still dispatches via built-in path."""
-    write_custom_command(tmp_path, "mode.md", body="Shadow attempt.\n", description="Shadow mode")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        type_slowly(tui, "/mode plan")
-        time.sleep(0.3)
-        tui.send(ENTER)
-        time.sleep(0.3)
-        tui.send(ENTER)
-        tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment")
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_deeply_nested_namespace_appears(build_binary, tmp_path):
-    """AC4: multi-level namespace like ``ci:github:actions`` works."""
-    write_custom_command(
-        tmp_path,
-        "ci/github/actions.md",
-        body="Run CI.\n",
-        description="CI GitHub Actions",
-    )
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
+        # A
+        type_slowly(tui, "/rev")
+        _expect_popup(tui, ("review", "Review code"), label="custom command with its description")
+        _reset(tui, "/rev", "Review code")
+        # B
+        type_slowly(tui, "/hello")
+        _expect_popup(tui, ("hello", "Greet the user warmly"), label="first-line description")
+        _reset(tui, "/hello", "Greet the user warmly")
+        # C
+        type_slowly(tui, "/deploy")
+        _expect_popup(tui, ("deploy:staging", "deploy-prod"), label="namespaced and flat")
+        type_slowly(tui, "-")
+        _expect_popup(tui, ("deploy-prod",), ("deploy:staging",), label="narrowed by '-'")
+        tui.send_keys(*([BACKSPACE] * 7), delay=0.05)
         type_slowly(tui, "ci")
-        time.sleep(0.5)
-        tui.assert_screen_contains(
-            "ci:github:actions", msg="Deeply nested namespace should appear"
-        )
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_custom_command_with_empty_body_shows_no_description(build_binary, tmp_path):
-    """AC3: empty-body command file shows ``(no description)`` placeholder."""
-    write_custom_command(tmp_path, "empty.md", body="")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "emp")
-        time.sleep(0.5)
-        tui.assert_screen_contains("empty", msg="Empty-body command should still appear")
-        _close_autocomplete(tui)
-    finally:
-        tui.stop()
-
-
-@pytest.mark.story_5_3
-def test_autocomplete_filter_narrows_custom_commands(build_binary, tmp_path):
-    """AC11: typing after ``/`` filters custom commands by substring match."""
-    write_custom_command(tmp_path, "deploy-prod.md", body="Deploy prod.\n", description="Deploy prod")
-    write_custom_command(tmp_path, "deploy-staging.md", body="Deploy staging.\n", description="Deploy staging")
-    write_custom_command(tmp_path, "review.md", body="Review code.\n", description="Review code")
-
-    tui = _start_tui_with_workspace(tmp_path)
-    try:
-        _open_slash_autocomplete(tui)
-        type_slowly(tui, "deploy")
-        time.sleep(0.5)
-        tui.assert_screen_contains("deploy-prod", msg="deploy-prod should match filter")
-        tui.assert_screen_contains("deploy-staging", msg="deploy-staging should match filter")
-        tui.assert_screen_not_contains("review", msg="review should be filtered out")
-
-        _close_autocomplete(tui)
+        _expect_popup(tui, ("ci:github:actions",), ("deploy-prod", "deploy:staging"),
+                      label="depth-3 namespace after the Backspace re-filter")
+        _reset(tui, "/ci", "ci:github:actions")
+        # D
+        type_slowly(tui, "/emp")
+        _expect_popup(tui, ("empty",), label="empty-body command")
+        _reset(tui, "/emp", "empty")
+        # E
+        type_slowly(tui, "/refresh-")
+        _expect_popup(tui, ("refresh-gone",), ("refresh-new",), label="before the re-scan")
+        _reset(tui, "/refresh-", "refresh-gone")
+        gone.unlink()
+        write_custom_command(ws, "refresh-new.md", body="Brand new.\n", description="Refresh new")
+        type_slowly(tui, "/refresh-")
+        _expect_popup(tui, ("refresh-new",), ("refresh-gone",), label="after the re-scan")
+        _reset(tui, "/refresh-", "refresh-new")
+        # F
+        assert mode_segment(tui.get_screen_text()) != "PLAN", "the TUI must not spawn in Plan mode"
+        type_slowly(tui, "/mode plan")
+        tui.wait_until(lambda s: "/mode plan" in _composer_text(s), "'/mode plan' typed into the composer")
+        tui.send_keys(ENTER, ENTER)
+        tui.wait_until(lambda s: mode_segment(s) == "PLAN", "the PLAN status segment")
     finally:
         tui.stop()

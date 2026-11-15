@@ -48,12 +48,18 @@ PROMPT_TWO_TASK_PLAN = (
 )
 
 
+def _leader_menu_open(screen: str) -> bool:
+    """The Ctrl+X leader menu: a box whose top border names the chord."""
+    return any(line.strip().startswith("┌") and "Ctrl+X" in line for line in screen.split("\n"))
+
+
 def _send_chord_ctrl_x_t(tui: RustainTUI) -> None:
-    """Send Ctrl+X followed by 't' to open Mission Control on its Tasks tab."""
+    """Ctrl+X, wait for the leader menu, then 't': Mission Control opens on its Tasks tab
+    (the call returns once the frame title is on screen)."""
     tui.send(CTRL_X)
-    tui.wait(0.2)
+    tui.wait_until(_leader_menu_open, "the Ctrl+X leader menu")
     tui.send("t")
-    tui.wait(0.5)
+    assert tui.wait_for_screen(HUB_TASKS, timeout=5.0), tui.get_screen_text()
 
 
 def _wait_for_plan_card(tui: RustainTUI, timeout: float = 30.0) -> None:
@@ -97,31 +103,27 @@ def _plan_reached_terminal_state(tui: RustainTUI, timeout: float = 180.0) -> boo
     return False
 
 
-# ── Scenario 1: Ctrl+X, t opens the Tasks tab ──────────────────────────────
+# ── Scenario 1, 2, 8, 10: the chord, Esc and the chord over History ─────────
 
 
 @pytest.mark.story_6_3
 def test_chord_opens_panel(tui_monitor: RustainTUI):
-    """Ctrl+X, t opens Mission Control on its Tasks tab (zero state: no plan)."""
-    tui = tui_monitor
-    _send_chord_ctrl_x_t(tui)
-    tui.assert_screen_contains(HUB_TASKS, msg="Tasks tab frame title should be visible")
-    tui.assert_screen_contains("No active plan", msg="Zero state expected with no plan")
+    """Ctrl+X, t opens Mission Control on its Tasks tab (zero state: no plan) at the default
+    130x30 terminal (no narrow guard); Esc closes it; the chord opens it again over History.
 
-
-# ── Scenario 2: the chord at the default terminal size ─────────────────────
-
-
-def test_chord_no_crash_at_default_size(tui_monitor: RustainTUI):
-    """Ctrl+X, t at the default 130x30 terminal opens the tab (no narrow guard).
-
-    The row/rail behaviour at narrow widths is exercised by the Rust conformance
-    tests; here we just verify the chord works at the standard test terminal size.
+    The row/rail behaviour at narrow widths is exercised by the Rust conformance tests.
     """
     tui = tui_monitor
+    assert "Mission Control ·" not in tui.get_screen_text(), "the hub must be closed at spawn"
     _send_chord_ctrl_x_t(tui)
-    tui.assert_screen_contains(HUB_TASKS, msg="Tab should open at 130 cols")
-    assert tui.child.isalive(), "TUI process died"
+    tui.wait_until(lambda s: HUB_TASKS in s and "No active plan" in s,
+                   "the Tasks tab zero state")
+
+    tui.send(ESC)
+    assert tui.wait_for_screen_not_contains("Mission Control ·", timeout=5.0), tui.get_screen_text()
+
+    tui.open_history()
+    _send_chord_ctrl_x_t(tui)
 
 
 # ── Scenario 4: j/k navigation moves cursor in the Tasks tab ───────────────
@@ -237,38 +239,6 @@ def test_failed_task_action_row(tui: RustainTUI):
     assert has_action_row, (
         f"Expected action row with action keys. Screen:\n{screen}"
     )
-
-
-# ── Scenario 8 (was 9): Esc closes the Tasks tab ───────────────────────────
-
-
-@pytest.mark.story_6_3
-def test_toggle_closes_panel(tui_monitor: RustainTUI):
-    """Esc closes the Tasks tab (the second-chord toggle of the sidebar is gone)."""
-    tui = tui_monitor
-    _send_chord_ctrl_x_t(tui)
-    tui.assert_screen_contains(HUB_TASKS, msg="Tab should be open")
-
-    tui.send(ESC)
-    tui.wait(1.0)
-    tui.assert_screen_not_contains(
-        "Mission Control ·", msg="Tab should close on Esc"
-    )
-
-
-# ── Scenario 10: History sidebar open, then Tasks ───────────────────────────
-
-
-@pytest.mark.story_6_3
-def test_switch_from_history_to_tasks(tui_monitor: RustainTUI):
-    """Ctrl+X, t while the History panel is open opens the Tasks tab."""
-    tui = tui_monitor
-    tui.open_history()
-    tui.wait(0.5)
-    tui.assert_screen_contains("History", msg="History panel should be open")
-
-    _send_chord_ctrl_x_t(tui)
-    tui.assert_screen_contains(HUB_TASKS, msg="Should have opened the Tasks tab")
 
 
 # ── Scenario 3: No auto-open on plan execution ─────────────────────────────

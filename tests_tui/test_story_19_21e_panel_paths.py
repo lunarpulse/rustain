@@ -3,8 +3,10 @@
 The Rust conformance tests exercise input routing, journal folds and widgets in
 isolation. These PTYs also execute event_loop::run: both real panel chords and
 slash commands must paint durable rows in Mission Control (Story 21.7: the Room and
-Artifacts tabs replaced the sidebar panels, so the Artifacts rows are also proved at 80 columns,
-where the sidebar never fit). No model turn, constructed TuiState or source-text pin is used.
+Artifacts tabs replaced the sidebar panels). One consuming TUI per route, at 80x24, where the
+sidebar never fit. The Artifacts lineage (`depends on`) is proved in Rust
+(tests/conformance_21_7_mission_control/k6_artifacts.rs), not here. No model turn,
+constructed TuiState or source-text pin is used.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import pytest
 
 import harness
 from harness import RustainTUI
-from keys import CTRL_X, ENTER
+from keys import CTRL_X, ENTER, ESC
 
 
 def _seed_journal(journal: Path) -> None:
@@ -36,7 +38,7 @@ def _seed_journal(journal: Path) -> None:
         {"event": "node_state_changed", "node": "parked", "from": "created", "to": "suspended"},
     ]
     # Evidence and decision rows have no permission-mode-dependent apply suffix.
-    # The second row's real depends_on edge must survive both rendering routes.
+    # The second row's real depends_on edge is part of the production envelope.
     for seed, kind, dependencies in [
         ("a", "evidence", []),
         ("b", "decision", ["a" * 64]),
@@ -92,15 +94,9 @@ def _populated_tui(tmp_path, monkeypatch, cols: int):
 
 
 @pytest.fixture
-def populated_panel_tui(tmp_path, monkeypatch, build_binary):
-    """The Room tab at the standard 130 columns."""
-    yield from _populated_tui(tmp_path, monkeypatch, 130)
-
-
-@pytest.fixture(params=[130, 80], ids=["130", "80"])
-def populated_artifacts_tui(request, tmp_path, monkeypatch, build_binary):
-    """The Artifacts tab at 130 columns (list + detail) and 80 (list only; the sidebar never fit)."""
-    yield from _populated_tui(tmp_path, monkeypatch, request.param)
+def populated_tui(tmp_path, monkeypatch, build_binary):
+    """The seeded workspace at 80x24 (the width the sidebar panels never fit)."""
+    yield from _populated_tui(tmp_path, monkeypatch, 80)
 
 
 def _assert_rows(tui: RustainTUI, rows: tuple[str, ...], diagnostic: str) -> None:
@@ -115,6 +111,12 @@ def _assert_rows(tui: RustainTUI, rows: tuple[str, ...], diagnostic: str) -> Non
     assert "as of" in tui.get_screen_text(), tui.get_screen_text()
 
 
+def _close_hub(tui: RustainTUI) -> None:
+    """Esc closes the Mission Control frame; wait until its title row is gone."""
+    tui.send(ESC)
+    assert tui.wait_for_screen_not_contains("Mission Control ·", timeout=5), tui.get_screen_text()
+
+
 def _submit(tui: RustainTUI, command: str) -> None:
     tui.send(command)
     assert tui.wait_for_screen(command, timeout=5), tui.get_screen_text()
@@ -126,37 +128,23 @@ def _submit(tui: RustainTUI, command: str) -> None:
     tui.send_keys(ENTER, ENTER)
 
 
-def test_room_chord_renders_durable_rows(populated_panel_tui: RustainTUI):
-    tui = populated_panel_tui
+def test_chords_render_durable_rows_at_80x24(populated_tui: RustainTUI):
+    tui = populated_tui
     tui.send(CTRL_X + "r")
     _assert_rows(tui, ("✓ proof-node", "host-bound: old"),
                  "Room root chord must render the seeded durable nodes")
-
-
-def _assert_artifact_rows(tui: RustainTUI) -> None:
-    _assert_rows(tui, ("Mission Control · Artifacts", "evidence aaaaaa", "decision bbbbbb"),
-                 "Artifacts must render the seeded durable artifacts in Mission Control")
-    if harness.TERM_COLS >= 120:
-        # The detail preview of the selected row carries the lineage edge.
-        tui.send("j")
-        assert tui.wait_for_screen("depends on aaaaaa", timeout=10), tui.get_screen_text()
-
-
-
-def test_artifacts_chord_renders_durable_rows(populated_artifacts_tui: RustainTUI):
-    tui = populated_artifacts_tui
+    _close_hub(tui)
     tui.send(CTRL_X + "e")
-    _assert_artifact_rows(tui)
+    _assert_rows(tui, ("Mission Control · Artifacts", "evidence aaaaaa", "decision bbbbbb"),
+                 "Artifacts root chord must render the seeded durable artifacts in Mission Control")
 
 
-def test_room_slash_renders_durable_rows(populated_panel_tui: RustainTUI):
-    tui = populated_panel_tui
+def test_slash_commands_render_durable_rows_at_80x24(populated_tui: RustainTUI):
+    tui = populated_tui
     _submit(tui, "/room")
     _assert_rows(tui, ("✓ proof-node", "host-bound: old"),
                  "Room root slash command must render the seeded durable nodes")
-
-
-def test_artifacts_slash_renders_durable_rows(populated_artifacts_tui: RustainTUI):
-    tui = populated_artifacts_tui
+    _close_hub(tui)
     _submit(tui, "/artifacts")
-    _assert_artifact_rows(tui)
+    _assert_rows(tui, ("Mission Control · Artifacts", "evidence aaaaaa", "decision bbbbbb"),
+                 "Artifacts root slash command must render the seeded durable artifacts in Mission Control")

@@ -1,14 +1,15 @@
 """Story 18-2: Transparency & Visible Surfacing — TUI contract tests.
 
 Deterministic (non-API) coverage for the ``Ctrl+X, L`` Messages surface (Story 21.7: Mission
-Control's Messages tab, the A2A log's one home) and the ``/team log`` in-chat surface. These
+Control's Messages tab, the A2A log's one home) and the ``/team log`` slash command, which opens the same Messages frame. These
 mirror the Story 10-4 subagent panel tests: real chord, real slash command, real render — no
 live LLM.
 
 Chord reference: ``Ctrl+X, L`` → ``InputAction::OpenMessages`` (local host). Before 18.2 the
 same chord was a ``ChordAction::Noop("Log panel — Epic 14")`` that the help screen advertised
-as ``available: true`` — a rendered, documented binding backed by nothing. The first test
-below is what makes that impossible to ship again.
+as ``available: true`` — a rendered, documented binding backed by nothing. The single
+survivor below is what makes that impossible to ship again: the chord and ``/team log`` must
+both open a Messages frame whose rows come from the durable journal.
 
 ⚠ **What these tests deliberately do NOT assert.**
 Peer-controlled text reaching the terminal without escape sequences is AC8, and
@@ -26,8 +27,8 @@ from pathlib import Path
 
 import pytest
 
-from harness import PROJECT_ROOT, RustainTUI, _resolve_binary
-from keys import CTRL_X
+from harness import PROJECT_ROOT, RustainTUI, _resolve_binary, composer_top
+from keys import CTRL_X, ENTER, ESC
 
 
 MESSAGES_TITLE = "Mission Control · Messages"
@@ -42,71 +43,6 @@ def _chord_ctrl_x_l(tui: RustainTUI) -> None:
     )
     tui.send("l")
     tui.wait_for_screen(MESSAGES_TITLE, timeout=5.0)
-
-
-# ── Scenario 1: the chord opens a real panel, not a "not yet available" block ──
-
-
-@pytest.mark.story_18_2
-def test_chord_opens_transparency_log_panel(tui_monitor: RustainTUI):
-    """Ctrl+X, L at the standard 130-col terminal opens Mission Control's Messages tab."""
-    tui = tui_monitor
-    _chord_ctrl_x_l(tui)
-    tui.assert_screen_contains(
-        MESSAGES_TITLE,
-        msg="Ctrl+X, L must open the Messages frame (it was a Noop before 18.2)",
-    )
-    screen = tui.get_screen_text()
-    assert "Epic 14" not in screen, (
-        "the stale 'Log panel — Epic 14' Noop copy must be gone. " f"Screen:\n{screen}"
-    )
-
-
-# ── Scenario 4: the chord toggles the panel closed ──────────────────────────
-
-
-@pytest.mark.story_18_2
-def test_chord_toggles_panel_closed(tui_monitor: RustainTUI):
-    """Esc closes the Messages frame (the sidebar panel's same-chord toggle is gone: the chord
-    retargets the one Mission Control frame, and Esc is the way out)."""
-    tui = tui_monitor
-    _chord_ctrl_x_l(tui)
-    tui.assert_screen_contains(MESSAGES_TITLE)
-    tui.send("\x1b")
-    tui.wait(0.5)
-    screen = tui.get_screen_text()
-    assert MESSAGES_TITLE not in screen, (
-        f"Esc must close the Messages frame. Screen:\n{screen}"
-    )
-
-
-# ── Scenario 5: `/team log` renders in-chat (the sub-120-col path) ──────────
-
-
-@pytest.mark.story_18_2
-def test_slash_team_log_runs_and_renders_in_chat(tui_monitor: RustainTUI):
-    """`/team log` must actually execute.
-
-    This is the mutant that matters: without the ``team`` entry in
-    ``submit_message``'s allowlist the command falls through to
-    ``SubmitWithContext``, resolves no command file, and silently dispatches an
-    empty turn — exactly the failure ``/fanout`` shipped with in 14.3c. A
-    handler-only test would stay green while the command was dead.
-    """
-    tui = tui_monitor
-    tui.send("/team log")
-    tui.wait(0.3)
-    tui.send("\r")
-    tui.wait(1.5)
-    screen = tui.get_screen_text()
-    assert "append-only" in screen or "no A2A interactions" in screen, (
-        "`/team log` must render the transparency surface in-chat. "
-        f"Screen:\n{screen}"
-    )
-    # A silently-unresolved command produces a provider error, never rows.
-    assert "Empty input messages" not in screen, (
-        f"`/team log` fell through to an empty turn. Screen:\n{screen}"
-    )
 
 
 # ── Scenario 7: the help screen advertises the real name ────────────────────
@@ -172,11 +108,16 @@ def tui_with_journal(build_binary):
         tmp.cleanup()
 
 
-@pytest.mark.story_18_2
-def test_panel_renders_real_rows_from_the_durable_journal(tui_with_journal: RustainTUI):
-    """The Messages tab shows rows that are actually on disk."""
-    tui = tui_with_journal
-    _chord_ctrl_x_l(tui)
+def _composer_text(screen: str) -> str:
+    """The composer box (its top border down to the screen's last row)."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return "\n".join(lines[top:]) if top is not None else ""
+
+
+def _assert_messages_populated(tui: RustainTUI) -> None:
+    """The Messages frame shows rows that are actually on disk: the title, a direction word,
+    an outcome word, no empty state, and (after ``G``) the structural-replay closing claim."""
     screen = tui.wait_until(
         lambda s: MESSAGES_TITLE in s and ("inbound" in s or "unknown" in s)
         and ("refused" in s or "accepted" in s),
@@ -192,15 +133,26 @@ def test_panel_renders_real_rows_from_the_durable_journal(tui_with_journal: Rust
 
 
 @pytest.mark.story_18_2
-def test_slash_team_log_renders_real_rows(tui_with_journal: RustainTUI):
-    """`/team log` renders the same records in-chat."""
+def test_panel_renders_real_rows_from_the_durable_journal(tui_with_journal: RustainTUI):
+    """The Messages tab shows rows that are actually on disk, opened by the chord and by `/team log`.
+
+    ``Ctrl+X, L`` opens the frame with the journal's rows (it was a Noop before 18.2) and Esc
+    closes it. ``/team log`` must actually execute: without the ``team`` entry in
+    ``submit_message``'s allowlist the command falls through to ``SubmitWithContext`` and
+    silently dispatches an empty turn, exactly the failure ``/fanout`` shipped with in 14.3c.
+    Typed after the chord leg closed the frame, it must open the same Messages frame with the
+    same rows (``src/adapters/tui/handlers/team_command.rs``).
+    """
     tui = tui_with_journal
+    assert MESSAGES_TITLE not in tui.get_screen_text(), "the Messages frame must be closed at spawn"
+    _chord_ctrl_x_l(tui)
+    _assert_messages_populated(tui)
+
+    tui.send(ESC)
+    assert tui.wait_for_screen_not_contains(MESSAGES_TITLE, timeout=5.0), tui.get_screen_text()
+
     tui.send("/team log")
-    tui.wait(0.3)
-    tui.send("\r")
-    tui.wait(1.5)
-    screen = tui.get_screen_text()
-    assert "append-only" in screen, f"Screen:\n{screen}"
-    assert "no A2A interactions" not in screen, (
-        f"the journal has records; `/team log` must show them. Screen:\n{screen}"
-    )
+    tui.wait_until(lambda s: "/team log" in _composer_text(s), "`/team log` typed into the composer")
+    tui.send(ENTER)
+    tui.wait_until(lambda s: MESSAGES_TITLE in s, "the Messages frame opened by `/team log`")
+    _assert_messages_populated(tui)
