@@ -1,4 +1,4 @@
-"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a/Bb2a and local Bb1b-i/ii; debug binary.
+"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a/Bb2a (one core test, local and attached); debug binary.
 
 No API/new marker, sleeps, imported driving helpers or canonical receipts. A
 held loopback model turn crosses a tiny budget over scrolled Help. Unknown local
@@ -6,28 +6,11 @@ slash commands / attached-local refusals create notices; a draft guards quit.
 Structural waits require the whole box, footer, status and cursor, not a title
 substring. Raw sent/received bytes, settled screens, dated logs and binary SHA
 stay in an env-scoped scratch run; publication is the parent's responsibility.
-RUSTAIN_MODAL_STACK_DESKCHECK=1 exercises predicates OFFLINE (no binary/spawn).
-The independent Bb1b-i node runs the local Bookmark/Wave leg in the generic lane too.
-With DESKCHECK=1, RUSTAIN_MODAL_STACK_BB1B_I_FRAMES must name the Rust export
-directory (120 bb1b-i-*.json frames); no prior-leg evidence is needed.
-Export before capture under gate-4bb1b-i; capture under smoke-evidence-4bb1b-i.
-The generic lane is not dedicated evidence, but a design failure there counts
-as the first execution: quarantine it unchanged, then exactly one corrected capture.
-Bb1b-ii independently consumes RUSTAIN_MODAL_STACK_BB1B_II_FRAMES offline;
-its native leg uses one real local turn, supported History, then live resize.
 Bb2a extends the main node: palette caret/paste in both hosts, local Search and
-ReverseSearch. Its 102 real-frame controls use RUSTAIN_MODAL_STACK_BB2A_FRAMES.
-Bb2b adds the six-field completion leg: shared Log/Help InspectorSearch in both
-hosts and real local CrossSearch pasted-query scans. Predicates consume only
-complete Rust exports through RUSTAIN_MODAL_STACK_BB2B_FRAMES before capture.
-Live inspector captures also require Crossterm's complete hidden-cursor draw
-postlude (including split CSI reads), not merely intact borders; each Help
-scroll is independently observed before its exact restoration is compared.
-C is an independent local/writer/read-only leg, captured under smoke-evidence-4c.
-Its zero-spawn DESKCHECK branch requires RUSTAIN_MODAL_STACK_C_FRAMES: c-*.json
-production exports at 60x16/80x24/130x30, indexed by width/height/host/stage.
-Collection is not dedicated evidence; a design failure still quarantines that
-single attempt unchanged. Only the parent runs the scrubbed dedicated capture.
+ReverseSearch. The scratch-path control is filesystem-only: it checks that the
+workspace scratch stays socket-bounded and that the evidence override is portable.
+The Bb1b-i/ii, Bb2b and C legs and the offline frame-dump mode with its exporters
+are retired (tui-5b); the behaviours they guarded are asserted in Rust.
 """
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -47,7 +30,6 @@ import tempfile
 import threading
 import time
 import traceback
-from types import SimpleNamespace
 
 import harness
 import pexpect
@@ -56,7 +38,6 @@ import pytest
 KEY = "sk-ant-21-4-loopback-key-canary"
 NOTICES = ("a1-first-invalid", "a1-second-invalid", "a1-third-invalid")
 DRAFT = "A1-kept-draft"
-FULL_DRAFT = "1\n2\n3\n4\n5\n6\n7\n8"
 LOG = "System · Notifications"
 QUIT = "System · Notifications › System · Quit"
 HELP = "Help — Rustain Keybindings"
@@ -82,15 +63,9 @@ def _evidence_parent():
     return Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", DEFAULT_EVIDENCE)).resolve()
 
 
-def _smoke_paths(part):
+def _smoke_paths():
     """Select workspace scratch and publication parent without starting a smoke."""
-    parent = _evidence_parent()
-    if part == "bb1b-ii" and "RUSTAIN_CAPTURE_EVIDENCE_DIR" not in os.environ:
-        parent = DEFAULT_EVIDENCE / "smoke-evidence-4bb1b-ii"
-    if part == "c":
-        if parent.name != "smoke-evidence-4c":
-            parent /= "smoke-evidence-4c"
-    return SCRATCH, parent
+    return SCRATCH, _evidence_parent()
 
 
 def _box(screen, title, rail, closing=None):
@@ -204,79 +179,6 @@ def _reversed_cells(tui):
             if tui.screen.buffer[y][x].reverse]
 
 
-def _deskcheck_bb1a_frames(directory):
-    """Offline only: runpy/import entry point; consumes complete Rust exports."""
-    stages = {"before", "search-unfiltered", "search-empty", "search-filtered",
-              "search-navigating-1", "search-navigating-2", "search-restored", "search-kept",
-              "reverse-open", "reverse-filtered", "reverse-cycled", "reverse-accepted", "reverse-restored"}
-    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb1a-*.json")]
-    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
-    assert len(records) == len(frames) == 6*len(stages), frames.keys()
-    for width, height in [(60, 16), (80, 24), (130, 30)]:
-        for full in (False, True):
-            def record(stage):
-                r = frames[width, height, full, stage]
-                assert _bb1a_shell(r["screen"], r["draft"]), (stage, r)
-                assert len(r["screen"].split("\n")) == height
-                assert len(r["screen"].split("\n")[0]) == width
-                return r
-            def search(stage, query, count):
-                r = record(stage)
-                assert _bb1a_search(r["screen"], query, count, r["cursor_hidden"], r["draft"]), r
-                return r
-            before = record("before")
-            assert _bb1a_base(before["screen"], before["draft"])
-            for stage, query, count in [("search-unfiltered", "", "0/0"), ("search-empty", "zzzz", "No matches found"),
-                                        ("search-filtered", "A2b", "1/2"), ("search-navigating-1", "A2b", "1/2"),
-                                        ("search-navigating-2", "A2b", "2/2")]:
-                r = search(stage, query, count)
-                predicate = lambda s: _bb1a_search(s, query, count, r["cursor_hidden"], r["draft"])
-                assert not predicate(before["screen"]), "independent no-owner control"
-                rows = r["screen"].split("\n")
-                for y in (0, harness.composer_top(rows)-1, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn)), (stage, y)
-                assert not _bb1a_search(r["screen"], query, count, False, r["draft"])
-                assert not _bb1a_base(r["screen"], r["draft"]), "live owner cannot be a restored base"
-            matched = record("search-navigating-2")
-            assert _bb1a_match(matched["screen"], matched["cursor_hidden"], matched["draft"])
-            assert not _bb1a_match(before["screen"], True, before["draft"])
-            assert not _bb1a_match(matched["screen"].replace("Bb1a-row-01", " "*len("Bb1a-row-01")),
-                                  True, matched["draft"]), "torn changed-view anchor"
-            restored, kept = record("search-restored"), record("search-kept")
-            assert _bb1a_base(restored["screen"], restored["draft"]) == _bb1a_base(before["screen"], before["draft"])
-            assert _bb1a_base(kept["screen"], kept["draft"]) != _bb1a_base(before["screen"], before["draft"])
-            assert _bb1a_base(kept["screen"], kept["draft"])[1:] == _bb1a_match(
-                matched["screen"], matched["cursor_hidden"], matched["draft"])[1:]
-            for stage, query, selected in [("reverse-open", "", None), ("reverse-filtered", "a1-", "/a1-third-invalid"),
-                                            ("reverse-cycled", "a1-", "/a1-second-invalid")]:
-                r = record(stage)
-                predicate = lambda s: _bb1a_reverse(s, query, selected, r["reversed_cells"], r["cursor_hidden"], r["draft"])
-                box = predicate(r["screen"])
-                assert box, r
-                assert not predicate(before["screen"]), "independent no-popup control"
-                rows = r["screen"].split("\n"); bottom = harness.composer_top(rows)-1
-                for y in (bottom-len(box), bottom-len(box)+1, bottom-1, bottom, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn)), (stage, y)
-                if selected:
-                    assert not predicate(r["screen"].replace('▸ "'+selected, '  "'+selected))
-                assert not _bb1a_reverse(r["screen"], query, selected, r["reversed_cells"], False, r["draft"])
-                assert not _bb1a_base(r["screen"], r["draft"])
-                assert not _bb1a_reverse(r["screen"], query, selected, [(0, 0)], True, r["draft"])
-            accepted, rollback = record("reverse-accepted"), record("reverse-restored")
-            assert _bb1a_base(accepted["screen"], "/a1-second-invalid") and not accepted["cursor_hidden"]
-            assert _bb1a_base(rollback["screen"], rollback["draft"]) and not rollback["cursor_hidden"]
-            assert accepted["cursor"] == [len("/a1-second-invalid")+2, height-2]
-            assert rollback["cursor"] == [2 if full else len(DRAFT)+1, height-2]
-            for r in (before, restored, kept, accepted, rollback):
-                rows = r["screen"].split("\n")
-                for y in (harness.composer_top(rows)-1, len(rows)-2, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not _bb1a_base("\n".join(torn), r["draft"])
-    return len(frames)
-
-
 def _help_box(screen):
     return _box(screen, HELP, "", closing="j/k scroll  ? close")
 
@@ -288,13 +190,9 @@ def _help_scrolled(screen):
         return False
     first, last = body[0][1:-1].strip(), body[-1][1:-1].strip()
     width = len(screen.split("\n", 1)[0])
-    if width == 60:
-        return first.startswith("Ctrl+X chords.") and last == ""
     if width == 80:
         # 21.7: the mission strip row shortens the Stage by one, so the final row is the previous one.
         return first == "close." and last.startswith("Shift+Wheel   Scroll half page per tick")
-    if width == 130:
-        return first == "" and last.startswith("G             Jump to newest message")
     return False
 
 
@@ -403,198 +301,10 @@ def _selected(tui, notices=NOTICES):
     return None
 
 
-def _deskcheck():
-    # Positive and negative controls for torn frames, hidden footer and status occlusion.
-    def fixture(title=LOG, rail="[Enter] List  [Esc] Close"):
-        rows = ["┌ "+title+" "+"─"*(76-len(title))+"┐"]
-        rows += ["│"+" "*78+"│" for _ in range(18)]
-        rows[2] = "│"+"Notifications (3) · detail".ljust(78)+"│"
-        rows[17] = "│"+rail.ljust(78)+"│"
-        rows += ["└"+"─"*78+"┘", "Ready".ljust(80), "┌"+"─"*78+"┐",
-                 "│"+DRAFT.ljust(78)+"│", "└"+"─"*78+"┘"]
-        return rows
-    rows = fixture()
-    screen = "\n".join(rows)
-    assert _box(screen, LOG, "[Esc] Close") and _status(screen) and _composer(screen) == DRAFT
-    assert _box("\n".join(fixture(QUIT)), QUIT, "[Esc] Close")
-    for index, replacement in [(0, " "*80), (9, "│"+" "*79), (17, "│"+" "*78+"│"), (19, " "*80)]:
-        torn = rows.copy(); torn[index] = replacement
-        assert _box("\n".join(torn), LOG, "[Esc] Close") is None
-    rows[20] = "System · Quit".ljust(80)
-    assert not _status("\n".join(rows))
-    final_quit = "\n".join(fixture("System · Quit", "[y] Quit  [n/Esc/Enter] Stay"))
-    assert _box(final_quit, "System · Quit", "Stay") and _status(final_quit)
-    rows = fixture()
-    rows[23] = " "*80
-    assert _composer("\n".join(rows)) is None
-    selected = harness.TerminalScreen(80, 24)
-    stream = harness.pyte.Stream(selected)
-    stream.feed("\x1b[2;1H"+NOTICES[1])
-    assert _selected(SimpleNamespace(screen=selected)) is None
-    stream.feed("\x1b[2;1H\x1b[7m"+NOTICES[1]+"\x1b[0m")
-    assert _selected(SimpleNamespace(screen=selected)) == NOTICES[1]
-    socket_path = SCRATCH / "r214-12345678/a/data/daemons" / ("0"*16+".sock")
-    assert len(os.fsencode(socket_path)) < 108, "scratch socket path exceeds AF_UNIX budget"
-    _deskcheck_help_frames()
-    _deskcheck_a2b_frames()
-    _deskcheck_ba_frames()
-    _deskcheck_saved_frames()
-    directory = os.environ["RUSTAIN_MODAL_STACK_BB2A_FRAMES"]
-    _deskcheck_bb1a_frames(directory)
-    _deskcheck_bb2a_frames(directory)
-
-
-def _deskcheck_help_frames():
-    """Use saved real TestHarness frames at all three named viewports."""
-    path = Path(os.environ["RUSTAIN_MODAL_STACK_HELP_FRAMES"])
-    frames = {}
-    for line in path.read_text().splitlines():
-        if line.startswith("HELP_DESKCHECK_FRAME="):
-            width, height, stage, screen = json.loads(line.split("=", 1)[1])
-            assert len(screen.split("\n")) == height
-            assert all(len(row) == width for row in screen.split("\n"))
-            frames[width, height, stage] = screen
-    assert len(frames) == 21, frames.keys()
-    for width, height in [(60, 16), (80, 24), (130, 30)]:
-        def frame(stage):
-            screen = frames[width, height, stage]
-            assert _status(screen) and _composer(screen) == DRAFT, (width, height, stage, screen)
-            return screen
-        initial = frame("help-initial")
-        scrolled = frame("help-scrolled")
-        assert _help_box(initial) and _help_box(scrolled), (width, height)
-        assert _help_box(initial) != _help_box(scrolled)
-        assert not _help_scrolled(initial)
-        assert _help_scrolled(scrolled), (width, height)
-        assert _box(frame("help-log"), HELP_LOG, "[Esc] Close")
-        assert _box(frame("help-quit"), HELP_QUIT, "[n/Esc/Enter] Stay")
-        assert _help_box(frame("help-restored-log")) == _help_box(scrolled)
-        assert _help_box(frame("help-restored-quit")) == _help_box(scrolled)
-        assert HELP not in frame("composer")
-        # Independent named-viewport geometry oracle; reject a shifted title
-        # and a complete border whose Help footer has not settled.
-        left, top, box_width, box_height = ((0, 0, width, height-4) if width < 100 else (6, 2, 117, 22))
-        rows = initial.split("\n")
-        assert rows[top].index("┌") == left
-        assert rows[top].index("┐") == left+box_width-1
-        assert rows[top+box_height-1][left] == "└"
-        broken = rows.copy(); broken[top] = " "+broken[top][:-1]
-        assert _help_box("\n".join(broken)) is None
-        broken = rows.copy()
-        footer = top+box_height-1
-        broken[footer] = broken[footer].replace("j/k scroll  ? close", " "*len("j/k scroll  ? close"))
-        assert _help_box("\n".join(broken)) is None
-
-
-def _deskcheck_a2b_frames():
-    """Rust renders are positive controls; damage each required structural edge."""
-    frames = {}
-    for line in Path(os.environ["RUSTAIN_MODAL_STACK_A2B_FRAMES"]).read_text().splitlines():
-        if line.startswith("A2B_DESKCHECK_FRAME="):
-            width, height, stage, screen = json.loads(line.split("=", 1)[1])
-            assert len(screen.split("\n")) == height
-            assert all(len(row) == width for row in screen.split("\n"))
-            assert (width, height, stage) not in frames
-            frames[width, height, stage] = screen
-    assert len(frames) == 24, frames.keys()
-    for width, height in [(60, 16), (80, 24), (130, 30)]:
-        def frame(stage, draft=""):
-            screen = frames[width, height, stage]
-            assert _status(screen) and _composer(screen) == draft, (width, height, stage, screen)
-            return screen
-        before = frame("help-before-arrival")
-        assert _help_scrolled(before) and _cue(before) is None
-        for stage in ("help-budget", "help-reopened-budget"):
-            screen = frame(stage)
-            box = _budget_box(screen)
-            assert box and _cue(screen) == 1, (width, height, stage, screen)
-            top = height-4-len(box)
-            left = (width-min(100, width))//2
-            rail_y = next(y for y in range(top+1, height-5) if "[Esc] Later" in screen.split("\n")[y])
-            for y, x in [(top, left), (top+1, left), (height-5, left), (rail_y, left+1)]:
-                rows = screen.split("\n")
-                rows[y] = rows[y][:x]+" "+rows[y][x+1:]
-                if y == rail_y:
-                    rows[y] = rows[y].replace("[Esc] Later", " "*len("[Esc] Later"))
-                assert _budget_box("\n".join(rows)) is None, (width, height, y, x)
-            rows = screen.split("\n"); rows[-4] = " "*width
-            assert not _status("\n".join(rows))
-        for stage, cue in [("help-deferred", 1), ("help-resolved", None)]:
-            screen = frame(stage)
-            assert _help_box(screen) == _help_box(before) and _cue(screen) == cue
-            assert BUDGET not in screen
-        popup = frame("attached-popup", "/det")
-        assert _popup_box(popup) and _composer(popup) == "/det"
-        for y in (height-6, height-5):
-            rows = popup.split("\n"); rows[y] = " "*width
-            assert _popup_box("\n".join(rows)) is None
-        rollback = frame("attached-popup-rollback")
-        assert "┌ Commands " not in rollback and _composer(rollback) == ""
-        menu = frame("attached-help-no-decisions")
-        assert _no_decisions_menu(menu) and _cue(menu) is None and BUDGET not in menu
-        rows = menu.split("\n"); rows[-5] = " "*width
-        assert _no_decisions_menu("\n".join(rows)) is None
-
-
-
-def _deskcheck_ba_frames():
-    frames = {}
-    for line in Path(os.environ["RUSTAIN_MODAL_STACK_BA_FRAMES"]).read_text().splitlines():
-        if line.startswith("BA_DESKCHECK_FRAME="):
-            width, height, stage, screen = json.loads(line.split("=", 1)[1])
-            assert len(screen.split("\n")) == height
-            assert all(len(row) == width for row in screen.split("\n"))
-            assert (width, height, stage) not in frames
-            frames[width, height, stage] = screen
-    assert len(frames) == 24, frames.keys()
-    for width, height in [(60, 16), (80, 24), (130, 30)]:
-        def frame(stage):
-            screen = frames[width, height, stage]
-            assert _status(screen) and _composer(screen) == DRAFT, (stage, screen)
-            return screen
-        for stage, title in [("model-alone", "Select Model"), ("help-model", HELP+" › Select Model")]:
-            screen = frame(stage)
-            body = _model_box(screen, title)
-            assert body, (stage, screen)
-            rows = screen.split("\n")
-            top = next(y for y, row in enumerate(rows) if "┌ "+title+" " in row)
-            bottom = top+len(body)+1
-            selected = next(y for y in range(top+1, bottom) if "▸ " in rows[y])
-            footer = next(y for y in range(top+1, bottom) if "Esc close" in rows[y])
-            for y in (top, top+1, bottom, selected, footer):
-                torn = rows.copy(); torn[y] = " "*width
-                assert _model_box("\n".join(torn), title) is None
-        palette = frame("palette-models")
-        assert _palette_models(palette), palette
-        for before, after in [("> /models", "> /model "), ("/models ", "/model  "), ("Enter", "     ")]:
-            assert _palette_models(palette.replace(before, after)) is None
-        rows = palette.split("\n")
-        bottom = next(y for y, row in enumerate(rows[:-4]) if "┘" in row)
-        rows[bottom] = " "*width
-        assert _palette_models("\n".join(rows)) is None
-        assert _help_box(frame("help-before")) == _help_box(frame("help-return"))
-        base = frame("base-return")
-        assert HELP not in base and "Select Model" not in base and "Command Palette" not in base
-
-def _deskcheck_saved_frames():
-    """Reuse published A2a native screens, independently of Rust fixture output."""
-    root = Path(os.environ["RUSTAIN_MODAL_STACK_SAVED_FRAMES"])
-    for tag in ("local", "attached"):
-        screens = [(root / f"{tag}-{label}.screen.txt").read_text().removesuffix("\n")
-                   for label in ("06-help-scrolled", "08-exact-help-from-log", "10-exact-help-from-quit")]
-        assert all(_help_scrolled(screen) and _status(screen) and _composer(screen) == DRAFT
-                   for screen in screens), tag
-        assert all(_help_box(screen) == _help_box(screens[0]) for screen in screens), tag
-        rows = screens[0].split("\n"); rows[19] = " "*80
-        assert _help_box("\n".join(rows)) is None
-
-
 class _Terminal:
     def __init__(self, stack, binary, args, ws, env, evidence, tag, errors):
         self.tag, self.evidence, self.errors = tag, evidence, errors
         self.screen = harness.TerminalScreen(80, 24)
-        self._draw_tail = b""
-        self.hidden_draw_complete = False
         self.stream = harness.pyte.Stream(self.screen)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.sent = []
@@ -613,10 +323,6 @@ class _Terminal:
             assert self.child.isalive(), f"{self.tag} exited unexpectedly"
             return
         self.stream.feed(self.decoder.decode(data))
-        # Crossterm ends a hidden-cursor draw with HideCursor. Borders alone
-        # can already match halfway through a scroll; carry split CSI bytes.
-        self._draw_tail = (self._draw_tail+data)[-6:]
-        self.hidden_draw_complete = self._draw_tail == b"\x1b[?25l"
         self.frames.write(json.dumps({"at": time.monotonic(), "screen": "\n".join(self.screen.display),
                                      "cursor_hidden": self.screen.cursor.hidden})+"\n")
         self.frames.flush()
@@ -651,19 +357,10 @@ class _Terminal:
             "cursor": [self.screen.cursor.x, self.screen.cursor.y],
             "reversed_cells": _reversed_cells(self)}, sort_keys=True)+"\n")
 
-    def resize(self, width, height):
-        before = [self.screen.columns, self.screen.lines]
-        self.screen.resize(lines=height, columns=width)
-        self.child.setwinsize(height, width)
-        self.frames.write(json.dumps({"at": time.monotonic(), "resize_from": before,
-                                      "viewport": [width, height]})+"\n")
-        self.frames.flush()
-
-    def exit(self, draft=None):
+    def exit(self):
         self.send("guarded final quit", b"\x11")
-        predicate = (lambda s: _bbii_quit(s, self.screen.cursor.hidden, draft)) if draft is not None else (
-            lambda s: _box(s, "System · Quit", "Stay") and _status(s))
-        self.wait(predicate, "settled final quit question and complete keys")
+        self.wait(lambda s: _box(s, "System · Quit", "Stay") and _status(s),
+                  "settled final quit question and complete keys")
         self.send("confirm final quit", b"y")
         deadline = time.monotonic()+30
         while time.monotonic() < deadline:
@@ -1041,66 +738,6 @@ def _bb2a_search(screen, query, position, count, caret_cells, hidden, draft=""):
                      == {(8+position, 0)}) else None
 
 
-def _deskcheck_bb2a_frames(directory):
-    """Real same-manager exports, styled-caret controls and torn complete frames."""
-    cases = {
-        "search-unfiltered": ("", 0, "0/0"), "search-empty": ("zzzz", 4, "No matches found"),
-        "search-filtered": ("A2b", 3, "1/2"), "search-caret": ("A2b", 1, "1/2"),
-        "search-pasted": ("Ax2b", 2, "No matches found"), "search-refiltered": ("A2b", 1, "1/2"),
-        "reverse-unfiltered": ("", 0, None), "reverse-filtered": ("a1-", 3, "/a1-third-invalid"),
-        "reverse-caret": ("a1-", 1, "/a1-third-invalid"), "reverse-pasted": ("ax1-", 2, None),
-        "reverse-refiltered": ("a1-", 1, "/a1-third-invalid"),
-        "palette-unfiltered": ("", 0, "some"), "palette-filtered": ("/ml", 3, "filtered"),
-        "palette-caret": ("/ml", 1, "filtered"), "palette-pasted": ("/~ml", 2, "empty"),
-        "palette-killed": ("/~", 2, "empty"), "palette-cleared": ("", 0, "some"),
-    }
-    records = [json.loads(path.read_text()) for path in Path(directory).glob("bb2a-*.json")]
-    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
-    assert len(records) == len(frames) == 6*len(cases), frames.keys()
-    old = {(r["width"], r["height"], r["full"], r["stage"]): r
-           for path in Path(directory).glob("bb1a-*.json") for r in [json.loads(path.read_text())]}
-    counted = False
-    for width, height in [(60, 16), (80, 24), (130, 30)]:
-        for full in (False, True):
-            for kind in ("palette", "search", "reverse"):
-                filtered, moved = (frames[width, height, full, f"{kind}-{name}"]
-                                   for name in ("filtered", "caret"))
-                assert filtered["screen"] == moved["screen"], "motion changes styles, not field text or Stage"
-                assert filtered["reversed_cells"] != moved["reversed_cells"], "observable caret-motion control"
-            for label, (query, position, mode) in cases.items():
-                r = frames[width, height, full, label]
-                kind = label.split("-")[0]
-                def predicate(screen, cells=r["reversed_cells"], hidden=r["cursor_hidden"]):
-                    if kind == "palette":
-                        return _bb2a_palette(screen, query, position, mode, cells, hidden, r["draft"])
-                    if kind == "search":
-                        return _bb2a_search(screen, query, position, mode, cells, hidden, r["draft"])
-                    return _bb1a_reverse(screen, query, mode, cells, hidden, r["draft"], position)
-                box = predicate(r["screen"])
-                assert box, (label, r)
-                assert not predicate(r["screen"], cells=[]), (label, "missing actual caret style")
-                assert not predicate(r["screen"], cells=[(0, 0)]), (label, "wrong caret cell")
-                assert not predicate(r["screen"], hidden=False), (label, "second hardware cursor")
-                base = old[width, height, full, "before" if kind == "search" else "reverse-restored"]
-                assert base["draft"] == r["draft"]
-                assert not predicate(base["screen"]), (label, "independent no-owner control")
-                rows, region = _bb1a_shell(r["screen"], r["draft"])
-                if kind == "search":
-                    edges = [0, region, height-1]
-                else:
-                    top = (region-len(box))//2 if kind == "palette" else region-len(box)
-                    edges = [top, top+1, top+len(box)-1, region, height-1]
-                    if kind == "palette":
-                        edges += [next(y for y in range(top+1, top+len(box)-1)
-                                       if all(key in rows[y] for key in ("Up/Down", "Enter", "Esc")))]
-                        counted |= bool(re.fullmatch(r"└ [1-9]\d*/[1-9]\d* ─+┘", box[-1]))
-                for y in set(edges):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn)), (label, width, full, y)
-    assert counted, "the real unfiltered palette exercises its counted lower rail"
-    return len(frames)
-
-
 def _bb2a_leg(tui):
     """Both real palette hosts; local Search calm jumps/Back and history editing."""
     def palette(query, position, mode):
@@ -1176,526 +813,7 @@ def _bb2a_leg(tui):
     tui.capture("44-bb2a-final-draft", screen)
 
 
-def _bb1b_book(screen, hidden, draft, count, index, payload):
-    box = _bb1b_frame(screen, hidden, draft, f"Bookmarks ({count})")
-    if not box:
-        return None
-    selected = [r[1:-1].strip() for r in box[1:-1] if "▸ " in r]
-    footer = next((r for r in reversed(box[1:-1]) if r[1:-1].strip()), "")
-    # Source tails may ellipsize; the selected durable index and lede may not.
-    return box if (len(selected) == 1 and selected[0].startswith(f"▸ msg {index}: {payload}")
-                   and all(t in footer for t in ("Jump", "Delete", "Undo", "Close"))) else None
-
-
-def _bb1b_wave(screen, hidden, draft, kind, slot=0, total=2, payload=None, reversed_rows=()):
-    box = _bb1b_frame(screen, hidden, draft, "Wave")
-    if not box:
-        return None
-    body = "\n".join(box[1:-1])
-    footer = next((r for r in reversed(box[1:-1]) if r[1:-1].strip()), "")
-    list_actions = ("Enter drill", "r rerun", "d diverge", "Esc/Ctrl+C close")
-    if kind == "list":
-        selected = [screen.split("\n")[y] for y in reversed_rows]
-        return box if (box[1][1:-1].strip() == f"▾ {slot+1 if total else 0} of {total}"
-                       and (not total or (payload and sum(payload in r and "↵" in r for r in selected) == 1))
-                       and all(t in footer for t in list_actions)) else None
-    if kind == "drill":
-        return box if (box[1][1:-1].strip() == f"Drill: spoke {slot}" and payload in body
-                       and (all(t in footer for t in list_actions)
-                            or all(t in footer for t in ("Enter/r overlay", "d diverge", "Esc dismiss", "Ctrl+C close")))) else None
-    if kind == "diverge":
-        return box if (box[1][1:-1].strip() == f"{total} spokes disagree"
-                       and payload in body and all(t in footer for t in ("s back", "Esc back", "Ctrl+C back"))) else None
-    raise AssertionError(kind)
-
-
-def _bb1b_base(screen, hidden, draft):
-    stage = _bb1a_base(screen, draft)
-    # This fixture's plain Stage rows have no sheet corners or right-hand rail.
-    # Reject partial sheet erasure, not merely an absent title.
-    if not hidden or not stage or any(
-            row.lstrip().startswith(("┌", "└")) or row.endswith("│") for row in stage):
-        return None
-    return stage
-
-
-def _bb1b_settled_base(screen, hidden, draft):
-    stage = _bb1b_base(screen, hidden, draft)
-    # Toast expiry is a legitimate paint change, not a change to Tab.view_state.
-    return stage if stage and not any(
-        text in screen for text in ("Bookmark added", "Mouse scroll enabled.")) else None
-
-
-def _deskcheck_bb1b_i_frames(directory):
-    stages = {"before", "bookmark-open", "bookmark-selected", "bookmark-back", "bookmark-jump",
-              "bookmark-counted", "bookmark-empty", "wave-open", "wave-selected", "wave-drill",
-              "wave-diverge", "wave-drill-return", "wave-closed", "wave-direct-diverge",
-              "wave-compact", "wave-reopen", "wave-list-diverge", "wave-list-compact", "wave-empty", "wave-counted"}
-    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb1b-i-*.json")]
-    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
-    assert len(records) == len(frames) == 6*len(stages), frames.keys()
-    for width, height in ((60, 16), (80, 24), (130, 30)):
-        for full in (False, True):
-            def record(stage):
-                r = frames[width, height, full, stage]
-                assert _bb1a_shell(r["screen"], r["draft"]), r
-                assert len(r["screen"].split("\n")) == height and len(r["screen"].split("\n")[0]) == width
-                return r
-            before = record("before")
-            checks = [
-                ("bookmark-open", lambda s, r: _bb1b_book(s, r["cursor_hidden"], r["draft"], 2, 0, "stage-0-row-00")),
-                ("bookmark-selected", lambda s, r: _bb1b_book(s, r["cursor_hidden"], r["draft"], 2, 2, "stage-2-row-00")),
-                ("bookmark-counted", lambda s, r: _bb1b_book(s, r["cursor_hidden"], r["draft"], 3, 2, "stage-2-row-00")),
-            ]
-            for stage, kind, slot, total in [
-                ("wave-open", "list", 0, 2), ("wave-selected", "list", 1, 2),
-                ("wave-reopen", "list", 0, 2), ("wave-empty", "list", 0, 0), ("wave-counted", "list", 23, 24),
-                ("wave-drill", "drill", 1, 2), ("wave-drill-return", "drill", 1, 2),
-                ("wave-diverge", "diverge", 1, 2), ("wave-direct-diverge", "diverge", 0, 2),
-                ("wave-list-diverge", "diverge", 0, 2),
-            ]:
-                payload = NOTICES[slot % 2]
-                checks.append((stage, lambda s, r, k=kind, i=slot, n=total, p=payload:
-                               _bb1b_wave(s, r["cursor_hidden"], r["draft"], k, i, n, p, r["reversed"])))
-            for stage, predicate in checks:
-                r = record(stage); box = predicate(r["screen"], r)
-                assert box, (stage, r)
-                assert not predicate(before["screen"], r), "independent absent-owner control"
-                rows = r["screen"].split("\n")
-                top = next(y for y, row in enumerate(rows) if box[0] in row)
-                status = harness.composer_top(rows)-1
-                for y in (top, top+1, top+len(box)-2, top+len(box)-1, status, height-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn), r), (stage, y)
-                footer = next(r[1:-1] for r in reversed(box[1:-1]) if r[1:-1].strip())
-                assert not predicate(r["screen"].replace(footer, " "*len(footer)), r), "missing action rail"
-                for action in ("Jump", "Delete", "Undo", "Close", "Enter drill", "r rerun",
-                               "d diverge", "Esc/Ctrl+C close", "Enter/r overlay", "Esc dismiss",
-                               "Ctrl+C close", "s back", "Esc back", "Ctrl+C back"):
-                    if action in footer:
-                        assert not predicate(r["screen"].replace(action, " "*len(action)), r), (stage, action)
-                assert not predicate(r["screen"], {**r, "cursor_hidden": False}), stage
-                if stage.startswith("bookmark"):
-                    assert not predicate(r["screen"].replace("▸ msg ", "  msg "), r)
-                    assert not predicate(r["screen"].replace("▸ msg ", "▸ bad "), r), "wrong durable selection"
-                elif stage not in ("wave-empty",):
-                    assert not predicate(r["screen"].replace(NOTICES[0], "x"*len(NOTICES[0])).replace(
-                        NOTICES[1], "x"*len(NOTICES[1])), r), "incorrect selected/payload control"
-            for stage in ("before", "bookmark-back", "bookmark-jump", "bookmark-empty",
-                          "wave-closed", "wave-compact", "wave-list-compact"):
-                r = record(stage)
-                assert _bb1b_base(r["screen"], r["cursor_hidden"], r["draft"]), r
-                assert _bb1b_settled_base(r["screen"], r["cursor_hidden"], r["draft"]), r
-                rows = r["screen"].split("\n")
-                for border in ("┌"+"─"*(width-2)+"┐", "└"+"─"*(width-2)+"┘"):
-                    torn = rows.copy(); torn[0] = border
-                    assert not _bb1b_base("\n".join(torn), True, r["draft"]), "leftover sheet border"
-                torn = rows.copy(); torn[0] = torn[0][:-1]+"│"
-                assert not _bb1b_base("\n".join(torn), True, r["draft"]), "leftover sheet rail"
-                for notice in ("Success Bookmark added (msg 1)", "Info Mouse scroll enabled."):
-                    transient = rows.copy(); transient[harness.composer_top(rows)-2] = notice.ljust(width)
-                    screen = "\n".join(transient)
-                    assert _bb1b_base(screen, True, r["draft"]), "complete but transient control"
-                    assert not _bb1b_settled_base(screen, True, r["draft"]), "toast cannot define the restore baseline"
-            assert _bb1a_base(record("bookmark-back")["screen"], before["draft"]) == _bb1a_base(before["screen"], before["draft"])
-            assert _bb1a_base(record("bookmark-jump")["screen"], before["draft"]) != _bb1a_base(before["screen"], before["draft"])
-            selected = record("wave-selected")
-            assert not _bb1b_wave(selected["screen"], True, selected["draft"], "list", 0, 2,
-                                  NOTICES[0], selected["reversed"]), "wrong actual selection"
-    return len(frames)
-
-
-def _bb1b_i_leg(tui):
-    """Local-only front doors; attached Bookmark/Wave are intentionally n/a."""
-    def reverse_rows():
-        return [y for y, row in enumerate(tui.screen.display)
-                if any(tui.screen.buffer[y][x].reverse for x in range(len(row)))]
-    def book(count, index, payload):
-        return lambda s: _bb1b_book(s, tui.screen.cursor.hidden, DRAFT, count, index, payload)
-    def wave(kind, slot=0, payload=NOTICES[0]):
-        return lambda s: _bb1b_wave(s, tui.screen.cursor.hidden, DRAFT, kind, slot, 2, payload, reverse_rows())
-    def base(s):
-        return _bb1b_base(s, tui.screen.cursor.hidden, DRAFT)
-    def retained(s):
-        return all(any(p in row and "↵" in row for row in s.split("\n")) for p in NOTICES[:2])
-    def step(label, data, predicate):
-        tui.send(label, data)
-        screen = tui.wait(predicate, label)
-        tui.capture("bb1b-i-"+label, screen)
-        return screen
-    # The pre-existing real model turn supplies user msg 0 / assistant msg 1.
-    step("chat-focus", b"\x1b", base)
-    step("chat-oldest", b"g", lambda s: base(s) and TURN in s and REPLY not in s)
-    step("bookmark-user", b"m", lambda s: base(s) and "Bookmark added (msg 0)" in s)
-    step("chat-bottom", b"G", lambda s: base(s) and REPLY in s)
-    step("bookmark-assistant", b"m", lambda s: base(s) and "Bookmark added (msg 1)" in s)
-    screen = tui.wait(
-        lambda s: _bb1b_settled_base(s, tui.screen.cursor.hidden, DRAFT) and REPLY in s,
-        "bookmark baseline after real transient notices expire")
-    tui.capture("bb1b-i-bookmark-settled-baseline", screen)
-    before = _bb1a_base(screen, DRAFT)
-    step("bookmark-open", b"'", book(2, 0, TURN))
-    step("bookmark-selected", b"j", book(2, 1, "Bb1a-row-00"))
-    step("bookmark-back", b"\x1b", lambda s: base(s) and _bb1a_base(s, DRAFT) == before)
-    step("bookmark-reopen", b"'", book(2, 0, TURN))
-    step("bookmark-jump", b"\r", lambda s: base(s) and TURN in s and REPLY not in s
-         and _bb1a_base(s, DRAFT) != before)
-    step("input-for-fanout", b"i"+b"\x7f"*len(DRAFT), lambda s: _composer(s) == "" and not tui.screen.cursor.hidden)
-    step("fanout-submit", ("/fanout 2 "+TURN).encode(), lambda s: _composer(s) == "/fanout 2 "+TURN)
-    step("fanout-completed", b"\r", lambda s: _status(s) and retained(s) and _composer(s) == ""
-         and not tui.screen.cursor.hidden)
-    step("wave-chat", DRAFT.encode()+b"\x1b", base)
-    screen = step("wave-open", b"r", lambda s: all(p in s for p in NOTICES[:2])
-                  and any(wave("list", 0, p)(s) for p in NOTICES[:2]))
-    # Learn only request scheduling, not selection: subsequent j must select the OTHER actual row.
-    first = next(p for p in NOTICES[:2] if any(p in tui.screen.display[y] for y in reverse_rows()))
-    second = next(p for p in NOTICES[:2] if p != first)
-    assert wave("list", 0, first)(screen)
-    step("wave-selected", b"j", wave("list", 1, second))
-    step("wave-drill", b"\r", wave("drill", 1, second))
-    step("wave-drill-list-keys-close", b"\x1b", base)
-    step("wave-enter-open", b"\r", wave("list", 0, first))
-    step("wave-list-diverge", b"d", wave("diverge", 0, first))
-    step("wave-list-diverge-back", b"\x1b", base)
-    step("wave-direct-diverge", b"d", wave("diverge", 0, first))
-    step("wave-direct-diverge-back", b"s", base)
-    step("wave-reopen", b"r", wave("list", 0, first))
-    step("wave-selected-again", b"j", wave("list", 1, second))
-    step("wave-drill-again", b"\r", wave("drill", 1, second))
-    step("wave-drill-diverge", b"d", wave("diverge", 1, first))
-    step("wave-prior-drill-chat-keys", b"\x1b", lambda s: wave("drill", 1, second)(s) and "Esc dismiss" in s)
-    step("wave-ordinary-close-retains", b"\x03", base)
-    step("wave-retained-reopen", b"r", wave("list", 0, first))
-    step("wave-retained-drill", b"\r", wave("drill", 0, first))
-    step("wave-retained-diverge", b"d", wave("diverge", 0, first))
-    step("wave-return-drill-for-dismiss", b"s", wave("drill", 0, first))
-    step("wave-full-dismiss", b"\x1b", lambda s: base(s) and not any(p in s for p in NOTICES[:2]))
-    step("wave-no-retained-reopen", b"r", lambda s: base(s) and not any(p in s for p in NOTICES[:2]))
-    step("input-restored", b"i", lambda s: _composer(s) == DRAFT and not tui.screen.cursor.hidden)
-
-def _bbii_shell(screen, draft):
-    """Actual status/composer boundary, including Monitor's full-height sidebar."""
-    rows = screen.split("\n")
-    if (len(rows) not in (16, 24, 30) or len(rows[0]) not in (60, 80, 130)
-            or any(len(row) != len(rows[0]) for row in rows)):
-        return None
-    top = harness.composer_top(rows)
-    if top is None or top < 2:
-        return None
-    width = len(rows[0])
-    composer_width = rows[top].find("┐")+1
-    allowed = (width, width-min(50, max(30, width*3//10))) if width >= 120 else (width,)
-    if (composer_width not in allowed
-            or not re.fullmatch(r"┌ Message(?: \[ML\])? ─*┐", rows[top][:composer_width])
-            or not re.search(r"\bReady\b", rows[top-1][:composer_width])
-            or rows[-1][:composer_width] != "└"+"─"*(composer_width-2)+"┘"):
-        return None
-    body = [r[:composer_width] for r in rows[top+1:-1]]
-    if (any(not (r.startswith("│") and r.endswith("│")) for r in body)
-            or [r[1:-1].strip() for r in body] != draft.split("\n")):
-        return None
-    return rows, top-1-_strip_rows(screen)
-
-
-def _bbii_frame(screen, hidden, draft, title, closing=None, spaced=True):
-    shell = _bbii_shell(screen, draft)
-    if not shell or not hidden:
-        return None
-    rows, region = shell
-    width = len(rows[0])
-    w, h = ((width, region) if width < 100 else
-            (width*9//10, min(region, max(5, region*85//100))))
-    left, top = (width-w)//2, (region-h)//2
-    box = tuple(row[left:left+w] for row in rows[top:top+h])
-    prefix = ("┌ "+title+" ") if spaced else ("┌"+title)
-    bottom = "└"+(closing or "")
-    if (len(box) < 5 or box[0] != prefix+"─"*(w-len(prefix)-1)+"┐"
-            or box[-1] != bottom+"─"*(w-len(bottom)-1)+"┘"
-            or any(not (r.startswith("│") and r.endswith("│")) for r in box[1:-1])):
-        return None
-    return box
-
-
-def _bbii_cross(screen, hidden, draft, query, count=None, selected=None):
-    box = _bbii_frame(screen, hidden, draft, "History › Cross-Search", " [Enter] open  [Esc] close ")
-    if not box or box[1][1:-1].rstrip() != ("/ "+query).rstrip():
-        return None
-    summary = count or ("Type at least 2 characters" if len(query) < 2 else "No matches found")
-    if box[2][1:-1].strip() != summary:
-        return None
-    titles = [r[1:-1].strip() for r in box[3:-1] if r[1:-1].strip().startswith("▸ ")]
-    if selected is None:
-        if titles:
-            return None
-    elif len(titles) != 1 or not titles[0].startswith("▸ "+selected):
-        return None
-    # Compare the exact queried owner across Quit, except relative-time ticks.
-    return tuple("<relative-time>" if re.fullmatch(r"│    (?:just now|\d+[mhd] ago) *│", r) else r
-                 for r in box)
-
-
-def _bbii_quit(screen, hidden, draft, title="System · Quit"):
-    box = _bbii_frame(screen, hidden, draft, title)
-    if not box:
-        return None
-    body = [r[1:-1].strip() for r in box[1:-1] if r[1:-1].strip()]
-    return box if (body and body[0] == "Quit rustain?"
-                   and body[-1] == "[y] Quit   [n/Esc/Enter] Stay"
-                   and any("Your unsent draft will be lost." in r for r in body)) else None
-
-
-def _bbii_history(screen, hidden, draft, require_entry=True, title=TURN):
-    shell = _bbii_shell(screen, draft)
-    if not shell or not hidden or (require_entry and not title):
-        return None
-    rows, status = shell
-    if len(rows[0]) != 130 or len(rows) != 30 or "Cross-Search" in screen:
-        return None
-    # History is a centred L2 frame (Story 21.7 A21), not the sidebar column: its title sits in
-    # the top rail without padding; an entry row reads `<title> · <age> · 2 msgs`.
-    box = _bbii_frame(screen, hidden, draft, "History", spaced=False)
-    if not box:
-        return None
-    body = [r[1:-1] for r in box[1:-1]]
-    if ((require_entry and not any(title in r and "2 msgs" in r for r in body))
-            or (not require_entry and not any("No conversations" in r for r in body))
-            or any("Cross-Search" in r or "System · Quit" in r for r in rows[:status])):
-        return None
-    return box[0], box[-1], title if require_entry else "No conversations"
-
-
-def _bbii_base(screen, hidden, draft):
-    shell = _bbii_shell(screen, draft)
-    if not shell or not hidden:
-        return None
-    rows, status = shell
-    stage = tuple(rows[:status])
-    if any(row.lstrip().startswith(("┌", "└")) or row.endswith("│") for row in stage):
-        return None
-    return stage
-
-
-def _deskcheck_bb1b_ii_frames(directory):
-    """Only real runtime exports are positive controls; tear every primary edge."""
-    required = {"cross-unfiltered", "cross-filtered", "cross-empty", "cross-counted"}
-    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb1b-ii-*.json")]
-    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
-    assert len(records) == len(frames), "duplicate frame keys"
-    for width, height in ((60, 16), (80, 24), (130, 30)):
-        for full in (False, True):
-            for stage in required:
-                r = frames[width, height, full, stage]
-                draft = FULL_DRAFT if full else DRAFT
-                assert r["draft"] == draft
-                assert len(r["screen"].split("\n")) == height
-                assert all(len(row) == width for row in r["screen"].split("\n"))
-                query, count, title = {
-                    "cross-unfiltered": ("", None, None),
-                    "cross-empty": ("zzzz", None, None),
-                    "cross-filtered": ("Bb1a", "1/1 matches", TURN),
-                    "cross-counted": ("Bb1a", "20/20 matches", TURN),
-                }[stage]
-                def predicate(screen, hidden=r["cursor_hidden"], q=query, c=count, t=title):
-                    return _bbii_cross(screen, hidden, draft, q, c, t)
-                assert predicate(r["screen"]), r
-                box = _bbii_frame(r["screen"], r["cursor_hidden"], draft, "History › Cross-Search",
-                                    " [Enter] open  [Esc] close ")
-                rows = r["screen"].split("\n")
-                top = next(y for y, row in enumerate(rows) if box[0] in row)
-                status = harness.composer_top(rows)-1
-                for y in (top, top+1, top+2, top+len(box)-1, status, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn)), (stage, width, full, y)
-                # Border cells, not only entire blank lines, must be checked.
-                left = rows[top].index(box[0])
-                for y in range(top+1, top+len(box)-1):
-                    for x in (left, left+len(box[0])-1):
-                        torn = rows.copy()
-                        torn[y] = torn[y][:x]+" "+torn[y][x+1:]
-                        assert not predicate("\n".join(torn)), (stage, y, x, "side border")
-                for token in ("[Enter] open", "[Esc] close"):
-                    assert not predicate(r["screen"].replace(token, " "*len(token)))
-                assert not predicate(r["screen"], hidden=False), "visible query caret"
-                assert not predicate(r["screen"], q=query+"x"), "wrong query"
-                assert not predicate(r["screen"], c="19/20 matches"), "wrong counter"
-                if title:
-                    for before, after in (("▸ "+TURN, "  "+TURN), (TURN, "x"*len(TURN))):
-                        assert not predicate(r["screen"].replace(before, after)), "wrong selected title"
-                    assert not predicate(r["screen"], t="unrelated-title"), "wrong selected result"
-                    unfiltered = frames[width, height, full, "cross-unfiltered"]
-                    assert not predicate(unfiltered["screen"]), "independent absent-results owner"
-            draft = FULL_DRAFT if full else DRAFT
-            filtered = frames[width, height, full, "cross-filtered"]
-            for stage, title in (("cross-quit", "History › Cross-Search › System · Quit"),
-                                 ("base-quit", "History › System · Quit" if width == 130 else "System · Quit")):
-                r = frames[width, height, full, stage]
-                assert r["draft"] == draft
-                def quit_predicate(screen, hidden=r["cursor_hidden"]):
-                    return _bbii_quit(screen, hidden, draft, title)
-                assert quit_predicate(r["screen"]), r
-                box = _bbii_frame(r["screen"], True, draft, title)
-                rows = r["screen"].split("\n")
-                top = next(y for y, row in enumerate(rows) if box[0] in row)
-                for y in (top, top+len(box)-1, harness.composer_top(rows)-1, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not quit_predicate("\n".join(torn)), (stage, width, full, y)
-                for token in ("Quit rustain?", "Your unsent draft will be lost.",
-                              "[y] Quit", "[n/Esc/Enter] Stay"):
-                    assert not quit_predicate(r["screen"].replace(token, " "*len(token))), token
-                assert not quit_predicate(r["screen"], hidden=False)
-                assert not _bbii_quit(r["screen"], True, draft, "wrong-owner")
-                assert not quit_predicate(filtered["screen"]), "independent absent Quit owner"
-            untitled = frames[width, height, full, "cross-untitled"]
-            assert untitled["conversation_title"] == ""
-            assert _bbii_cross(untitled["screen"], True, draft, "Bb1a", "1/1 matches", "(untitled)")
-            assert not _bbii_cross(untitled["screen"], True, draft, "Bb1a", "1/1 matches", TURN)
-            assert not _bbii_cross(filtered["screen"], True, draft, "Bb1a", "1/1 matches", "(untitled)")
-            assert not _bbii_cross(untitled["screen"].replace("▸ (untitled)", "  (untitled)"),
-                                   True, draft, "Bb1a", "1/1 matches", "(untitled)")
-            if width < 100:
-                r = frames[width, height, full, "accepted-base"]
-                assert r["draft"] == draft
-                def accepted_predicate(screen, hidden=r["cursor_hidden"]):
-                    return (_bbii_base(screen, hidden, draft)
-                            and "Bb1a-row-0" in screen and REPLY not in screen)
-                assert accepted_predicate(r["screen"]), r
-                assert not accepted_predicate(r["screen"], hidden=False)
-                assert not accepted_predicate(filtered["screen"]), "independent still-owned frame"
-                assert not accepted_predicate(r["screen"].replace("Bb1a-row-0", "x"*10))
-                rows = r["screen"].split("\n")
-                for y in (harness.composer_top(rows)-1, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not accepted_predicate("\n".join(torn)), (width, full, y)
-                torn = rows.copy(); torn[0] = REPLY.ljust(width)
-                assert not accepted_predicate("\n".join(torn)), "completion tail is not the accepted match"
-            if width == 130:
-                r = frames[width, height, full, "history-return"]
-                assert r["draft"] == (FULL_DRAFT if full else DRAFT)
-                assert _bbii_history(r["screen"], r["cursor_hidden"], r["draft"], require_entry=False), r
-                rows = r["screen"].split("\n")
-                box = _bbii_frame(r["screen"], True, r["draft"], "History", spaced=False)
-                top = next(y for y, row in enumerate(rows) if box[0] in row)
-                for y in (top, top+len(box)-1, harness.composer_top(rows)-1, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not _bbii_history("\n".join(torn), True, r["draft"], require_entry=False), y
-                assert not _bbii_history(r["screen"], False, r["draft"], require_entry=False)
-                assert not _bbii_history(r["screen"].replace("No conversations", "x"*16),
-                                         True, r["draft"], require_entry=False)
-                populated = frames[width, height, full, "history-populated"]
-                def history_predicate(screen, hidden=populated["cursor_hidden"]):
-                    return _bbii_history(screen, hidden, draft, title=populated["history_title"])
-                assert populated["draft"] == draft
-                assert history_predicate(populated["screen"]), populated
-                assert not history_predicate(r["screen"]), "independent empty History"
-                assert not history_predicate(filtered["screen"]), "independent Cross owner"
-                assert not history_predicate(populated["screen"], hidden=False)
-                assert not _bbii_history(populated["screen"], True, draft, title="")
-                for before, after in ((populated["history_title"], "x"*len(populated["history_title"])), ("2 msgs", "3 msgs")):
-                    assert not history_predicate(populated["screen"].replace(before, after))
-                rows = populated["screen"].split("\n")
-                box = _bbii_frame(populated["screen"], True, draft, "History", spaced=False)
-                top = next(y for y, row in enumerate(rows) if box[0] in row)
-                for y in (top, top+len(box)-1, harness.composer_top(rows)-1, len(rows)-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not history_predicate("\n".join(torn)), (full, y)
-    # Read an actual FileSystemStorage serialization, not a hand-written echo of
-    # the reader's schema. Negative copies never alter the saved positive.
-    persisted_ws = Path(directory) / "persisted-control"
-    positive = _bbii_persisted(persisted_ws)
-    assert positive and positive["messages"] == 2, persisted_ws
-    source = persisted_ws / ".claude" / "sessions" / positive["file"]
-    original = json.loads(source.read_text())
-    populated = frames[130, 30, True, "history-populated"]
-    assert _bbii_history(populated["screen"], True, FULL_DRAFT, title=positive["history_title"])
-    untitled = frames[60, 16, True, "cross-untitled"]
-    assert _bbii_cross(untitled["screen"], True, FULL_DRAFT, "Bb1a", "1/1 matches", positive["result_title"])
-    with tempfile.TemporaryDirectory(prefix="offline-persisted-", dir=Path(directory).parent) as tmp:
-        workspace = Path(tmp)
-        target = workspace / ".claude" / "sessions" / positive["file"]
-        target.parent.mkdir(parents=True)
-        for field in ("title", "count", "user", "assistant"):
-            record = json.loads(json.dumps(original))
-            if field == "title":
-                record["title"] = "unrelated-title"
-            elif field == "count":
-                record["messages"] = record["messages"][:1]
-            else:
-                record["messages"][0 if field == "user" else 1]["content"] = "unrelated-content"
-            target.write_text(json.dumps(record))
-            found = _bbii_persisted(workspace)
-            if field == "title":
-                assert found
-                assert not _bbii_history(populated["screen"], True, FULL_DRAFT, title=found["history_title"])
-                assert not _bbii_cross(untitled["screen"], True, FULL_DRAFT, "Bb1a", "1/1 matches", found["result_title"])
-            else:
-                assert not found, field
-    return len(frames)
-
-
-def _bbii_persisted(ws):
-    # Runtime turn completion touches SessionIndex and asynchronously saves the
-    # flat FileSystemStorage payload before CrossSearch loads it via StoragePort.
-    for path in (ws / ".claude" / "sessions").glob("*.meta.json"):
-        record = json.loads(path.read_text())
-        messages = record.get("messages", [])
-        if (len(messages) == 2
-                and messages[0].get("content") == TURN and messages[1].get("content") == SEARCH_REPLY):
-            return {"file": path.name, "id": record["id"], "title": record["title"], "messages": len(messages),
-                    "history_title": record["title"] or "New Conversation",
-                    "result_title": record["title"] or "(untitled)"}
-    return None
-
-
-def _bb1b_ii_leg(tui, ws):
-    """One real turn; actual supported History door, then full-composer sheets."""
-    def cross(query="", count=None, title=None):
-        return lambda s: _bbii_cross(s, tui.screen.cursor.hidden, FULL_DRAFT, query, count, title)
-    def step(label, data, predicate):
-        tui.send("Bb1b-ii "+label, data)
-        screen = tui.wait(predicate, label)
-        tui.capture("bb1b-ii-"+label, screen)
-        return screen
-    step("prepare-input-draft", DRAFT.encode(), lambda s: _composer(s) == DRAFT)
-    step("full-eight-line-draft", b"\x15\x1b[200~"+FULL_DRAFT.encode()+b"\x1b[201~",
-         lambda s: _bbii_shell(s, FULL_DRAFT) and REPLY in s and not tui.screen.cursor.hidden)
-    tui.resize(130, 30)
-    tui.wait(lambda s: _bbii_shell(s, FULL_DRAFT) and REPLY in s, "130 supported sidebar viewport")
-    screen = step("history-opener", b"\x18h",
-                  lambda s: (persisted := _bbii_persisted(ws))
-                  and _bbii_history(s, tui.screen.cursor.hidden, FULL_DRAFT, title=persisted["history_title"]))
-    persisted = _bbii_persisted(ws)
-    assert persisted
-    title = persisted["result_title"]
-    (tui.evidence / "bb1b-ii-persisted.json").write_text(json.dumps(persisted, indent=2)+"\n")
-    step("cross-unfiltered", b"/", cross())
-    step("cross-empty", b"zzzz", cross("zzzz"))
-    step("cross-backspace", b"\x7f", cross("zzz"))
-    step("cross-clear", b"\x15", cross())
-    queried = step("cross-filtered", b"Bb1a", cross("Bb1a", "1/1 matches", title))
-    owner = cross("Bb1a", "1/1 matches", title)(queried)
-    step("reserved-navigation", b"jk", lambda s: cross("Bb1a", "1/1 matches", title)(s) == owner)
-    step("paste-edits-query", b"\x1b[200~blocked\x1b[201~",
-         cross("Bb1ablocked"))
-    step("restore-query-after-paste", b"\x15Bb1a", cross("Bb1a", "1/1 matches", title))
-    step("cross-quit", b"\x11",
-         lambda s: _bbii_quit(s, tui.screen.cursor.hidden, FULL_DRAFT, "History › Cross-Search › System · Quit"))
-    step("cross-quit-cancel", b"n", lambda s: cross("Bb1a", "1/1 matches", title)(s) == owner)
-    for label, key in (("esc", b"\x1b"), ("ctrl-c", b"\x03")):
-        step("history-return-"+label, key, lambda s: _bbii_history(s, tui.screen.cursor.hidden, FULL_DRAFT, title=persisted["history_title"]))
-        step("fresh-unfiltered-"+label, b"/", cross())
-        step("same-query-"+label, b"Bb1a", cross("Bb1a", "1/1 matches", title))
-    for width, height in ((80, 24), (60, 16)):
-        tui.resize(width, height)
-        screen = tui.wait(cross("Bb1a", "1/1 matches", title), f"{width} complete resized CrossSearch sheet")
-        tui.capture(f"bb1b-ii-cross-{width}x{height}-full", screen)
-    screen = step("enter-kept-match", b"\r", lambda s: _bbii_base(s, tui.screen.cursor.hidden, FULL_DRAFT)
-                  and "Bb1a-row-0" in s and REPLY not in s)
-    assert "Cross-Search" not in screen
-    tui.exit(FULL_DRAFT)
-
-
-
-@pytest.mark.parametrize("evidence_override", (None, "external-evidence", "smoke-evidence-4c"))
+@pytest.mark.parametrize("evidence_override", (None, "external-evidence"))
 def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch, evidence_override):
     """Filesystem-only controls: no binary resolution, server, socket or TUI."""
     with tempfile.TemporaryDirectory(prefix="r214-paths-", dir="/tmp") as directory:
@@ -1729,564 +847,20 @@ def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch, evidence_ove
                 expected_parent = evidence.resolve()
             assert module["_evidence_parent"]() == expected_parent
             assert module["SCRATCH"] == scratch, "evidence override must not relocate sockets"
-            assert module["_smoke_paths"]("bb1a") == (scratch, expected_parent)
-            expected_ii = (evidence / "smoke-evidence-4bb1b-ii"
-                           if evidence_override is None else expected_parent)
-            assert module["_smoke_paths"]("bb1b-ii") == (scratch, expected_ii)
-            c_scratch, c_parent = module["_smoke_paths"]("c")
-            assert c_scratch == scratch, "C must use the same socket-bounded workspace scratch"
-            c_expected = (expected_parent if expected_parent.name == "smoke-evidence-4c"
-                          else expected_parent / "smoke-evidence-4c")
-            assert c_parent == c_expected, "C must preserve portable evidence overrides"
-            c_parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="r214-", dir=c_scratch) as workspace:
-                for tag in ("l", "a"):
-                    ws = Path(workspace) / tag
-                    (ws / "data/daemons").mkdir(parents=True)
-                    assert len(os.fsencode(ws / "data/daemons" / ("0"*16+".sock"))) < 108
+            assert module["_smoke_paths"]() == (scratch, expected_parent)
             monkeypatch.delenv("RUSTAIN_CAPTURE_EVIDENCE_DIR", raising=False)
 
 
-def _bb2b_box(screen, hidden, draft, kind):
-    """Complete fitted inspector sheet; bottom-border list hints may vary."""
-    shell = _bbii_shell(screen, draft)
-    if not shell or not hidden:
-        return None
-    rows, region = shell
-    width = len(rows[0])
-    w, h = ((width, region) if width < 100 else
-            (width*9//10, min(region, max(5, region*85//100))))
-    left, top = (width-w)//2, (region-h)//2
-    box = tuple(row[left:left+w] for row in rows[top:top+h])
-    title = LOG if kind == "log" else HELP
-    prefix = "┌ "+title+" "
-    if (len(box) < 5 or box[0] != prefix+"─"*(w-len(prefix)-1)+"┐"
-            or not (box[-1].startswith("└") and box[-1].endswith("┘"))
-            or any(not (r.startswith("│") and r.endswith("│")) for r in box[1:-1])):
-        return None
-    return box
-
-
-def _bb2b_inspector(screen, hidden, draft, kind, query, position, editing,
-                    cells, mode="some", token=None):
-    box = _bb2b_box(screen, hidden, draft, kind)
-    if not box or box[1][1:-1].rstrip() != ("/ "+query).rstrip():
-        return None
-    content = "\n".join(row[1:-1] for row in box[2:-1])
-    rail = "\n".join(box[2:])
-    if editing:
-        if not all(t in rail for t in ("[Enter]", "Keep filter", "[Esc]", "Clear")):
-            return None
-    elif "[/] Search" not in "\n".join(box):
-        return None
-    empty = "No matching notifications." if kind == "log" else "No matching keybindings."
-    if mode == "empty":
-        if empty not in content:
-            return None
-    elif empty in content or not content.strip():
-        return None
-    if kind == "log" and mode != "empty":
-        if not re.search(r"\b(?:Info|Success|Warning|Error)\s*·", content):
-            return None
-    if kind == "log" and not editing:
-        if not all(t in rail for t in ("[Enter]", "Detail", "[c]", "Copy")):
-            return None
-    if mode == "filtered" and (not token or token.lower() not in content.lower()):
-        return None
-    rows, region = _bbii_shell(screen, draft)
-    top, left = (region-len(box))//2, (len(rows[0])-len(box[0]))//2
-    actual = {(x, y) for x, y in cells if y == top+1}
-    expected = {(left+3+position, top+1)} if editing else set()
-    return box if actual == expected else None
-
-
-def _bb2b_list(screen, hidden, draft, kind, token=None):
-    box = _bb2b_box(screen, hidden, draft, kind)
-    if not box or box[1][1:-1].lstrip().startswith("/") or "[/] Search" not in "\n".join(box):
-        return None
-    content = "\n".join(box[1:-1])
-    if kind == "log":
-        if not re.search(r"\b(?:Info|Success|Warning|Error)\s*·", content):
-            return None
-        if not all(t in "\n".join(box) for t in ("[Enter]", "Detail", "[c]", "Copy")):
-            return None
-    elif not content.strip("│ \n"):
-        return None
-    return box if token is None or token in content else None
-
-
-def _bb2b_cross(screen, hidden, draft, query, position, cells, count=None, title=None):
-    box = _bbii_frame(screen, hidden, draft, "History › Cross-Search", " [Enter] open  [Esc] close ")
-    if not box or not _bbii_cross(screen, hidden, draft, query, count, title):
-        return None
-    rows, region = _bbii_shell(screen, draft)
-    top, left = (region-len(box))//2, (len(rows[0])-len(box[0]))//2
-    return box if {(x, y) for x, y in cells if y == top+1} == {(left+3+position, top+1)} else None
-
-
-def _deskcheck_bb2b_frames(directory):
-    """Real frames are positive controls; query styles, rails and torn edges aren't optional."""
-    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb2b-*.json")]
-    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
-    cases = {}
-    for kind, needle, token in (("log", "aone", "/aone"), ("help", "notification", "notification")):
-        for suffix, query, position, editing, mode in [
-            ("unfiltered", "", 0, True, "some"),
-            ("filtered", needle, len(needle), True, "filtered"),
-            ("caret", needle, 1, True, "filtered"),
-            ("empty", needle[:1]+"x"+needle[1:], 2, True, "empty"),
-            ("restored", needle, 1, True, "filtered"),
-            ("accepted", needle, 1, False, "filtered"),
-            ("cleared", "", 0, False, "list"),
-        ]:
-            cases[kind+"-"+suffix] = (kind, query, position, editing, mode, token)
-    for suffix, query, position, count, title in [
-        ("unfiltered", "", 0, None, None),
-        ("filtered", "Bb1a", 4, "1/1 matches", TURN),
-        ("caret", "Bb1a", 1, "1/1 matches", TURN),
-        ("empty", "Bxb1a", 2, None, None),
-        ("restored", "Bb1a", 1, "1/1 matches", TURN),
-        ("counted", "Bb1a", 4, "20/20 matches", TURN),
-    ]:
-        cases["cross-"+suffix] = ("cross", query, position, count, title, None)
-    assert len(records) == len(frames) == 6*len(cases), (len(records), frames.keys())
-    for width, height in ((60, 16), (80, 24), (130, 30)):
-        for full in (False, True):
-            for kind in ("log", "help", "cross"):
-                a, b = (frames[width, height, full, kind+"-"+s] for s in ("filtered", "caret"))
-                assert a["screen"] == b["screen"], "caret motion alone changes no query/body/shell text"
-                assert a["reversed_cells"] != b["reversed_cells"], "observable style-motion control"
-            for stage, values in cases.items():
-                r = frames[width, height, full, stage]
-                kind = values[0]
-                def predicate(screen, hidden=r["cursor_hidden"], cells=r["reversed_cells"]):
-                    if kind == "cross":
-                        _, query, position, count, title, _ = values
-                        return _bb2b_cross(screen, hidden, r["draft"], query, position, cells, count, title)
-                    _, query, position, editing, mode, token = values
-                    if mode == "list":
-                        return _bb2b_list(screen, hidden, r["draft"], kind, token if kind == "log" else None)
-                    return _bb2b_inspector(screen, hidden, r["draft"], kind, query, position,
-                                           editing, cells, mode, token)
-                box = predicate(r["screen"])
-                assert box, (stage, r)
-                assert not predicate(r["screen"], hidden=False), (stage, "second hardware cursor")
-                assert not _bb2b_box(r["screen"], True, r["draft"],
-                                     "help" if kind == "log" else "log"), (stage, "wrong owner")
-                if kind == "cross" or values[3] is True:
-                    assert not predicate(r["screen"], cells=[]), (stage, "missing actual caret")
-                rows = r["screen"].split("\n")
-                top = next(y for y, row in enumerate(rows) if box[0] in row)
-                for y in (top, top+1, top+len(box)-1, harness.composer_top(rows)-1, height-1):
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn)), (stage, width, full, y)
-                left = rows[top].index(box[0])
-                if kind == "cross" or values[4] != "list":
-                    wrong_query = rows.copy()
-                    y, x = top+1, left+1
-                    wrong_query[y] = wrong_query[y][:x]+"#"+wrong_query[y][x+1:]
-                    assert not predicate("\n".join(wrong_query)), (stage, "wrong query marker")
-                for y in range(top+1, top+len(box)-1):
-                    for x in (left, left+len(box[0])-1):
-                        torn = rows.copy(); torn[y] = torn[y][:x]+" "+torn[y][x+1:]
-                        assert not predicate("\n".join(torn)), (stage, "torn side", x, y)
-                # Remove actual body content but retain every footer rail and
-                # every border. The predicate must not accept a footer-only
-                # partial frame as a settled nonempty result.
-                bodyless = rows.copy()
-                body_start = 1 if kind != "cross" and values[4] == "list" else 2
-                for y in range(top+body_start, top+len(box)-1):
-                    row = bodyless[y][left:left+len(box[0])]
-                    if kind == "log" and re.search(
-                            r"\[[^]]+\]\s+(?:Move|Detail|Copy|Retry|Dismiss|Search|Close|Keep filter|Clear)", row):
-                        continue
-                    bodyless[y] = (bodyless[y][:left+1]
-                                   + " "*(len(box[0])-2)
-                                   + bodyless[y][left+len(box[0])-1:])
-                assert not predicate("\n".join(bodyless)), (stage, "missing actual body")
-                if kind != "cross" and values[3] is True:
-                    for label in ("[Enter]", "Keep filter", "[Esc]", "Clear"):
-                        assert not predicate(r["screen"].replace(label, " "*len(label))), (stage, label)
-                if kind != "cross" and values[3] is False:
-                    assert not predicate(r["screen"].replace("[/] Search", " "*10)), (stage, "missing Search rail")
-                if kind == "log" and values[3] is False:
-                    for label in ("Detail", "Copy"):
-                        assert not predicate(r["screen"].replace(label, " "*len(label))), (stage, label)
-                if "empty" in stage:
-                    marker = "No matches found" if kind == "cross" else (
-                        "No matching notifications." if kind == "log" else "No matching keybindings.")
-                    assert not predicate(r["screen"].replace(marker, " "*len(marker))), stage
-    print(f"BB2B_DESKCHECK_FRAMES={len(frames)}", flush=True)
-    return len(frames)
-
-
-def _bb2b_fields_leg(tui):
-    attached = tui.tag == "attached"
-    notices = ("mode", "plan") if attached else ("aone", "btwo")
-    tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, "Bb2b Input ready")
-    for marker in notices:
-        command = "/"+marker
-        tui.send("Bb2b real notice command", (command+" ").encode())
-        tui.wait(lambda s: _composer(s) == command, "Bb2b slash delimiter consumed")
-        tui.send("Bb2b submit local notice", b"\r")
-        tui.wait(lambda s: _notice_ready(s, command, attached), "Bb2b actual notice settled")
-    tui.send("Bb2b retained draft", DRAFT.encode())
-    tui.wait(lambda s: _composer(s) == DRAFT, "Bb2b draft settled")
-    for kind in ("log", "help"):
-        title = LOG if kind == "log" else HELP
-        tui.send("Bb2b open "+kind, b"\x18"+(b"n" if kind == "log" else b"?"))
-        original = tui.wait(lambda s: tui.hidden_draw_complete and
-                            _bb2b_list(s, tui.screen.cursor.hidden, DRAFT, kind),
-                            "Bb2b complete unfiltered "+kind)
-        if kind == "log":
-            tui.send("Bb2b select retained non-newest record", b"j")
-            tui.wait(lambda s: tui.hidden_draw_complete and _selected(tui, notices) == notices[0],
-                     "Bb2b selected id control")
-        else:
-            for offset in range(1, 4):
-                before = _help_box(original)
-                tui.send(f"Bb2b actual Help scroll control {offset}", b"j")
-                original = tui.wait(
-                    lambda s: tui.hidden_draw_complete and
-                    _bb2b_list(s, tui.screen.cursor.hidden, DRAFT, kind) and
-                    _help_box(s) != before and _help_box(s)[:-1] == before[1:],
-                    f"Bb2b complete one-row Help scroll {offset}")
-        before_help = _help_box(original) if kind == "help" else None
-        needle = ("/"+notices[0] if attached else notices[0]) if kind == "log" else "notification"
-        token = "/"+notices[0] if kind == "log" else "notification"
-        def field(query, position, mode="some", editing=True):
-            return lambda s: _bb2b_inspector(s, tui.screen.cursor.hidden, DRAFT, kind,
-                                              query, position, editing, _reversed_cells(tui), mode, token)
-        def step(label, data, predicate):
-            tui.send("Bb2b "+kind+" "+label, data)
-            screen = tui.wait(lambda s: predicate(s) and
-                              (tui.hidden_draw_complete or not tui.screen.cursor.hidden),
-                              "Bb2b settled "+kind+" "+label)
-            tui.capture("bb2b-"+kind+"-"+label, screen)
-            return screen
-        step("unfiltered", b"/", field("", 0))
-        step("filtered", b"\x1b[200~"+needle.encode()+b"\x1b[201~", field(needle, len(needle), "filtered"))
-        step("caret", b"\x1b[H\x1b[C", field(needle, 1, "filtered"))
-        step("empty", b"\x1b[200~x\x1b[201~", field(needle[:1]+"x"+needle[1:], 2, "empty"))
-        step("restored", b"\x08", field(needle, 1, "filtered"))
-        step("kill-tail", b"\x0b", field(needle[:1], 1))
-        step("kill-prefix", b"\x15", field("", 0))
-        step("refilter", b"\x1b[200~"+needle.encode()+b"\x1b[201~\x1b[H\x1b[C", field(needle, 1, "filtered"))
-        step("keep-filter", b"\r", field(needle, 1, "filtered", False))
-        step("reenter", b"/", field(needle, 1, "filtered"))
-        step("quit-cover", b"\x11", lambda s: _box(s, title+" › System · Quit", "Stay") and _status(s))
-        step("quit-return", b"n", field(needle, 1, "filtered"))
-        step("clear-child", b"\x1b", lambda s:
-             _bb2b_list(s, tui.screen.cursor.hidden, DRAFT, kind, token if kind == "log" else None) and
-             (kind != "help" or _help_box(s) == before_help))
-        if kind == "log":
-            assert _selected(tui, notices) == notices[0], "matching selected record id survives filtering"
-        else:
-            assert _help_box("\n".join(tui.screen.display)) == before_help, "unfiltered Help scroll restored"
-        step("back-frame", b"\x1b", lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden)
-
-
-def _bb2b_cross_leg(tui, ws):
-    """Pasted content starts the actual local scan; caret-only input keeps its result."""
-    tui.resize(130, 30)
-    tui.wait(lambda s: _bbii_shell(s, DRAFT) and not tui.screen.cursor.hidden, "Bb2b supported History width")
-    tui.send("Bb2b supported History opener", b"\x18h")
-    tui.wait(lambda s: (p := _bbii_persisted(ws)) and
-             _bbii_history(s, tui.screen.cursor.hidden, DRAFT, title=p["history_title"]),
-             "Bb2b persisted real History")
-    title = _bbii_persisted(ws)["result_title"]
-    tui.send("Bb2b CrossSearch opener", b"/")
-    tui.wait(lambda s: _bbii_cross(s, tui.screen.cursor.hidden, DRAFT, ""), "Bb2b CrossSearch owned")
-    tui.resize(80, 24)
-    def field(query, position, count=None, selected=None):
-        return lambda s: tui.hidden_draw_complete and _bb2b_cross(
-            s, tui.screen.cursor.hidden, DRAFT, query, position, _reversed_cells(tui), count, selected)
-    def step(label, data, predicate):
-        tui.send("Bb2b CrossSearch "+label, data)
-        screen = tui.wait(predicate, "Bb2b settled CrossSearch "+label)
-        tui.capture("bb2b-cross-"+label, screen)
-    tui.wait(field("", 0), "Bb2b 80x24 CrossSearch query caret")
-    step("pasted-scan", b"\x1b[200~Bb1a\x1b[201~", field("Bb1a", 4, "1/1 matches", title))
-    step("caret", b"\x1b[H\x1b[C", field("Bb1a", 1, "1/1 matches", title))
-    step("empty", b"\x1b[200~x\x1b[201~", field("Bxb1a", 2))
-    step("restored", b"\x08", field("Bb1a", 1, "1/1 matches", title))
-    step("short-query", b"\x0b", field("B", 1))
-    step("clear-query", b"\x15", field("", 0))
-    step("refilter", b"\x1b[200~Bb1a\x1b[201~\x1b[H\x1b[C", field("Bb1a", 1, "1/1 matches", title))
-    step("enter-result", b"\r", lambda s: _bbii_base(s, tui.screen.cursor.hidden, DRAFT)
-         and "Bb1a-row-0" in s and REPLY not in s)
-
-
-def _c_plain_shell(screen):
-    """Validate the real reader's shared-composer bottom title before reuse."""
-    rows = screen.split("\n")
-    if rows and re.fullmatch(r"└ read-only — can't send here ─*┘", rows[-1]):
-        rows[-1] = "└"+"─"*(len(rows[-1])-2)+"┘"
-    return "\n".join(rows)
-
-
-def _c_base(screen, draft, position, cursor, visible):
-    """Shared composer pixels and hardware caret, not just its trimmed text."""
-    # The common shell trims text; exact row/caret checks below retain positions.
-    shell = _bbii_shell(_c_plain_shell(screen), draft.strip())
-    if not shell or not visible:
-        return None
-    rows, status = shell
-    if (rows[-2] != "│"+draft+" "*(len(rows[0])-2-len(draft))+"│"
-            or tuple(cursor) != (position+1, len(rows)-2)):
-        return None
-    return tuple(rows[:status])
-
-
-def _c_view(screen, draft, cursor, visible, earlier):
-    stage = _c_base(screen, draft, len(draft), cursor, visible)
-    if not stage:
-        return None
-    text = "\n".join(stage)
-    return stage if (("Bb1a-row-" in text and REPLY not in text) if earlier else REPLY in text) else None
-
-
-def _c_cover(screen, draft, visible, kind, token):
-    screen = _c_plain_shell(screen)
-    rows = screen.split("\n")
-    if len(rows) < 3 or rows[-2] != "│"+draft+" "*(len(rows[0])-2-len(draft))+"│":
-        return None
-    box = _bb2b_list(screen, not visible, draft, kind, token if kind == "log" else None)
-    if not box:
-        return None
-    if kind == "help" and (not _help_box(screen) or
-                           "Rustain is a composable" not in "\n".join(box[1:-1])):
-        return None
-    return box
-
-
-def _deskcheck_c_frames(directory):
-    """Only saved real production paints are positives; this path never spawns."""
-    cases = {"initial": ("", 0), "notice": ("", 0), "notice-dismiss-return": ("", 0),
-             "typed": ("C-kept draft", 12), "readline-home": ("C-kept draft", 0),
-             "left": ("C-kept draft", 11), "caret": ("C-kept draft", 1),
-             "paste": ("CX-kept draft", 2), "kill-tail": ("CX", 2), "kill-prefix": ("", 0)}
-    common = set(cases) | {"notice-command", "bottom", "scrolled", "help", "help-scrolled",
-                           "help-return", "log", "log-return"}
-    def stages(host):
-        extra = {"readonly-command", "readonly-log"} if host == "readonly" else {"notice-log"}
-        return common | extra | ({"chat-before-scroll", "chat-scrolled"} if host == "local" else set())
-    records = [json.loads(p.read_text()) for p in Path(directory).glob("c-*.json")]
-    frames = {(r["width"], r["height"], r["host"], r["stage"]): r for r in records}
-    required = {(w, h, host, stage) for w, h in ((60, 16), (80, 24), (130, 30))
-                for host in ("local", "attached", "readonly") for stage in stages(host)}
-    assert len(records) == len(frames) and frames.keys() == required, frames.keys() ^ required
-    for width, height in ((60, 16), (80, 24), (130, 30)):
-        for host in ("local", "attached", "readonly"):
-            token = "/cnotice" if host == "local" else "/mode"
-            def record(stage):
-                r = frames[width, height, host, stage]
-                assert r["full"] is False
-                assert len(r["screen"].split("\n")) == height
-                assert all(len(row) == width for row in r["screen"].split("\n"))
-                assert ("read-only — can't send here" in r["screen"].split("\n")[-1]) == (host == "readonly")
-                assert KEY not in json.dumps(r)
-                assert all(0 <= x < width and 0 <= y < height for x, y in r["reversed_cells"])
-                return r
-            def visible(r):
-                return r["cursor_visible"] if "cursor_visible" in r else not r["cursor_hidden"]
-            before = record("initial")
-            for stage in stages(host):
-                r = record(stage)
-                cover = stage in ("help", "help-scrolled", "log", "notice-log", "readonly-log")
-                chat = stage in ("chat-before-scroll", "chat-scrolled")
-                draft, position = cases.get(stage, (
-                    "" if stage in ("notice-log", "readonly-log") else "C-kept draft", 12))
-                if stage == "notice-command":
-                    draft, position = token+" ", len(token)+1
-                elif stage == "readonly-command":
-                    draft, position = "/notifications ", 15
-                assert r["draft"] == draft
-                def predicate(screen, cursor=r["cursor"], shown=visible(r)):
-                    if stage == "help-scrolled":
-                        box = _bb2b_list(_c_plain_shell(screen), not shown, draft, "help")
-                        shifted, prior = _help_box(screen), _help_box(record("help")["screen"])
-                        return box if (box and shifted and prior and shifted != prior
-                                       and shifted[:-1] == prior[1:]) else None
-                    if cover:
-                        return _c_cover(screen, draft, shown, "help" if stage == "help" else "log", token)
-                    if chat:
-                        shell = _bbii_shell(_c_plain_shell(screen), draft)
-                        if not shell or shown:
-                            return None
-                        body = tuple(shell[0][:shell[1]])
-                        earlier = "Bb1a-row-" in "\n".join(body) and REPLY not in "\n".join(body)
-                        return body if (earlier if stage == "chat-scrolled" else REPLY in "\n".join(body)) else None
-                    if stage == "notice" and not _notice_ready(screen, token, host != "local"):
-                        return None
-                    if stage == "notice-dismiss-return" and any(
-                            token in row for row in harness.toast_rows(screen, rows=3)):
-                        return None
-                    if stage in ("bottom", "scrolled", "help-return", "log-return"):
-                        return _c_view(screen, draft, cursor, shown, stage != "bottom")
-                    return _c_base(screen, draft, position, cursor, shown)
-                owned = predicate(r["screen"])
-                assert owned, (host, stage, r)
-                assert not predicate(r["screen"], shown=not visible(r)), (stage, "wrong hardware ownership")
-                if not cover and not chat:
-                    assert not predicate(r["screen"], cursor=[width-1, height-1]), (stage, "wrong caret")
-                    if stage != "initial" and draft:
-                        assert not predicate(before["screen"]), (stage, "independent empty composer")
-                elif cover:
-                    assert not predicate(before["screen"]), (stage, "independent no-owner frame")
-                rows = r["screen"].split("\n")
-                torn_rows = {harness.composer_top(rows), height-4, height-2, height-1}
-                if cover:
-                    top = next(y for y, row in enumerate(rows) if owned[0] in row)
-                    left = rows[top].index(owned[0])
-                    torn_rows |= {top, top+len(owned)-1}
-                    for y in range(top+1, top+len(owned)-1):
-                        for x in (left, left+len(owned[0])-1):
-                            torn = rows.copy(); torn[y] = torn[y][:x]+" "+torn[y][x+1:]
-                            assert not predicate("\n".join(torn)), (stage, "torn side", x, y)
-                    labels = ("j/k scroll", "? close", "[/] Search") if stage.startswith("help") else (
-                        "[Enter]", "Detail", "[c]", "Copy", "[/] Search")
-                    for label in labels:
-                        assert not predicate(r["screen"].replace(label, " "*len(label))), (stage, label)
-                    if stage == "help-scrolled":
-                        assert not predicate(record("help")["screen"]), (stage, "observable real scroll")
-                    else:
-                        marker = "Rustain is a composable" if stage == "help" else token
-                        assert not predicate(r["screen"].replace(marker, " "*len(marker))), (stage, "body-only control")
-                if stage == "notice":
-                    assert not predicate(before["screen"]), (stage, "real toast required")
-                    assert not predicate(r["screen"].replace(token, " "*len(token))), (stage, "notice body")
-                    for corrupt in (token[:-1]+" ", token[:-1]+"x"):
-                        assert not predicate(r["screen"].replace(token, corrupt)), (stage, "complete notice token")
-                if stage in ("notice-command", "readonly-command"):
-                    assert not predicate(r["screen"], cursor=[position, height-2]), (stage, "trailing-space caret")
-                for y in torn_rows:
-                    torn = rows.copy(); torn[y] = " "*width
-                    assert not predicate("\n".join(torn)), (host, stage, "torn row", y)
-                if stage in ("bottom", "scrolled", "help-return", "log-return") or chat:
-                    marker = REPLY if stage in ("bottom", "chat-before-scroll") else "Bb1a-row-"
-                    assert not predicate(r["screen"].replace(marker, " "*len(marker))), (stage, "transcript body")
-            typed, caret = record("typed"), record("caret")
-            assert typed["screen"] == caret["screen"] and typed["cursor"] != caret["cursor"]
-            bottom, scrolled = record("bottom"), record("scrolled")
-            assert not _c_view(bottom["screen"], bottom["draft"], bottom["cursor"], visible(bottom), True)
-            assert not _c_view(scrolled["screen"], scrolled["draft"], scrolled["cursor"], visible(scrolled), False)
-            original = _c_view(scrolled["screen"], scrolled["draft"], scrolled["cursor"], visible(scrolled), True)
-            for stage in ("help-return", "log-return"):
-                r = record(stage)
-                assert _c_view(r["screen"], r["draft"], r["cursor"], visible(r), True) == original
-    print(f"C_DESKCHECK_FRAMES={len(frames)}", flush=True)
-    return len(frames)
-
-
-def _c_leg(tui):
-    """Same editor and authoritative scrolled view in local, writer and reader."""
-    def base(draft, position):
-        return lambda s: _c_base(s, draft, position,
-                                 (tui.screen.cursor.x, tui.screen.cursor.y), not tui.screen.cursor.hidden)
-    def step(stage, data, predicate):
-        tui.send("C "+stage, data)
-        screen = tui.wait(predicate, "C settled "+stage)
-        tui.capture("c-"+stage, screen)
-        return screen
-    screen = tui.wait(base("", 0), "C starts in Input without i")
-    tui.capture("c-initial", screen)
-    attached = tui.tag != "local"
-    command = "/mode" if attached else "/cnotice"
-    step("notice-command", (command+" ").encode(), base(command+" ", len(command)+1))
-    step("notice", b"\r", lambda s: _notice_ready(s, command, attached) and base("", 0)(s))
-    # Dismiss just the toast presentation through the real retained Log record,
-    # removing TTL changes from the later exact transcript-pixel comparison.
-    if tui.tag == "readonly":
-        step("readonly-command", b"/notifications ", base("/notifications ", 15))
-        opener, stage = b"\r", "readonly-log"
-    else:
-        opener, stage = b"\x18n", "notice-log"
-    step(stage, opener, lambda s: tui.hidden_draw_complete and
-         _c_cover(s, "", not tui.screen.cursor.hidden, "log", command))
-    step("notice-dismiss-return", b"x\x1b", lambda s: base("", 0)(s) and
-         not any(command in row for row in harness.toast_rows(s, rows=3)))
-    typed = step("typed", b"C-kept draft", base("C-kept draft", 12))
-    for label, data, position in (("readline-home", b"\x01", 0), ("readline-end", b"\x05", 12),
-                                  ("left", b"\x1b[D", 11), ("end", b"\x1b[F", 12)):
-        assert step(label, data, base("C-kept draft", position)) == typed
-    caret = step("caret", b"\x1b[H\x1b[C", base("C-kept draft", 1))
-    assert typed == caret, "caret motion must not mutate draft or transcript pixels"
-    step("paste", b"\x1b[200~X\x1b[201~", base("CX-kept draft", 2))
-    step("readline-backspace", b"\x08", base("C-kept draft", 1))
-    step("repaste", b"\x1b[200~X\x1b[201~", base("CX-kept draft", 2))
-    step("kill-tail", b"\x0b", base("CX", 2))
-    step("kill-prefix", b"\x15", base("", 0))
-    step("word-fixture", b"CX", base("CX", 2))
-    step("kill-word", b"\x17", base("", 0))
-    draft = "C-kept draft"
-    def view(earlier):
-        return lambda s: _c_view(s, draft, (tui.screen.cursor.x, tui.screen.cursor.y),
-                                 not tui.screen.cursor.hidden, earlier)
-    step("bottom", draft.encode(), view(False))
-    if tui.tag == "local":
-        # Local full-page up is Chat Ctrl+B; attached Input offers PgUp.
-        step("chat-before-scroll", b"\x1b", lambda s: tui.hidden_draw_complete and
-             _bbii_shell(s, draft) and tui.screen.cursor.hidden and REPLY in s)
-        step("chat-scrolled", b"\x02", lambda s: tui.hidden_draw_complete and
-             _bbii_shell(s, draft) and tui.screen.cursor.hidden and
-             "Bb1a-row-" in s and REPLY not in s)
-        original = step("scrolled", b"i", view(True))
-    else:
-        original = step("scrolled", b"\x1b[5~", view(True))
-    original_stage = view(True)(original)
-    for kind, key in (("help", b"?"), ("log", b"n")):
-        covered = step(kind, b"\x18"+key, lambda s: tui.hidden_draw_complete and
-                       _c_cover(s, draft, not tui.screen.cursor.hidden, kind, command))
-        if kind == "help":
-            tui.send("C observable covered Help scroll", b"j")
-            tui.wait(lambda s: tui.hidden_draw_complete and
-                     _bb2b_list(_c_plain_shell(s), tui.screen.cursor.hidden, draft, kind) and
-                     _help_box(s) != _help_box(covered) and _help_box(s)[:-1] == _help_box(covered)[1:],
-                     "C complete changed Help body without transcript movement")
-        step(kind+"-return", b"\x1b", lambda s: view(True)(s) == original_stage)
-
-
-def _run_modal_stack_smoke(part):
-    assert part in ("bb1a", "bb1b-i", "bb1b-ii", "bb2b", "c")
-    local_only = part not in ("bb1a", "bb2b", "c")
-    turns = 2 if part == "c" else (3 if part == "bb1b-i" else 1)
-    part_name = part.replace("bb", "Bb", 1)
-    if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
-        if part == "c":
-            _deskcheck_c_frames(os.environ["RUSTAIN_MODAL_STACK_C_FRAMES"])
-            return
-        if part == "bb2b":
-            _deskcheck_bb2b_frames(os.environ["RUSTAIN_MODAL_STACK_BB2B_FRAMES"])
-            return
-        frames_ii = os.environ.get("RUSTAIN_MODAL_STACK_BB1B_II_FRAMES")
-        if part == "bb1b-ii" or (frames_ii and not os.environ.get("RUSTAIN_MODAL_STACK_BB1B_I_FRAMES")):
-            _deskcheck_bb1b_ii_frames(frames_ii)
-        elif part == "bb1b-i":
-            _deskcheck_bb1b_i_frames(os.environ["RUSTAIN_MODAL_STACK_BB1B_I_FRAMES"])
-        else:
-            _deskcheck()
-        return
+def _run_modal_stack_smoke():
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
-    scratch, parent = _smoke_paths(part)
+    scratch, parent = _smoke_paths()
     parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix=f"21-4-{part}-", dir=parent))
+    evidence = Path(tempfile.mkdtemp(prefix="21-4-bb1a-", dir=parent))
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING",
                 "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a", "Bb2a"]}
-    if part == "bb2b":
-        manifest.update(story_parts=["Bb2b"], cross_search="local only; attached unavailable")
-    if part == "c":
-        manifest.update(story_parts=["C"], legs=["local", "attached", "readonly"],
-                        attached_unavailable="Model/Profile/Login/Usage/Search/Bookmark/Wave/CrossSearch n/a")
-    if local_only:
-        surface = "Bookmark/Wave" if part == "bb1b-i" else "CrossSearch"
-        manifest.update(legs=["local"], story_parts=[part_name],
-                        attached=f"{surface} n/a: local-only")
-    if part == "bb1b-ii":
-        manifest["viewports"] = [[80, 24], [130, 30], [80, 24], [60, 16]]
     errors, posts = queue.Queue(), []
     held, release = threading.Event(), threading.Event()
     request_lock = threading.Lock()
@@ -2313,8 +887,8 @@ def _run_modal_stack_smoke(part):
                             self.reply(b'{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}')
                             return
                         assert body.get("stream") is True and TURN in json.dumps(body.get("messages", []))
-                        assert turn <= turns, "unexpected extra real turn"
-                        reply = SEARCH_REPLY if turn == 1 or part == "c" else NOTICES[turn-2]
+                        assert turn <= 1, "unexpected extra real turn"
+                        reply = SEARCH_REPLY
                         if turn == 1:
                             held.set()
                             assert release.wait(90), "held model turn was never released"
@@ -2349,7 +923,7 @@ def _run_modal_stack_smoke(part):
             def environment(tag, ws):
                 config = ws / ".rustain"; config.mkdir(parents=True)
                 settings = "[notifications]\ninfo_ttl_secs = 30\n"
-                if tag == "local" and part == "bb1a":
+                if tag == "local":
                     settings += ('\n[budget]\ndaily_limit_usd = 0.000001\n'
                                  '\n[pricing."claude-sonnet-4-6"]\ninput_per_million = 3.0\noutput_per_million = 15.0\n')
                 (ws / ".env").write_text(""); (config / "config.toml").write_text(settings)
@@ -2358,64 +932,20 @@ def _run_modal_stack_smoke(part):
                         "XDG_CACHE_HOME": str(root / "cache"), "RUSTAIN_CONFIG_DIR": str(config), "RUSTAIN_DATA_DIR": str(ws / "data"),
                         "RUSTAIN_LOG_PATH": str(evidence / f"{tag}.runtime.log"), "RUST_LOG": "debug",
                         "ANTHROPIC_API_KEY": KEY, "ANTHROPIC_BASE_URL": origin, "RUSTAIN_MODELS_DEV_URL": origin, "NO_PROXY": "*"}
-            for tag in (("local",) if local_only else ("local", "attached")):
+            for tag in ("local", "attached"):
                 ws = root / ("l" if tag == "local" else "a"); env = environment(tag, ws)
                 assert len(os.fsencode(ws / "data/daemons" / ("0"*16+".sock"))) < 108
                 if tag == "attached":
                     daemon_env = {**env, "RUSTAIN_LOG_PATH": str(evidence / "daemon.runtime.log")}
                     _daemon(stack, binary, ws, daemon_env, evidence)
                 tui = _Terminal(stack, binary, ["--new"] if tag == "local" else ["daemon", "attach"], ws, env, evidence, tag, errors)
-                if part == "c":
-                    release.set()
-                    tui.wait(lambda s: _c_base(s, "", 0, (tui.screen.cursor.x, tui.screen.cursor.y),
-                                              not tui.screen.cursor.hidden), "C initial shared Input")
-                    tui.send("C real transcript turn", TURN.encode()+b"\r")
-                    tui.wait(lambda s: _status(s) and REPLY in s and not tui.screen.cursor.hidden,
-                             "C real transcript completion")
-                    _c_leg(tui)
-                    if tag == "attached":
-                        reader_env = {**env, "RUSTAIN_LOG_PATH": str(evidence / "readonly.runtime.log")}
-                        reader = _Terminal(stack, binary, ["daemon", "attach"], ws, reader_env,
-                                           evidence, "readonly", errors)
-                        reader.wait(lambda s: _status(s) and "read-only" in s and REPLY in s,
-                                    "C real daemon-granted read-only snapshot")
-                        _c_leg(reader)
-                        reader.exit()
-                    tui.exit()
-                    continue
-                if local_only:
-                    release.set()
-                    tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, f"{part_name} initial Input")
-                    tui.send(f"{part_name} real fixture turn", TURN.encode()+b"\r")
-                    tui.wait(lambda s: held.is_set() and _status(s) and REPLY in s, f"{part_name} real fixture completion")
-                    if part == "bb1b-i":
-                        tui.send("Bb1b-i retained draft", DRAFT.encode())
-                        tui.wait(lambda s: _composer(s) == DRAFT, "Bb1b-i fixture draft")
-                        _bb1b_i_leg(tui)
-                        tui.exit()
-                    else:
-                        _bb1b_ii_leg(tui, ws)
-                elif part == "bb2b":
-                    if tag == "local":
-                        release.set()
-                        tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, "Bb2b initial Input")
-                        tui.send("Bb2b real persisted fixture turn", TURN.encode()+b"\r")
-                        tui.wait(lambda s: held.is_set() and _status(s) and REPLY in s,
-                                 "Bb2b real fixture completion")
-                    _bb2b_fields_leg(tui)
-                    if tag == "local":
-                        _bb2b_cross_leg(tui, ws)
-                    tui.exit()
-                else:
-                    _leg(tui, held, release)
+                _leg(tui, held, release)
         assert errors.empty(), list(errors.queue)
         assert held.is_set() and release.is_set()
-        assert sum(post["kind"] == "turn" for post in posts) == turns, posts
+        assert sum(post["kind"] == "turn" for post in posts) == 1, posts
         logs = sorted(evidence.glob("*.runtime.log.*"))
-        for tag in (("local",) if local_only else ("local", "attached", "daemon")):
+        for tag in ("local", "attached", "daemon"):
             assert any(p.name.startswith(tag+".runtime.log.") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.suffix[1:]) for p in logs), f"missing dated {tag} debug log"
-        if part == "c":
-            assert any(p.name.startswith("readonly.runtime.log.") for p in logs), "missing reader debug log"
         (evidence / "requests.json").write_text(json.dumps(posts, indent=2)+"\n")
         for path in evidence.iterdir():
             assert KEY.encode() not in path.read_bytes(), f"credential leaked to {path.name}"
@@ -2427,31 +957,9 @@ def _run_modal_stack_smoke(part):
     finally:
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2)+"\n")
-        label = "NATIVE_21_4_"+part.upper().replace("-", "_")+"_EVIDENCE"
+        label = "NATIVE_21_4_BB1A_EVIDENCE"
         print(f"{label}={evidence}", flush=True)
 
 
 def test_modal_stack_a1_a2a_local_and_attached_80x24():
-    _run_modal_stack_smoke("bb1a")
-
-
-def test_modal_stack_bb1b_i_local_80x24():
-    _run_modal_stack_smoke("bb1b-i")
-
-
-def test_modal_stack_bb1b_ii_local_cross_search():
-    _run_modal_stack_smoke("bb1b-ii")
-
-
-def test_modal_stack_bb2b_inspector_fields_both_hosts_and_cross_query():
-    _run_modal_stack_smoke("bb2b")
-
-
-def test_modal_stack_c_shared_composer_and_view_both_hosts(monkeypatch):
-    if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
-        def forbidden(*_args, **_kwargs):
-            raise AssertionError("C DESKCHECK must not resolve or spawn an app")
-        monkeypatch.setattr(harness, "_resolve_binary", forbidden)
-        monkeypatch.setattr(subprocess, "Popen", forbidden)
-        monkeypatch.setattr(pexpect, "spawn", forbidden)
-    _run_modal_stack_smoke("c")
+    _run_modal_stack_smoke()

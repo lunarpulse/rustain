@@ -3051,11 +3051,33 @@ mod tests {
         );
     }
 
-    fn attached_frame_record(
+    /// K3: paint the attached frame, then the composer body row is the border-wrapped EXPECTED
+    /// draft (a literal, not live state) padded to the inner width with the state at the
+    /// expected caret, and the last row carries the read-only title exactly when read-only.
+    fn assert_attached_composer(
         rig: &mut attach_keys::tests::Rig,
-        stage: &str,
+        draft: &str,
+        caret: usize,
         read_only: bool,
     ) -> String {
+        let screen = attached_frame_record(rig);
+        let (width, height) = (rig.state.terminal_width, rig.state.terminal_height);
+        let (width, height) = (usize::from(width), usize::from(height));
+        assert_eq!(
+            (rig.state.input_buffer.as_str(), rig.state.cursor_position),
+            (draft, caret),
+            "{screen}"
+        );
+        let rows: Vec<&str> = screen.lines().collect();
+        assert_eq!(rows.len(), height, "{screen}");
+        let expected = format!("│{draft:<inner$}│", inner = width - 2);
+        assert_eq!(rows[height - 2], expected, "{screen}");
+        let flag = rows[height - 1].contains("read-only — can't send here");
+        assert_eq!(flag, read_only, "{screen}");
+        screen
+    }
+
+    fn attached_frame_record(rig: &mut attach_keys::tests::Rig) -> String {
         let mut terminal = rig.paint();
         let screen = attached_screen(&terminal);
         let buffer = terminal.backend().buffer();
@@ -3088,44 +3110,6 @@ mod tests {
                     rig.state.terminal_height - 2
                 )
             );
-        }
-        if let Some(path) = std::env::var_os("RUSTAIN_STORY_21_4_FRAME_DIR") {
-            let path = std::path::PathBuf::from(path);
-            assert!(path.is_absolute());
-            assert!(
-                !path
-                    .components()
-                    .any(|c| c == std::path::Component::ParentDir)
-            );
-            std::fs::create_dir_all(&path).unwrap();
-            let path = std::fs::canonicalize(path).unwrap();
-            let cursor = terminal.get_cursor_position().unwrap();
-            let reversed_cells: Vec<_> = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .enumerate()
-                .filter(|(_, cell)| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
-                .map(|(i, _)| {
-                    [
-                        i % usize::from(rig.state.terminal_width),
-                        i / usize::from(rig.state.terminal_width),
-                    ]
-                })
-                .collect();
-            let host = if read_only { "readonly" } else { "attached" };
-            let record = serde_json::json!({
-                "width": rig.state.terminal_width, "height": rig.state.terminal_height,
-                "host": host, "stage": stage, "full": false, "screen": screen,
-                "draft": rig.state.input_buffer, "cursor": [cursor.x, cursor.y],
-                "cursor_visible": terminal.backend().cursor_visible(), "reversed_cells": reversed_cells,
-            });
-            let name = format!(
-                "c-{host}-{}x{}-{stage}.json",
-                rig.state.terminal_width, rig.state.terminal_height
-            );
-            std::fs::write(path.join(name), serde_json::to_vec(&record).unwrap()).unwrap();
         }
         screen
     }
@@ -3528,58 +3512,58 @@ mod tests {
                     .conversation
                     .messages
                     .push(system_message("A2b budget completion"));
-                attached_frame_record(&mut rig, "initial", read_only);
+                attached_frame_record(&mut rig);
                 rig.type_text("/mode ").await;
                 assert_eq!(rig.state.input_buffer, "/mode ");
                 assert_eq!(rig.state.cursor_position, 6);
-                attached_frame_record(&mut rig, "notice-command", read_only);
+                attached_frame_record(&mut rig);
                 rig.key(Key::Enter).await;
                 assert!(rig.state.input_buffer.is_empty());
-                attached_frame_record(&mut rig, "notice", read_only);
+                attached_frame_record(&mut rig);
                 if read_only {
                     rig.type_text("/notifications ").await;
                     assert_eq!(rig.state.input_buffer, "/notifications ");
                     assert_eq!(rig.state.cursor_position, 15);
-                    attached_frame_record(&mut rig, "readonly-command", true);
+                    attached_frame_record(&mut rig);
                     rig.key(Key::Enter).await;
-                    let log = attached_frame_record(&mut rig, "readonly-log", true);
+                    let log = attached_frame_record(&mut rig);
                     assert!(log.contains("/mode"));
                 } else {
                     rig.key(Key::Ctrl('x')).await;
                     rig.key(Key::Char('n')).await;
-                    attached_frame_record(&mut rig, "notice-log", false);
+                    attached_frame_record(&mut rig);
                 }
                 rig.key(Key::Char('x')).await;
                 rig.key(Key::Esc).await;
                 assert!(rig.state.modal_stack.is_empty());
-                attached_frame_record(&mut rig, "notice-dismiss-return", read_only);
+                attached_frame_record(&mut rig);
                 rig.type_text("C-kept draft").await;
-                attached_frame_record(&mut rig, "typed", read_only);
+                assert_attached_composer(&mut rig, "C-kept draft", 12, read_only);
                 rig.key(Key::Ctrl('a')).await;
                 assert_eq!(rig.state.cursor_position, 0);
-                attached_frame_record(&mut rig, "readline-home", read_only);
+                attached_frame_record(&mut rig);
                 rig.key(Key::Ctrl('e')).await;
                 assert_eq!(rig.state.cursor_position, 12);
                 rig.key(Key::Left).await;
                 assert_eq!(rig.state.cursor_position, 11);
-                attached_frame_record(&mut rig, "left", read_only);
+                attached_frame_record(&mut rig);
                 rig.key(Key::End).await;
                 rig.key(Key::Home).await;
                 rig.key(Key::Right).await;
                 assert_eq!(rig.state.cursor_position, 1);
-                attached_frame_record(&mut rig, "caret", read_only);
+                assert_attached_composer(&mut rig, "C-kept draft", 1, read_only);
                 rig.paste("X").await;
-                assert_eq!(rig.state.input_buffer, "CX-kept draft");
-                assert_eq!(rig.state.cursor_position, 2);
-                attached_frame_record(&mut rig, "paste", read_only);
+                assert_attached_composer(&mut rig, "CX-kept draft", 2, read_only);
                 rig.key(Key::Ctrl('k')).await;
-                assert_eq!(rig.state.input_buffer, "CX");
-                attached_frame_record(&mut rig, "kill-tail", read_only);
+                assert_attached_composer(&mut rig, "CX", 2, read_only);
                 rig.key(Key::Ctrl('u')).await;
-                assert!(rig.state.input_buffer.is_empty());
-                attached_frame_record(&mut rig, "kill-prefix", read_only);
+                assert_attached_composer(&mut rig, "", 0, read_only);
+                rig.type_text("CX").await;
+                assert_attached_composer(&mut rig, "CX", 2, read_only);
+                rig.key(Key::Ctrl('w')).await;
+                assert_attached_composer(&mut rig, "", 0, read_only);
                 rig.type_text("C-kept draft").await;
-                let bottom = attached_frame_record(&mut rig, "bottom", read_only);
+                let bottom = assert_attached_composer(&mut rig, "C-kept draft", 12, read_only);
                 assert!(bottom.contains("A2b budget completion"), "{bottom}");
                 assert_eq!(rig.domain_tab.view_state.mode, AnchorMode::Following);
                 rig.key(Key::PageUp).await;
@@ -3601,16 +3585,14 @@ mod tests {
                     None
                 );
                 assert!(rig.domain_tab.view_state.scroll_offset > page_offset);
-                let scrolled = attached_frame_record(&mut rig, "scrolled", read_only);
+                let scrolled = attached_frame_record(&mut rig);
                 assert!(scrolled.contains("Bb1a-row-"), "{scrolled}");
                 assert!(
                     !scrolled.contains("A2b budget completion"),
                     "earlier rows actually replaced the tail: {scrolled}"
                 );
                 let view = rig.domain_tab.view_state.clone();
-                for (open, shown, returned) in
-                    [('?', "help", "help-return"), ('n', "log", "log-return")]
-                {
+                for open in ['?', 'n'] {
                     rig.key(Key::Ctrl('x')).await;
                     rig.key(Key::Char(open)).await;
                     let owner = rig.state.modal_stack.top().unwrap().clone();
@@ -3622,7 +3604,7 @@ mod tests {
                             crate::adapters::tui::presentation::Surface::NotificationLog
                         }
                     );
-                    let painted = attached_frame_record(&mut rig, shown, read_only);
+                    let painted = attached_frame_record(&mut rig);
                     assert!(painted.contains(if open == '?' { "Help" } else { "Notifications" }));
                     assert_eq!(rig.domain_tab.view_state.scroll_offset, view.scroll_offset);
                     assert_eq!(rig.domain_tab.view_state.mode, view.mode);
@@ -3638,10 +3620,27 @@ mod tests {
                         let before = rig.state.help_overlay.scroll_offset;
                         rig.key(Key::Char('j')).await;
                         assert_eq!(rig.state.help_overlay.scroll_offset, before + 1);
-                        attached_frame_record(&mut rig, "help-scrolled", read_only);
+                        let after = attached_frame_record(&mut rig);
+                        let b: Vec<&str> = painted.lines().collect();
+                        let a: Vec<&str> = after.lines().collect();
+                        let find = |p: &str| b.iter().position(|r| r.contains(p)).expect(p);
+                        let (top, bottom) = (find("Help — Rustain"), find("j/k scroll"));
+                        assert!(bottom > top + 2, "{painted}");
+                        // The Stage beside the frame does not move: compare the frame's columns.
+                        let tr: Vec<char> = b[top].chars().collect();
+                        let left = tr.iter().position(|c| *c == '┌').expect("corner");
+                        let n = tr.iter().rposition(|c| *c == '┐').expect("corner") + 1 - left;
+                        let cut = |rows: &[&str], i: usize| -> String {
+                            rows[i].chars().skip(left).take(n).collect()
+                        };
+                        assert_eq!(cut(&b, top), cut(&a, top), "{after}");
+                        assert_eq!(cut(&b, bottom), cut(&a, bottom), "{after}");
+                        for row in top + 2..bottom {
+                            assert_eq!(cut(&b, row), cut(&a, row - 1), "Help j shifts up one row");
+                        }
                     }
                     rig.key(Key::Esc).await;
-                    let returned_screen = attached_frame_record(&mut rig, returned, read_only);
+                    let returned_screen = attached_frame_record(&mut rig);
                     let stage_height = usize::from(rig.state.viewport_height);
                     assert_eq!(
                         returned_screen

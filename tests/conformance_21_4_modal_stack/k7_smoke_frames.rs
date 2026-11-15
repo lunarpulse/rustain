@@ -1,4 +1,9 @@
-//! Bb1a smoke predicate controls: complete production frames, never native captures.
+//! Painted-frame controls for the modal-stack smoke predicates: Search, ReverseSearch, Palette,
+//! Bookmark, Wave, CrossSearch, Help and Notification frames are driven through the production
+//! decoder and handlers and painted by the production renderer at (60x16), (80x24) and (130x30),
+//! with and without a full-height composer. Every frame must complete the shell (status row,
+//! bottom border, cursor visibility), keep the draft and its composer row, and (at the
+//! standard 80x24 shell) paint its owner's predicates.
 use super::keymap_support::press;
 use super::stage_support::paste;
 use crate::e2e_harness::TestHarness;
@@ -8,7 +13,6 @@ use rustain::adapters::tui::{
     presentation::{self, Surface},
 };
 use rustain::domain::models::{StopReason, StreamChunk, TabManager};
-use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 const DRAFT: &str = "A1-kept-draft";
@@ -45,70 +49,20 @@ fn open(h: &mut TestHarness, tabs: &mut TabManager, full: bool) {
     }
 }
 
-fn output_dir() -> Option<PathBuf> {
-    selected_output_dir(std::env::var_os("RUSTAIN_STORY_21_4_FRAME_DIR").map(PathBuf::from))
-}
-
-fn selected_output_dir(path: Option<PathBuf>) -> Option<PathBuf> {
-    let path = path?;
-    assert!(path.is_absolute());
-    assert!(
-        !path
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
-    );
-    std::fs::create_dir_all(&path).unwrap();
-    Some(std::fs::canonicalize(path).unwrap())
-}
-
-#[test]
-fn frame_output_dir_is_portable_and_opt_in() {
-    // Keep this external to a launcher's session-specific TMPDIR.
-    let root = tempfile::tempdir_in("/tmp").unwrap();
-    let path = root.path().join("external-evidence/frames");
-    assert_eq!(selected_output_dir(None), None);
-    assert!(
-        !path.exists(),
-        "no opt-in must not create an export directory"
-    );
-    let selected = selected_output_dir(Some(path.clone())).unwrap();
-    assert!(selected.is_dir());
-    assert_eq!(selected, std::fs::canonicalize(&path).unwrap());
-    assert_eq!(selected_output_dir(Some(path)), Some(selected));
-}
-
-#[test]
-fn frame_output_dir_rejects_relative_paths_and_parent_traversal() {
-    let root = tempfile::tempdir().unwrap();
-    for path in [
-        PathBuf::from("relative-frame-export"),
-        root.path().join("frames/../escaped"),
-    ] {
-        assert!(std::panic::catch_unwind(|| selected_output_dir(Some(path))).is_err());
-    }
-    assert!(!root.path().join("frames").exists());
-    assert!(!root.path().join("escaped").exists());
-}
-
+/// Paint the active tab through the production renderer and return the complete screen.
 fn capture(
     h: &mut TestHarness,
     tabs: &TabManager,
     family: &str,
     stage: &str,
     full: bool,
-    dir: &Option<PathBuf>,
 ) -> String {
     h.render_active_tab(tabs);
-    export_frame(h, family, stage, full, dir)
+    check_frame(h, family, stage, full)
 }
 
-fn export_frame(
-    h: &mut TestHarness,
-    family: &str,
-    stage: &str,
-    full: bool,
-    dir: &Option<PathBuf>,
-) -> String {
+/// The shell invariants every painted frame satisfies; returns the rows joined by `\n`.
+fn check_frame(h: &TestHarness, family: &str, stage: &str, full: bool) -> String {
     let buffer = h.terminal.backend().buffer();
     let rows: Vec<String> = (0..buffer.area.height)
         .map(|y| {
@@ -118,56 +72,43 @@ fn export_frame(
         })
         .collect();
     let screen = rows.join("\n");
-    let reversed_cells: Vec<_> = buffer
-        .content
-        .iter()
-        .enumerate()
-        .filter(|(_, cell)| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
-        .map(|(index, _)| {
-            (
-                index % usize::from(buffer.area.width),
-                index / usize::from(buffer.area.width),
-            )
-        })
-        .collect();
+    let label = format!("{family} {stage} full={full}: {screen}");
     assert!(
         rows.iter().any(|row| row.contains("Ready")),
-        "complete status: {screen}"
+        "complete status: {label}"
     );
-    assert!(rows.last().unwrap().starts_with('└'));
+    assert!(rows.last().unwrap().starts_with('└'), "{label}");
     assert_eq!(
         h.terminal.backend().cursor_visible(),
         h.state.modal_stack.is_empty()
             && h.state.focus == rustain::domain::models::FocusState::Input
             && h.state.pending_leader.is_none()
-            && !h.state.reverse_search.is_open()
+            && !h.state.reverse_search.is_open(),
+        "{label}"
     );
-    if let Some(dir) = dir {
-        let cursor = h.terminal.get_cursor_position().unwrap();
-        let mut record = serde_json::json!({
-            "width": h.state.terminal_width, "height": h.state.terminal_height,
-            "stage": stage, "full": full, "screen": screen,
-            "draft": h.state.input_buffer, "cursor": [cursor.x, cursor.y],
-            "cursor_hidden": !h.terminal.backend().cursor_visible(),
-            "reversed_cells": reversed_cells,
-        });
-        if let Some(host) = family.strip_prefix("c-") {
-            record["host"] = host.into();
-        }
-        let name = format!(
-            "{family}-{}x{}-{}-{stage}.json",
-            h.state.terminal_width,
-            h.state.terminal_height,
-            if full { "full" } else { "normal" }
-        );
-        std::fs::write(dir.join(name), serde_json::to_vec(&record).unwrap()).unwrap();
-    }
     screen
+}
+
+/// The rows of a screen returned by `capture`.
+fn screen_rows(screen: &str) -> Vec<&str> {
+    screen.split('\n').collect()
+}
+
+/// The composer's last body row (absolute row `height - 2`) is `│` + the draft's last line
+/// padded to the inner width + `│`.
+fn assert_composer_last_row(h: &TestHarness, screen: &str, draft: &str, stage: &str) {
+    let rows = screen_rows(screen);
+    let last_line = draft.lines().last().unwrap_or("");
+    let inner = usize::from(h.state.terminal_width) - 2;
+    assert_eq!(
+        rows[rows.len() - 2],
+        format!("│{last_line:<inner$}│"),
+        "{stage}: the composer paints the draft's last line: {screen}"
+    );
 }
 
 #[tokio::test]
 async fn bb1a_real_frames_for_smoke_predicates() {
-    let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
             let mut h = TestHarness::with_size(width, height);
@@ -194,40 +135,40 @@ async fn bb1a_real_frames_for_smoke_predicates() {
             let draft = if full { "1\n2\n3\n4\n5\n6\n7\n8" } else { "" };
             h.state.input_buffer = draft.into();
             h.state.cursor_position = draft.chars().count();
-            let before = capture(&mut h, &tabs, "bb1a", "before", full, &dir);
+            let before = capture(&mut h, &tabs, "bb1a", "before", full);
             let view = format!("{:?}", tabs.active_tab().view_state);
             open(&mut h, &mut tabs, full);
             assert!(presentation::is_open(&h.state, Surface::Search));
-            capture(&mut h, &tabs, "bb1a", "search-unfiltered", full, &dir);
-            capture(&mut h, &tabs, "bb2a", "search-unfiltered", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "search-unfiltered", full);
+            capture(&mut h, &tabs, "bb2a", "search-unfiltered", full);
             text(&mut h, &mut tabs, "zzzz");
             assert!(h.state.search_state.matches.is_empty());
-            capture(&mut h, &tabs, "bb1a", "search-empty", full, &dir);
-            capture(&mut h, &tabs, "bb2a", "search-empty", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "search-empty", full);
+            capture(&mut h, &tabs, "bb2a", "search-empty", full);
             key(&mut h, &mut tabs, Key::Esc);
             for keep in [false, true] {
                 open(&mut h, &mut tabs, full);
                 text(&mut h, &mut tabs, "A2b");
                 assert_eq!(h.state.search_state.matches.len(), 2);
-                capture(&mut h, &tabs, "bb1a", "search-filtered", full, &dir);
+                capture(&mut h, &tabs, "bb1a", "search-filtered", full);
                 if !keep {
-                    capture(&mut h, &tabs, "bb2a", "search-filtered", full, &dir);
+                    capture(&mut h, &tabs, "bb2a", "search-filtered", full);
                     key(&mut h, &mut tabs, Key::Home);
                     key(&mut h, &mut tabs, Key::Right);
-                    capture(&mut h, &tabs, "bb2a", "search-caret", full, &dir);
+                    capture(&mut h, &tabs, "bb2a", "search-caret", full);
                     paste(&mut h, &mut tabs, "x");
-                    capture(&mut h, &tabs, "bb2a", "search-pasted", full, &dir);
+                    capture(&mut h, &tabs, "bb2a", "search-pasted", full);
                     key(&mut h, &mut tabs, Key::Ctrl('h'));
-                    capture(&mut h, &tabs, "bb2a", "search-refiltered", full, &dir);
+                    capture(&mut h, &tabs, "bb2a", "search-refiltered", full);
                     key(&mut h, &mut tabs, Key::End);
                 }
                 key(&mut h, &mut tabs, Key::Enter);
-                capture(&mut h, &tabs, "bb1a", "search-navigating-1", full, &dir);
+                capture(&mut h, &tabs, "bb1a", "search-navigating-1", full);
                 key(&mut h, &mut tabs, Key::Char('n'));
                 assert_eq!(h.state.search_state.focused_match_index, 1);
                 let matched_view = format!("{:?}", tabs.active_tab().view_state);
                 assert_ne!(matched_view, view, "long assistant jump must leave bottom");
-                let matched = capture(&mut h, &tabs, "bb1a", "search-navigating-2", full, &dir);
+                let matched = capture(&mut h, &tabs, "bb1a", "search-navigating-2", full);
                 assert!(matched.contains("Bb1a-row-01") && !matched.contains(REPLY));
                 key(&mut h, &mut tabs, if keep { Key::Enter } else { Key::Esc });
                 assert!(!presentation::is_open(&h.state, Surface::Search));
@@ -241,7 +182,6 @@ async fn bb1a_real_frames_for_smoke_predicates() {
                         "search-restored"
                     },
                     full,
-                    &dir,
                 );
                 if keep {
                     assert_eq!(format!("{:?}", tabs.active_tab().view_state), matched_view);
@@ -267,27 +207,27 @@ async fn bb1a_real_frames_for_smoke_predicates() {
                 h.state.input_history.push(entry.into());
             }
             key(&mut h, &mut tabs, Key::Ctrl('r'));
-            capture(&mut h, &tabs, "bb1a", "reverse-open", full, &dir);
-            capture(&mut h, &tabs, "bb2a", "reverse-unfiltered", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-open", full);
+            capture(&mut h, &tabs, "bb2a", "reverse-unfiltered", full);
             text(&mut h, &mut tabs, "a1-");
             assert_eq!(h.state.reverse_search.matches.len(), 3);
-            capture(&mut h, &tabs, "bb1a", "reverse-filtered", full, &dir);
-            capture(&mut h, &tabs, "bb2a", "reverse-filtered", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-filtered", full);
+            capture(&mut h, &tabs, "bb2a", "reverse-filtered", full);
             key(&mut h, &mut tabs, Key::Home);
             key(&mut h, &mut tabs, Key::Right);
-            capture(&mut h, &tabs, "bb2a", "reverse-caret", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "reverse-caret", full);
             paste(&mut h, &mut tabs, "x");
-            capture(&mut h, &tabs, "bb2a", "reverse-pasted", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "reverse-pasted", full);
             key(&mut h, &mut tabs, Key::Ctrl('h'));
-            capture(&mut h, &tabs, "bb2a", "reverse-refiltered", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "reverse-refiltered", full);
             key(&mut h, &mut tabs, Key::End);
             key(&mut h, &mut tabs, Key::Ctrl('r'));
             assert_eq!(h.state.reverse_search.selected_match, Some(1));
-            capture(&mut h, &tabs, "bb1a", "reverse-cycled", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-cycled", full);
             key(&mut h, &mut tabs, Key::Enter);
             assert_eq!(h.state.input_buffer, "/a1-second-invalid ");
             assert!(!h.state.reverse_search.is_open());
-            capture(&mut h, &tabs, "bb1a", "reverse-accepted", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-accepted", full);
             h.state.input_buffer = draft.into();
             h.state.cursor_position = draft.chars().count();
             key(&mut h, &mut tabs, Key::Ctrl('r'));
@@ -299,7 +239,7 @@ async fn bb1a_real_frames_for_smoke_predicates() {
                 h.state.modal_stack.is_empty(),
                 "ReverseSearch is never a frame"
             );
-            capture(&mut h, &tabs, "bb1a", "reverse-restored", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-restored", full);
             key(&mut h, &mut tabs, Key::Ctrl('p'));
             let mut commands = rustain::adapters::command_registry::CommandRegistry::new();
             let mut palette = rustain::adapters::palette_registry::PaletteRegistry::new();
@@ -308,7 +248,7 @@ async fn bb1a_real_frames_for_smoke_predicates() {
             gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
                 .await;
             let unfiltered_count = h.state.command_palette.filtered_entries.len();
-            capture(&mut h, &tabs, "bb2a", "palette-unfiltered", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "palette-unfiltered", full);
             paste(&mut h, &mut tabs, "/ml");
             gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
                 .await;
@@ -320,23 +260,23 @@ async fn bb1a_real_frames_for_smoke_predicates() {
                     .any(|entry| entry.name == "/ml")
             );
             assert!(h.state.command_palette.filtered_entries.len() < unfiltered_count);
-            capture(&mut h, &tabs, "bb2a", "palette-filtered", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "palette-filtered", full);
             key(&mut h, &mut tabs, Key::Home);
             key(&mut h, &mut tabs, Key::Right);
-            capture(&mut h, &tabs, "bb2a", "palette-caret", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "palette-caret", full);
             paste(&mut h, &mut tabs, "~");
             gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
                 .await;
             assert!(h.state.command_palette.filtered_entries.is_empty());
-            capture(&mut h, &tabs, "bb2a", "palette-pasted", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "palette-pasted", full);
             key(&mut h, &mut tabs, Key::Ctrl('k'));
             gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
                 .await;
-            capture(&mut h, &tabs, "bb2a", "palette-killed", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "palette-killed", full);
             key(&mut h, &mut tabs, Key::Ctrl('u'));
             gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
                 .await;
-            capture(&mut h, &tabs, "bb2a", "palette-cleared", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "palette-cleared", full);
             key(&mut h, &mut tabs, Key::Esc);
             assert_eq!(h.state.input_buffer, draft);
         }
@@ -344,8 +284,10 @@ async fn bb1a_real_frames_for_smoke_predicates() {
 }
 
 // Render-only retained-data fixture. No TaskHandle, run, or drill capability is
-// fabricated: the native leg below /fanout owns that proof. The sealed DrillBody
-// cannot be constructed by integration tests; subview text is fixture DATA.
+// fabricated: the `/fanout` command arm is proven by
+// `fanout_consults_gate_decision_before_launch` (tests/conformance_tui_orchestration.rs) and the
+// real launch front door by the `spawn_wave_run` keystones. The sealed DrillBody cannot be
+// constructed by integration tests; subview text is fixture DATA.
 #[derive(Debug)]
 struct Bb1bPayload(super::keymap_support::StubWave);
 
@@ -388,43 +330,201 @@ impl rustain::domain::ports::wave_handle::WaveHandle for Bb1bPayload {
     }
 }
 
+/// Paint the active tab and keep the draft: the state's buffer is the draft and the composer's
+/// last body row paints its last line, at every viewport and for both composer sizes.
 fn bb1b_capture(
     h: &mut TestHarness,
     tabs: &TabManager,
     stage: &str,
     full: bool,
-    dir: &Option<PathBuf>,
-) {
-    let screen = capture(h, tabs, "bb1a", stage, full, &None);
-    if let Some(dir) = dir {
-        let buffer = h.terminal.backend().buffer();
-        let reversed: Vec<usize> = (0..buffer.area.height)
-            .filter(|&y| {
-                (0..buffer.area.width).any(|x| {
-                    buffer[(x, y)]
-                        .modifier
-                        .contains(ratatui::style::Modifier::REVERSED)
-                })
-            })
-            .map(usize::from)
-            .collect();
-        let record = serde_json::json!({
-            "width": h.state.terminal_width, "height": h.state.terminal_height,
-            "stage": stage, "full": full, "screen": screen,
-            "draft": h.state.input_buffer, "cursor_hidden": !h.terminal.backend().cursor_visible(),
-            "reversed": reversed,
-        });
-        std::fs::write(
-            dir.join(format!(
-                "bb1b-i-{}x{}-{}-{stage}.json",
-                h.state.terminal_width,
-                h.state.terminal_height,
-                if full { "full" } else { "normal" }
-            )),
-            serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap();
+    draft: &str,
+) -> String {
+    let screen = capture(h, tabs, "bb1b-i", stage, full);
+    assert_eq!(h.state.input_buffer, draft, "{stage} full={full}: {screen}");
+    assert_composer_last_row(h, &screen, draft, stage);
+    screen
+}
+
+/// The absolute row of the status bar in the current layout.
+fn status_row(h: &TestHarness, tabs: &TabManager) -> usize {
+    let area = h.terminal.backend().buffer().area;
+    let layout = rustain::adapters::tui::layout::compute_layout(
+        area,
+        &h.state.theme,
+        &h.state.input_buffer,
+        tabs.tab_count(),
+        h.state.monitor,
+    )
+    .unwrap();
+    usize::from(layout.status_bar.y)
+}
+
+/// The modal frame's rectangle in the current layout (the same geometry the Stage hands every
+/// S-frame: `frame_rect(modal_region(..))`).
+fn modal_box_rect(h: &TestHarness, tabs: &TabManager) -> ratatui::layout::Rect {
+    let area = h.terminal.backend().buffer().area;
+    let layout = rustain::adapters::tui::layout::compute_layout(
+        area,
+        &h.state.theme,
+        &h.state.input_buffer,
+        tabs.tab_count(),
+        h.state.monitor,
+    )
+    .unwrap();
+    presentation::geometry::frame_rect(presentation::geometry::modal_region(&layout, area))
+}
+
+/// The frame's cells (frame columns only), top border row to bottom border row.
+fn modal_box_rows(h: &TestHarness, tabs: &TabManager) -> Vec<String> {
+    let buffer = h.terminal.backend().buffer();
+    let rect = modal_box_rect(h, tabs);
+    (rect.y..rect.bottom())
+        .map(|y| {
+            (rect.x..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect()
+}
+
+/// The complete frame rectangle at its expected place: titled top border, plain bottom border,
+/// a `│` rail on both sides of every inner row (the deleted `_bb1b_frame`).
+fn titled_box(h: &TestHarness, tabs: &TabManager, title: &str) -> Vec<String> {
+    let rows = modal_box_rows(h, tabs);
+    let width = rows.first().map_or(0, |row| row.chars().count());
+    let prefix = format!("┌ {title} ");
+    assert!(rows.len() >= 5, "frame too short: {rows:#?}");
+    assert_eq!(
+        rows[0],
+        format!(
+            "{prefix}{}┐",
+            "─".repeat(width - prefix.chars().count() - 1)
+        ),
+        "top border: {rows:#?}"
+    );
+    assert_eq!(
+        rows[rows.len() - 1],
+        format!("└{}┘", "─".repeat(width - 2)),
+        "bottom border: {rows:#?}"
+    );
+    for row in &rows[1..rows.len() - 1] {
+        assert!(
+            row.starts_with('│') && row.ends_with('│'),
+            "side rail: {rows:#?}"
+        );
     }
+    rows
+}
+
+/// The inner text of a frame row, borders and padding removed.
+fn inner(row: &str) -> &str {
+    row.trim_matches('│').trim()
+}
+
+/// The last non-empty inner row of the frame: its action footer.
+fn footer(rows: &[String]) -> &str {
+    rows[1..rows.len() - 1]
+        .iter()
+        .rev()
+        .map(|row| row.as_str())
+        .find(|row| !inner(row).is_empty())
+        .unwrap_or("")
+}
+
+/// The Bookmark frame inside its rectangle: the count title, exactly one selected row naming
+/// the durable index and the lede, and the action footer (the deleted `_bb1b_book`).
+fn assert_bookmark_frame(
+    h: &TestHarness,
+    tabs: &TabManager,
+    count: usize,
+    index: usize,
+    lede: &str,
+) {
+    let rows = titled_box(h, tabs, &format!("Bookmarks ({count})"));
+    let selected: Vec<&str> = rows[1..rows.len() - 1]
+        .iter()
+        .map(|row| inner(row))
+        .filter(|row| row.contains("▸ "))
+        .collect();
+    assert_eq!(selected.len(), 1, "exactly one selected row: {rows:#?}");
+    assert!(
+        selected[0].starts_with(&format!("▸ msg {index}: {lede}")),
+        "{rows:#?}"
+    );
+    let footer = footer(&rows);
+    assert!(
+        ["Jump", "Delete", "Undo", "Close"]
+            .iter()
+            .all(|action| footer.contains(action)),
+        "{rows:#?}"
+    );
+}
+
+/// The rows whose cells carry `Modifier::REVERSED` in the last painted frame.
+fn reversed_rows(h: &TestHarness) -> Vec<u16> {
+    let buffer = h.terminal.backend().buffer();
+    (0..buffer.area.height)
+        .filter(|&y| {
+            (0..buffer.area.width).any(|x| {
+                buffer[(x, y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            })
+        })
+        .collect()
+}
+
+/// The Wave list inside its rectangle: the `▾ k of N` header on the first inner row, the list
+/// actions in the footer, and exactly one reversed row, inside the frame, that carries the
+/// selected spoke's summary and the `↵` drill mark (the deleted `_bb1b_wave` "list").
+fn assert_wave_list(h: &TestHarness, tabs: &TabManager, position: &str, summary: &str) {
+    let rows = titled_box(h, tabs, "Wave");
+    assert_eq!(inner(&rows[1]), position, "{rows:#?}");
+    let footer = footer(&rows);
+    assert!(
+        ["Enter drill", "r rerun", "d diverge", "Esc/Ctrl+C close"]
+            .iter()
+            .all(|action| footer.contains(action)),
+        "{rows:#?}"
+    );
+    let rect = modal_box_rect(h, tabs);
+    let reversed = reversed_rows(h);
+    assert_eq!(reversed.len(), 1, "exactly one selected row: {rows:#?}");
+    assert!(
+        (rect.y + 1..rect.bottom() - 1).contains(&reversed[0]),
+        "the selected row lies inside the frame: {rows:#?}"
+    );
+    let selected = &rows[usize::from(reversed[0] - rect.y)];
+    assert!(
+        selected.contains(summary) && selected.contains('↵'),
+        "{rows:#?}"
+    );
+}
+
+/// The Wave drill and divergence frames: the header on the first inner row, the fixture payload
+/// in the body and one of the footer action sets (the deleted `_bb1b_wave` "drill" /
+/// "diverge").
+fn assert_wave_subview(
+    h: &TestHarness,
+    tabs: &TabManager,
+    header: &str,
+    payload: &str,
+    footers: &[&[&str]],
+) {
+    let rows = titled_box(h, tabs, "Wave");
+    assert_eq!(inner(&rows[1]), header, "{rows:#?}");
+    let body = rows[2..rows.len() - 1].join("\n");
+    assert!(
+        body.contains(payload),
+        "payload `{payload}` in the body: {rows:#?}"
+    );
+    let footer = footer(&rows);
+    assert!(
+        footers
+            .iter()
+            .any(|set| set.iter().all(|action| footer.contains(action))),
+        "{rows:#?}"
+    );
 }
 
 #[test]
@@ -434,9 +534,11 @@ fn bb1b_i_real_frames_for_smoke_predicates() {
         handlers::{bookmark, wave_overlay},
     };
     use std::sync::Arc;
-    let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
+            // Owner predicates are painted-and-asserted at the standard shell; every viewport and
+            // both composer sizes still keep the draft and its composer row at every step.
+            let painted = width == 80 && !full;
             let (mut h, mut tabs) = super::stage_support::stage(width, height);
             h.finalize_turn();
             let draft = if full {
@@ -446,41 +548,68 @@ fn bb1b_i_real_frames_for_smoke_predicates() {
             };
             h.state.input_buffer = draft.into();
             h.state.cursor_position = draft.chars().count();
-            bb1b_capture(&mut h, &tabs, "before", full, &dir);
+            let before_screen = bb1b_capture(&mut h, &tabs, "before", full, draft);
             let before = super::stage_support::view(&tabs);
-            let action = press(&mut h.state, Key::Char('\''));
-            assert_eq!(action, InputAction::OpenBookmarkList);
+            assert_eq!(
+                press(&mut h.state, Key::Char('\'')),
+                InputAction::OpenBookmarkList
+            );
             bookmark::handle_apply_open_bookmark_list(
                 &tabs,
                 &mut h.state,
                 &tabs.active_tab().conversation,
             );
-            bb1b_capture(&mut h, &tabs, "bookmark-open", full, &dir);
-            press(&mut h.state, Key::Char('j'));
+            bb1b_capture(&mut h, &tabs, "bookmark-open", full, draft);
+            if painted {
+                assert_bookmark_frame(&h, &tabs, 2, 0, "stage-0-row-00");
+            }
+            assert_eq!(press(&mut h.state, Key::Char('j')), InputAction::Consumed);
             assert_eq!(h.state.bookmark_list_selected, 1);
-            bb1b_capture(&mut h, &tabs, "bookmark-selected", full, &dir);
-            press(&mut h.state, Key::Esc);
-            bookmark::close(&mut h.state);
+            bb1b_capture(&mut h, &tabs, "bookmark-selected", full, draft);
+            if painted {
+                assert_bookmark_frame(&h, &tabs, 2, 2, "stage-2-row-00");
+            }
+            assert_eq!(
+                press(&mut h.state, Key::Esc),
+                InputAction::CloseBookmarkList
+            );
             assert_eq!(super::stage_support::view(&tabs), before);
-            bb1b_capture(&mut h, &tabs, "bookmark-back", full, &dir);
+            let screen = bb1b_capture(&mut h, &tabs, "bookmark-back", full, draft);
+            if painted {
+                let status = status_row(&h, &tabs);
+                assert_eq!(
+                    &screen_rows(&screen)[..status],
+                    &screen_rows(&before_screen)[..status],
+                    "the rows above the status row are the pre-open rows: {screen}"
+                );
+            }
+            assert_eq!(
+                press(&mut h.state, Key::Char('\'')),
+                InputAction::OpenBookmarkList
+            );
             bookmark::handle_apply_open_bookmark_list(
                 &tabs,
                 &mut h.state,
                 &tabs.active_tab().conversation,
             );
+            assert_eq!(press(&mut h.state, Key::Enter), InputAction::JumpToBookmark);
             let conversation = tabs.active_tab().conversation.clone();
             bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &conversation);
             assert_ne!(super::stage_support::view(&tabs), before);
-            bb1b_capture(&mut h, &tabs, "bookmark-jump", full, &dir);
+            let screen = bb1b_capture(&mut h, &tabs, "bookmark-jump", full, draft);
+            if painted {
+                assert!(screen.contains("stage-0-row-00"), "{screen}");
+            }
             tabs.active_tab_mut().session_meta.bookmarks = vec![0, 1, 2];
             bookmark::handle_apply_open_bookmark_list(
                 &tabs,
                 &mut h.state,
                 &tabs.active_tab().conversation,
             );
-            press(&mut h.state, Key::Char('j'));
-            press(&mut h.state, Key::Char('j'));
-            bb1b_capture(&mut h, &tabs, "bookmark-counted", full, &dir);
+            for _ in 0..2 {
+                assert_eq!(press(&mut h.state, Key::Char('j')), InputAction::Consumed);
+            }
+            bb1b_capture(&mut h, &tabs, "bookmark-counted", full, draft);
             bookmark::close(&mut h.state);
             tabs.active_tab_mut().session_meta.bookmarks.clear();
             bookmark::handle_apply_open_bookmark_list(
@@ -490,90 +619,105 @@ fn bb1b_i_real_frames_for_smoke_predicates() {
             );
             assert!(!presentation::is_open(&h.state, Surface::BookmarkList));
             h.state.notifications.clear_toasts();
-            bb1b_capture(&mut h, &tabs, "bookmark-empty", full, &dir);
+            bb1b_capture(&mut h, &tabs, "bookmark-empty", full, draft);
             h.state.wave_run = Some(Arc::new(Bb1bPayload(super::keymap_support::StubWave(2))));
             let id = tabs.active_tab().conversation.id.clone();
-            for (key, stage) in [
-                (Key::Char('r'), "wave-open"),
-                (Key::Char('j'), "wave-selected"),
+            for (key, expected, stage, position, summary) in [
+                (
+                    Key::Char('r'),
+                    InputAction::OpenWaveOverlay,
+                    "wave-open",
+                    "▾ 1 of 2",
+                    "a1-first-invalid",
+                ),
+                (
+                    Key::Char('j'),
+                    InputAction::Consumed,
+                    "wave-selected",
+                    "▾ 2 of 2",
+                    "a1-second-invalid",
+                ),
             ] {
                 let action = press(&mut h.state, key);
+                assert_eq!(action, expected, "{stage}");
                 wave_overlay::apply(&mut h.state, &id, &action);
-                bb1b_capture(&mut h, &tabs, stage, full, &dir);
+                bb1b_capture(&mut h, &tabs, stage, full, draft);
+                if painted {
+                    assert_wave_list(&h, &tabs, position, summary);
+                }
             }
             // Fixture payload, not a claimed successful lazy handle resolution.
             h.state.wave_drill_body = Some((1, "a1-second-invalid".into()));
-            bb1b_capture(&mut h, &tabs, "wave-drill", full, &dir);
-            for (key, stage) in [
-                (Key::Char('d'), "wave-diverge"),
-                (Key::Char('s'), "wave-drill-return"),
-                (Key::Ctrl('c'), "wave-closed"),
-                (Key::Char('d'), "wave-direct-diverge"),
-                (Key::Esc, "wave-compact"),
-                (Key::Enter, "wave-reopen"),
-                (Key::Char('d'), "wave-list-diverge"),
-                (Key::Esc, "wave-list-compact"),
+            bb1b_capture(&mut h, &tabs, "wave-drill", full, draft);
+            if painted {
+                assert_wave_subview(
+                    &h,
+                    &tabs,
+                    "Drill: spoke 1",
+                    "a1-second-invalid",
+                    &[
+                        &["Enter drill", "r rerun", "d diverge", "Esc/Ctrl+C close"],
+                        &[
+                            "Enter/r overlay",
+                            "d diverge",
+                            "Esc dismiss",
+                            "Ctrl+C close",
+                        ],
+                    ],
+                );
+            }
+            for (key, expected, stage) in [
+                (Key::Char('d'), InputAction::OpenDivergeView, "wave-diverge"),
+                (
+                    Key::Char('s'),
+                    InputAction::CloseDivergeView,
+                    "wave-drill-return",
+                ),
+                (Key::Ctrl('c'), InputAction::CloseWaveOverlay, "wave-closed"),
+                (
+                    Key::Char('d'),
+                    InputAction::OpenDivergeView,
+                    "wave-direct-diverge",
+                ),
+                (Key::Esc, InputAction::CloseDivergeView, "wave-compact"),
+                (Key::Enter, InputAction::OpenWaveOverlay, "wave-reopen"),
+                (
+                    Key::Char('d'),
+                    InputAction::OpenDivergeView,
+                    "wave-list-diverge",
+                ),
+                (Key::Esc, InputAction::CloseDivergeView, "wave-list-compact"),
             ] {
                 let action = press(&mut h.state, key);
+                assert_eq!(action, expected, "{stage}");
                 wave_overlay::apply(&mut h.state, &id, &action);
-                bb1b_capture(&mut h, &tabs, stage, full, &dir);
+                bb1b_capture(&mut h, &tabs, stage, full, draft);
+                if painted && stage == "wave-diverge" {
+                    assert_wave_subview(
+                        &h,
+                        &tabs,
+                        "2 spokes disagree",
+                        "a1-second-invalid",
+                        &[&["s back", "Esc back", "Ctrl+C back"]],
+                    );
+                }
             }
             for (count, selected, stage) in [(0, 0, "wave-empty"), (24, 23, "wave-counted")] {
                 h.state.wave_run = Some(Arc::new(Bb1bPayload(super::keymap_support::StubWave(
                     count,
                 ))));
                 let action = press(&mut h.state, Key::Char('r'));
+                assert_eq!(action, InputAction::OpenWaveOverlay, "{stage}");
                 wave_overlay::apply(&mut h.state, &id, &action);
                 h.state.wave_overlay_selected = selected;
-                bb1b_capture(&mut h, &tabs, stage, full, &dir);
+                bb1b_capture(&mut h, &tabs, stage, full, draft);
                 wave_overlay::apply(&mut h.state, &id, &InputAction::CloseWaveOverlay);
             }
         }
     }
 }
 
-fn bb1b_ii_write(
-    h: &mut TestHarness,
-    stage: &str,
-    full: bool,
-    screen: &str,
-    history_title: Option<&str>,
-    dir: &Option<PathBuf>,
-) {
-    if let Some(dir) = dir {
-        use std::io::Write as _;
-        let cursor = h.terminal.get_cursor_position().unwrap();
-        let record = serde_json::json!({
-            "width": h.state.terminal_width, "height": h.state.terminal_height,
-            "stage": stage, "full": full, "screen": screen,
-            "draft": h.state.input_buffer, "cursor": [cursor.x, cursor.y],
-            "cursor_hidden": !h.terminal.backend().cursor_visible(),
-            "conversation_title": h.conversation.title,
-            "history_title": history_title,
-        });
-        let name = format!(
-            "bb1b-ii-{}x{}-{}-{stage}.json",
-            h.state.terminal_width,
-            h.state.terminal_height,
-            if full { "full" } else { "normal" }
-        );
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dir.join(name))
-            .expect("CrossSearch export must not overwrite a frame");
-        file.write_all(&serde_json::to_vec(&record).unwrap())
-            .unwrap();
-    }
-}
-
-fn bb1b_ii_capture(
-    h: &mut TestHarness,
-    tabs: &mut TabManager,
-    stage: &str,
-    full: bool,
-    dir: &Option<PathBuf>,
-) {
+fn bb1b_ii_capture(h: &mut TestHarness, tabs: &mut TabManager, stage: &str, full: bool) {
     crate::conformance_tui_orchestration::render_runtime(h, tabs);
     let buffer = h.terminal.backend().buffer();
     let rows: Vec<String> = (0..buffer.area.height)
@@ -692,7 +836,6 @@ fn bb1b_ii_capture(
             );
         }
     }
-    bb1b_ii_write(h, stage, full, &screen, None, dir);
 }
 
 fn bb1b_ii_results(h: &mut TestHarness, query: &str, count: usize) {
@@ -811,7 +954,6 @@ fn bb1b_ii_open_fixture(width: u16, height: u16, draft: &str) -> (TestHarness, T
 #[test]
 fn bb1b_ii_real_frames_for_smoke_predicates() {
     use rustain::adapters::tui::{app::InputAction, handlers::export};
-    let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
             let draft = if full {
@@ -820,7 +962,7 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
                 DRAFT
             };
             let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft);
-            bb1b_ii_capture(&mut h, &mut tabs, "cross-unfiltered", full, &dir);
+            bb1b_ii_capture(&mut h, &mut tabs, "cross-unfiltered", full);
             for (query, count, stage) in [
                 ("Bb1a", 1, "cross-filtered"),
                 ("zzzz", 0, "cross-empty"),
@@ -833,7 +975,7 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
                     }
                 }
                 assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
-                bb1b_ii_capture(&mut h, &mut tabs, stage, full, &dir);
+                bb1b_ii_capture(&mut h, &mut tabs, stage, full);
             }
             assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
             export::close_cross_search(&mut h.state);
@@ -842,7 +984,7 @@ fn bb1b_ii_real_frames_for_smoke_predicates() {
             assert_eq!(h.state.input_buffer, draft);
             assert_eq!(h.state.cursor_position, draft.chars().count());
             if width == 130 {
-                bb1b_ii_capture(&mut h, &mut tabs, "history-return", full, &dir);
+                bb1b_ii_capture(&mut h, &mut tabs, "history-return", full);
             }
         }
     }
@@ -854,7 +996,6 @@ fn bb1b_ii_aux_capture(
     index: &rustain::domain::services::session_index::SessionIndex,
     stage: &str,
     full: bool,
-    dir: &Option<PathBuf>,
 ) {
     rustain::infrastructure::runtime::event_loop::render(
         &mut h.terminal,
@@ -959,14 +1100,6 @@ fn bb1b_ii_aux_capture(
         }
         _ => panic!("unknown auxiliary frame {stage}"),
     }
-    bb1b_ii_write(
-        h,
-        stage,
-        full,
-        &screen,
-        index.entries().first().map(|entry| entry.title.as_str()),
-        dir,
-    );
 }
 
 fn bb1b_ii_request_quit(state: &mut rustain::adapters::tui::state::TuiState) {
@@ -991,7 +1124,6 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
         services::session_index::SessionIndex,
     };
     use rustain::infrastructure::runtime::event_loop;
-    let dir = output_dir();
     let tmp = tempfile::tempdir().unwrap();
     let storage =
         rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().join("sessions"));
@@ -1048,9 +1180,9 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
                 ),
                 export::CrossSearchResultsOutcome::Applied
             );
-            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "cross-untitled", full, &dir);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "cross-untitled", full);
             bb1b_ii_request_quit(&mut h.state);
-            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "cross-quit", full, &dir);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "cross-quit", full);
             press(&mut h.state, Key::Char('n'));
             assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
             assert_eq!(h.state.cross_search.query.as_str(), "Bb1a");
@@ -1073,23 +1205,19 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
                     &tx,
                 )
                 .await;
-                bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "accepted-base", full, &dir);
+                bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "accepted-base", full);
             } else {
                 assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
                 export::close_cross_search(&mut h.state);
-                bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "history-populated", full, &dir);
-                if full && let Some(dir) = &dir {
+                bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "history-populated", full);
+                if full {
                     let persisted = &h.conversation;
                     assert_eq!(persisted.messages.len(), 2);
                     assert_eq!(persisted.messages[0].content, TURN);
-                    let store = rustain::adapters::filesystem::FileSystemStorage::new(
-                        dir.join("persisted-control/.claude/sessions"),
-                    );
-                    store.save_conversation(persisted).await.unwrap();
                 }
             }
             bb1b_ii_request_quit(&mut h.state);
-            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "base-quit", full, &dir);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &index, "base-quit", full);
             press(&mut h.state, Key::Char('n'));
             if width < 100 {
                 // A successful open closed the History frame too.
@@ -1152,7 +1280,6 @@ fn bb2b_publish_cross(h: &mut TestHarness, count: usize) {
 #[tokio::test]
 async fn bb2b_real_frames_for_smoke_predicates() {
     use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
-    let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
             let draft = if full {
@@ -1213,61 +1340,26 @@ async fn bb2b_real_frames_for_smoke_predicates() {
                 }
                 let owner = h.state.modal_stack.top().unwrap().clone();
                 key(&mut h, &mut tabs, Key::Char('/'));
-                capture(
-                    &mut h,
-                    &tabs,
-                    "bb2b",
-                    &format!("{kind}-unfiltered"),
-                    full,
-                    &dir,
-                );
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-unfiltered"), full);
                 paste(&mut h, &mut tabs, needle);
-                capture(
-                    &mut h,
-                    &tabs,
-                    "bb2b",
-                    &format!("{kind}-filtered"),
-                    full,
-                    &dir,
-                );
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-filtered"), full);
                 key(&mut h, &mut tabs, Key::Home);
                 key(&mut h, &mut tabs, Key::Right);
-                capture(&mut h, &tabs, "bb2b", &format!("{kind}-caret"), full, &dir);
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-caret"), full);
                 paste(&mut h, &mut tabs, "x");
-                let empty = capture(&mut h, &tabs, "bb2b", &format!("{kind}-empty"), full, &dir);
+                let empty = capture(&mut h, &tabs, "bb2b", &format!("{kind}-empty"), full);
                 assert!(empty.contains(if kind == "log" {
                     "No matching notifications."
                 } else {
                     "No matching keybindings."
                 }));
                 key(&mut h, &mut tabs, Key::Ctrl('h'));
-                capture(
-                    &mut h,
-                    &tabs,
-                    "bb2b",
-                    &format!("{kind}-restored"),
-                    full,
-                    &dir,
-                );
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-restored"), full);
                 key(&mut h, &mut tabs, Key::Enter);
-                capture(
-                    &mut h,
-                    &tabs,
-                    "bb2b",
-                    &format!("{kind}-accepted"),
-                    full,
-                    &dir,
-                );
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-accepted"), full);
                 key(&mut h, &mut tabs, Key::Char('/'));
                 key(&mut h, &mut tabs, Key::Esc);
-                capture(
-                    &mut h,
-                    &tabs,
-                    "bb2b",
-                    &format!("{kind}-cleared"),
-                    full,
-                    &dir,
-                );
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-cleared"), full);
                 assert_eq!(
                     h.state.modal_stack.top(),
                     Some(&owner),
@@ -1287,25 +1379,25 @@ async fn bb2b_real_frames_for_smoke_predicates() {
                 assert_eq!(h.state.input_buffer, draft);
             }
             let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft);
-            capture(&mut h, &tabs, "bb2b", "cross-unfiltered", full, &dir);
+            capture(&mut h, &tabs, "bb2b", "cross-unfiltered", full);
             paste(&mut h, &mut tabs, "Bb1a");
             bb2b_publish_cross(&mut h, 1);
-            capture(&mut h, &tabs, "bb2b", "cross-filtered", full, &dir);
+            capture(&mut h, &tabs, "bb2b", "cross-filtered", full);
             key(&mut h, &mut tabs, Key::Home);
             key(&mut h, &mut tabs, Key::Right);
-            capture(&mut h, &tabs, "bb2b", "cross-caret", full, &dir);
+            capture(&mut h, &tabs, "bb2b", "cross-caret", full);
             paste(&mut h, &mut tabs, "x");
             bb2b_publish_cross(&mut h, 0);
-            capture(&mut h, &tabs, "bb2b", "cross-empty", full, &dir);
+            capture(&mut h, &tabs, "bb2b", "cross-empty", full);
             key(&mut h, &mut tabs, Key::Ctrl('h'));
             bb2b_publish_cross(&mut h, 1);
-            capture(&mut h, &tabs, "bb2b", "cross-restored", full, &dir);
+            capture(&mut h, &tabs, "bb2b", "cross-restored", full);
             key(&mut h, &mut tabs, Key::End);
             bb2b_publish_cross(&mut h, 20);
             for _ in 0..19 {
                 key(&mut h, &mut tabs, Key::Down);
             }
-            capture(&mut h, &tabs, "bb2b", "cross-counted", full, &dir);
+            capture(&mut h, &tabs, "bb2b", "cross-counted", full);
             assert_eq!(
                 h.state.cross_search.selected, 19,
                 "selected-window control is reachable"
@@ -1316,12 +1408,48 @@ async fn bb2b_real_frames_for_smoke_predicates() {
     }
 }
 
-fn c_capture_local(
-    h: &mut TestHarness,
-    tabs: &mut TabManager,
-    stage: &str,
-    dir: &Option<PathBuf>,
-) -> String {
+/// The local composer body row is `│` + the draft padded to the inner width + `│`, and the
+/// visible cursor sits just inside the left border at `(cursor_position + 1, height - 2)`.
+fn assert_local_composer(h: &mut TestHarness, screen: &str, draft: &str, caret: usize) {
+    assert_eq!(
+        (&*h.state.input_buffer, h.state.cursor_position),
+        (draft, caret)
+    );
+    let rows = screen_rows(screen);
+    let inner = usize::from(h.state.terminal_width) - 2;
+    assert_eq!(
+        rows[rows.len() - 2],
+        format!("│{draft:<inner$}│"),
+        "{screen}"
+    );
+    assert!(h.terminal.backend().cursor_visible(), "{screen}");
+    let cursor = h.terminal.get_cursor_position().unwrap();
+    assert_eq!(
+        (usize::from(cursor.x), usize::from(cursor.y)),
+        (caret + 1, rows.len() - 2),
+        "{screen}"
+    );
+}
+
+/// One Help `j` moves the body up by exactly one row; both border rows are unchanged.
+fn assert_help_scrolled_one_row(before: &[String], after: &[String]) {
+    let last = before.len() - 1;
+    assert!(
+        before[0].contains("Help — Rustain Keybindings"),
+        "{before:?}"
+    );
+    assert!(before[last].contains("j/k scroll  ? close"), "{before:?}");
+    assert_eq!(after[0], before[0], "top border row");
+    assert_eq!(after[last], before[last], "bottom border row");
+    let (before_body, after_body) = (&before[1..last], &after[1..last]);
+    assert_eq!(
+        &before_body[1..],
+        &after_body[..after_body.len() - 1],
+        "the Help body shifts up one row"
+    );
+}
+
+fn c_capture_local(h: &mut TestHarness, tabs: &mut TabManager, stage: &str) -> String {
     rustain::infrastructure::runtime::event_loop::render(
         &mut h.terminal,
         &mut h.state,
@@ -1337,7 +1465,7 @@ fn c_capture_local(
         128_000,
     )
     .unwrap();
-    export_frame(h, "c-local", stage, false, dir)
+    check_frame(h, "c-local", stage, false)
 }
 
 #[tokio::test]
@@ -1351,7 +1479,6 @@ async fn c_real_local_frames_for_smoke_predicates() {
         events::DomainInputEvent,
         models::{FocusState, view_state::ScrollDelta},
     };
-    let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         let mut h = TestHarness::with_size(width, height);
         let reply = (0..60)
@@ -1375,13 +1502,13 @@ async fn c_real_local_frames_for_smoke_predicates() {
         // scroll effect; the same manager owns the view and production paint.
         tabs.active_tab_mut().conversation = h.conversation.clone();
         h.state.active_tab_id = tabs.active_tab_id();
-        c_capture_local(&mut h, &mut tabs, "initial", &dir);
+        c_capture_local(&mut h, &mut tabs, "initial");
         for c in "/cnotice ".chars() {
             press(&mut h.state, Key::Char(c));
         }
         assert_eq!(h.state.input_buffer, "/cnotice ");
         assert_eq!(h.state.cursor_position, 9);
-        c_capture_local(&mut h, &mut tabs, "notice-command", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice-command");
         assert!(matches!(
             press(&mut h.state, Key::Enter),
             InputAction::SubmitWithContext { command: Some(command), .. } if command == "cnotice"
@@ -1392,53 +1519,67 @@ async fn c_real_local_frames_for_smoke_predicates() {
             NoticeSeverity::Warning,
             "Unknown command: /cnotice",
         );
-        c_capture_local(&mut h, &mut tabs, "notice", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice");
         for k in [Key::Ctrl('x'), Key::Char('n')] {
             press(&mut h.state, k);
         }
-        c_capture_local(&mut h, &mut tabs, "notice-log", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice-log");
         for k in [Key::Char('x'), Key::Esc] {
             press(&mut h.state, k);
         }
-        c_capture_local(&mut h, &mut tabs, "notice-dismiss-return", &dir);
+        c_capture_local(&mut h, &mut tabs, "notice-dismiss-return");
         for c in "C-kept draft".chars() {
             press(&mut h.state, Key::Char(c));
         }
-        c_capture_local(&mut h, &mut tabs, "typed", &dir);
+        let typed = c_capture_local(&mut h, &mut tabs, "typed");
+        assert_local_composer(&mut h, &typed, "C-kept draft", 12);
         press(&mut h.state, Key::Ctrl('a'));
         assert_eq!(h.state.cursor_position, 0);
-        c_capture_local(&mut h, &mut tabs, "readline-home", &dir);
+        c_capture_local(&mut h, &mut tabs, "readline-home");
         press(&mut h.state, Key::Ctrl('e'));
         assert_eq!(h.state.cursor_position, 12);
         press(&mut h.state, Key::Left);
         assert_eq!(h.state.cursor_position, 11);
-        c_capture_local(&mut h, &mut tabs, "left", &dir);
+        c_capture_local(&mut h, &mut tabs, "left");
         press(&mut h.state, Key::End);
         press(&mut h.state, Key::Home);
         press(&mut h.state, Key::Right);
         assert_eq!(h.state.cursor_position, 1);
-        c_capture_local(&mut h, &mut tabs, "caret", &dir);
+        let caret = c_capture_local(&mut h, &mut tabs, "caret");
+        assert_local_composer(&mut h, &caret, "C-kept draft", 1);
         handle_input(&mut h.state, &DomainInputEvent::Paste("X".into()));
         assert_eq!(
             (&*h.state.input_buffer, h.state.cursor_position),
             ("CX-kept draft", 2)
         );
-        c_capture_local(&mut h, &mut tabs, "paste", &dir);
+        let pasted = c_capture_local(&mut h, &mut tabs, "paste");
+        assert_local_composer(&mut h, &pasted, "CX-kept draft", 2);
         press(&mut h.state, Key::Ctrl('k'));
         assert_eq!((&*h.state.input_buffer, h.state.cursor_position), ("CX", 2));
-        c_capture_local(&mut h, &mut tabs, "kill-tail", &dir);
+        let kill_tail = c_capture_local(&mut h, &mut tabs, "kill-tail");
+        assert_local_composer(&mut h, &kill_tail, "CX", 2);
         press(&mut h.state, Key::Ctrl('u'));
         assert!(h.state.input_buffer.is_empty());
-        c_capture_local(&mut h, &mut tabs, "kill-prefix", &dir);
+        let cleared = c_capture_local(&mut h, &mut tabs, "kill-prefix");
+        assert_local_composer(&mut h, &cleared, "", 0);
+        for c in "CX".chars() {
+            press(&mut h.state, Key::Char(c));
+        }
+        let word = c_capture_local(&mut h, &mut tabs, "word-fixture");
+        assert_local_composer(&mut h, &word, "CX", 2);
+        press(&mut h.state, Key::Ctrl('w'));
+        let killed = c_capture_local(&mut h, &mut tabs, "kill-word");
+        assert_local_composer(&mut h, &killed, "", 0);
         for c in "C-kept draft".chars() {
             press(&mut h.state, Key::Char(c));
         }
-        let bottom = c_capture_local(&mut h, &mut tabs, "bottom", &dir);
+        let bottom = c_capture_local(&mut h, &mut tabs, "bottom");
+        assert_local_composer(&mut h, &bottom, "C-kept draft", 12);
         assert!(bottom.contains(REPLY));
         // Local full-page up is Chat Ctrl+B; attached offers Input PgUp.
         press(&mut h.state, Key::Esc);
         assert_eq!(h.state.focus, FocusState::Chat);
-        c_capture_local(&mut h, &mut tabs, "chat-before-scroll", &dir);
+        c_capture_local(&mut h, &mut tabs, "chat-before-scroll");
         assert_eq!(
             press(&mut h.state, Key::Ctrl('b')),
             InputAction::ScrollFullPageUp
@@ -1449,10 +1590,10 @@ async fn c_real_local_frames_for_smoke_predicates() {
             &h.conversation,
             ScrollDelta::FullPageUp,
         );
-        c_capture_local(&mut h, &mut tabs, "chat-scrolled", &dir);
+        c_capture_local(&mut h, &mut tabs, "chat-scrolled");
         press(&mut h.state, Key::Char('i'));
         assert_eq!(h.state.focus, FocusState::Input);
-        let scrolled = c_capture_local(&mut h, &mut tabs, "scrolled", &dir);
+        let scrolled = c_capture_local(&mut h, &mut tabs, "scrolled");
         assert!(scrolled.contains("Bb1a-row-") && !scrolled.contains(REPLY));
         assert!(
             tabs.active_tab().view_state.scroll_offset > 0,
@@ -1463,16 +1604,18 @@ async fn c_real_local_frames_for_smoke_predicates() {
             press(&mut h.state, Key::Ctrl('x'));
             press(&mut h.state, Key::Char(opener));
             assert_eq!(h.state.modal_stack.len(), 1, "cover reached");
-            c_capture_local(&mut h, &mut tabs, kind, &dir);
+            c_capture_local(&mut h, &mut tabs, kind);
             if kind == "help" {
                 let before = h.state.help_overlay.scroll_offset;
+                let open_rows = modal_box_rows(&h, &tabs);
                 press(&mut h.state, Key::Char('j'));
                 assert_eq!(h.state.help_overlay.scroll_offset, before + 1);
-                c_capture_local(&mut h, &mut tabs, "help-scrolled", &dir);
+                c_capture_local(&mut h, &mut tabs, "help-scrolled");
+                assert_help_scrolled_one_row(&open_rows, &modal_box_rows(&h, &tabs));
             }
             press(&mut h.state, Key::Esc);
             assert!(h.state.modal_stack.is_empty(), "owner actually released");
-            let restored = c_capture_local(&mut h, &mut tabs, &format!("{kind}-return"), &dir);
+            let restored = c_capture_local(&mut h, &mut tabs, &format!("{kind}-return"));
             assert_eq!(
                 restored
                     .lines()

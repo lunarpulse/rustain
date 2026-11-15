@@ -1090,7 +1090,7 @@ mod k7_surfaces {
     #[tokio::test]
     async fn ba_smoke_predicates_have_real_rust_frames() {
         use rustain::adapters::{command_registry, palette_registry};
-        fn emit(h: &mut crate::e2e_harness::TestHarness, stage: &str) {
+        fn paint(h: &mut crate::e2e_harness::TestHarness) {
             let width = usize::from(h.state.terminal_width);
             let height = h.state.terminal_height;
             h.render();
@@ -1099,10 +1099,6 @@ mod k7_surfaces {
                 .map(|y| k3_compose::row(buffer, buffer.area, y))
                 .collect::<Vec<_>>();
             assert!(rows.iter().all(|row| row.chars().count() == width));
-            println!(
-                "BA_DESKCHECK_FRAME={}",
-                serde_json::json!([width, height, stage, rows.join("\n")])
-            );
         }
         let mut registry = palette_registry::PaletteRegistry::new();
         registry.populate_from_command_registry(&command_registry::CommandRegistry::new());
@@ -1111,7 +1107,7 @@ mod k7_surfaces {
                 let mut h = crate::e2e_harness::TestHarness::with_size(width, height);
                 h.state.input_buffer = "A1-kept-draft".into();
                 open(&mut h.state, Surface::ModelSelector).await;
-                emit(&mut h, "model-alone");
+                paint(&mut h);
                 back(&mut h.state);
                 press(&mut h.state, Key::Ctrl('x'));
                 press(&mut h.state, Key::Char('?'));
@@ -1119,14 +1115,14 @@ mod k7_surfaces {
                     press(&mut h.state, Key::Char('j'));
                 }
                 let caller = h.state.modal_stack.top().cloned();
-                emit(&mut h, "help-before");
+                paint(&mut h);
                 press(&mut h.state, Key::Ctrl('p'));
                 let entries = registry.all_entries().into_iter().cloned().collect();
                 h.state.command_palette.filtered_entries = entries;
-                emit(&mut h, "palette-all");
+                paint(&mut h);
                 press(&mut h.state, Key::Char('~'));
                 h.state.command_palette.filtered_entries.clear();
-                emit(&mut h, "palette-empty");
+                paint(&mut h);
                 press(&mut h.state, Key::Ctrl('u'));
                 for c in "/models".chars() {
                     press(&mut h.state, Key::Char(c));
@@ -1136,7 +1132,7 @@ mod k7_surfaces {
                     .into_iter()
                     .cloned()
                     .collect();
-                emit(&mut h, "palette-models");
+                paint(&mut h);
                 assert_eq!(
                     press(&mut h.state, Key::Enter),
                     InputAction::ExecuteCommand {
@@ -1146,12 +1142,12 @@ mod k7_surfaces {
                 );
                 model_switch::open_selector(&mut h.state, &Info, &AppConfig::default(), None);
                 assert!(!presentation::is_open(&h.state, Surface::CommandPalette));
-                emit(&mut h, "help-model");
+                paint(&mut h);
                 back(&mut h.state);
                 assert_eq!(h.state.modal_stack.top(), caller.as_ref());
-                emit(&mut h, "help-return");
+                paint(&mut h);
                 back(&mut h.state);
-                emit(&mut h, "base-return");
+                paint(&mut h);
             }
         })
         .await

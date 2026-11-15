@@ -694,6 +694,140 @@ fn room_and_peer_command_arms_delegate_to_their_bridges() {
     );
 }
 
+/// tui-5b K1: the bookmark, wave-overlay, history, cross-search, scroll and turn-completion
+/// arms in `event_loop::run` delegate to their handlers. `run` has no test seam, so each arm
+/// is pinned by source text, the way the tui-5a guards above do. Guards the named mutants
+/// MB1 (`OpenBookmarkList` closes instead of opening), MB2 (`JumpToBookmark` body emptied),
+/// MB3 (`WaveDrillSpoke(_)` dropped from the wave or-pattern), MB4 (`OpenHistory` passes a
+/// fresh `SessionIndex`), MB5 (`CrossSearchQueryChanged` scan removed), MB6 (`ScrollFullPageUp`
+/// passes `HalfPageUp` or drops the handler), MB7 (the toggle no longer awaits `_pending_save`),
+/// MB15 (`WaveRunReady` drops `handle_wave_run_ready`) and MB16 (the turn-completion
+/// `session_index.touch` removed).
+#[test]
+fn bookmark_wave_history_and_scroll_arms_delegate_to_their_handlers() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+
+    // ── Bookmarks ──
+    let toggle = input_action_arm(event_loop, "InputAction::ToggleBookmark =>");
+    let taken = toggle
+        .find("if let Some(prev) = _pending_save.take()")
+        .expect("the toggle arm must take the in-flight save first");
+    let awaited = toggle
+        .find("prev.await")
+        .expect("the toggle arm must await the taken save handle");
+    let handled = toggle
+        .find("handlers::bookmark::handle_apply_bookmark_toggle(")
+        .expect("the toggle arm must call the bookmark toggle handler");
+    assert!(
+        taken < awaited && awaited < handled && toggle.contains("&*fs_storage"),
+        "the bookmark toggle must take and await `_pending_save` before the handler writes \
+         meta.json: {toggle}"
+    );
+    assert!(
+        toggle[handled..].contains(".await"),
+        "the bookmark toggle handler itself must be awaited: {toggle}"
+    );
+
+    let open_list = input_action_arm(event_loop, "InputAction::OpenBookmarkList =>");
+    assert!(
+        open_list.contains("handlers::bookmark::handle_apply_open_bookmark_list(")
+            && !open_list.contains("bookmark::close("),
+        "OpenBookmarkList must open the list, not close it: {open_list}"
+    );
+
+    let jump = input_action_arm(event_loop, "InputAction::JumpToBookmark =>");
+    assert!(
+        jump.contains("handlers::bookmark::handle_apply_jump_bookmark("),
+        "JumpToBookmark must jump through the bookmark handler: {jump}"
+    );
+
+    let close_list = input_action_arm(event_loop, "InputAction::CloseBookmarkList =>");
+    assert!(
+        close_list.contains("handlers::bookmark::close(&mut state)"),
+        "CloseBookmarkList must close the bookmark list: {close_list}"
+    );
+
+    // ── Wave overlay (combined arm + WaveRunReady event) ──
+    let wave = event_loop
+        .split("action @ (InputAction::OpenWaveOverlay | InputAction::CloseWaveOverlay")
+        .nth(1)
+        .expect("the combined wave-overlay arm must exist in event_loop.rs")
+        .split("InputAction::SpawnGateConfirm =>")
+        .next()
+        .expect("the combined wave arm must be bounded by the SpawnGateConfirm arm");
+    assert!(
+        wave.contains("InputAction::WaveDrillSpoke(_)")
+            && wave.contains("InputAction::OpenDivergeView")
+            && wave.contains("InputAction::CloseDivergeView")
+            && wave.contains("InputAction::DismissWave) =>")
+            && wave
+                .contains("handlers::wave_overlay::apply(&mut state, &conversation.id, &action)"),
+        "the wave overlay arm must route all six actions through wave_overlay::apply: {wave}"
+    );
+
+    let wave_ready = event_loop
+        .split("AppEvent::WaveRunReady(handle) =>")
+        .nth(1)
+        .expect("the WaveRunReady event arm must exist in event_loop.rs")
+        .split("AppEvent::")
+        .next()
+        .expect("the WaveRunReady arm is bounded by the next AppEvent arm");
+    assert!(
+        wave_ready.contains("state.handle_wave_run_ready(handle)"),
+        "WaveRunReady must install the handle through the state handler: {wave_ready}"
+    );
+
+    // ── History and cross-conversation search ──
+    let history = input_action_arm(event_loop, "InputAction::OpenHistory =>");
+    assert!(
+        history.contains("history_bridge::open(&mut state, &session_index)")
+            && !history.contains("SessionIndex::new()"),
+        "OpenHistory must open over the live session index: {history}"
+    );
+
+    let query = input_action_arm(event_loop, "InputAction::CrossSearchQueryChanged =>");
+    assert!(
+        query.contains("start_cross_search_scan(") && query.contains("&session_index"),
+        "a cross-search query change must start a scan over the live session index: {query}"
+    );
+
+    let open_result = input_action_arm(event_loop, "InputAction::OpenCrossSearchResult =>");
+    assert!(
+        open_result.contains("apply_open_cross_search_result("),
+        "OpenCrossSearchResult must open the chosen result: {open_result}"
+    );
+
+    let close_search = input_action_arm(event_loop, "InputAction::CloseCrossSearch =>");
+    assert!(
+        close_search.contains("close_cross_search(&mut state)"),
+        "CloseCrossSearch must close the cross-search overlay: {close_search}"
+    );
+
+    // ── Scroll ──
+    let full_up = input_action_arm(event_loop, "InputAction::ScrollFullPageUp =>");
+    assert!(
+        full_up.contains("handlers::scroll::handle_apply_scroll_intent(")
+            && full_up.contains("ScrollDelta::FullPageUp")
+            && !full_up.contains("HalfPageUp"),
+        "ScrollFullPageUp must scroll a full page up through the scroll handler: {full_up}"
+    );
+
+    // ── Turn completion ──
+    let completion = event_loop
+        .split("// Update sidebar index on turn complete")
+        .nth(1)
+        .expect("the turn-completion sidebar marker must exist in event_loop.rs")
+        .split("Failed to persist session: ")
+        .next()
+        .expect("the turn-completion block is bounded by the persist error text");
+    assert!(
+        completion.contains("session_index.touch(")
+            && completion.contains("Some(conversation.messages.len())")
+            && completion.contains("storage_ref.save_conversation(&conv_clone)"),
+        "turn completion must touch the session index and persist the conversation: {completion}"
+    );
+}
+
 // The real dispatch/effect seam reuses the retained run; provider-count evidence is native.
 #[test]
 fn diverge_toggle_arms_never_dispatch() {

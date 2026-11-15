@@ -287,16 +287,14 @@ fn toast_arrival_cannot_overpaint_the_top_quit_frame() {
 
 #[test]
 fn smoke_notice_prefix_survives_named_viewports() {
-    for (severity, command, prefix, message) in [
+    for (severity, prefix, message) in [
         (
             NoticeSeverity::Warning,
-            "/a1-second-invalid",
             "Warning Unknown command: /a1-second-invalid ",
             "Unknown command: /a1-second-invalid — not a built-in or a custom command.",
         ),
         (
             NoticeSeverity::Info,
-            "/config",
             "Info /config is not available ",
             "/config is not available in an attached session. Detach (Ctrl+X d) and use it from a standalone `rustain` session.",
         ),
@@ -312,10 +310,6 @@ fn smoke_notice_prefix_survives_named_viewports() {
                 .join("\n");
             assert!(screen.contains(prefix), "{width}x{height}: {screen}");
             assert!(screen.contains('…'), "{width}x{height}: {screen}");
-            println!(
-                "TOAST_DESKCHECK_FRAME={}",
-                serde_json::json!([width, height, command, screen])
-            );
         }
     }
 }
@@ -655,10 +649,6 @@ fn a2a_smoke_help_predicates_match_fitted_frames() {
             if stage.starts_with("help") {
                 assert!(screen.contains("Help — Rustain Keybindings"));
             }
-            println!(
-                "HELP_DESKCHECK_FRAME={}",
-                serde_json::json!([width, height, stage, screen])
-            );
         }
     }
 }
@@ -931,24 +921,6 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
         time::{Duration, Instant},
     };
 
-    fn emit(h: &mut crate::e2e_harness::TestHarness, host: Host, stage: &str) -> String {
-        h.render_with_host(host);
-        let buffer = h.terminal.backend().buffer();
-        let screen = (0..h.state.terminal_height)
-            .map(|y| row(buffer, buffer.area, y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        println!(
-            "A2B_DESKCHECK_FRAME={}",
-            serde_json::json!([
-                h.state.terminal_width,
-                h.state.terminal_height,
-                stage,
-                screen,
-            ])
-        );
-        screen
-    }
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         let clock = Arc::new(MockClock::new(Instant::now()));
         let mut h = crate::e2e_harness::TestHarness::with_size(width, height);
@@ -967,7 +939,7 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
         clock.advance(Duration::from_secs(2));
         let frame = h.state.modal_stack.top().unwrap().clone();
         let scroll = h.state.help_overlay.scroll_offset;
-        emit(&mut h, Host::Local, "help-before-arrival");
+        h.render_with_host(Host::Local);
         assert_eq!(
             decision_queue::raise(
                 &mut h.state,
@@ -976,17 +948,17 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
             ),
             decision_queue::Raised::Focused
         );
-        emit(&mut h, Host::Local, "help-budget");
+        h.render_with_host(Host::Local);
         decision_queue::note_painted(&mut h.state);
         clock.advance(decision_queue::INERT_AFTER_PAINT);
         press(&mut h.state, Key::Esc);
         assert_eq!(h.state.modal_stack.top(), Some(&frame));
         assert_eq!(h.state.help_overlay.scroll_offset, scroll);
-        emit(&mut h, Host::Local, "help-deferred");
+        h.render_with_host(Host::Local);
         press_all(&mut h.state, &[Key::Ctrl('x'), Key::Char('q')]);
         decision_queue::open_waiting(&mut h.state, &LogFacts::default());
         assert_eq!(press(&mut h.state, Key::Enter), InputAction::Consumed);
-        emit(&mut h, Host::Local, "help-reopened-budget");
+        h.render_with_host(Host::Local);
         decision_queue::note_painted(&mut h.state);
         clock.advance(decision_queue::INERT_AFTER_PAINT);
         assert_eq!(
@@ -995,7 +967,7 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
         );
         assert_eq!(h.state.modal_stack.top(), Some(&frame));
         assert_eq!(h.state.help_overlay.scroll_offset, scroll);
-        emit(&mut h, Host::Local, "help-resolved");
+        h.render_with_host(Host::Local);
 
         // These are real shared Rust paints with attached availability; socket
         // ownership/rollback is separately covered by the attached front door.
@@ -1017,10 +989,10 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
             name: "detach".into(),
             description: "Detach this client".into(),
         }];
-        emit(&mut attached, Host::Attached, "attached-popup");
+        attached.render_with_host(Host::Attached);
         press(&mut attached.state, Key::Esc);
         assert!(attached.state.input_buffer.is_empty());
-        emit(&mut attached, Host::Attached, "attached-popup-rollback");
+        attached.render_with_host(Host::Attached);
         press_all(
             &mut attached.state,
             &[
@@ -1037,7 +1009,7 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
             message: "No decisions waiting in this client".into(),
         });
         assert_eq!(attached.state.pending_leader, Some(Context::Help));
-        emit(&mut attached, Host::Attached, "attached-help-no-decisions");
+        attached.render_with_host(Host::Attached);
     }
 }
 
