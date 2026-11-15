@@ -233,7 +233,7 @@ pub fn render(
 
     // Context window ratio (Story 7.4 AC1/AC2)
     if context_window > 0 {
-        let used = token_usage.map_or(0, |u| u.input_tokens);
+        let used = token_usage.map_or(0, |u| u.prompt_tokens());
         let pct = used
             .saturating_mul(100)
             .checked_div(context_window)
@@ -611,11 +611,12 @@ pub fn format_token_count(count: u32) -> String {
     }
 }
 
-/// Format token usage as `↑{input} ↓{output}`.
+/// Format token usage as `↑{prompt size} ↓{output}` (prompt size = input + cache
+/// reads and writes, see `UsageInfo::prompt_tokens`).
 pub fn format_token_usage(usage: &UsageInfo) -> String {
     format!(
         "↑{} ↓{}",
-        format_token_count(usage.input_tokens),
+        format_token_count(usage.prompt_tokens()),
         format_token_count(usage.output_tokens)
     )
 }
@@ -728,6 +729,76 @@ mod tests {
         let txt = buffer_text(&t);
         assert!(txt.contains("↑1.2k ↓3.4k"), "↑/↓ segment missing: {txt}");
         assert!(txt.contains("ctx:"), "ctx: segment missing: {txt}");
+    }
+
+    /// Renders the bar for `usage` against a 2000-token context window.
+    fn render_with_usage(usage: &UsageInfo) -> String {
+        let backend = TestBackend::new(200, 1);
+        let mut t = Terminal::new(backend).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "sonnet-4-6",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                Some(usage),
+                2000, // context_window
+                false,
+                None,
+                false,
+                true,
+                0, // injected_tokens
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                false,
+                None,
+                LogAwareness::Hidden,
+                0,
+            );
+        })
+        .unwrap();
+        buffer_text(&t)
+    }
+
+    fn usage_of(input: u32, cache_read: Option<u32>, output: u32) -> UsageInfo {
+        UsageInfo {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: cache_read,
+            reasoning_tokens: None,
+        }
+    }
+
+    /// eval-2 AC6: the prompt a call sent is input + cache reads, whichever
+    /// provider family reported it, for both the `↑` count and the context ratio.
+    #[test]
+    fn eval2_status_bar_shows_prompt_size_for_cached_calls() {
+        // Normalised call (what the Anthropic and, after eval-2, the Chat decoders emit).
+        let txt = render_with_usage(&usage_of(141, Some(1408), 10));
+        let up = format!("↑{}", format_token_count(1549));
+        let ctx = format!("ctx: {}/{} (77%)", humanize_ctx(1549), humanize_ctx(2000));
+        assert!(txt.contains(&up), "↑ must show the prompt size {up}: {txt}");
+        assert!(txt.contains(&ctx), "context ratio must be {ctx}: {txt}");
+
+        // Positive control: no cache, same prompt size.
+        let txt = render_with_usage(&usage_of(1549, None, 10));
+        assert!(txt.contains(&up), "control ↑ {up}: {txt}");
+        assert!(txt.contains(&ctx), "control ctx {ctx}: {txt}");
     }
 
     #[test]

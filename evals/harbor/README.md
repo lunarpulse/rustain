@@ -13,7 +13,8 @@ rustain ask --yolo --output-format stream-json "<task instruction>"
 - The provider key is read from the host environment and uploaded as a private file. The runner reads it into rustain's environment and deletes the file. The key is not passed through `env` or the command of a Harbor exec call, because Harbor's Docker backend puts those on a `docker compose exec` command line.
 - rustain's shell tool inherits that environment, so the agent can read the key and a command such as `env` prints it. The runner replaces the key with `[redacted:<VARIABLE>]` in the stream, the session and stderr when the run ends, and the adapter does the same for a trial that was killed first. Until then the trial logs hold the key, and the model has seen it; use a key you can rotate.
 - rustain's config and data live under `/installed-agent/rustain-state`. The sessions a run saves in `./.claude/sessions` are moved to the trial logs, so the verifier sees only what the agent did to the workspace. Sessions that were there before stay. A session that cannot be copied stays too, and the run then exits 3.
-- Token usage comes from the `call_usage` lines of the stream (schema 1.2, see `docs/output-schema.md`). A trial that fails or times out still reports the calls that reported usage. A stream without such a line leaves the token and cost fields empty and sets `usage_observed` to false: unknown is not zero.
+- Token usage comes from the `call_usage` lines of the stream (schema 1.2+, see `docs/output-schema.md`). A trial that fails or times out still reports the calls that reported usage. A stream without such a line leaves the token and cost fields empty and sets `usage_observed` to false: unknown is not zero.
+- From schema 1.3 every provider's counts are disjoint (`input_tokens` excludes cache reads, `output_tokens` includes reasoning), and the adapter prices them that way. A 1.2 stream keeps the per-provider table in `agent.py`: providers on the Chat transport counted cache hits inside `input_tokens`. That table marks `openrouter` as inclusive, but OpenRouter's default transport is Responses, whose 1.2 counts were already disjoint, and a 1.2 stream does not say which transport served it. For such a run the adapter subtracts the cache hits a second time, so cached rows are **under-priced** and the first-call prompt size is understated; do not trust the cost of a 1.2 OpenRouter run. 1.3 streams are not affected.
 - Cost uses LiteLLM's list price for `<provider>/<model>`, call by call. A model without a price reports tokens and no cost. So does a model with a call whose prompt is larger than the flat list price covers; the dearer rates above that size are not modelled.
 
 Each trial records, besides Harbor's own token and cost fields, `provider_calls` and `first_call_input_tokens`: the prompt size of the first provider call, which is the system prompt, the tool definitions and the task instruction.
@@ -28,7 +29,7 @@ uv tool install cargo-zigbuild
 cargo zigbuild --locked --target x86_64-unknown-linux-musl
 ```
 
-A binary older than schema 1.2 reports the last provider call only; the adapter then leaves the token and cost fields empty.
+A binary older than schema 1.2 reports the last provider call only; the adapter then leaves the token and cost fields empty. A binary older than schema 1.3 counts cache hits inside `input_tokens` for requests sent over the Chat Completions transport only (see `docs/output-schema.md`, v1.3); the adapter's per-provider table approximates that by provider name.
 
 ## Run
 

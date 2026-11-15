@@ -58,6 +58,27 @@ fn pricing() -> HashMap<String, PricingConfig> {
             reasoning_per_million: None,
         },
     );
+    // eval-2 AC7 fixtures: DeepSeek list prices and an explicit Anthropic-cache model.
+    m.insert(
+        "deepseek-v4-flash".to_string(),
+        PricingConfig {
+            input_per_million: 0.30,
+            output_per_million: 1.20,
+            cache_creation_per_million: None,
+            cache_read_per_million: Some(0.006),
+            reasoning_per_million: None,
+        },
+    );
+    m.insert(
+        "sonnet-cached".to_string(),
+        PricingConfig {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            cache_creation_per_million: Some(3.75),
+            cache_read_per_million: Some(0.30),
+            reasoning_per_million: None,
+        },
+    );
     m
 }
 
@@ -123,6 +144,96 @@ async fn ledger_to_cost_breakdown_end_to_end() {
     // read_since(2500) filters out ts < 2500 → returns 2 entries (ts=3000, 4000)
     let recent = ledger.read_since(2500).await.expect("read_since recent");
     assert_eq!(recent.len(), 2);
+
+    match original {
+        Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) },
+        None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") },
+    }
+}
+
+/// eval-2 AC7: rows written before the fix are read unchanged and re-priced
+/// with the new formula; nothing is rewritten.
+#[tokio::test]
+#[serial_test::serial]
+async fn legacy_rows_are_read_unchanged_and_priced_with_the_new_formula() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let original = std::env::var("RUSTAIN_DATA_DIR").ok();
+    unsafe {
+        std::env::set_var("RUSTAIN_DATA_DIR", tmp.path().as_os_str());
+    }
+    let ledger: Arc<dyn UsageLedgerPort> = Arc::new(FileUsageLedger::new());
+
+    // A pre-fix Chat-family row exactly as the old adapter wrote it: the
+    // prompt (cache reads included) in `tokens_in`.
+    let mut chat = entry("legacy", 1000, "deepseek-v4-flash", 3465, 3959);
+    chat.usage.cache_read_tokens = Some(2176);
+    chat.usage.reasoning_tokens = Some(3803);
+    // A pre-fix Anthropic row: disjoint then and now.
+    let mut anthropic = entry("legacy", 2000, "sonnet-cached", 141, 10);
+    anthropic.usage.cache_read_tokens = Some(1408);
+    anthropic.usage.cache_creation_tokens = Some(2000);
+    let (written_chat, written_anthropic) = (chat.clone(), anthropic.clone());
+    ledger.append(chat).await.expect("append chat row");
+    ledger
+        .append(anthropic)
+        .await
+        .expect("append anthropic row");
+
+    let bytes = |dir: &std::path::Path| -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir.join("usage"))
+            .expect("usage dir")
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        files
+            .into_iter()
+            .map(|p| {
+                let b = std::fs::read(&p).unwrap();
+                (p, b)
+            })
+            .collect()
+    };
+    let before = bytes(tmp.path());
+
+    let rows = ledger.read_since(0).await.expect("read_since");
+    assert_eq!(rows.len(), 2);
+    let by_model = |m: &str| rows.iter().find(|r| r.model == m).expect("row").clone();
+    let (c, a) = (by_model("deepseek-v4-flash"), by_model("sonnet-cached"));
+    // The whole row comes back as written: every counter, `parent_ctx` and all metadata.
+    let whole = |e: &UsageLedgerEntry| serde_json::to_value(e).expect("serialise row");
+    assert_eq!(
+        whole(&c),
+        whole(&written_chat),
+        "chat row is read as written"
+    );
+    assert_eq!(
+        whole(&a),
+        whole(&written_anthropic),
+        "anthropic row is read as written"
+    );
+    assert_eq!(
+        (c.usage.tokens_in, c.usage.cache_read_tokens),
+        (3465, Some(2176)),
+        "the old inclusive prompt is kept, not normalised"
+    );
+
+    let p = pricing();
+    let cost = |e: &UsageLedgerEntry| {
+        rustain::domain::services::cost_calculator::cost_for_entry(e, &p).expect("priced")
+    };
+    // Reasoning once; the cache residual (2176 × $0.30/M = $0.0006528) stays on old Chat rows.
+    assert!(
+        (cost(&c) - 0.005803356).abs() < 1e-12,
+        "chat row: {}",
+        cost(&c)
+    );
+    assert!(
+        (cost(&a) - 0.0084954).abs() < 1e-12,
+        "anthropic row: {}",
+        cost(&a)
+    );
+
+    assert_eq!(bytes(tmp.path()), before, "reading rewrites nothing");
 
     match original {
         Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) },

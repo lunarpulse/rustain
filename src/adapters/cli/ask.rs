@@ -76,8 +76,10 @@ impl OutputFormat {
 }
 
 /// Schema version string. Bumped 1.0 → 1.1 in Story 13.1c (additive: dry_run, plan, tools_would_use)
-/// and 1.1 → 1.2 for the additive `call_usage` stream event.
-const SCHEMA_VERSION: &str = "1.2";
+/// and 1.1 → 1.2 for the additive `call_usage` stream event. 1.2 → 1.3 (eval-2): the
+/// `usage` counts are disjoint for every provider (see `UsageInfo`), where OpenAI-style
+/// providers reported `input_tokens` including cache reads before.
+const SCHEMA_VERSION: &str = "1.3";
 
 /// Output-only snake_case DTO for token usage (boundary coercion, AC1/O6).
 #[derive(Debug, Clone, Serialize)]

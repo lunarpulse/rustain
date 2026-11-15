@@ -393,9 +393,9 @@ pub struct OpenAiUsage {
     pub completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
 }
 
-/// Breakdown of prompt-side token usage (e.g. cached tokens). Currently unused
-/// by Rustain's cost model (designed around Anthropic's cache semantics); kept
-/// for forward-compat so unknown sub-keys don't break deserialization.
+/// Breakdown of prompt-side token usage. `cached_tokens` is the part of
+/// `prompt_tokens` served from the prompt cache; the stream decoder maps it to
+/// `cache_read_input_tokens` and subtracts it from the input count.
 #[derive(Debug, Deserialize, Default)]
 pub struct OpenAiPromptTokensDetails {
     #[serde(default)]

@@ -1302,3 +1302,24 @@ fn usage_orchestration_subtraction_only_when_the_total_includes_it() {
     assert_eq!(usage(Some(175)), (70, 30, Some(50)));
     assert_eq!(usage(None), (70, 30, Some(50)));
 }
+
+/// eval-2 AC3 (d): the decoder's disjoint counts price each token once
+/// (reasoning is part of the output).
+#[test]
+fn eval2_usage_prices_each_token_once() {
+    use crate::domain::services::cost_calculator::test_support::{assert_usd, cost_of, pricing};
+    let chunks = feed(
+        &mut EventMapper::new(),
+        json!({"type":"response.completed","response":{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":10},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":5}}}}),
+    );
+    let StreamChunk::Usage { usage, .. } = &chunks[0] else {
+        panic!("{:?}", chunks[0]);
+    };
+    assert_eq!(usage.input_tokens, 50);
+    assert_eq!(usage.output_tokens, 7);
+    assert_eq!(usage.cache_read_input_tokens, Some(40));
+    assert_eq!(usage.cache_creation_input_tokens, Some(10));
+    assert_eq!(usage.reasoning_tokens, Some(5));
+    let p = pricing("sonnet", 3.00, 15.00, 0.30, Some(3.75));
+    assert_usd(cost_of(usage, "sonnet", &p), 0.0003045, "responses");
+}

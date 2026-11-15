@@ -335,23 +335,23 @@ impl OpenAiStreamTransformer {
                 .completion_tokens_details
                 .as_ref()
                 .and_then(|d| d.reasoning_tokens);
-            // OpenAI's `prompt_tokens_details.cached_tokens` = prompt tokens
-            // served from the prompt cache. Map to `cache_read_input_tokens`
-            // so the cost calculator charges them at the cache-read rate.
-            // OpenAI-compat providers never expose Anthropic-style cache
-            // *creation*, so that stays None.
+            // OpenAI's `prompt_tokens` includes the cached ones
+            // (`prompt_tokens_details.cached_tokens`) and `completion_tokens`
+            // includes the reasoning: normalise to rustain's disjoint counts
+            // (`UsageInfo`). OpenAI-compat providers never expose Anthropic-style
+            // cache *creation*, so that stays None.
             let cache_read_input_tokens = usage
                 .prompt_tokens_details
                 .as_ref()
                 .and_then(|d| d.cached_tokens);
             chunks.push(StreamChunk::Usage {
-                usage: UsageInfo {
-                    input_tokens: self.input_tokens,
-                    output_tokens: self.output_tokens,
-                    cache_creation_input_tokens: None,
+                usage: UsageInfo::from_inclusive_counts(
+                    self.input_tokens,
+                    self.output_tokens,
                     cache_read_input_tokens,
+                    None,
                     reasoning_tokens,
-                },
+                ),
                 session_id: None,
             });
         }
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         match &chunks[0] {
             StreamChunk::Usage { usage, .. } => {
-                assert_eq!(usage.input_tokens, 200);
+                assert_eq!(usage.input_tokens, 50, "uncached prompt = 200 − 150 cached");
                 assert_eq!(usage.output_tokens, 3);
                 assert_eq!(
                     usage.cache_read_input_tokens,
@@ -831,12 +831,86 @@ mod tests {
         );
         match &chunks[2] {
             StreamChunk::Usage { usage, .. } => {
-                assert_eq!(usage.input_tokens, 1549);
+                assert_eq!(usage.input_tokens, 141, "1549 prompt − 1408 cached");
                 assert_eq!(usage.output_tokens, 10);
                 assert_eq!(usage.cache_read_input_tokens, Some(1408));
             }
             other => panic!("expected usage, got {other:?}"),
         }
+    }
+
+    fn the_usage_of(frames: &[SseFrame]) -> UsageInfo {
+        all(frames)
+            .into_iter()
+            .find_map(|c| match c {
+                StreamChunk::Usage { usage, .. } => Some(usage),
+                _ => None,
+            })
+            .expect("a usage chunk")
+    }
+
+    /// eval-2 AC3 (a): a DeepSeek final chunk (cache hit and reasoning) decodes
+    /// to disjoint counts and is priced once per token.
+    #[test]
+    fn eval2_deepseek_final_chunk_decodes_disjoint_and_prices_once() {
+        use crate::domain::services::cost_calculator::test_support::{
+            assert_usd, cost_of, pricing,
+        };
+        let data = r#"{"choices":[],"usage":{"prompt_tokens":3465,"completion_tokens":3959,
+            "prompt_tokens_details":{"cached_tokens":2176},
+            "completion_tokens_details":{"reasoning_tokens":3803}}}"#;
+        let usage = the_usage_of(&[frame(data)]);
+        assert_eq!(usage.input_tokens, 1289, "uncached prompt tokens only");
+        assert_eq!(usage.output_tokens, 3959);
+        assert_eq!(usage.cache_read_input_tokens, Some(2176));
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.reasoning_tokens, Some(3803));
+        let p = pricing("deepseek-v4-flash", 0.30, 1.20, 0.006, None);
+        assert_usd(
+            cost_of(&usage, "deepseek-v4-flash", &p),
+            0.005150556,
+            "deepseek",
+        );
+    }
+
+    /// eval-2 AC3 (b) and (f): the owner's Copilot call prices once, and means
+    /// the same as the identical call reported by Anthropic's disjoint counts.
+    #[test]
+    fn eval2_copilot_chat_call_equals_the_same_call_reported_by_anthropic() {
+        use crate::domain::services::cost_calculator::test_support::{
+            assert_usd, cost_of, pricing,
+        };
+        let frames: Vec<_> = OWNER_LINES.iter().map(|line| frame(line)).collect();
+        let copilot = the_usage_of(&frames);
+        let p = pricing("gpt-4.1", 2.00, 8.00, 0.50, None);
+        assert_usd(cost_of(&copilot, "gpt-4.1", &p), 0.001066, "copilot chat");
+
+        let anthropic = UsageInfo {
+            input_tokens: 141,
+            output_tokens: 10,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(1408),
+            reasoning_tokens: None,
+        };
+        assert_eq!(copilot.input_tokens, anthropic.input_tokens);
+        assert_eq!(copilot.output_tokens, anthropic.output_tokens);
+        assert_eq!(
+            copilot.cache_read_input_tokens,
+            anthropic.cache_read_input_tokens
+        );
+        assert_eq!(
+            copilot.cache_creation_input_tokens,
+            anthropic.cache_creation_input_tokens
+        );
+        assert_eq!(copilot.reasoning_tokens, anthropic.reasoning_tokens);
+        let prompt = UsageInfo::prompt_tokens;
+        assert_eq!(prompt(&copilot), 1549);
+        assert_eq!(prompt(&copilot), prompt(&anthropic));
+        assert_usd(
+            cost_of(&anthropic, "gpt-4.1", &p),
+            cost_of(&copilot, "gpt-4.1", &p),
+            "same call, same cost",
+        );
     }
 
     #[test]

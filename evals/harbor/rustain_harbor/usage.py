@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 
 # First schema whose usage covers every provider call of the turn.
 MIN_SCHEMA = (1, 2)
+# First schema whose usage counts are disjoint for every provider: `input_tokens`
+# excludes cache reads and writes, `output_tokens` includes reasoning. Streams
+# before it count in each provider's own way (`agent.PROVIDERS`).
+DISJOINT_SCHEMA = (1, 3)
 
 
 @dataclass(frozen=True)
@@ -75,17 +79,21 @@ class RunSummary:
             self.calls[0][1], input_includes_cache=input_includes_cache
         )
 
-    @property
-    def has_per_call_usage(self) -> bool:
-        """False for a stream from a binary older than schema 1.2, whose usage
-        covers the last provider call only."""
+    def schema_at_least(self, minimum: tuple[int, int]) -> bool:
+        """True when `schema_version` parses as `major.minor` >= `minimum`."""
         if self.schema_version is None:
             return False
         try:
             major, minor = (int(part) for part in self.schema_version.split(".")[:2])
         except ValueError:
             return False
-        return (major, minor) >= MIN_SCHEMA
+        return (major, minor) >= minimum
+
+    @property
+    def has_per_call_usage(self) -> bool:
+        """False for a stream from a binary older than schema 1.2, whose usage
+        covers the last provider call only."""
+        return self.schema_at_least(MIN_SCHEMA)
 
     @property
     def usage_observed(self) -> bool:

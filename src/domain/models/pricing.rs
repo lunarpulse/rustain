@@ -15,7 +15,9 @@
 //! - **`cache_read_per_million` → 0.10 × `input_per_million`** — Anthropic's
 //!   90%-off cache-read discount.
 //! - **`reasoning_per_million` → `output_per_million`** — Anthropic + OpenAI bill
-//!   reasoning tokens at the output rate.
+//!   reasoning tokens at the output rate. Reasoning is a part of the output
+//!   count, so only the reasoning share is priced at this rate and nothing is
+//!   added on top.
 //!
 //! These are **calculation** defaults — they are NOT applied by `#[serde(default)]`
 //! (which would force a specific concrete number into the parsed struct). The struct

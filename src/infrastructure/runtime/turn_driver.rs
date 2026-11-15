@@ -683,7 +683,7 @@ impl LocalTurnDriver {
         }
         // --- Model resolution (Story 7.1c) ---
         let retry_count = state.retry_state.as_ref().map_or(0, |r| r.attempt as u32);
-        let input_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
+        let input_tokens = conversation.usage.as_ref().map_or(0, |u| u.prompt_tokens());
         let explicit_override = agent_snapshot
             .as_ref()
             .and_then(|a| {

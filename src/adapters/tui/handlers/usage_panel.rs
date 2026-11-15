@@ -131,11 +131,10 @@ pub async fn handle_open_usage_panel(
     };
 
     // Snapshot context window for the active model via the port.
-    let token_usage_in = conversation.usage.as_ref().map_or(0u32, |u| {
-        u.input_tokens
-            .saturating_add(u.cache_creation_input_tokens.unwrap_or(0))
-            .saturating_add(u.cache_read_input_tokens.unwrap_or(0))
-    });
+    let token_usage_in = conversation
+        .usage
+        .as_ref()
+        .map_or(0u32, |u| u.prompt_tokens());
     let context_window_tokens = info
         .get_model(&info.active_delegate_id(), effective_model(state, config))
         .map_or(0u32, |m| m.context_window);

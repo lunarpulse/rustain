@@ -287,3 +287,31 @@ def test_a_call_above_the_flat_rate_threshold_leaves_the_cost_unset(tmp_path, mo
     assert context.n_input_tokens == 201_001
     assert context.cost_usd is None
     assert context.metadata["unpriced_models"] == ["deepseek-v4-flash"]
+
+
+def test_schema_1_3_streams_are_disjoint_for_every_provider(tmp_path, monkeypatch):
+    # The same DeepSeek call: a 1.2 binary reported the prompt with its 2176
+    # cache hits inside `input_tokens`; a 1.3 binary reports them apart.
+    monkeypatch.setattr(
+        agent_module,
+        "lookup_prices",
+        lambda provider, model: Prices(
+            input=0.30e-6, output=1.20e-6, cache_read=0.006e-6, cache_creation=0.30e-6
+        ),
+    )
+    costs = {}
+    for schema, input_tokens in (("1.3", 1289), ("1.2", 3465)):
+        trial = tmp_path / schema
+        trial.mkdir()
+        agent = make_agent(trial)
+        write_stream(
+            agent, [call_usage(input_tokens, 3959, cache_read=2176, schema=schema)]
+        )
+        context = AgentContext()
+
+        agent.populate_context_post_run(context)
+
+        costs[schema] = context.cost_usd
+        assert context.metadata["first_call_input_tokens"] == 3465, schema
+    assert costs["1.3"] == pytest.approx(0.005150556, abs=1e-12)
+    assert costs["1.2"] == pytest.approx(0.005150556, abs=1e-12)

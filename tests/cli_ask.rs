@@ -1148,7 +1148,7 @@ async fn p0_13_1b_json_shape() {
     assert_eq!(exit, ExitCode::SUCCESS);
 
     let doc: serde_json::Value = serde_json::from_str(&out).expect("stdout must be valid JSON");
-    assert_eq!(doc["schema_version"], "1.2");
+    assert_eq!(doc["schema_version"], "1.3");
     assert_eq!(doc["response"], "JSON shape response");
     assert!(
         !doc["model"].as_str().unwrap().is_empty(),
@@ -1378,6 +1378,256 @@ async fn ask_usage_sums_every_provider_call() {
     assert_eq!(events.last().unwrap()["type"], "turn_complete");
 }
 
+// ── eval-2: `ask`, `call_usage` and the ledger agree on disjoint counts ─────
+
+/// Test ledger behind the `CallUsageTap`: keeps every entry `run_turn` appends.
+#[derive(Default)]
+struct RecordingLedger {
+    entries: Mutex<Vec<rustain::domain::models::UsageLedgerEntry>>,
+}
+
+#[async_trait]
+impl rustain::domain::ports::UsageLedgerPort for RecordingLedger {
+    async fn append(
+        &self,
+        entry: rustain::domain::models::UsageLedgerEntry,
+    ) -> Result<(), rustain::domain::errors::StorageError> {
+        self.entries.lock().unwrap().push(entry);
+        Ok(())
+    }
+
+    async fn read_session(
+        &self,
+        _: &str,
+    ) -> Result<Vec<rustain::domain::models::UsageLedgerEntry>, rustain::domain::errors::StorageError>
+    {
+        Ok(self.entries.lock().unwrap().clone())
+    }
+
+    async fn read_since(
+        &self,
+        _: i64,
+    ) -> Result<Vec<rustain::domain::models::UsageLedgerEntry>, rustain::domain::errors::StorageError>
+    {
+        Ok(self.entries.lock().unwrap().clone())
+    }
+}
+
+/// `run_ask_core_test` with a recording ledger behind the tap.
+async fn run_ask_recording(
+    provider: Arc<dyn StreamingProvider>,
+    opts: rustain::adapters::cli::ask::AskOpts,
+) -> (
+    ExitCode,
+    String,
+    Vec<rustain::domain::models::UsageLedgerEntry>,
+) {
+    let ledger = Arc::new(RecordingLedger::default());
+    let mut core = build_test_core(provider.clone());
+    core.ledger = ledger.clone();
+    let config = default_config();
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider,
+        core,
+        opts,
+        &config,
+        std::path::Path::new("/tmp/test-ask"),
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    let out = String::from_utf8(stdout.into_inner()).unwrap();
+    let entries = ledger.entries.lock().unwrap().clone();
+    (exit, out, entries)
+}
+
+/// DeepSeek list prices (SCP 2026-11-13 §1.2), reasoning at the output rate.
+fn deepseek_pricing()
+-> std::collections::HashMap<String, rustain::domain::models::pricing::PricingConfig> {
+    std::collections::HashMap::from([(
+        "deepseek-v4-flash".to_string(),
+        rustain::domain::models::pricing::PricingConfig {
+            input_per_million: 0.30,
+            output_per_million: 1.20,
+            cache_creation_per_million: None,
+            cache_read_per_million: Some(0.006),
+            reasoning_per_million: None,
+        },
+    )])
+}
+
+fn usd(entry: &rustain::domain::models::UsageLedgerEntry) -> f64 {
+    rustain::domain::services::cost_calculator::cost_for_entry(entry, &deepseek_pricing())
+        .expect("deepseek-v4-flash is priced")
+}
+
+fn assert_close(got: f64, want: f64, what: &str) {
+    assert!((got - want).abs() < 1e-12, "{what}: got {got}, want {want}");
+}
+
+fn usage_chunk_full(
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read: u32,
+    reasoning: u32,
+) -> StreamChunk {
+    StreamChunk::Usage {
+        usage: UsageInfo {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(cache_read),
+            reasoning_tokens: Some(reasoning),
+        },
+        session_id: None,
+    }
+}
+
+/// The four counts of a usage object, in a fixed order.
+fn four_counts(v: &serde_json::Value) -> [u64; 4] {
+    [
+        v["input_tokens"].as_u64().unwrap(),
+        v["output_tokens"].as_u64().unwrap(),
+        v["cache_read_input_tokens"].as_u64().unwrap(),
+        v["reasoning_tokens"].as_u64().unwrap(),
+    ]
+}
+
+/// One DeepSeek call, through the real Chat adapter against a stubbed endpoint:
+/// final chunk carries a cache hit and reasoning (prompt 3465 of which 2176 cached).
+async fn deepseek_adapter(server: &wiremock::MockServer) -> Arc<dyn StreamingProvider> {
+    use rustain::adapters::openai::{
+        ChatCredential, OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile,
+    };
+    let body = concat!(
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3465,\"completion_tokens\":3959,\"prompt_tokens_details\":{\"cached_tokens\":2176},\"completion_tokens_details\":{\"reasoning_tokens\":3803}}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(server)
+        .await;
+    Arc::new(
+        OpenAiAdapter::new(
+            OpenAiCompatibleVariant::DeepSeek,
+            ChatCredential::Fixed(rustain::domain::models::SecretString::new(
+                "fixture-key".into(),
+            )),
+            "deepseek-v4-flash".into(),
+            StaticChatProfile::new(&format!("{}/v1", server.uri())),
+        )
+        .unwrap(),
+    )
+}
+
+/// eval-2 AC5 (i): a real DeepSeek-shaped answer reports disjoint counts in
+/// `call_usage`, `usage`, `--output-format json` and the ledger row, and the
+/// ledger row prices once per token.
+#[tokio::test]
+async fn eval2_ask_with_a_cached_reasoning_deepseek_call_reports_disjoint_counts() {
+    let mut opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    opts.model_override = Some("deepseek-v4-flash".into());
+    let server = wiremock::MockServer::start().await;
+    let (exit, out, entries) = run_ask_recording(deepseek_adapter(&server).await, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{out}");
+    let events = parse_ndjson(&out);
+
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 1, "one provider call: {out}");
+    assert_eq!(four_counts(&calls[0]["usage"]), [1289, 3959, 2176, 3803]);
+    let totals: Vec<_> = events.iter().filter(|e| e["type"] == "usage").collect();
+    assert_eq!(totals.len(), 1);
+    assert_eq!(four_counts(&totals[0]["usage"]), [1289, 3959, 2176, 3803]);
+
+    assert_eq!(entries.len(), 1, "one ledger row per provider call");
+    let u = &entries[0].usage;
+    assert_eq!(u.tokens_in, 1289);
+    assert_eq!(u.tokens_out, 3959);
+    assert_eq!(u.cache_read_tokens, Some(2176));
+    assert_eq!(u.reasoning_tokens, Some(3803));
+    assert_close(usd(&entries[0]), 0.005150556, "ledger row cost");
+
+    for e in &events {
+        assert_eq!(e["schema_version"], "1.3", "{e}");
+    }
+
+    // The same call through `--output-format json`.
+    let mut opts = make_opts_with_format("test", OutputFormat::Json);
+    opts.model_override = Some("deepseek-v4-flash".into());
+    let server = wiremock::MockServer::start().await;
+    let (exit, out, _) = run_ask_recording(deepseek_adapter(&server).await, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(four_counts(&doc["usage"]), [1289, 3959, 2176, 3803]);
+}
+
+/// eval-2 AC5 (ii): two calls; the ledger rows equal the `call_usage` lines
+/// field for field, the turn total is their sum and pricing is linear.
+#[tokio::test]
+async fn eval2_ask_two_calls_agree_with_the_ledger_and_price_linearly() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_requesting_call(usage_chunk_full(1289, 3959, 2176, 3803)),
+        vec![
+            StreamChunk::Text {
+                content: "done".into(),
+                parent_tool_use_id: None,
+            },
+            usage_chunk_full(7282, 6396, 71424, 4744),
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ],
+    ]));
+    let mut opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    opts.model_override = Some("deepseek-v4-flash".into());
+    let (exit, out, entries) = run_ask_recording(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{out}");
+    let events = parse_ndjson(&out);
+
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(entries.len(), 2);
+    for (call, entry) in calls.iter().zip(&entries) {
+        let u = &entry.usage;
+        assert_eq!(
+            four_counts(&call["usage"]),
+            [
+                u64::from(u.tokens_in),
+                u64::from(u.tokens_out),
+                u64::from(u.cache_read_tokens.unwrap()),
+                u64::from(u.reasoning_tokens.unwrap()),
+            ],
+            "ledger row equals its call_usage line"
+        );
+    }
+    let total = events.iter().find(|e| e["type"] == "usage").unwrap();
+    assert_eq!(four_counts(&total["usage"]), [8571, 10355, 73600, 8547]);
+
+    let sum: f64 = entries.iter().map(usd).sum();
+    assert_close(sum, 0.0154389, "sum of the two rows");
+    let mut summed = entries[0].clone();
+    summed.usage.tokens_in = 8571;
+    summed.usage.tokens_out = 10355;
+    summed.usage.cache_read_tokens = Some(73600);
+    summed.usage.reasoning_tokens = Some(8547);
+    assert_close(usd(&summed), sum, "the total priced as one row");
+}
+
 /// When a later provider call fails, the calls that completed are still
 /// reported before the terminal `error` line.
 #[tokio::test]
@@ -1556,7 +1806,7 @@ async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
             line
         );
         let ev: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(ev["schema_version"], "1.2");
+        assert_eq!(ev["schema_version"], "1.3");
     }
     let types: Vec<String> = lines
         .iter()
@@ -1710,7 +1960,7 @@ async fn p0_13_1b_json_error() {
 
     let doc: serde_json::Value =
         serde_json::from_str(&out).expect("json error must be parseable stdout");
-    assert_eq!(doc["schema_version"], "1.2");
+    assert_eq!(doc["schema_version"], "1.3");
     assert!(
         doc["response"].is_null(),
         "error envelope: response must be null"
@@ -1780,10 +2030,11 @@ fn collect_field_paths(
     }
 }
 
-/// P0-13.1b/c-G4-schema-fingerprint — the v1.2 field set is pinned.
+/// P0-13.1b/c-G4-schema-fingerprint — the v1.3 field set is pinned.
 /// Story 13.1c additive bump 1.0→1.1: dry_run, plan, tools_would_use (always-present, O3).
 /// turn_complete now carries dry_run + tools_would_use.
 /// Additive bump 1.1→1.2: the `call_usage` stream event (`usage`, `model`).
+/// Bump 1.2→1.3 (eval-2): same field set, disjoint `usage` counts for every provider.
 const SCHEMA_FINGERPRINT: &str = "112b6076580916c050311a3fd91a433946528f2c64dfbbab96455efb3da921d5";
 #[tokio::test]
 async fn p0_13_1b_g4_schema_fingerprint() {
@@ -2072,7 +2323,7 @@ fn p0_13_1b_json_error_unreadable_file() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let doc = serde_json::from_str::<serde_json::Value>(&stdout)
         .expect("stdout must contain structured error document");
-    assert_eq!(doc["schema_version"], "1.2");
+    assert_eq!(doc["schema_version"], "1.3");
     assert!(
         doc["error"]["message"]
             .as_str()
@@ -2442,7 +2693,7 @@ async fn p0_13_1c_json_plan_and_schema_1_1() {
     assert_eq!(exit, ExitCode::SUCCESS);
 
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(doc["schema_version"], "1.2");
+    assert_eq!(doc["schema_version"], "1.3");
     assert_eq!(doc["dry_run"], true);
     assert!(!doc["plan"].is_null(), "plan must be non-null");
     assert_eq!(doc["plan"]["title"], "Refactor auth module");
@@ -2642,8 +2893,8 @@ async fn p0_13_1c_stream_plan() {
     // Every line has schema_version 1.2
     for line in &lines {
         assert_eq!(
-            line["schema_version"], "1.2",
-            "every line must have schema 1.2"
+            line["schema_version"], "1.3",
+            "every line must have schema 1.3"
         );
     }
 
@@ -3078,7 +3329,7 @@ async fn p0_13_1c_13_1b_regression() {
 
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
     // Schema version bumped
-    assert_eq!(doc["schema_version"], "1.2");
+    assert_eq!(doc["schema_version"], "1.3");
     // All existing fields still present
     assert!(doc.get("response").is_some());
     assert!(doc.get("model").is_some());

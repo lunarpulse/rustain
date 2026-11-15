@@ -303,18 +303,11 @@ pub async fn run_turn(
                     step_kind,
                     escalation_reason: resolved.escalation_reason,
                     usage: match iteration_usage {
-                        Some(ref u) => TokenUsage {
-                            tokens_in: u.input_tokens,
-                            tokens_out: u.output_tokens,
-                            parent_ctx: parent_ctx_tokens,
-                            // Story 7.5 AC8 — cache/reasoning attribution.
-                            // DF-S71c-1 carries forward: only the LAST Usage chunk per
-                            // iteration is retained; Anthropic emits Usage exactly once
-                            // per call so this is correct for the current adapter set.
-                            cache_creation_tokens: u.cache_creation_input_tokens,
-                            cache_read_tokens: u.cache_read_input_tokens,
-                            reasoning_tokens: u.reasoning_tokens,
-                        },
+                        // Story 7.5 AC8 — cache/reasoning attribution.
+                        // DF-S71c-1 carries forward: only the LAST Usage chunk per
+                        // iteration is retained; Anthropic emits Usage exactly once
+                        // per call so this is correct for the current adapter set.
+                        Some(ref u) => TokenUsage::from_usage(u, parent_ctx_tokens),
                         None => TokenUsage {
                             tokens_in: 0,
                             tokens_out: 0,

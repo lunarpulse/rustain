@@ -512,15 +512,13 @@ fn parse_usage(usage: &Value) -> UsageInfo {
         .map(|cached| cached.saturating_sub(orchestration_cached));
     let written = tokens(&details["cache_write_tokens"])
         .or_else(|| tokens(&usage["prompt_cache_miss_tokens"]));
-    UsageInfo {
-        input_tokens: input
-            .saturating_sub(cached.unwrap_or(0))
-            .saturating_sub(written.unwrap_or(0)),
-        output_tokens: output,
-        cache_read_input_tokens: cached,
-        cache_creation_input_tokens: written,
-        reasoning_tokens: tokens(&output_details["reasoning_tokens"]),
-    }
+    UsageInfo::from_inclusive_counts(
+        input,
+        output,
+        cached,
+        written,
+        tokens(&output_details["reasoning_tokens"]),
+    )
 }
 
 fn failure(value: &Value, dialect: Dialect) -> EventError {

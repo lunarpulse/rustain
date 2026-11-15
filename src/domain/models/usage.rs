@@ -4,7 +4,25 @@ use serde::{Deserialize, Serialize};
 use super::provider::ModelCapability;
 use super::router::{EscalationReason, ModelTier, StepKind};
 
-/// Token usage information from a provider response.
+/// Token usage of one provider call, in rustain's single counting convention.
+///
+/// The counts are **disjoint** for every provider:
+/// - `input_tokens`: prompt tokens billed at the input rate. Excludes
+///   `cache_read_input_tokens` and `cache_creation_input_tokens`.
+/// - `cache_read_input_tokens`, `cache_creation_input_tokens`: prompt tokens
+///   read from and written to the provider's cache. Disjoint from
+///   `input_tokens` and from each other.
+/// - `output_tokens`: every generated token, reasoning included.
+/// - `reasoning_tokens`: the part of `output_tokens` spent on reasoning; never
+///   greater than `output_tokens`. Informational for pricing unless
+///   `reasoning_per_million` is set.
+///
+/// The prompt a call sent is `input + cache_read + cache_creation`, see
+/// [`UsageInfo::prompt_tokens`]. Adapters whose provider reports inclusive
+/// counts (OpenAI Chat, Responses, Gemini) build this with
+/// [`UsageInfo::from_inclusive_counts`]; Anthropic and Ollama report disjoint
+/// counts already. `TokenUsage` (the ledger row) has the same meaning field
+/// for field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageInfo {
@@ -12,34 +30,87 @@ pub struct UsageInfo {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: Option<u32>,
     pub cache_read_input_tokens: Option<u32>,
-    /// Reasoning tokens (e.g., Claude extended thinking).
-    /// Added in S7.1a for cost tracking parity (FR36).
+    /// Reasoning tokens (e.g., Claude extended thinking), a part of
+    /// `output_tokens`. Added in S7.1a for cost tracking parity (FR36).
     pub reasoning_tokens: Option<u32>,
 }
 
-/// Token usage triple for the ledger — distinct from the raw provider
-/// `UsageInfo` which carries cache/reasoning breakdowns.
+impl UsageInfo {
+    /// Normalise a provider's inclusive counts: `prompt` already contains the
+    /// cache reads and writes, `completion` already contains the reasoning.
+    ///
+    /// A cache count above the prompt it is a part of is a provider error and
+    /// is clamped, so [`UsageInfo::prompt_tokens`] of the result always equals
+    /// `prompt` (cache reads first, then writes).
+    pub fn from_inclusive_counts(
+        prompt: u32,
+        completion: u32,
+        cache_read: Option<u32>,
+        cache_write: Option<u32>,
+        reasoning: Option<u32>,
+    ) -> Self {
+        let cache_read = cache_read.map(|read| read.min(prompt));
+        let cache_write = cache_write.map(|write| write.min(prompt - cache_read.unwrap_or(0)));
+        Self {
+            input_tokens: prompt - cache_read.unwrap_or(0) - cache_write.unwrap_or(0),
+            output_tokens: completion,
+            cache_creation_input_tokens: cache_write,
+            cache_read_input_tokens: cache_read,
+            reasoning_tokens: reasoning.map(|r| r.min(completion)),
+        }
+    }
+
+    /// Tokens of the prompt the call sent: input plus cache reads and writes
+    /// (saturating). The context-size readers use this; pricing never does.
+    pub fn prompt_tokens(&self) -> u32 {
+        self.input_tokens
+            .saturating_add(self.cache_read_input_tokens.unwrap_or(0))
+            .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
+    }
+}
+
+/// Token usage of one provider call as the ledger stores it — distinct from
+/// the raw provider `UsageInfo` only in carrying `parent_ctx`. The counts mean
+/// the same, field for field, as in [`UsageInfo`]: disjoint, reasoning inside
+/// output.
 ///
 /// Story 7.5 AC8: extended with optional cache/reasoning fields so cost
 /// arithmetic can charge each token class at its correct rate. Legacy ledger
 /// lines (pre-7.5) deserialize with all three new fields as `None` via
 /// `#[serde(default)]` — backward-compat is asserted by the
-/// `flat_file::ledger_append_roundtrip` test.
+/// `flat_file::ledger_append_roundtrip` test. Rows written before eval-2 by
+/// OpenAI-style adapters counted cache reads inside `tokens_in`; they are read
+/// as written (see `cost_calculator`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub parent_ctx: u32,
-    /// Anthropic cache-write tokens (Story 7.5 AC8). `None` for non-Anthropic adapters.
+    /// Cache-write tokens (Story 7.5 AC8), disjoint from `tokens_in`.
     #[serde(default)]
     pub cache_creation_tokens: Option<u32>,
-    /// Anthropic cache-read tokens (Story 7.5 AC8). `None` for non-Anthropic adapters.
+    /// Cache-read tokens (Story 7.5 AC8), disjoint from `tokens_in`.
     #[serde(default)]
     pub cache_read_tokens: Option<u32>,
-    /// Reasoning tokens (extended thinking) (Story 7.5 AC8).
+    /// Reasoning tokens (extended thinking) (Story 7.5 AC8), a part of `tokens_out`.
     #[serde(default)]
     pub reasoning_tokens: Option<u32>,
+}
+
+impl TokenUsage {
+    /// The ledger row of one provider call: the five counts of `usage` and the
+    /// parent context size.
+    pub fn from_usage(usage: &UsageInfo, parent_ctx: u32) -> Self {
+        Self {
+            tokens_in: usage.input_tokens,
+            tokens_out: usage.output_tokens,
+            parent_ctx,
+            cache_creation_tokens: usage.cache_creation_input_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        }
+    }
 }
 
 /// A single entry in the usage ledger — one row per provider call.
@@ -76,4 +147,112 @@ pub struct ModelInfo {
     /// Optional pricing tier for UI grouping (added in S7.1a).
     #[serde(default)]
     pub pricing_tier: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(input, output, cache_read, cache_creation, reasoning)` of a usage.
+    type Counts = (u32, u32, Option<u32>, Option<u32>, Option<u32>);
+
+    fn counts(u: &UsageInfo) -> Counts {
+        (
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_read_input_tokens,
+            u.cache_creation_input_tokens,
+            u.reasoning_tokens,
+        )
+    }
+
+    #[test]
+    fn inclusive_counts_become_disjoint_and_keep_the_prompt_size() {
+        // (prompt, completion, cache_read, cache_write, reasoning) → counts, prompt size
+        let cases: [(
+            (u32, u32, Option<u32>, Option<u32>, Option<u32>),
+            Counts,
+            u32,
+        ); 5] = [
+            // The owner's Copilot call.
+            (
+                (1549, 10, Some(1408), None, None),
+                (141, 10, Some(1408), None, None),
+                1549,
+            ),
+            // A DeepSeek call with a cache hit and reasoning.
+            (
+                (3465, 3959, Some(2176), None, Some(3803)),
+                (1289, 3959, Some(2176), None, Some(3803)),
+                3465,
+            ),
+            // Cache reads and writes together.
+            (
+                (100, 7, Some(40), Some(10), Some(5)),
+                (50, 7, Some(40), Some(10), Some(5)),
+                100,
+            ),
+            // A cache count above its prompt is clamped to it; so is reasoning.
+            (
+                (1, 2, Some(10), None, Some(9)),
+                (0, 2, Some(1), None, Some(2)),
+                1,
+            ),
+            (
+                (100, 7, Some(90), Some(20), None),
+                (0, 7, Some(90), Some(10), None),
+                100,
+            ),
+        ];
+        for ((prompt, completion, read, write, reasoning), want, size) in cases {
+            let got = UsageInfo::from_inclusive_counts(prompt, completion, read, write, reasoning);
+            assert_eq!(
+                counts(&got),
+                want,
+                "{prompt}/{completion}/{read:?}/{write:?}"
+            );
+            assert_eq!(got.prompt_tokens(), size, "{prompt}/{read:?}/{write:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_tokens_sums_the_three_prompt_fields_and_saturates() {
+        let u = UsageInfo {
+            input_tokens: 141,
+            output_tokens: 10,
+            cache_creation_input_tokens: Some(2000),
+            cache_read_input_tokens: Some(1408),
+            reasoning_tokens: None,
+        };
+        assert_eq!(u.prompt_tokens(), 3549);
+        let big = UsageInfo {
+            input_tokens: u32::MAX,
+            cache_read_input_tokens: Some(1),
+            ..u
+        };
+        assert_eq!(big.prompt_tokens(), u32::MAX);
+    }
+
+    #[test]
+    fn ledger_row_copies_the_five_counts_and_the_parent_context() {
+        let u = UsageInfo {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_creation_input_tokens: Some(3),
+            cache_read_input_tokens: Some(4),
+            reasoning_tokens: Some(5),
+        };
+        let row = TokenUsage::from_usage(&u, 7);
+        assert_eq!(
+            (
+                row.tokens_in,
+                row.tokens_out,
+                row.cache_creation_tokens,
+                row.cache_read_tokens,
+                row.reasoning_tokens,
+                row.parent_ctx
+            ),
+            (1, 2, Some(3), Some(4), Some(5), 7)
+        );
+    }
 }

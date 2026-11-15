@@ -164,7 +164,7 @@ async fn ac1_the_owners_copilot_stream_decodes() {
         assert_eq!(posts, 1, "{what}");
         assert_eq!(text_of(&chunks), "Hello", "{what}");
         assert_eq!(terminals(&chunks), [StopReason::EndTurn], "{what}");
-        assert_eq!(usages(&chunks), [(1549, 10, Some(1408))], "{what}");
+        assert_eq!(usages(&chunks), [(141, 10, Some(1408))], "{what}");
         assert!(errors(&chunks).is_empty(), "{what}");
     }
 }

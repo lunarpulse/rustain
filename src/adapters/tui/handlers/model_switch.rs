@@ -270,7 +270,7 @@ pub async fn handle_apply_model_switch(
             state.model_selector.pending_context_warning = None;
         }
     } else {
-        let current_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
+        let current_tokens = conversation.usage.as_ref().map_or(0, |u| u.prompt_tokens());
         if context_window > 0 && current_tokens > context_window {
             state.model_selector.pending_context_warning =
                 Some(crate::adapters::tui::state::ContextWarning {
@@ -428,5 +428,103 @@ pub async fn handle_apply_startup_provider_fallback(
                 )
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::errors::ProviderError;
+    use crate::domain::models::UsageInfo;
+    use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
+    use crate::domain::ports::StreamingProvider;
+    use std::sync::Arc;
+
+    /// One healthy provider `p` whose model `m` has a 1000-token context window.
+    struct OneModel;
+    impl ProviderInfoPort for OneModel {
+        fn active_delegate_id(&self) -> String {
+            "p".into()
+        }
+        fn get_model(&self, _: &str, _: &str) -> Option<ModelDescriptor> {
+            Some(ModelDescriptor {
+                model_id: "m".into(),
+                display_name: "M".into(),
+                provider_id: "p".into(),
+                context_window: 1000,
+                capabilities: Default::default(),
+                pricing_tier: None,
+                stale: false,
+                wire_model_id: None,
+            })
+        }
+        fn get_model_provider(&self, _: &str, _: Option<&str>) -> Option<String> {
+            Some("p".into())
+        }
+        fn list_providers(&self) -> Vec<ProviderDescriptor> {
+            vec![ProviderDescriptor {
+                provider_id: "p".into(),
+                healthy: true,
+                model_count: 1,
+                display_name: "P".into(),
+            }]
+        }
+        fn list_models_by_provider(&self, _: &str) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        fn get_provider(&self, _: &str) -> Option<Arc<dyn StreamingProvider>> {
+            None
+        }
+        fn set_active_provider(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn now_unix(&self) -> i64 {
+            0
+        }
+        fn today_start_unix_ms(&self) -> i64 {
+            0
+        }
+    }
+
+    async fn switch_with_usage(input: u32, cache_read: Option<u32>) -> TuiState {
+        let mut state = TuiState::new(80, 24);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let conversation = Conversation {
+            usage: Some(UsageInfo {
+                input_tokens: input,
+                output_tokens: 10,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: cache_read,
+                reasoning_tokens: None,
+            }),
+            ..Default::default()
+        };
+        handle_apply_model_switch(
+            &mut state,
+            &OneModel,
+            &StreamingState::default(),
+            &tx,
+            &conversation,
+            Some("p".into()),
+            "m".into(),
+        )
+        .await;
+        state
+    }
+
+    /// eval-2 AC6: the conversation's prompt size (input + cache reads, 1549)
+    /// is what overflows a 1000-token window, whichever family reported it.
+    #[tokio::test]
+    async fn eval2_switch_warns_when_the_cached_prompt_overflows_the_target_window() {
+        let state = switch_with_usage(141, Some(1408)).await;
+        let warning = state
+            .model_selector
+            .pending_context_warning
+            .expect("a 1549-token prompt does not fit a 1000-token window");
+        assert_eq!(warning.current_tokens, 1549);
+
+        // Control: 900 tokens, no cache, fits.
+        let state = switch_with_usage(900, None).await;
+        assert!(state.model_selector.pending_context_warning.is_none());
     }
 }

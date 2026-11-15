@@ -137,7 +137,7 @@ pub fn handle_trigger_compaction(
         .get_model(&info.active_delegate_id(), effective_model(state, config))
         .map_or(0u32, |m| m.context_window);
 
-    let pre_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
+    let pre_tokens = conversation.usage.as_ref().map_or(0, |u| u.prompt_tokens());
     let history_text = match &purpose {
         CompactionPurpose::Inline => {
             crate::domain::services::compaction::build_compaction_prompt_input(

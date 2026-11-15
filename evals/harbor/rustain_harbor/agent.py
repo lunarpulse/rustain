@@ -28,6 +28,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext, ModelUsage
 
 from rustain_harbor.usage import (
+    DISJOINT_SCHEMA,
     Prices,
     calls_cost_usd,
     summarize,
@@ -47,7 +48,8 @@ class Provider:
     and `rustain/src/adapters/openai/variant.rs`."""
 
     api_key_env: str
-    # OpenAI-style usage counts cache hits inside `input_tokens`.
+    # OpenAI-style usage up to schema 1.2 counts cache hits inside `input_tokens`;
+    # from 1.3 rustain reports disjoint counts for every provider.
     input_includes_cache: bool
     # Anthropic is rustain's default route and needs no `[provider.*]` entry.
     needs_config_entry: bool = True
@@ -290,7 +292,11 @@ class RustainAgent(BaseInstalledAgent):
             return
         summary = summarize(stream.read_text(errors="replace").splitlines())
         provider_id, _ = self._provider_and_model()
-        includes_cache = PROVIDERS[provider_id].input_includes_cache
+        # From schema 1.3 every provider's counts are disjoint; before it the
+        # table says which providers counted cache hits inside `input_tokens`.
+        includes_cache = PROVIDERS[
+            provider_id
+        ].input_includes_cache and not summary.schema_at_least(DISJOINT_SCHEMA)
         context.metadata = {
             "schema_version": summary.schema_version,
             "usage_observed": summary.usage_observed,

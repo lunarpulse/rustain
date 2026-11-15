@@ -492,16 +492,16 @@ pub(crate) fn usage(metadata: &Value) -> UsageInfo {
         (total - candidates - thoughts).max(0.0)
     };
     let cache_read = js_number(&metadata["cachedContentTokenCount"]).min(prompt);
+    // Gemini's prompt includes the cache and `candidates` excludes the thoughts:
+    // normalise to rustain's disjoint counts with the thoughts inside the output.
     // `as u32` saturates (negative → 0).
-    let cache_read_tokens = cache_read as u32;
-    let thought_tokens = thoughts as u32;
-    UsageInfo {
-        input_tokens: (prompt - cache_read) as u32,
-        output_tokens: (candidates + thoughts) as u32,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: (cache_read > 0.0).then_some(cache_read_tokens),
-        reasoning_tokens: (thoughts > 0.0).then_some(thought_tokens),
-    }
+    UsageInfo::from_inclusive_counts(
+        prompt as u32,
+        (candidates + thoughts) as u32,
+        (cache_read > 0.0).then_some(cache_read as u32),
+        None,
+        (thoughts > 0.0).then_some(thoughts as u32),
+    )
 }
 
 fn next_tool_call_id(name: &str) -> String {
@@ -962,6 +962,27 @@ mod tests {
             assert_eq!(u.cache_creation_input_tokens, None);
             assert_eq!(u.reasoning_tokens, reasoning, "{metadata}");
         }
+    }
+
+    /// eval-2 AC3 (e): thoughts are part of the output, so they price once.
+    #[test]
+    fn eval2_usage_prices_each_token_once() {
+        use crate::domain::services::cost_calculator::test_support::{
+            assert_usd, cost_of, pricing,
+        };
+        let u = usage(&json!({
+            "promptTokenCount": 1000,
+            "cachedContentTokenCount": 600,
+            "candidatesTokenCount": 50,
+            "thoughtsTokenCount": 200
+        }));
+        assert_eq!(u.input_tokens, 400);
+        assert_eq!(u.output_tokens, 250);
+        assert_eq!(u.cache_read_input_tokens, Some(600));
+        assert_eq!(u.cache_creation_input_tokens, None);
+        assert_eq!(u.reasoning_tokens, Some(200));
+        let p = pricing("gemini", 1.25, 10.00, 0.125, None);
+        assert_usd(cost_of(&u, "gemini", &p), 0.003075, "gemini");
     }
 
     #[test]

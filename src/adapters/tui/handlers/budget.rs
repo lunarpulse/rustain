@@ -303,4 +303,91 @@ mod tests {
             "changed limit: raised again"
         );
     }
+
+    /// Read-only ledger double: `read_since` returns the rows it was built with.
+    struct FixedLedger(Vec<crate::domain::models::usage::UsageLedgerEntry>);
+    #[async_trait::async_trait]
+    impl UsageLedgerPort for FixedLedger {
+        async fn append(
+            &self,
+            _: crate::domain::models::usage::UsageLedgerEntry,
+        ) -> Result<(), crate::domain::errors::StorageError> {
+            Ok(())
+        }
+        async fn read_session(
+            &self,
+            _: &str,
+        ) -> Result<
+            Vec<crate::domain::models::usage::UsageLedgerEntry>,
+            crate::domain::errors::StorageError,
+        > {
+            Ok(self.0.clone())
+        }
+        async fn read_since(
+            &self,
+            _: i64,
+        ) -> Result<
+            Vec<crate::domain::models::usage::UsageLedgerEntry>,
+            crate::domain::errors::StorageError,
+        > {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// eval-2 AC4: the daily budget prices the five eval-1 baseline trials
+    /// (normalised rows, DeepSeek list prices) at what the provider bills.
+    #[tokio::test]
+    async fn eval2_daily_budget_counts_cache_reads_and_reasoning_once() {
+        use crate::domain::models::pricing::PricingConfig;
+        use crate::domain::models::router::{EscalationReason, ModelTier};
+        use crate::domain::models::usage::{TokenUsage, UsageLedgerEntry};
+
+        let rows: Vec<UsageLedgerEntry> = [
+            (7_282, 6_396, 71_424, 4_744),
+            (5_317, 2_819, 88_448, 1_177),
+            (17_520, 29_320, 450_304, 23_177),
+            (9_702, 18_402, 149_248, 12_331),
+            (33_703, 48_043, 1_430_784, 37_572),
+        ]
+        .into_iter()
+        .map(|(i, o, c, r)| UsageLedgerEntry {
+            timestamp_ms: 1,
+            session_id: "s".into(),
+            conversation_id: "c".into(),
+            provider_id: "deepseek".into(),
+            model: "deepseek-v4-flash".into(),
+            tier: ModelTier::Flagship,
+            step_kind: None,
+            escalation_reason: EscalationReason::None,
+            usage: TokenUsage {
+                tokens_in: i,
+                tokens_out: o,
+                parent_ctx: 0,
+                cache_creation_tokens: None,
+                cache_read_tokens: Some(c),
+                reasoning_tokens: Some(r),
+            },
+        })
+        .collect();
+        let mut config = AppConfig::default();
+        config.budget.daily_limit_usd = Some(1.0);
+        config.pricing.insert(
+            "deepseek-v4-flash".into(),
+            PricingConfig {
+                input_per_million: 0.30,
+                output_per_million: 1.20,
+                cache_creation_per_million: None,
+                cache_read_per_million: Some(0.006),
+                reasoning_per_million: None,
+            },
+        );
+        let state = recompute_daily_budget(&FixedLedger(rows), &config, 0, &FixedNow(1_000, 0))
+            .await
+            .expect("a limit is configured");
+        assert!(
+            (state.spent_today_usd - 0.161174448).abs() < 1e-12,
+            "spent_today_usd = {}, want 0.161174448",
+            state.spent_today_usd
+        );
+    }
 }

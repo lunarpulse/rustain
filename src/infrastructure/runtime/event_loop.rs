@@ -4118,7 +4118,7 @@ pub async fn run(
                                     state.active_context_window = cw;
                                     if cw > 0 {
                                         let pct = conversation.usage.as_ref().map_or(0, |u| {
-                                            u.input_tokens.saturating_mul(100) / cw
+                                            u.prompt_tokens().saturating_mul(100) / cw
                                         });
                                         match state.context_warn_level {
                                             crate::adapters::tui::state::ContextWarnLevel::None => {

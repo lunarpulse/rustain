@@ -372,4 +372,33 @@ mod tests {
         ));
         assert!(chunks.is_empty());
     }
+
+    /// eval-2 AC3 (c), control: Anthropic's counts are already disjoint, so the
+    /// decoder passes them through and no number moves.
+    #[test]
+    fn eval2_anthropic_usage_is_disjoint_and_priced_as_before() {
+        use crate::domain::services::cost_calculator::test_support::{
+            assert_usd, cost_of, pricing,
+        };
+        let mut t = StreamTransformer::new();
+        t.transform(&frame(
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":141,"cache_read_input_tokens":1408,"cache_creation_input_tokens":2000}}}"#,
+        ));
+        let chunks = t.transform(&frame(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}"#,
+        ));
+        let usage = match chunks.last() {
+            Some(StreamChunk::Usage { usage, .. }) => usage,
+            other => panic!("expected a usage chunk, got {other:?}"),
+        };
+        assert_eq!(usage.input_tokens, 141);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.cache_read_input_tokens, Some(1408));
+        assert_eq!(usage.cache_creation_input_tokens, Some(2000));
+        assert_eq!(usage.reasoning_tokens, None);
+        let p = pricing("sonnet", 3.00, 15.00, 0.30, Some(3.75));
+        assert_usd(cost_of(usage, "sonnet", &p), 0.0084954, "anthropic");
+    }
 }

@@ -16,10 +16,10 @@ The `--format` alias does **not** exist and was intentionally dropped (it never 
 Every JSON document and NDJSON event carries:
 
 ```json
-"schema_version": "1.2"
+"schema_version": "1.3"
 ```
 
-(v1.0 shipped in Story 13.1b; v1.1 adds the dry-run fields in Story 13.1c; v1.2 adds the `call_usage` stream event.)
+(v1.0 shipped in Story 13.1b; v1.1 adds the dry-run fields in Story 13.1c; v1.2 adds the `call_usage` stream event; v1.3 makes the `usage` counts disjoint for every provider.)
 
 The version is a **string** following `major.minor` semantics:
 
@@ -27,6 +27,8 @@ The version is a **string** following `major.minor` semantics:
 - **Breaking change** (field removed, renamed, or its meaning/type changed) → bump the **major** version.
 
 Within a major version (e.g. all `1.x` releases), the schema is **additive-only**. Field removal, rename, or retype requires a major bump.
+
+**One exception: 1.3.** v1.3 changes the *meaning* of `usage.input_tokens` for requests sent over the OpenAI Chat Completions transport (see [v1.3](#v13--disjoint-usage-counts)) without changing any field name or type. By the rule above that is a breaking change, and the rule on its own would read 2.0. The spec's default (schema 1.3, a minor bump) was applied by the integrator; the owner did not answer the question and may veto it before landing. The field set, and so the schema fingerprint, is unchanged. An unchanged fingerprint does not mean the change is compatible: a consumer that already subtracts cache reads itself must read `schema_version` and stop subtracting from 1.3 on. The general rule stands for every later change: a change of meaning is a major bump.
 
 Emitting a prior schema version on request (e.g. `--schema-version`) is **deferred** until a `2.0` schema actually exists; no consumer needs it at `1.0`.
 
@@ -39,16 +41,16 @@ A single pretty-printed JSON object on stdout.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | string | Always `"1.2"`. |
+| `schema_version` | string | Always `"1.3"`. |
 | `response` | string \| null | Assistant text. `null` in the error envelope. |
 | `model` | string | The resolved concrete model used for the turn. |
 | `stop_reason` | string | One of: `end_turn`, `tool_use`, `max_tokens`, `cancelled`. |
 | `usage` | object \| null | Token usage summed over every provider call of the turn, or explicit `null` if the provider emitted no `Usage` chunk. |
-| `usage.input_tokens` | number | Input tokens. |
-| `usage.output_tokens` | number | Output tokens. |
-| `usage.cache_creation_input_tokens` | number \| null | Optional cache-creation tokens. |
-| `usage.cache_read_input_tokens` | number \| null | Optional cache-read tokens. |
-| `usage.reasoning_tokens` | number \| null | Optional reasoning tokens. |
+| `usage.input_tokens` | number | Prompt tokens billed at the input rate. Excludes cache reads and cache writes (from v1.3, for every provider). |
+| `usage.output_tokens` | number | Every generated token, reasoning included. |
+| `usage.cache_creation_input_tokens` | number \| null | Optional prompt tokens written to the provider's cache. Disjoint from `input_tokens`. |
+| `usage.cache_read_input_tokens` | number \| null | Optional prompt tokens read from the provider's cache. Disjoint from `input_tokens`. |
+| `usage.reasoning_tokens` | number \| null | Optional part of `output_tokens` spent on reasoning; never greater than `output_tokens`. |
 | `tool_calls` | array | List of tool calls made during the turn (may be empty). |
 | `tool_calls[].id` | string | Tool-use ID. |
 | `tool_calls[].name` | string | Tool name. |
@@ -71,7 +73,7 @@ A single pretty-printed JSON object on stdout.
 
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "response": null,
   "model": "",
   "stop_reason": "",
@@ -90,7 +92,7 @@ A single pretty-printed JSON object on stdout.
 
 ## `--output-format stream-json` events
 
-One compact JSON object per line. Every line carries `schema_version: "1.2"` and a `type` discriminator.
+One compact JSON object per line. Every line carries `schema_version: "1.3"` and a `type` discriminator.
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
@@ -186,6 +188,22 @@ A turn takes one provider call per tool round, so a turn that uses tools makes s
 
 When the turn fails, the calls that reported usage are written before the terminal `error` and no `usage` total follows. That includes a call that reported usage and then failed. Sum the `call_usage` lines to get the cost of a failed turn.
 
+## v1.3 — Disjoint usage counts
+
+Before v1.3 the `usage` counts followed each provider's wire format: Anthropic reported `input_tokens` without its cache reads and writes, while requests sent over the OpenAI Chat Completions transport reported `input_tokens` **including** the cache reads. From v1.3 the counts mean the same for every provider:
+
+- `input_tokens` excludes `cache_read_input_tokens` and `cache_creation_input_tokens`.
+- `output_tokens` includes `reasoning_tokens`.
+- The prompt a call sent is `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+- Cost is `input × input rate + cache_read × cache-read rate + cache_creation × cache-write rate + output × output rate`; every token is priced once.
+
+Only the meaning of `input_tokens` changes, and only for streams served over the OpenAI **Chat** transport. Before 1.3, whether `input_tokens` included cache reads depended on the transport, not on the provider name:
+
+- Chat Completions transport: `input_tokens` **included** the cache reads. A pre-1.3 consumer subtracts `cache_read_input_tokens` from `input_tokens` for these. By default this is: OpenAI, DeepSeek, Moonshot, custom OpenAI-compatible endpoints, the Google AI **API-key** route (Google's OpenAI-compatible endpoint), GitHub Copilot models routed to Chat (e.g. `gpt-4o`), and OpenRouter only when `RUSTAIN_OPENROUTER_RESPONSES` is exactly `0`.
+- `input_tokens` already **excluded** the cache reads (subtracting again would count the cache twice) for: Anthropic; Ollama; the Responses transport (Codex, xAI, GitHub Copilot models routed to Responses (e.g. `gpt-5`), and OpenRouter by default, i.e. unless the variable is `0`); GitHub Copilot models routed to Messages (e.g. Claude models), which use the Anthropic decoder; and Gemini CLI (Google OAuth), which is a different adapter from the Google API-key route.
+
+A pre-1.3 stream does not say which transport served it, so the provider name alone cannot decide this for OpenRouter (default transport: Responses; Chat only when `RUSTAIN_OPENROUTER_RESPONSES` is `0`) or GitHub Copilot (Chat, Responses or Messages, chosen per model). A consumer of such old streams must obtain the transport elsewhere, or treat the cost as unknown. From 1.3 no such distinction is needed: read `schema_version`, and for `1.3` and later use the counts as they are.
+
 ## Stdout/stderr discipline
 
 - **stdout** carries only the rendered output for the selected format.
@@ -195,7 +213,7 @@ Under `--final-message-only`, the JSON `response` field is narrowed to the final
 
 ## Version-bump enforcement
 
-A schema fingerprint test pins the v1.2 field-path set. If the fingerprint changes, the failure message instructs the maintainer to decide whether the change is additive (bump minor) or breaking (bump major) and then update the recorded fingerprint. This makes schema changes loud and intentional.
+A schema fingerprint test pins the v1.3 field-path set. If the fingerprint changes, the failure message instructs the maintainer to decide whether the change is additive (bump minor) or breaking (bump major) and then update the recorded fingerprint. This makes schema changes loud and intentional.
 
 ## See also
 
