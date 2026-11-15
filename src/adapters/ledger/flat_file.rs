@@ -29,6 +29,10 @@ impl Default for FileUsageLedger {
 #[async_trait]
 impl UsageLedgerPort for FileUsageLedger {
     async fn append(&self, entry: UsageLedgerEntry) -> Result<(), StorageError> {
+        // The id names the file: refuse one that could leave the usage directory.
+        crate::infrastructure::utils::sanitize_id(&entry.session_id).map_err(|_| {
+            StorageError::Other("usage ledger: session id is not a safe file name".into())
+        })?;
         let path = crate::infrastructure::paths::usage_ledger_path(&entry.session_id)
             .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
@@ -371,5 +375,96 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
             None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
         }
+    }
+
+    /// Points `RUSTAIN_DATA_DIR` at a tempdir until the guard drops.
+    fn data_dir_guard(
+        dir: &std::path::Path,
+    ) -> scopeguard::ScopeGuard<Option<String>, impl FnOnce(Option<String>)> {
+        let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+        unsafe {
+            std::env::set_var("RUSTAIN_DATA_DIR", dir.as_os_str()); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+        }
+        scopeguard::guard(original, |original| match original {
+            Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+            None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+        })
+    }
+
+    /// eval-3 AC4: a session id that is not a safe file name writes nothing,
+    /// above or inside the usage directory; a safe id is written.
+    #[tokio::test]
+    #[serial_test::serial(rustain_data_dir)]
+    async fn append_refuses_a_session_id_that_is_not_a_safe_file_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = data_dir_guard(tmp.path());
+        let ledger = FileUsageLedger::new();
+
+        for bad in ["../escape", "a/b", ""] {
+            let refused = ledger.append(make_entry(bad, 1000, "haiku")).await;
+            assert!(refused.is_err(), "session id {bad:?} must be refused");
+        }
+        assert!(!tmp.path().join("escape.jsonl").exists());
+        let usage = tmp.path().join("usage");
+        let in_usage = std::fs::read_dir(&usage).map_or(0, Iterator::count);
+        assert_eq!(in_usage, 0, "nothing is written in the usage directory");
+        let top_level_jsonl = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            .count();
+        assert_eq!(top_level_jsonl, 0, "no .jsonl above the usage directory");
+
+        let entry = make_entry("acp-AbC_9-1", 2000, "haiku");
+        ledger.append(entry.clone()).await.expect("safe id appends");
+        let text = std::fs::read_to_string(usage.join("acp-AbC_9-1.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: UsageLedgerEntry = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            serde_json::to_value(&entry).unwrap()
+        );
+    }
+
+    /// eval-3 AC6 (pin): two writers appending to one session file keep every
+    /// line whole.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(rustain_data_dir)]
+    async fn concurrent_appends_to_one_session_stay_whole() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = data_dir_guard(tmp.path());
+
+        let mut tasks = Vec::new();
+        for writer in ["a", "b"] {
+            let ledger = std::sync::Arc::new(FileUsageLedger::new());
+            for i in 0..100 {
+                let mut entry = make_entry("concurrent-1", 1000 + i, "haiku");
+                entry.conversation_id = format!("{writer}-{i}");
+                let ledger = ledger.clone();
+                tasks.push(tokio::spawn(async move { ledger.append(entry).await }));
+            }
+        }
+        for task in tasks {
+            task.await.expect("join").expect("append");
+        }
+
+        let text = std::fs::read_to_string(tmp.path().join("usage/concurrent-1.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 200);
+        for l in text.lines() {
+            serde_json::from_str::<UsageLedgerEntry>(l).expect("every line parses");
+        }
+        let read = FileUsageLedger::new()
+            .read_session("concurrent-1")
+            .await
+            .unwrap();
+        let got: std::collections::BTreeSet<String> =
+            read.into_iter().map(|e| e.conversation_id).collect();
+        let want: std::collections::BTreeSet<String> = ["a", "b"]
+            .iter()
+            .flat_map(|w| (0..100).map(move |i| format!("{w}-{i}")))
+            .collect();
+        assert_eq!(got.len(), 200);
+        assert_eq!(got, want);
     }
 }

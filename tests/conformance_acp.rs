@@ -191,6 +191,25 @@ mod scripted {
             }
         }
 
+        /// A turn that streams `text`, reports usage and ends cleanly.
+        pub fn usage_turn(text: &str, input: u32, output: u32, cache_read: u32) -> Self {
+            let mut turn = Self::text_turn(text);
+            turn.chunks.insert(
+                1,
+                StreamChunk::Usage {
+                    usage: rustain::domain::models::UsageInfo {
+                        input_tokens: input,
+                        output_tokens: output,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: Some(cache_read),
+                        reasoning_tokens: None,
+                    },
+                    session_id: None,
+                },
+            );
+            turn
+        }
+
         pub fn into_provider(self) -> Arc<dyn StreamingProvider> {
             Arc::new(self)
         }
@@ -5383,4 +5402,168 @@ mod acp_notice_carrier {
         expected.push(GOLDEN_AGENT_TEXT.into());
         assert_eq!(replay, expected);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// eval-3 — ACP turns write the usage ledger, keyed by the ACP session
+// ─────────────────────────────────────────────────────────────────────
+
+/// Read JSON-RPC lines until the response for `id` arrives.
+async fn eval3_result_for<R: tokio::io::AsyncBufRead + Unpin>(
+    lines: &mut tokio::io::Lines<R>,
+    id: i64,
+) -> serde_json::Value {
+    loop {
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("timeout waiting for an ACP frame")
+            .expect("read error on ACP stream")
+            .expect("ACP stream ended before the result");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("ACP frame JSON");
+        if v["id"] == serde_json::json!(id) {
+            assert!(v.get("error").is_none(), "ACP request {id} failed: {v}");
+            return v;
+        }
+    }
+}
+
+/// eval-3 AC2: two prompts of one ACP session write two ledger rows in
+/// `usage/<session>.jsonl`, through the production `build_acp_core` ledger.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn eval3_acp_writes_one_ledger_row_per_prompt_keyed_by_the_acp_session() {
+    use std::rc::Rc;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::AcpCoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_acp_core_factory;
+    use rustain::domain::models::{AppConfig, TokenUsage, UsageInfo};
+    use rustain::infrastructure::composition::build_acp_core;
+
+    const PROMPT: &str = "EVAL3-ACP-CANARY-PROMPT";
+    const REPLY: &str = "EVAL3-ACP-CANARY-REPLY";
+
+    let data = tempfile::tempdir().expect("data tempdir");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let original = std::env::var_os("RUSTAIN_DATA_DIR");
+    // SAFETY: `#[serial]`; the prior value is restored on drop.
+    unsafe { std::env::set_var("RUSTAIN_DATA_DIR", data.path()) };
+    let _env = scopeguard::guard(original, |original| {
+        // SAFETY: as above.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("RUSTAIN_DATA_DIR", v),
+                None => std::env::remove_var("RUSTAIN_DATA_DIR"),
+            }
+        }
+    });
+
+    let config = AppConfig::default();
+    let factory_config = config.clone();
+    let factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
+        let mut core = build_acp_core(&factory_config, cwd, false, mcp_servers)
+            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+        // Seeding (Rule 2): only the provider is replaced; the ledger is the composed one.
+        core.provider =
+            scripted::ScriptedProvider::usage_turn(REPLY, 141, 10, 1408).into_provider();
+        Ok(core)
+    });
+    let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
+    let server = serve_acp_with_acp_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        config,
+        workspace.path().to_path_buf(),
+        None,
+        factory,
+    );
+
+    let drive = async {
+        let mut lines = tokio::io::BufReader::new(&mut client_read).lines();
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        eval3_result_for(&mut lines, 1).await;
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        let created = eval3_result_for(&mut lines, 2).await;
+        let sid = created["result"]["sessionId"]
+            .as_str()
+            .expect("session/new returns a sessionId")
+            .to_owned();
+        for id in [3, 4] {
+            client_write
+                .write_all(
+                    line(acp_prompt_req_with_text(
+                        serde_json::json!(id),
+                        &sid,
+                        PROMPT,
+                    ))
+                    .as_bytes(),
+                )
+                .await
+                .expect("write session/prompt");
+            let done = eval3_result_for(&mut lines, id).await;
+            assert_eq!(
+                done["result"]["stopReason"],
+                serde_json::json!("end_turn"),
+                "{done}"
+            );
+        }
+        sid
+    };
+    let sid = tokio::select! {
+        sid = drive => sid,
+        res = server => panic!("ACP server exited before the prompts completed: {res:?}"),
+    };
+
+    let rows = rustain::adapters::ledger::FileUsageLedger::new()
+        .read_session(&sid)
+        .await
+        .expect("read_session");
+    assert_eq!(
+        rows.len(),
+        2,
+        "one ledger row per prompt, filed under {sid}"
+    );
+    let expected_usage = serde_json::to_value(TokenUsage::from_usage(
+        &UsageInfo {
+            input_tokens: 141,
+            output_tokens: 10,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(1408),
+            reasoning_tokens: None,
+        },
+        0,
+    ))
+    .unwrap();
+    let conversation = sid
+        .strip_prefix("acp-")
+        .expect("ACP session ids carry the acp- prefix");
+    for row in &rows {
+        assert_eq!(row.session_id, sid);
+        assert_eq!(row.conversation_id, conversation);
+        assert_eq!(row.provider_id, "scripted");
+        assert_eq!(serde_json::to_value(&row.usage).unwrap(), expected_usage);
+    }
+    let files: Vec<_> = std::fs::read_dir(data.path().join("usage"))
+        .expect("the usage directory exists")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, vec![format!("{sid}.jsonl")]);
+    let text = std::fs::read_to_string(data.path().join("usage").join(&files[0])).unwrap();
+    assert!(
+        !text.contains(PROMPT) && !text.contains(REPLY),
+        "no message text in the ledger"
+    );
 }

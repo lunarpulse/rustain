@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::{StreamExt as _, stream};
 use rustain::adapters::cli::ask::OutputFormat;
 use rustain::adapters::noop::{
     NoOpApprovalPersistence, NoOpSecurity, NoOpStorage, NoOpToolSet, NoOpUsageLedger,
@@ -957,6 +957,8 @@ struct ScriptedProvider {
     /// Keep each call's stream open after its last chunk, as a connection
     /// that never closes does.
     never_ends: bool,
+    /// The first call's stream ends only when this fires (structural wait).
+    end_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl ScriptedProvider {
@@ -965,6 +967,7 @@ impl ScriptedProvider {
             calls,
             served: std::sync::atomic::AtomicUsize::new(0),
             never_ends: false,
+            end_gate: Mutex::new(None),
         }
     }
 
@@ -973,6 +976,19 @@ impl ScriptedProvider {
             never_ends: true,
             ..Self::new(calls)
         }
+    }
+
+    /// The first call's stream, after its chunks, ends when the returned
+    /// sender fires.
+    fn gated_end(calls: Vec<Vec<StreamChunk>>) -> (Self, tokio::sync::oneshot::Sender<()>) {
+        let (fire, gate) = tokio::sync::oneshot::channel();
+        let provider = Self::new(calls);
+        *provider.end_gate.lock().unwrap() = Some(gate);
+        (provider, fire)
+    }
+
+    fn served(&self) -> usize {
+        self.served.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -989,13 +1005,18 @@ impl StreamingProvider for ScriptedProvider {
         let n = self
             .served
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match self.calls.get(n) {
-            Some(chunks) if self.never_ends => Ok(Box::pin(futures::StreamExt::chain(
-                stream::iter(chunks.clone()),
-                stream::pending(),
-            ))),
-            Some(chunks) => Ok(Box::pin(stream::iter(chunks.clone()))),
-            None => Err(rustain::domain::errors::ProviderError::ConnectionFailed(
+        let gate = self.end_gate.lock().unwrap().take();
+        match (self.calls.get(n), gate) {
+            (Some(chunks), Some(gate)) => {
+                let held =
+                    stream::once(gate).filter_map(|_| std::future::ready(None::<StreamChunk>));
+                Ok(Box::pin(stream::iter(chunks.clone()).chain(held)))
+            }
+            (Some(chunks), None) if self.never_ends => Ok(Box::pin(
+                stream::iter(chunks.clone()).chain(stream::pending()),
+            )),
+            (Some(chunks), None) => Ok(Box::pin(stream::iter(chunks.clone()))),
+            (None, _) => Err(rustain::domain::errors::ProviderError::ConnectionFailed(
                 "script exhausted".into(),
             )),
         }
@@ -1413,6 +1434,45 @@ impl rustain::domain::ports::UsageLedgerPort for RecordingLedger {
     }
 }
 
+/// `run_ask_core` over the test core with `ledger` behind the tap; returns
+/// the exit code and stderr.
+async fn run_ask_with_ledger(
+    provider: Arc<dyn StreamingProvider>,
+    opts: rustain::adapters::cli::ask::AskOpts,
+    ledger: Arc<dyn rustain::domain::ports::UsageLedgerPort>,
+    out: &mut dyn std::io::Write,
+) -> (ExitCode, String) {
+    let mut core = build_test_core(provider.clone());
+    core.ledger = ledger;
+    let config = default_config();
+    let mut stderr = Cursor::new(Vec::new());
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider,
+        core,
+        opts,
+        &config,
+        std::path::Path::new("/tmp/test-ask"),
+        out,
+        &mut stderr,
+    )
+    .await;
+    (exit, String::from_utf8(stderr.into_inner()).unwrap())
+}
+
+/// `run_ask_core_test` with a recording ledger behind the tap and the stdout
+/// writer chosen by the caller. The entries are read right after
+/// `run_ask_core` returns.
+async fn run_ask_recording_to(
+    provider: Arc<dyn StreamingProvider>,
+    opts: rustain::adapters::cli::ask::AskOpts,
+    out: &mut dyn std::io::Write,
+) -> (ExitCode, Vec<rustain::domain::models::UsageLedgerEntry>) {
+    let ledger = Arc::new(RecordingLedger::default());
+    let (exit, _) = run_ask_with_ledger(provider, opts, ledger.clone(), out).await;
+    let entries = ledger.entries.lock().unwrap().clone();
+    (exit, entries)
+}
+
 /// `run_ask_core_test` with a recording ledger behind the tap.
 async fn run_ask_recording(
     provider: Arc<dyn StreamingProvider>,
@@ -1422,25 +1482,13 @@ async fn run_ask_recording(
     String,
     Vec<rustain::domain::models::UsageLedgerEntry>,
 ) {
-    let ledger = Arc::new(RecordingLedger::default());
-    let mut core = build_test_core(provider.clone());
-    core.ledger = ledger.clone();
-    let config = default_config();
     let mut stdout = Cursor::new(Vec::new());
-    let mut stderr = Cursor::new(Vec::new());
-    let exit = rustain::adapters::cli::ask::run_ask_core(
-        provider,
-        core,
-        opts,
-        &config,
-        std::path::Path::new("/tmp/test-ask"),
-        &mut stdout,
-        &mut stderr,
+    let (exit, entries) = run_ask_recording_to(provider, opts, &mut stdout).await;
+    (
+        exit,
+        String::from_utf8(stdout.into_inner()).unwrap(),
+        entries,
     )
-    .await;
-    let out = String::from_utf8(stdout.into_inner()).unwrap();
-    let entries = ledger.entries.lock().unwrap().clone();
-    (exit, out, entries)
 }
 
 /// DeepSeek list prices (SCP 2026-11-13 §1.2), reasoning at the output rate.
@@ -1651,8 +1699,10 @@ async fn ask_usage_reports_calls_completed_before_a_failure() {
 }
 
 /// A call that reports usage and then fails mid-stream is still counted, and
-/// `ask` does not wait for a provider stream that never ends.
-#[tokio::test]
+/// `ask` does not wait for a provider stream that never ends: it waits the
+/// drain grace (2 s of virtual time) for its turn task, then gives up with no
+/// ledger row for the call that never closed.
+#[tokio::test(start_paused = true)]
 async fn ask_usage_counts_a_call_that_fails_after_reporting_usage() {
     let provider = Arc::new(ScriptedProvider::never_ending(vec![vec![
         usage_chunk(100, 0, None),
@@ -1661,13 +1711,22 @@ async fn ask_usage_counts_a_call_that_fails_after_reporting_usage() {
         },
     ]]));
     let opts = make_opts_with_format("test", OutputFormat::StreamJson);
-    let (exit, out, _) = tokio::time::timeout(
+    let started = tokio::time::Instant::now();
+    let mut stdout = Cursor::new(Vec::new());
+    let (exit, entries) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        run_ask_core_test(provider, opts),
+        run_ask_recording_to(provider, opts, &mut stdout),
     )
     .await
     .expect("ask must not wait for the provider stream to end");
+    let waited = started.elapsed();
+    let out = String::from_utf8(stdout.into_inner()).unwrap();
     assert_eq!(exit, ExitCode::FAILURE);
+    assert!(
+        waited >= std::time::Duration::from_secs(2) && waited < std::time::Duration::from_secs(3),
+        "ask waits the 2 s drain grace, got {waited:?}"
+    );
+    assert!(entries.is_empty(), "a stream that never closes has no row");
     let events = parse_ndjson(&out);
 
     let calls: Vec<&serde_json::Value> = events
@@ -3466,4 +3525,644 @@ async fn test_ask_offline_dry_run() {
         let _doc: serde_json::Value =
             serde_json::from_str(&out).expect("JSON output should be valid if present");
     }
+}
+
+// ── eval-3: `ask` writes the usage ledger, drains its turn before it returns ─
+
+use rustain::domain::ports::UsageLedgerPort as _;
+
+const EVAL3_PROMPT: &str = "EVAL3-CANARY-PROMPT-7F3A";
+const EVAL3_REPLY: &str = "EVAL3-CANARY-REPLY-9C1D";
+
+/// Points `RUSTAIN_DATA_DIR` at `dir` until the guard drops. Callers are
+/// `#[serial]`, like the other tests of this binary that set the variable.
+fn data_dir_guard(dir: &std::path::Path) -> impl Drop {
+    let original = std::env::var_os("RUSTAIN_DATA_DIR");
+    // SAFETY: `#[serial]` callers; the prior value is restored on drop.
+    unsafe { std::env::set_var("RUSTAIN_DATA_DIR", dir) };
+    scopeguard::guard(original, |original| {
+        // SAFETY: as above.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("RUSTAIN_DATA_DIR", v),
+                None => std::env::remove_var("RUSTAIN_DATA_DIR"),
+            }
+        }
+    })
+}
+
+/// Two provider calls: a tool request, then the canary reply.
+fn eval3_two_call_script() -> Vec<Vec<StreamChunk>> {
+    vec![
+        tool_requesting_call(usage_chunk_full(1289, 3959, 2176, 3803)),
+        vec![
+            StreamChunk::Text {
+                content: EVAL3_REPLY.into(),
+                parent_tool_use_id: None,
+            },
+            usage_chunk_full(7282, 6396, 71424, 4744),
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ],
+    ]
+}
+
+/// The two calls `run_ask` makes (`build_cli_core`, `run_ask_core`), over the
+/// production composition: real storage and the ledger `build_cli_core` picks.
+async fn run_ask_production(
+    provider: Arc<dyn StreamingProvider>,
+    opts: rustain::adapters::cli::ask::AskOpts,
+    workspace: &std::path::Path,
+) -> (ExitCode, String) {
+    let config = default_config();
+    let core = rustain::infrastructure::composition::build_cli_core(&config, workspace, false)
+        .expect("build_cli_core");
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider,
+        core,
+        opts,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    (exit, String::from_utf8(stdout.into_inner()).unwrap())
+}
+
+/// File stems under `<data dir>/usage/`, sorted; empty when the directory is absent.
+fn ledger_stems(data: &std::path::Path) -> Vec<String> {
+    let mut stems: Vec<String> = std::fs::read_dir(data.join("usage"))
+        .map(|dir| {
+            dir.filter_map(Result::ok)
+                .map(|e| e.path().file_stem().unwrap().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    stems.sort();
+    stems
+}
+
+async fn ledger_rows(session: &str) -> Vec<rustain::domain::models::UsageLedgerEntry> {
+    rustain::adapters::ledger::FileUsageLedger::new()
+        .read_session(session)
+        .await
+        .expect("read_session")
+}
+
+/// The usage a `call_usage` line reports, as a `UsageInfo`.
+fn usage_of_call_line(call: &serde_json::Value) -> UsageInfo {
+    let u = &call["usage"];
+    let count = |key: &str| u[key].as_u64().map(|n| u32::try_from(n).unwrap());
+    UsageInfo {
+        input_tokens: count("input_tokens").expect("input_tokens is emitted"),
+        output_tokens: count("output_tokens").expect("output_tokens is emitted"),
+        cache_creation_input_tokens: count("cache_creation_input_tokens"),
+        cache_read_input_tokens: count("cache_read_input_tokens"),
+        reasoning_tokens: count("reasoning_tokens"),
+    }
+}
+
+/// eval-3 AC1: `ask` over the production composition writes one ledger row per
+/// provider call, equal to that call's `call_usage` line; the budget's own
+/// reader and pricing agree; no message text reaches the ledger; a dry-run's
+/// calls are recorded too.
+#[tokio::test]
+#[serial_test::serial]
+async fn eval3_ask_writes_one_ledger_row_per_provider_call() {
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _env = data_dir_guard(data.path());
+    let t0 = chrono::Utc::now().timestamp_millis();
+
+    let provider = Arc::new(ScriptedProvider::new(eval3_two_call_script()));
+    let mut opts = make_opts_with_format(EVAL3_PROMPT, OutputFormat::StreamJson);
+    opts.model_override = Some("deepseek-v4-flash".into());
+    let (exit, out) = run_ask_production(provider, opts, workspace.path()).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{out}");
+
+    let stems = ledger_stems(data.path());
+    assert_eq!(
+        stems.len(),
+        1,
+        "one ledger file under the data dir: {stems:?}"
+    );
+    let session = &stems[0];
+    // A turn with a tool round saves in the directory layout (`<id>/conversation.json`).
+    let session_file = workspace
+        .path()
+        .join(".claude/sessions")
+        .join(session)
+        .join("conversation.json");
+    let saved = std::fs::read_to_string(&session_file)
+        .unwrap_or_else(|e| panic!("the ledger stem names the saved session: {e}"));
+    assert!(
+        saved.contains(EVAL3_PROMPT),
+        "positive control: the session keeps the prompt"
+    );
+
+    let rows = ledger_rows(session).await;
+    assert_eq!(rows.len(), 2, "one row per provider call");
+    let calls: Vec<serde_json::Value> = parse_ndjson(&out)
+        .into_iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    let total = parse_ndjson(&out)
+        .into_iter()
+        .find(|e| e["type"] == "usage")
+        .expect("the result's usage line");
+    // Every counter of the total line against a fold of the rows; an optional
+    // counter is absent when no row has it.
+    let fold = |pick: fn(&rustain::domain::models::TokenUsage) -> Option<u32>| {
+        rows.iter()
+            .filter_map(|r| pick(&r.usage))
+            .reduce(u32::saturating_add)
+    };
+    let from_total = usage_of_call_line(&total);
+    assert_eq!(
+        from_total.input_tokens,
+        fold(|u| Some(u.tokens_in)).unwrap()
+    );
+    assert_eq!(
+        from_total.output_tokens,
+        fold(|u| Some(u.tokens_out)).unwrap()
+    );
+    assert_eq!(
+        from_total.cache_creation_input_tokens,
+        fold(|u| u.cache_creation_tokens)
+    );
+    assert_eq!(
+        from_total.cache_read_input_tokens,
+        fold(|u| u.cache_read_tokens)
+    );
+    assert_eq!(from_total.reasoning_tokens, fold(|u| u.reasoning_tokens));
+    for (call, row) in calls.iter().zip(&rows) {
+        assert_eq!(
+            serde_json::to_value(&row.usage).unwrap(),
+            serde_json::to_value(rustain::domain::models::TokenUsage::from_usage(
+                &usage_of_call_line(call),
+                0
+            ))
+            .unwrap(),
+            "the row equals its call_usage line"
+        );
+        assert_eq!(&row.session_id, session);
+        assert_eq!(&row.conversation_id, session);
+        assert_eq!(row.provider_id, "mock-scripted");
+        assert_eq!(row.model, "deepseek-v4-flash");
+    }
+
+    let since = rustain::adapters::ledger::FileUsageLedger::new()
+        .read_since(t0)
+        .await
+        .unwrap();
+    let key = |rows: &[rustain::domain::models::UsageLedgerEntry]| {
+        let mut keys: Vec<String> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap().to_string())
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        key(&since),
+        key(&rows),
+        "the budget's reader sees the same rows"
+    );
+    assert_close(
+        rustain::domain::services::cost_calculator::cumulative_cost(&since, &deepseek_pricing()),
+        0.0154389,
+        "what the daily budget sums",
+    );
+
+    for entry in std::fs::read_dir(data.path().join("usage")).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(EVAL3_PROMPT) && !text.contains(EVAL3_REPLY));
+    }
+}
+
+/// eval-3 AC1: the `session_id` that `--output-format json` reports is the one
+/// on every ledger row.
+#[tokio::test]
+#[serial_test::serial]
+async fn eval3_ask_json_session_id_is_the_ledger_session_id() {
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _env = data_dir_guard(data.path());
+    let provider = Arc::new(ScriptedProvider::new(eval3_two_call_script()));
+    let mut opts = make_opts_with_format(EVAL3_PROMPT, OutputFormat::Json);
+    opts.model_override = Some("deepseek-v4-flash".into());
+    let (exit, out) = run_ask_production(provider, opts, workspace.path()).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let reported = doc["session_id"]
+        .as_str()
+        .expect("json reports a session_id");
+    let rows = ledger_rows(reported).await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "rows are filed under the reported session id"
+    );
+    assert!(rows.iter().all(|r| r.session_id == reported));
+}
+
+/// eval-3 AC1 (owner call Q2): a dry-run's provider calls are recorded.
+#[tokio::test]
+#[serial_test::serial]
+async fn eval3_ask_dry_run_records_its_provider_calls() {
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _env = data_dir_guard(data.path());
+    let provider = Arc::new(ScriptedProvider::new(vec![vec![
+        StreamChunk::Text {
+            content: "plan".into(),
+            parent_tool_use_id: None,
+        },
+        usage_chunk(100, 7, None),
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]));
+    let mut opts = make_opts_with_format("plan it", OutputFormat::StreamJson);
+    opts.dry_run = true;
+    let (exit, out) = run_ask_production(provider, opts, workspace.path()).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{out}");
+    let stems = ledger_stems(data.path());
+    assert_eq!(stems.len(), 1, "one ledger file: {stems:?}");
+    let rows = ledger_rows(&stems[0]).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].usage.tokens_in, rows[0].usage.tokens_out),
+        (100, 7)
+    );
+}
+
+/// `std::io::Write` over a `Vec` that fires `gate` once an `error` event has
+/// been written: the structural signal that lets a provider stream end.
+struct GateWriter {
+    buf: Vec<u8>,
+    gate: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl std::io::Write for GateWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(bytes);
+        let seen = String::from_utf8_lossy(&self.buf).contains("\"type\":\"error\"");
+        if seen {
+            if let Some(gate) = self.gate.take() {
+                let _ = gate.send(());
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A writer whose every write fails.
+struct FailingWriter;
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("stdout closed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// eval-3 AC3 (a): a call that reported usage and then failed mid-stream keeps
+/// its ledger row when `ask` returns on the error; the stream ends only after
+/// `ask` has written its `error` line.
+#[tokio::test]
+async fn eval3_ask_keeps_the_row_of_a_call_that_fails_after_reporting_usage() {
+    let (provider, fire) = ScriptedProvider::gated_end(vec![vec![
+        usage_chunk(100, 7, None),
+        StreamChunk::Error {
+            content: "boom".into(),
+        },
+    ]]);
+    let mut out = GateWriter {
+        buf: Vec::new(),
+        gate: Some(fire),
+    };
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, entries) = run_ask_recording_to(Arc::new(provider), opts, &mut out).await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    let events = parse_ndjson(&String::from_utf8(out.buf).unwrap());
+    let calls: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "call_usage")
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        (
+            calls[0]["usage"]["input_tokens"].as_u64(),
+            calls[0]["usage"]["output_tokens"].as_u64()
+        ),
+        (Some(100), Some(7)),
+        "the emitted call_usage line carries the call's counters"
+    );
+    assert_eq!(
+        entries.len(),
+        1,
+        "the failed call's row is written before ask exits"
+    );
+    assert_eq!(
+        (entries[0].usage.tokens_in, entries[0].usage.tokens_out),
+        (100, 7)
+    );
+}
+
+/// eval-3 AC3 (b): an output failure inside the event loop still lets the call
+/// that is waiting in the ledger tap write its row.
+#[tokio::test]
+async fn eval3_ask_keeps_the_row_when_stdout_fails_mid_turn() {
+    let provider = Arc::new(ScriptedProvider::new(vec![vec![
+        StreamChunk::Text {
+            content: "x".into(),
+            parent_tool_use_id: None,
+        },
+        usage_chunk(100, 7, None),
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]]));
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, entries) = run_ask_recording_to(provider, opts, &mut FailingWriter).await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert_eq!(
+        entries.len(),
+        1,
+        "the call's row is written before ask exits"
+    );
+    assert_eq!(
+        (entries[0].usage.tokens_in, entries[0].usage.tokens_out),
+        (100, 7)
+    );
+}
+
+/// eval-3 AC3 (c): once `ask` gives up it starts no further provider call.
+#[tokio::test]
+async fn eval3_ask_starts_no_provider_call_after_it_gives_up() {
+    let (provider, fire) = ScriptedProvider::gated_end(vec![vec![
+        usage_chunk(100, 7, None),
+        StreamChunk::Error {
+            content: "boom".into(),
+        },
+        StreamChunk::ToolUse {
+            id: "t1".into(),
+            name: "dummy_tool".into(),
+            input: serde_json::json!({}),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ]]);
+    let provider = Arc::new(provider);
+    let mut out = GateWriter {
+        buf: Vec::new(),
+        gate: Some(fire),
+    };
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, entries) = run_ask_recording_to(provider.clone(), opts, &mut out).await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert_eq!(
+        provider.served(),
+        1,
+        "the drain cancels the turn before its next call"
+    );
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        (entries[0].usage.tokens_in, entries[0].usage.tokens_out),
+        (100, 7)
+    );
+}
+
+/// Wraps `ScriptedProvider`; tells the test when the first call's stream has
+/// been read to its end and when a second provider call starts.
+struct HandshakeProvider {
+    inner: Arc<ScriptedProvider>,
+    first_stream_ended: Mutex<std::sync::mpsc::Sender<()>>,
+    second_call_started: Mutex<std::sync::mpsc::Sender<()>>,
+}
+
+#[async_trait]
+impl StreamingProvider for HandshakeProvider {
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        let later_call = self.inner.served() >= 1;
+        if later_call {
+            let _ = self.second_call_started.lock().unwrap().send(());
+        }
+        let stream = self.inner.stream_completion(messages, options).await?;
+        if later_call {
+            return Ok(stream);
+        }
+        let ended = self.first_stream_ended.lock().unwrap().clone();
+        let end = stream::once(async move {
+            let _ = ended.send(());
+        })
+        .filter_map(|_| std::future::ready(None::<StreamChunk>));
+        Ok(Box::pin(stream.chain(end)))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+}
+
+/// A writer whose first write waits (bounded) on `signal`, then records
+/// whether it arrived.
+struct WaitingWriter {
+    signal: std::sync::mpsc::Receiver<()>,
+    waited: bool,
+    signalled: bool,
+}
+
+impl std::io::Write for WaitingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.waited {
+            self.waited = true;
+            self.signalled = self
+                .signal
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// eval-3 patch E3-R01: on an error exit `ask` cancels the turn BEFORE it
+/// releases the ledger boundary, so no worker can run the queued tool and start
+/// a second provider call while `ask` is still writing its diagnostics. The
+/// writers hold `ask` at its first stderr and stdout writes (multi-thread
+/// runtime): stderr until the first stream has ended (the boundary is queued),
+/// stdout until a second provider call starts (bounded; a started call fails
+/// the test).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eval3_ask_cancels_the_turn_before_it_releases_the_boundary() {
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let scripted = Arc::new(ScriptedProvider::new(vec![
+        vec![
+            usage_chunk(100, 7, None),
+            StreamChunk::Error {
+                content: "boom".into(),
+            },
+            StreamChunk::ToolUse {
+                id: "t1".into(),
+                name: "dummy_tool".into(),
+                input: serde_json::json!({}),
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+            },
+        ],
+        vec![
+            StreamChunk::Text {
+                content: "second".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ],
+    ]));
+    let provider: Arc<dyn StreamingProvider> = Arc::new(HandshakeProvider {
+        inner: scripted.clone(),
+        first_stream_ended: Mutex::new(ended_tx),
+        second_call_started: Mutex::new(second_tx),
+    });
+    let ledger = Arc::new(RecordingLedger::default());
+    let mut core = build_test_core(provider.clone());
+    core.ledger = ledger.clone();
+    let mut stdout = WaitingWriter {
+        signal: second_rx,
+        waited: false,
+        signalled: false,
+    };
+    let mut stderr = WaitingWriter {
+        signal: ended_rx,
+        waited: false,
+        signalled: false,
+    };
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider,
+        core,
+        make_opts_with_format("test", OutputFormat::StreamJson),
+        &default_config(),
+        std::path::Path::new("/tmp/test-ask"),
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert!(
+        stderr.signalled,
+        "the first stream ended while ask was in its error exit"
+    );
+    assert!(
+        !stdout.signalled && scripted.served() == 1,
+        "no second provider call may start once the error exit has begun"
+    );
+    assert_eq!(ledger.entries.lock().unwrap().len(), 1);
+}
+
+/// A ledger whose every write fails.
+struct FailingLedger;
+
+#[async_trait]
+impl rustain::domain::ports::UsageLedgerPort for FailingLedger {
+    async fn append(
+        &self,
+        _: rustain::domain::models::UsageLedgerEntry,
+    ) -> Result<(), rustain::domain::errors::StorageError> {
+        Err(rustain::domain::errors::StorageError::IoError(
+            "disk full".into(),
+        ))
+    }
+
+    async fn read_session(
+        &self,
+        _: &str,
+    ) -> Result<Vec<rustain::domain::models::UsageLedgerEntry>, rustain::domain::errors::StorageError>
+    {
+        Ok(Vec::new())
+    }
+
+    async fn read_since(
+        &self,
+        _: i64,
+    ) -> Result<Vec<rustain::domain::models::UsageLedgerEntry>, rustain::domain::errors::StorageError>
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// eval-3 AC5 (pin): a ledger that cannot write does not fail the turn and does
+/// not change what `ask` prints.
+#[tokio::test]
+async fn eval3_ask_output_is_unchanged_when_the_ledger_cannot_write() {
+    let run = |ledger: Arc<dyn rustain::domain::ports::UsageLedgerPort>| async move {
+        let provider = Arc::new(ScriptedProvider::new(eval3_two_call_script()));
+        let mut opts = make_opts_with_format("test", OutputFormat::StreamJson);
+        opts.model_override = Some("deepseek-v4-flash".into());
+        let mut stdout = Cursor::new(Vec::new());
+        let (exit, err) = run_ask_with_ledger(provider, opts, ledger, &mut stdout).await;
+        let events: Vec<serde_json::Value> =
+            parse_ndjson(&String::from_utf8(stdout.into_inner()).unwrap())
+                .into_iter()
+                .filter(|e| e["type"] == "call_usage" || e["type"] == "usage")
+                .collect();
+        (exit, err, events)
+    };
+    let (exit, err, failing) = run(Arc::new(FailingLedger)).await;
+    let (_, _, recording) = run(Arc::new(RecordingLedger::default())).await;
+    assert_eq!(exit, ExitCode::SUCCESS, "{err}");
+    assert_eq!(failing.len(), 3, "two call_usage lines and the total");
+    assert_eq!(failing, recording);
+    assert!(
+        !err.contains("disk full") && !err.contains("ledger"),
+        "{err}"
+    );
 }

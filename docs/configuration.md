@@ -104,6 +104,17 @@ enabled = true
 discover_models = true
 ```
 
+The daily limit counts the recorded, priced turn calls of every rustain process
+that shares the data directory: the TUI, `rustain ask`, ACP sessions, and the
+daemon, including cron, channel and peer turns. Each call is recorded in
+`<data dir>/usage/<session>.jsonl` (counts, model and ids, never message text).
+A model with no price adds nothing to the sum. Alerts appear in the TUI;
+headless runs are counted but not stopped by the limit. Memory consolidation,
+compaction, title generation, subagent calls and interrupted calls are not yet
+recorded. A failed write is logged, not retried. Lines are appended without a
+lock, so a short write or a network filesystem can tear a line, which readers
+then skip.
+
 ### Workspace TOML (override with `--config-file`)
 
 ```toml

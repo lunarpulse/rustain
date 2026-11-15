@@ -1614,7 +1614,7 @@ pub fn build_cli_core(
     yolo: bool,
 ) -> Result<CliCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
-    use crate::adapters::noop::{NoOpApprovalPersistence, NoOpUsageLedger};
+    use crate::adapters::noop::NoOpApprovalPersistence;
     use crate::adapters::sandbox::NoOpSandbox;
     use crate::adapters::security_adapter::SecurityAdapter;
 
@@ -1689,7 +1689,8 @@ pub fn build_cli_core(
         raw_capacity,
     );
 
-    let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> = Arc::new(NoOpUsageLedger);
+    let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
+        Arc::new(crate::adapters::ledger::FileUsageLedger::new());
 
     Ok(CliCore {
         provider,
@@ -1711,7 +1712,7 @@ pub fn build_acp_core(
     mcp_servers: &[crate::domain::models::McpServerSpec],
 ) -> Result<AcpCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
-    use crate::adapters::noop::{NoOpApprovalPersistence, NoOpUsageLedger};
+    use crate::adapters::noop::NoOpApprovalPersistence;
     use crate::adapters::sandbox::NoOpSandbox;
     use crate::adapters::security_adapter::SecurityAdapter;
 
@@ -1853,7 +1854,8 @@ pub fn build_acp_core(
         approval.clone(),
         raw_capacity,
     );
-    let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> = Arc::new(NoOpUsageLedger);
+    let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
+        Arc::new(crate::adapters::ledger::FileUsageLedger::new());
 
     Ok(AcpCore {
         provider,

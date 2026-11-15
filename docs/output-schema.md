@@ -162,7 +162,7 @@ The domain `Plan` type serializes with `camelCase` internally (for TUI/storage c
 
 ### `--dry-run` behavior
 
-- The run writes **NO session state** — no conversation save, no resume hint. A dry-run leaves zero trace on disk.
+- The run saves no reply and prints no resume hint. Its provider calls are still recorded in the usage ledger (`<data dir>/usage/`), as for every run. The prompt is still saved once before the first provider call (a known defect).
 - `--dry-run --yolo` is rejected by clap (`conflicts_with`) — `--yolo` is the literal inverse of `--dry-run`.
 - In `text` mode, stdout renders the plan (title, numbered tasks, estimated effort, attempted-tools line). When no `propose_plan` call was made, falls back to assistant prose + attempted-tools line.
 - The no-mutate guarantee is **model-independent** — even a model that ignores the plan-mode nudge and emits `Write`/`Bash` cannot mutate state, because the `permission_chain` gate denies them. Safe-risk tools (e.g. `read_file`, `propose_plan`) still execute.

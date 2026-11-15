@@ -716,6 +716,38 @@ impl UsageLedgerPort for CallUsageTap {
     }
 }
 
+/// How long `ask` waits, before it returns, for its turn task to end, so the
+/// last call's ledger row is written before the process exits.
+const TURN_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Every exit of `run_ask_core` after the turn is spawned goes through here:
+/// no further provider call, then wait (bounded) for the turn task.
+async fn finish_turn(
+    exit: ExitCode,
+    cancel: CancellationToken,
+    call_usage_rx: tokio::sync::mpsc::UnboundedReceiver<CallBoundary>,
+    mut turn: tokio::task::JoinHandle<()>,
+) -> ExitCode {
+    cancel.cancel();
+    // The tap stops waiting for a boundary nobody takes.
+    drop(call_usage_rx);
+    if tokio::time::timeout(TURN_DRAIN_GRACE, &mut turn)
+        .await
+        .is_err()
+    {
+        turn.abort();
+    }
+    exit
+}
+
+/// First action of every failing exit after the turn is spawned: cancel the
+/// turn, then write the error text. No write may sit between the failure and
+/// the cancel, or a released turn could start another provider call meanwhile.
+fn begin_exit(cancel: &CancellationToken, err: &mut dyn Write, message: std::fmt::Arguments<'_>) {
+    cancel.cancel();
+    let _ = writeln!(err, "{message}");
+}
+
 fn add_tokens(total: Option<u32>, call: Option<u32>) -> Option<u32> {
     match (total, call) {
         (None, None) => None,
@@ -992,7 +1024,8 @@ pub async fn run_ask_core(
 
     // Move event_tx into the turn — when the turn ends, the channel closes,
     // unblocking the event_rx.recv() loop below.
-    tokio::spawn(turn::run_turn(
+    let drain_cancel = turn_cancel.clone();
+    let turn_task = tokio::spawn(turn::run_turn(
         provider,
         messages,
         options,
@@ -1080,10 +1113,20 @@ pub async fn run_ask_core(
                     ),
                     None => Ok(()),
                 };
+                if written.is_err() {
+                    // Cancel before the release, so the turn starts nothing more.
+                    drain_cancel.cancel();
+                }
                 let _ = boundary.resume.send(());
                 if let Err(e) = written {
-                    let _ = writeln!(err, "Error: failed to write stream output: {}", e);
-                    return ExitCode::FAILURE;
+                    begin_exit(&drain_cancel, err, format_args!("Error: failed to write stream output: {}", e));
+                    return finish_turn(
+                        ExitCode::FAILURE,
+                        drain_cancel,
+                        call_usage_rx,
+                        turn_task,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -1096,8 +1139,18 @@ pub async fn run_ask_core(
                         assistant_text.push_str(content);
                         span.text(content);
                         if let Err(e) = renderer.on_chunk(chunk) {
-                            let _ = writeln!(err, "Error: failed to write stream output: {}", e);
-                            return ExitCode::FAILURE;
+                            begin_exit(
+                                &drain_cancel,
+                                err,
+                                format_args!("Error: failed to write stream output: {}", e),
+                            );
+                            return finish_turn(
+                                ExitCode::FAILURE,
+                                drain_cancel,
+                                call_usage_rx,
+                                turn_task,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1123,8 +1176,18 @@ pub async fn run_ask_core(
                     }
                     if !turn_complete {
                         if let Err(e) = renderer.on_chunk(chunk) {
-                            let _ = writeln!(err, "Error: failed to write stream output: {}", e);
-                            return ExitCode::FAILURE;
+                            begin_exit(
+                                &drain_cancel,
+                                err,
+                                format_args!("Error: failed to write stream output: {}", e),
+                            );
+                            return finish_turn(
+                                ExitCode::FAILURE,
+                                drain_cancel,
+                                call_usage_rx,
+                                turn_task,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1159,8 +1222,18 @@ pub async fn run_ask_core(
                     }
                     if !turn_complete {
                         if let Err(e) = renderer.on_chunk(chunk) {
-                            let _ = writeln!(err, "Error: failed to write stream output: {}", e);
-                            return ExitCode::FAILURE;
+                            begin_exit(
+                                &drain_cancel,
+                                err,
+                                format_args!("Error: failed to write stream output: {}", e),
+                            );
+                            return finish_turn(
+                                ExitCode::FAILURE,
+                                drain_cancel,
+                                call_usage_rx,
+                                turn_task,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1193,7 +1266,9 @@ pub async fn run_ask_core(
                 StreamChunk::Error { content } => {
                     let parsed = parse_provider_error_display(content);
                     if !parsed.is_offline() {
-                        let _ = writeln!(err, "Error: {}", content);
+                        begin_exit(&drain_cancel, err, format_args!("Error: {}", content));
+                    } else {
+                        drain_cancel.cancel();
                     }
                     turn_error = Some(parsed);
                     break;
@@ -1205,7 +1280,9 @@ pub async fn run_ask_core(
                     let parsed = parse_provider_error_display(message);
                     // Defer stderr output for offline errors — handled post-loop (AC3).
                     if !parsed.is_offline() {
-                        let _ = writeln!(err, "Error: {}", message);
+                        begin_exit(&drain_cancel, err, format_args!("Error: {}", message));
+                    } else {
+                        drain_cancel.cancel();
                     }
                     turn_error = Some(parsed);
                     break;
@@ -1228,6 +1305,8 @@ pub async fn run_ask_core(
     // in `append`; it names the model when the stream did end.
     let open_call_model = match call_usage_rx.try_recv() {
         Ok(boundary) => {
+            // Cancel first: the released turn must not start another call.
+            drain_cancel.cancel();
             let _ = boundary.resume.send(());
             boundary.model
         }
@@ -1236,8 +1315,12 @@ pub async fn run_ask_core(
     if let Some(usage) = open_call_usage.take() {
         if let Err(e) = record_call_usage(&mut renderer, &mut usage_total, &open_call_model, usage)
         {
-            let _ = writeln!(err, "Error: failed to write stream output: {}", e);
-            return ExitCode::FAILURE;
+            begin_exit(
+                &drain_cancel,
+                err,
+                format_args!("Error: failed to write stream output: {}", e),
+            );
+            return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
         }
     }
 
@@ -1253,17 +1336,27 @@ pub async fn run_ask_core(
         // failure occurs — matched on the domain variant, not a string prefix.
         if error.is_offline() {
             let msg = "✗ No provider available (offline). Use --dry-run for plan-only, or configure a local LLM.";
-            return emit_cli_error(output_format, out, err, msg, opts.dry_run);
+            drain_cancel.cancel();
+            let exit = emit_cli_error(output_format, out, err, msg, opts.dry_run);
+            return finish_turn(exit, drain_cancel, call_usage_rx, turn_task).await;
         }
-        let _ = writeln!(err, "Error: turn failed: {}", error);
+        begin_exit(
+            &drain_cancel,
+            err,
+            format_args!("Error: turn failed: {}", error),
+        );
         let _ = renderer.emit_error(&format!("turn failed: {}", error), opts.dry_run);
-        return ExitCode::FAILURE;
+        return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
     }
 
     if !turn_complete {
-        let _ = writeln!(err, "Error: turn did not complete");
+        begin_exit(
+            &drain_cancel,
+            err,
+            format_args!("Error: turn did not complete"),
+        );
         let _ = renderer.emit_error("turn did not complete", opts.dry_run);
-        return ExitCode::FAILURE;
+        return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
     }
 
     // Story 13.1c (AC4): derive tools_would_use — deduplicated, sorted tool names
@@ -1298,12 +1391,16 @@ pub async fn run_ask_core(
         tools_would_use,
     };
     if let Err(e) = renderer.finish(&outcome, opts.final_message_only) {
-        let _ = writeln!(err, "Error: failed to write output: {}", e);
-        return ExitCode::FAILURE;
+        begin_exit(
+            &drain_cancel,
+            err,
+            format_args!("Error: failed to write output: {}", e),
+        );
+        return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
     }
 
-    // Story 13.1c (AC7): dry-run is fully read-only — skip all session writes
-    // and the resume hint. A dry-run leaves zero trace on disk.
+    // Story 13.1c (AC7): dry-run saves no reply and prints no resume hint. Its
+    // provider calls are still recorded in the usage ledger, as for every run.
     if !opts.dry_run {
         provider_replay.extend(spans);
         conversation.messages.push(ChatMessage {
@@ -1347,7 +1444,7 @@ pub async fn run_ask_core(
         );
     }
 
-    ExitCode::SUCCESS
+    finish_turn(ExitCode::SUCCESS, drain_cancel, call_usage_rx, turn_task).await
 }
 
 pub async fn run_ask(
@@ -1456,5 +1553,60 @@ async fn read_limited_stdin(cap: usize) -> Result<String> {
             let valid_up_to = e.utf8_error().valid_up_to();
             Ok(String::from_utf8_lossy(&e.into_bytes()[..valid_up_to]).into_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_order_tests {
+    use super::*;
+
+    /// Records whether the token was already cancelled when the write came.
+    struct ObservingWriter {
+        cancel: CancellationToken,
+        cancelled_at_write: Option<bool>,
+    }
+
+    impl Write for ObservingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.cancelled_at_write = Some(self.cancel.is_cancelled());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// eval-3 E3-R01: the cancel comes first, then the text.
+    #[test]
+    fn begin_exit_cancels_the_turn_before_it_writes() {
+        let cancel = CancellationToken::new();
+        let mut err = ObservingWriter {
+            cancel: cancel.clone(),
+            cancelled_at_write: None,
+        };
+        begin_exit(&cancel, &mut err, format_args!("Error: {}", "x"));
+        assert_eq!(err.cancelled_at_write, Some(true));
+    }
+
+    /// eval-3 E3-R01: after the turn is spawned, every error text goes through
+    /// `begin_exit`; a bare `writeln!(err, "Error: ...")` could sit between a
+    /// failure and the cancel (a released turn runs concurrently with `ask`).
+    #[test]
+    fn run_ask_core_writes_no_error_text_before_cancelling() {
+        let source = include_str!("ask.rs");
+        let body = source
+            .split("let turn_task = tokio::spawn(")
+            .nth(1)
+            .expect("the turn spawn")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let run_ask_core_tail = body.split("pub async fn run_ask(").next().unwrap();
+        assert!(
+            !run_ask_core_tail.contains("writeln!(err, \"Error"),
+            "use begin_exit for every error text after the spawn"
+        );
+        assert!(run_ask_core_tail.matches("begin_exit(").count() >= 10);
     }
 }
