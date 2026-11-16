@@ -5678,7 +5678,14 @@ async fn fr41_acp_turn_lists_only_the_trusted_skill_through_build_acp_core() {
     let config = AppConfig::default();
 
     // A fresh production ACP core binds the L1 port (M11).
-    let fresh = build_acp_core(&config, workspace.path(), false, &[]).expect("build_acp_core");
+    let fresh = build_acp_core(
+        &config,
+        workspace.path(),
+        false,
+        &[],
+        Arc::new(rustain::adapters::noop::NoOpPersona),
+    )
+    .expect("build_acp_core");
     assert_eq!(
         fresh
             .skill_exposure
@@ -5695,8 +5702,14 @@ async fn fr41_acp_turn_lists_only_the_trusted_skill_through_build_acp_core() {
     let factory_config = config.clone();
     let factory_capture = capture.clone();
     let factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
-        let mut core = build_acp_core(&factory_config, cwd, false, mcp_servers)
-            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+        let mut core = build_acp_core(
+            &factory_config,
+            cwd,
+            false,
+            mcp_servers,
+            Arc::new(rustain::adapters::noop::NoOpPersona),
+        )
+        .map_err(|_| agent_client_protocol::Error::internal_error())?;
         // Seeding (Rule 2): provider and ledger are replaced; the skill registry
         // is filled *inside* the activator `builtin-full` captured, so the
         // production toolset and the catalog read one registry.

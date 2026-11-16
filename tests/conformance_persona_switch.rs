@@ -272,6 +272,9 @@ impl Fixture {
             Arc::new(ArcSwap::from_pointee(
                 None as Option<Arc<dyn ContextAssemblerPort>>,
             )),
+            Arc::new(ArcSwap::from_pointee(
+                None as Option<Arc<dyn rustain::domain::ports::SkillExposurePort>>,
+            )),
             workspace.path().to_path_buf(),
             Arc::new(FileSystemStorage::new(workspace.path().join("sessions"))),
             Arc::new(NoOpStorage),

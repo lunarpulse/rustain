@@ -234,7 +234,9 @@ impl TuiDoor {
             tools,
             scheduler,
             self.activator.clone(),
-            Arc::new(FixedPersona),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(FixedPersona) as Arc<dyn rustain::domain::ports::PersonaPort>
+            )),
             Arc::new(ArcSwap::from_pointee(
                 Arc::new(NoOpContext) as Arc<dyn rustain::domain::ports::ContextPort>
             )),

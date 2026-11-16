@@ -4243,9 +4243,13 @@ async fn fr41_ask_system_prompt_is_the_bare_persona_with_skills_on_disk() {
         prompt: Mutex::new(None),
     });
     let config = default_config();
-    let mut core =
-        rustain::infrastructure::composition::build_cli_core(&config, workspace.path(), false)
-            .expect("build_cli_core");
+    let mut core = rustain::infrastructure::composition::build_cli_core(
+        &config,
+        workspace.path(),
+        false,
+        Arc::new(rustain::adapters::noop::NoOpPersona),
+    )
+    .expect("build_cli_core");
     core.ledger = Arc::new(NoOpUsageLedger);
     let mut stdout = Cursor::new(Vec::new());
     let mut stderr = Cursor::new(Vec::new());
