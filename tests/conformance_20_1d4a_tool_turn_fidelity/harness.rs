@@ -263,6 +263,7 @@ pub(crate) async fn tui_turn(
         Arc::new(ArcSwap::from_pointee(
             None as Option<Arc<dyn ContextAssemblerPort>>,
         )),
+        Arc::new(ArcSwap::from_pointee(None)),
         ws.to_path_buf(),
         fs.clone(),
         fs as Arc<dyn StoragePort>,

@@ -596,6 +596,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(
                 None as Option<Arc<dyn ContextAssemblerPort>>,
             )),
+            Arc::new(ArcSwap::from_pointee(None)),
             workspace.path().to_path_buf(),
             Arc::new(FileSystemStorage::new(workspace.path().join("sessions"))),
             Arc::new(NoOpStorage),

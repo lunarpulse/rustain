@@ -104,6 +104,7 @@ async fn submitted_tab_producers_are_cancelled_by_owner_and_quit_closes_both() {
             security, tools, scheduler, Arc::new(SkillActivator::new()), Arc::new(NoOpPersona),
             Arc::new(ArcSwap::from_pointee(Arc::new(NoOpContext) as Arc<dyn ContextPort>)),
             Arc::new(ArcSwap::from_pointee(None as Option<Arc<dyn ContextAssemblerPort>>)),
+            Arc::new(ArcSwap::from_pointee(None)),
             workspace.path().to_path_buf(), storage.clone(), storage as Arc<dyn StoragePort>,
             Arc::new(DefaultPlanInjector::new()), Arc::new(NoOpUsageLedger), ActiveRatioWindow::new_in_memory(),
         );

@@ -21,6 +21,7 @@ pub(crate) mod quit_guard;
 pub mod recipient_view;
 pub(crate) mod recovery_prompt;
 pub mod room_bridge;
+pub mod skill_catalog;
 #[cfg(test)]
 mod state_extraction_tests;
 pub(crate) mod system_notice;

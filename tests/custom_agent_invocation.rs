@@ -89,6 +89,7 @@ fn test_persona_replaced_by_agent_body() {
     let prompt = assemble_system_prompt_with_agent(
         persona,
         Some(agent_body),
+        None,
         &activation_set,
         std::path::Path::new("/tmp"),
     );
@@ -109,6 +110,7 @@ fn test_fallback_to_persona_when_agent_body_empty() {
     let prompt = assemble_system_prompt_with_agent(
         persona,
         Some("   \n  "),
+        None,
         &activation_set,
         std::path::Path::new("/tmp"),
     );
@@ -135,6 +137,7 @@ fn test_skill_composition_appended_after_agent_body() {
     let prompt = assemble_system_prompt_with_agent(
         persona,
         Some(agent_body),
+        None,
         &activation_set,
         std::path::Path::new("/tmp"),
     );

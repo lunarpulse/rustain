@@ -726,6 +726,7 @@ pub async fn run(
         persona.clone(),
         app_state.agent_core.context.clone(),
         app_state.agent_core.context_assembler.clone(),
+        app_state.agent_core.skill_exposure.clone(),
         workspace_path.clone(),
         fs_storage.clone(),
         storage.clone(),

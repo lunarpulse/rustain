@@ -30,6 +30,9 @@ mod conformance_skill_registry_sharing;
 #[path = "../conformance_19_29_redirect_and_delegation/mod.rs"]
 mod conformance_19_29_redirect_and_delegation;
 
+#[path = "../conformance_fr41_skill_catalog.rs"]
+mod conformance_fr41_skill_catalog;
+
 #[path = "../conformance_tool_exposure.rs"]
 mod conformance_tool_exposure;
 

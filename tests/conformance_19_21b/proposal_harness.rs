@@ -522,6 +522,7 @@ impl ProposalFixture {
             Arc::new(NoOpPersona),
             self.context.clone(),
             Arc::new(ArcSwap::from_pointee(None)),
+            Arc::new(ArcSwap::from_pointee(None)),
             workspace.clone(),
             Arc::new(
                 rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(

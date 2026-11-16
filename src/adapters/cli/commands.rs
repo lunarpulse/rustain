@@ -71,7 +71,7 @@ pub struct Cli {
     // Skill exposure defaults to "l1-metadata" (ADR-09-02) because skills, unlike tools,
     // gain from a metadata-first listing.
     /// Choose how skills are exposed to the model each turn: `"l1-metadata"` (the
-    /// default) or `"static-full"` (lists every skill in full, like codex).
+    /// default) or `"static-full"` (lists each skill's full SKILL.md, within the catalog token cap).
     #[arg(long, global = true, value_parser = ["l1-metadata", "static-full"])]
     pub skill_exposure: Option<String>,
     /// Choose the sandbox adapter: `"noop"` (the default on all platforms) or

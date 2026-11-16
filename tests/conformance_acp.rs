@@ -5567,3 +5567,207 @@ async fn eval3_acp_writes_one_ledger_row_per_prompt_keyed_by_the_acp_session() {
         "no message text in the ledger"
     );
 }
+
+/// FR41 K4: an ACP turn through the production `build_acp_core` tells the model
+/// about the skills it can activate — and only the ones whose trust policy
+/// allows it (no model-driven trust route on ACP, so a workspace skill is not
+/// listed). Only the provider, the ledger and the contents of the shared skill
+/// registry are seeded; the toolset (which offers `activate_skill`) and the
+/// exposure port stay production.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn fr41_acp_turn_lists_only_the_trusted_skill_through_build_acp_core() {
+    use std::rc::Rc;
+
+    use async_trait::async_trait;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::AcpCoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_acp_core_factory;
+    use rustain::adapters::skill_exposure::SkillExposureKind;
+    use rustain::adapters::skill_registry::SkillRegistry;
+    use rustain::domain::models::{
+        AppConfig, CompletionOptions, Message, ModelDescriptor, SkillDef, SkillSource, StopReason,
+        StreamChunk,
+    };
+    use rustain::domain::ports::{PersonaPort, StreamingProvider};
+    use rustain::infrastructure::composition::build_acp_core;
+
+    /// Ends the turn at once; records the system prompt of the request.
+    struct PromptCapture {
+        prompt: parking_lot::Mutex<Option<String>>,
+    }
+    #[async_trait]
+    impl StreamingProvider for PromptCapture {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<
+            futures::stream::BoxStream<'static, StreamChunk>,
+            rustain::domain::errors::ProviderError,
+        > {
+            *self.prompt.lock() = Some(options.system_prompt);
+            Ok(Box::pin(futures::stream::iter(vec![
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ])))
+        }
+        async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "fr41-capture".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError>
+        {
+            Ok(rustain::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    fn skill(name: &str, description: &str, source: SkillSource) -> SkillDef {
+        SkillDef {
+            name: name.to_string(),
+            description: description.to_string(),
+            file: std::path::PathBuf::from(format!("/fr41/{name}/SKILL.md")),
+            directory: std::path::PathBuf::from(format!("/fr41/{name}")),
+            source,
+            allowed_tools: None,
+            terse: None,
+        }
+    }
+
+    let data = tempfile::tempdir().expect("data tempdir");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let original = std::env::var_os("RUSTAIN_DATA_DIR");
+    // SAFETY: `#[serial]`; the prior value is restored on drop.
+    unsafe { std::env::set_var("RUSTAIN_DATA_DIR", data.path()) };
+    let _env = scopeguard::guard(original, |original| {
+        // SAFETY: as above.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("RUSTAIN_DATA_DIR", v),
+                None => std::env::remove_var("RUSTAIN_DATA_DIR"),
+            }
+        }
+    });
+
+    let config = AppConfig::default();
+
+    // A fresh production ACP core binds the L1 port (M11).
+    let fresh = build_acp_core(&config, workspace.path(), false, &[]).expect("build_acp_core");
+    assert_eq!(
+        fresh
+            .skill_exposure
+            .as_ref()
+            .expect("build_acp_core binds a skill exposure port")
+            .kind(),
+        SkillExposureKind::L1Metadata
+    );
+    drop(fresh);
+
+    let capture = Arc::new(PromptCapture {
+        prompt: parking_lot::Mutex::new(None),
+    });
+    let factory_config = config.clone();
+    let factory_capture = capture.clone();
+    let factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
+        let mut core = build_acp_core(&factory_config, cwd, false, mcp_servers)
+            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+        // Seeding (Rule 2): provider and ledger are replaced; the skill registry
+        // is filled *inside* the activator `builtin-full` captured, so the
+        // production toolset and the catalog read one registry.
+        core.provider = factory_capture.clone();
+        core.ledger = Arc::new(rustain::adapters::noop::NoOpUsageLedger);
+        *core
+            .skill_activator
+            .registry_arc()
+            .try_write()
+            .expect("fresh registry is uncontended") = SkillRegistry::from_skills(vec![
+            skill("g-skill", "Global skill", SkillSource::GlobalAgents),
+            skill("w-skill", "Workspace skill", SkillSource::WorkspaceAgents),
+        ]);
+        Ok(core)
+    });
+    let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
+    let server = serve_acp_with_acp_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        config,
+        workspace.path().to_path_buf(),
+        None,
+        factory,
+    );
+
+    let drive = async {
+        let mut lines = tokio::io::BufReader::new(&mut client_read).lines();
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        eval3_result_for(&mut lines, 1).await;
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        let created = eval3_result_for(&mut lines, 2).await;
+        let sid = created["result"]["sessionId"]
+            .as_str()
+            .expect("session/new returns a sessionId")
+            .to_owned();
+        client_write
+            .write_all(
+                line(acp_prompt_req_with_text(
+                    serde_json::json!(3),
+                    &sid,
+                    "hello",
+                ))
+                .as_bytes(),
+            )
+            .await
+            .expect("write session/prompt");
+        let done = eval3_result_for(&mut lines, 3).await;
+        assert_eq!(
+            done["result"]["stopReason"],
+            serde_json::json!("end_turn"),
+            "{done}"
+        );
+    };
+    tokio::select! {
+        () = drive => {},
+        res = server => panic!("ACP server exited before the prompt completed: {res:?}"),
+    };
+
+    // The persona is the ACP session's own (`PersonaAdapter` over the cwd).
+    let persona = rustain::adapters::persona_adapter::PersonaAdapter::new(
+        rustain::domain::models::project_context::ProjectContext::empty(),
+    )
+    .system_prompt(workspace.path());
+    let expected = format!(
+        "{}\n\n<available_skills>\nInstalled skills you can load with the activate_skill tool. When a request matches a skill's description, call activate_skill with its exact name.\n<skill_entry name=\"g-skill\">Global skill</skill_entry>\n</available_skills>",
+        persona.trim_end()
+    );
+    let prompt = capture
+        .prompt
+        .lock()
+        .clone()
+        .expect("the prompt reached the provider");
+    assert_eq!(prompt, expected);
+}

@@ -518,11 +518,13 @@ impl DaemonTurnRuntime {
         context_tainted: bool,
     ) -> tokio::task::JoinHandle<()> {
         // System prompt (persona; no per-turn skill activation headless).
+        // `None` catalog: a daemon turn has no skill source (DF-FR41-DAEMON-ASK-NO-SKILL-SOURCE).
         let persona_prompt = self.persona.system_prompt(&self.workspace);
         let empty_set = SkillActivationSet::new();
         let system_prompt =
             crate::domain::services::skill_context::assemble_system_prompt_with_agent(
                 &persona_prompt,
+                None,
                 None,
                 &empty_set,
                 &self.workspace,

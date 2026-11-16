@@ -12,6 +12,7 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::domain::events::AppEvent;
+use crate::domain::models::skill_metadata::SkillMetadata;
 use crate::domain::models::{
     ActiveSkill, ConversationId, MAX_SKILL_ACTIVATION_DEPTH, MAX_SKILL_FILE_SIZE,
     SkillActivationError, SkillActivationOutcome, SkillActivationSet, SkillDef, SkillSource,
@@ -28,6 +29,14 @@ pub struct SkillActivator {
     /// When None (e.g., unit-test fixtures), workspace-tier activation proceeds without
     /// prompting — tests that need gating must use the user-driven event-loop path.
     event_tx: RwLock<Option<mpsc::UnboundedSender<AppEvent>>>,
+}
+
+/// One skill the Tier-1 catalog may list, with its trust state for this
+/// conversation (`trusted` gates whether a body may be shown).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSkill {
+    pub metadata: SkillMetadata,
+    pub trusted: bool,
 }
 
 impl Default for SkillActivator {
@@ -88,6 +97,36 @@ impl SkillActivator {
         let mut names: Vec<String> = guard.skills().iter().map(|s| s.name.clone()).collect();
         names.sort();
         names
+    }
+
+    /// Skills this conversation's turn may be told about in the Tier-1 catalog
+    /// (FR41 D1), sorted by name. Fail-closed trust filter: a skill is kept iff
+    /// it is trusted (`GlobalAgents`, or its file is trusted in this
+    /// conversation) or the activator can prompt for trust (`event_tx` set).
+    /// Guards are taken one at a time and never with `try_read`.
+    pub async fn catalog_skills(&self, conversation_id: &str) -> Vec<CatalogSkill> {
+        let entries: Vec<(SkillMetadata, PathBuf)> = {
+            let guard = self.registry.read().await;
+            guard
+                .skills()
+                .iter()
+                .map(|def| (SkillMetadata::from_def(def), def.file.clone()))
+                .collect()
+        };
+        let can_prompt = self.event_tx.read().await.is_some();
+        let sets = self.conversation_sets.read().await;
+        let set = sets.get(conversation_id);
+        let mut out: Vec<CatalogSkill> = entries
+            .into_iter()
+            .filter_map(|(metadata, file)| {
+                let trusted = metadata.source == SkillSource::GlobalAgents
+                    || set.is_some_and(|s| s.is_trusted(&file));
+                (trusted || can_prompt).then_some(CatalogSkill { metadata, trusted })
+            })
+            .collect();
+        drop(sets);
+        out.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
+        out
     }
 
     pub async fn activate(
@@ -495,5 +534,98 @@ mod tests {
         assert_eq!(active.name, "test-skill");
         assert!(active.body.contains("# Test Body"));
         assert_eq!(activator.active_count("conv-1").await, 1);
+    }
+
+    fn catalog_def(name: &str, source: crate::domain::models::SkillSource) -> SkillDef {
+        SkillDef {
+            name: name.to_string(),
+            description: format!("{name} desc"),
+            file: PathBuf::from(format!("/ws/{name}/SKILL.md")),
+            directory: PathBuf::from(format!("/ws/{name}")),
+            source,
+            allowed_tools: None,
+            terse: None,
+        }
+    }
+
+    fn catalog_activator(defs: Vec<SkillDef>) -> SkillActivator {
+        SkillActivator::with_registry(Arc::new(RwLock::new(SkillRegistry::from_skills(defs))))
+    }
+
+    fn names(skills: &[CatalogSkill]) -> Vec<&str> {
+        skills.iter().map(|s| s.metadata.name.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn a1_catalog_skills_sorted_by_name_from_reversed_input() {
+        use crate::domain::models::SkillSource::GlobalAgents;
+        let activator = catalog_activator(vec![
+            catalog_def("zeta", GlobalAgents),
+            catalog_def("mid", GlobalAgents),
+            catalog_def("alpha", GlobalAgents),
+        ]);
+        let skills = activator.catalog_skills("conv-1").await;
+        assert_eq!(names(&skills), vec!["alpha", "mid", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn a2_untrusted_workspace_skill_dropped_without_event_tx_kept_after_trust() {
+        use crate::domain::models::SkillSource::{GlobalAgents, WorkspaceAgents};
+        let activator = catalog_activator(vec![
+            catalog_def("g-skill", GlobalAgents),
+            catalog_def("w-skill", WorkspaceAgents),
+        ]);
+        let before = activator.catalog_skills("conv-1").await;
+        assert_eq!(names(&before), vec!["g-skill"]);
+        activator
+            .mark_trusted("conv-1", PathBuf::from("/ws/w-skill/SKILL.md"))
+            .await;
+        let after = activator.catalog_skills("conv-1").await;
+        assert_eq!(names(&after), vec!["g-skill", "w-skill"]);
+        // Trust is per conversation.
+        let other = activator.catalog_skills("conv-2").await;
+        assert_eq!(names(&other), vec!["g-skill"]);
+    }
+
+    #[tokio::test]
+    async fn a3_workspace_skill_listed_untrusted_when_the_activator_can_prompt() {
+        use crate::domain::models::SkillSource::WorkspaceAgents;
+        let activator = catalog_activator(vec![catalog_def("w-skill", WorkspaceAgents)]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        activator.set_event_tx(tx).await;
+        let skills = activator.catalog_skills("conv-1").await;
+        assert_eq!(names(&skills), vec!["w-skill"]);
+        assert!(!skills[0].trusted);
+    }
+
+    #[tokio::test]
+    async fn a4_trusted_flag_is_global_or_marked_only() {
+        use crate::domain::models::SkillSource::{GlobalAgents, WorkspaceClaude};
+        let activator = catalog_activator(vec![
+            catalog_def("g-skill", GlobalAgents),
+            catalog_def("w-skill", WorkspaceClaude),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        activator.set_event_tx(tx).await;
+        let flags = |skills: &[CatalogSkill]| -> Vec<(String, bool)> {
+            skills
+                .iter()
+                .map(|s| (s.metadata.name.clone(), s.trusted))
+                .collect()
+        };
+        assert_eq!(
+            flags(&activator.catalog_skills("c").await),
+            vec![
+                ("g-skill".to_string(), true),
+                ("w-skill".to_string(), false)
+            ]
+        );
+        activator
+            .mark_trusted("c", PathBuf::from("/ws/w-skill/SKILL.md"))
+            .await;
+        assert_eq!(
+            flags(&activator.catalog_skills("c").await),
+            vec![("g-skill".to_string(), true), ("w-skill".to_string(), true)]
+        );
     }
 }

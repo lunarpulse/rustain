@@ -973,6 +973,7 @@ async fn drive_turn_through_submit(
         Arc::new(ArcSwap::from_pointee(
             None as Option<Arc<dyn rustain::domain::ports::ContextAssemblerPort>>,
         )),
+        Arc::new(ArcSwap::from_pointee(None)),
         workspace.to_path_buf(),
         Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(
             workspace.join("sessions"),

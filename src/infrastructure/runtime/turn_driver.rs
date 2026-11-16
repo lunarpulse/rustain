@@ -54,8 +54,8 @@ use crate::domain::models::{
     TurnOrigin, generate_conversation_id,
 };
 use crate::domain::ports::{
-    ContextAssemblerPort, ContextPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider,
-    ToolSetPort, UsageLedgerPort,
+    ContextAssemblerPort, ContextPort, PersonaPort, SecurityPort, SkillExposurePort, StoragePort,
+    StreamingProvider, ToolSetPort, UsageLedgerPort,
 };
 use crate::domain::services::message_builder;
 use crate::domain::services::plan_mode_injector::{DefaultPlanInjector, PlanModeInjector};
@@ -148,6 +148,9 @@ pub struct LocalTurnDriver {
     persona: Arc<dyn PersonaPort>,
     context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
     context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
+    /// The Tier-1 skill catalog's exposure port (FR41); a live slot read with
+    /// `load_full()` at submit, like `context_assembler`. `None` = no catalog.
+    skill_exposure: Arc<ArcSwap<Option<Arc<dyn SkillExposurePort>>>>,
     workspace_path: PathBuf,
     fs_storage: Arc<FileSystemStorage>,
     storage: Arc<dyn StoragePort>,
@@ -172,6 +175,7 @@ impl LocalTurnDriver {
         persona: Arc<dyn PersonaPort>,
         context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
         context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
+        skill_exposure: Arc<ArcSwap<Option<Arc<dyn SkillExposurePort>>>>,
         workspace_path: PathBuf,
         fs_storage: Arc<FileSystemStorage>,
         storage: Arc<dyn StoragePort>,
@@ -190,6 +194,7 @@ impl LocalTurnDriver {
             persona,
             context,
             context_assembler,
+            skill_exposure,
             workspace_path,
             fs_storage,
             storage,
@@ -437,13 +442,6 @@ impl LocalTurnDriver {
         let empty_set = crate::domain::models::SkillActivationSet::new();
         let activation = activation_set.as_ref().unwrap_or(&empty_set);
         let agent_body = agent_snapshot.as_ref().map(|a| a.body.as_str());
-        let system_prompt =
-            crate::domain::services::skill_context::assemble_system_prompt_with_agent(
-                &persona_prompt,
-                agent_body,
-                activation,
-                workspace_path,
-            );
         let all_tool_names: Vec<String> = all_tool_defs.iter().map(|t| t.name.clone()).collect();
         let agent_filter = agent_snapshot
             .as_ref()
@@ -681,6 +679,39 @@ impl LocalTurnDriver {
             let diagnostics = crate::adapters::tool_exposure::RenderDiagnostics::clean();
             emit_tool_after_render(provider_id, catalog_len, &diagnostics, &telemetry).await;
         }
+        // FR41 — Tier-1 skill catalog + system prompt. Composed after the final
+        // tool list so the `activate_skill` gate sees what the model is offered.
+        let skill_exposure = self.skill_exposure.load_full();
+        let skill_catalog =
+            crate::infrastructure::runtime::skill_catalog::render_turn_skill_catalog(
+                skill_exposure.as_ref().as_ref().map(|exposure| {
+                    crate::infrastructure::runtime::skill_catalog::SkillCatalogSource {
+                        exposure: exposure.as_ref(),
+                        activator: skill_activator,
+                        conversation_id: &conversation.id,
+                        context_window: state.active_context_window,
+                    }
+                }),
+                activation,
+                &tool_defs,
+            )
+            .await;
+        if let Some(d) = &skill_catalog.diagnostics {
+            crate::infrastructure::telemetry::emit_skill_after_render(
+                crate::infrastructure::telemetry::ProviderId::Anthropic,
+                d,
+                &telemetry,
+            )
+            .await;
+        }
+        let system_prompt =
+            crate::domain::services::skill_context::assemble_system_prompt_with_agent(
+                &persona_prompt,
+                agent_body,
+                skill_catalog.block.as_deref(),
+                activation,
+                workspace_path,
+            );
         // --- Model resolution (Story 7.1c) ---
         let retry_count = state.retry_state.as_ref().map_or(0, |r| r.attempt as u32);
         let input_tokens = conversation.usage.as_ref().map_or(0, |u| u.prompt_tokens());

@@ -932,6 +932,7 @@ async fn real_submission_excludes_cancelled_display_from_next_request_and_rebuil
             Arc::new(ArcSwap::from_pointee(
                 None as Option<Arc<dyn ContextAssemblerPort>>,
             )),
+            Arc::new(ArcSwap::from_pointee(None)),
             workspace.path().to_path_buf(),
             storage.clone(),
             storage.clone() as Arc<dyn StoragePort>,

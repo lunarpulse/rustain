@@ -1571,6 +1571,8 @@ pub struct AcpCore {
     pub registry: Arc<crate::adapters::provider::ProviderRegistry>,
     pub router: Arc<crate::adapters::provider::ProviderRouter>,
     pub skill_activator: Arc<SkillActivator>,
+    /// Tier-1 skill catalog port (FR41). `None` = no catalog on this core.
+    pub skill_exposure: Option<Arc<dyn crate::domain::ports::SkillExposurePort>>,
 }
 
 impl From<CliCore> for AcpCore {
@@ -1604,6 +1606,8 @@ impl From<CliCore> for AcpCore {
             registry,
             router,
             skill_activator: Arc::new(SkillActivator::new()),
+            // No skill source (empty activator above) → no catalog.
+            skill_exposure: None,
         }
     }
 }
@@ -1856,6 +1860,10 @@ pub fn build_acp_core(
     );
     let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
         Arc::new(crate::adapters::ledger::FileUsageLedger::new());
+    // FR41 — the Tier-1 skill catalog's port, from the same `ComposeContext` the
+    // toolset was built from (ACP's exposure kind is fixed; see
+    // DF-FR41-ACP-EXPOSURE-KIND-HARDCODED).
+    let skill_exposure = build_skill_exposure(&ProfileSelection::default(), &ctx)?;
 
     Ok(AcpCore {
         provider,
@@ -1870,6 +1878,7 @@ pub fn build_acp_core(
         registry,
         router,
         skill_activator,
+        skill_exposure,
     })
 }
 

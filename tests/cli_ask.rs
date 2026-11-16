@@ -4166,3 +4166,98 @@ async fn eval3_ask_output_is_unchanged_when_the_ledger_cannot_write() {
         "{err}"
     );
 }
+
+/// FR41 K5: `rustain ask` over the production `build_cli_core` never carries a
+/// skill catalog, even with a SKILL.md in the workspace — its system prompt is
+/// the persona and nothing else (the CLI builder hides `activate_skill`, and the
+/// Harbor evaluation harness measures the prompt as it is).
+#[tokio::test]
+#[serial_test::serial]
+async fn fr41_ask_system_prompt_is_the_bare_persona_with_skills_on_disk() {
+    struct PromptCapture {
+        prompt: Mutex<Option<String>>,
+    }
+    #[async_trait]
+    impl StreamingProvider for PromptCapture {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<
+            futures::stream::BoxStream<'static, StreamChunk>,
+            rustain::domain::errors::ProviderError,
+        > {
+            *self.prompt.lock().unwrap() = Some(options.system_prompt);
+            Ok(Box::pin(stream::iter(vec![
+                StreamChunk::Text {
+                    content: "ok".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ])))
+        }
+        async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "fr41-capture".into()
+        }
+        fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError>
+        {
+            Ok(rustain::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _env = data_dir_guard(data.path());
+    let skill_dir = workspace.path().join(".agents/skills/fr41-ask");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fr41-ask\ndescription: FR41 ask must not list this\n---\nbody\n",
+    )
+    .unwrap();
+
+    let provider = Arc::new(PromptCapture {
+        prompt: Mutex::new(None),
+    });
+    let config = default_config();
+    let mut core =
+        rustain::infrastructure::composition::build_cli_core(&config, workspace.path(), false)
+            .expect("build_cli_core");
+    core.ledger = Arc::new(NoOpUsageLedger);
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider.clone(),
+        core,
+        make_opts("hello"),
+        &config,
+        workspace.path(),
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let persona = rustain::adapters::persona_adapter::PersonaAdapter::new(
+        rustain::domain::models::project_context::ProjectContext::empty(),
+    );
+    let persona_prompt =
+        rustain::domain::ports::PersonaPort::system_prompt(&persona, workspace.path());
+    let prompt = provider.prompt.lock().unwrap().clone().unwrap();
+    assert_eq!(prompt, persona_prompt);
+}

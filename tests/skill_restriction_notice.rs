@@ -298,6 +298,7 @@ pub(crate) async fn run_turn_front_door(
         Arc::new(ArcSwap::from_pointee(
             None as Option<Arc<dyn rustain::domain::ports::ContextAssemblerPort>>,
         )),
+        Arc::new(ArcSwap::from_pointee(None)),
         ws.to_path_buf(),
         Arc::new(FileSystemStorage::new(ws.join("sessions"))),
         Arc::new(NoOpStorage),

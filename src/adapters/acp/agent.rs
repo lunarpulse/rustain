@@ -81,6 +81,7 @@ pub(crate) struct SessionCore {
     registry: Arc<crate::adapters::provider::ProviderRegistry>,
     router: Arc<crate::adapters::provider::ProviderRouter>,
     skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
+    skill_exposure: Option<Arc<dyn crate::domain::ports::SkillExposurePort>>,
     mcp_event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AppEvent>>>,
 }
 
@@ -98,6 +99,7 @@ impl From<AcpCore> for SessionCore {
             registry,
             router,
             skill_activator,
+            skill_exposure,
             ..
         } = core;
         Self {
@@ -112,6 +114,7 @@ impl From<AcpCore> for SessionCore {
             router,
             mcp_event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             skill_activator,
+            skill_exposure,
         }
     }
 }
@@ -582,6 +585,9 @@ impl RustainAcpAgent {
             selected_model,
             mcp_event_rx,
             skill_activator,
+            registry,
+            router,
+            skill_exposure,
         ) = {
             let sessions = self.sessions.borrow();
             let state = sessions
@@ -601,6 +607,9 @@ impl RustainAcpAgent {
                 state.selected.clone().map(|(_, model_id)| model_id),
                 state.core.mcp_event_rx.clone(),
                 state.core.skill_activator.clone(),
+                state.core.registry.clone(),
+                state.core.router.clone(),
+                state.core.skill_exposure.clone(),
             )
         };
 
@@ -711,13 +720,6 @@ impl RustainAcpAgent {
         let persona_prompt = PersonaPort::system_prompt(&persona, &cwd);
         let empty_set = SkillActivationSet::new();
         let activation_set = skill_activator.snapshot_for_turn(&conversation_id).await;
-        let system_prompt =
-            crate::domain::services::skill_context::assemble_system_prompt_with_agent(
-                &persona_prompt,
-                None,
-                activation_set.as_ref().unwrap_or(&empty_set),
-                &cwd,
-            );
         let resolved = resolve_effective_model(
             &ModelResolutionRequest {
                 explicit_override: selected_model.or_else(|| self.model_override.clone()),
@@ -729,13 +731,42 @@ impl RustainAcpAgent {
             },
             &self.app_config.router,
         );
+        // FR41 — Tier-1 skill catalog, composed from the final offered tools and
+        // the resolved model's window on the active delegate (D4).
+        let tools_offered = tools.available_tools();
+        let skill_catalog = crate::infrastructure::runtime::skill_catalog::render_turn_skill_catalog(
+            skill_exposure.as_deref().map(|exposure| {
+                crate::infrastructure::runtime::skill_catalog::SkillCatalogSource {
+                    exposure,
+                    activator: &skill_activator,
+                    conversation_id: &conversation_id,
+                    context_window:
+                        crate::infrastructure::runtime::skill_catalog::active_delegate_context_window(
+                            &registry,
+                            &router,
+                            &resolved.model,
+                        ),
+                }
+            }),
+            activation_set.as_ref().unwrap_or(&empty_set),
+            &tools_offered,
+        )
+        .await;
+        let system_prompt =
+            crate::domain::services::skill_context::assemble_system_prompt_with_agent(
+                &persona_prompt,
+                None,
+                skill_catalog.block.as_deref(),
+                activation_set.as_ref().unwrap_or(&empty_set),
+                &cwd,
+            );
         let options = CompletionOptions {
             session_id: Some(conversation.id.clone()),
             model: resolved.model.clone(),
             max_tokens: 8192,
             system_prompt,
             temperature: None,
-            tools: tools.available_tools(),
+            tools: tools_offered,
         };
 
         let mut approval_rx = approval.subscribe();

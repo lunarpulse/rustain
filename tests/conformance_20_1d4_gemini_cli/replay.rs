@@ -724,6 +724,7 @@ async fn k10_tui_tool_round_replays_in_turn_and_no_projection_carries_it() {
         Arc::new(ArcSwap::from_pointee(
             None as Option<Arc<dyn ContextAssemblerPort>>,
         )),
+        Arc::new(ArcSwap::from_pointee(None)),
         ws.clone(),
         fs.clone(),
         fs as Arc<dyn StoragePort>,

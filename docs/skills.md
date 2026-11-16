@@ -217,6 +217,36 @@ If the active agent and skill tool filters share no tool at all, a separate,
 louder warning fires instead: *"Active agent and skill tool filters are
 disjoint — no tools available for this turn."*
 
+## How the model learns which skills exist
+
+On every turn in the TUI and in an ACP editor, rustain adds an
+`<available_skills>` block to the system prompt, right after the persona and
+before any skill you have already activated. Each line is one installed skill
+(`name` and `description`) that the model can load with `activate_skill`, so it
+can pick one from your request instead of learning the names from an error.
+
+- **What is listed.** Enabled skills, sorted by name. A skill you have already
+  activated in this message is not repeated — its full `<skill>` block is the
+  last thing in the prompt. Workspace skills carry `trust="workspace"`.
+- **The cap.** The listing is limited to 2% of the model's context window, at
+  most 4,000 estimated tokens (4,000 when the window is unknown). It stops at
+  the first skill that would not fit; a trailing `<omitted count="N">` line
+  says how many installed skills were left out. The count is all the model is
+  told: it is not given a route to the unlisted skills.
+- **Trust.** The TUI lists workspace skills because it can ask you before the
+  model activates one. ACP cannot ask, so it lists a workspace skill only after
+  you have trusted it in that conversation (for example by typing `/skill`).
+  Under `[skill_exposure].kind = "static-full"` a workspace skill you have not
+  trusted shows only its name and description; its full SKILL.md appears once
+  you trust it. `static-full` bodies are the snapshot taken at startup.
+- **`meta-search`.** With `kind = "meta-search"` there is no listing; the model
+  finds skills with the `search_skills` tool instead.
+- **The first message.** Skills are discovered in the background after
+  startup, so a message sent before discovery finishes can go out without the
+  listing.
+- **Not covered.** `rustain ask` and daemon/attach turns have no skill source
+  and carry no listing.
+
 ## Before any of that: the trust prompt
 
 The first time a **workspace** skill is activated, rustain stops and asks

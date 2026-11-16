@@ -942,11 +942,15 @@ pub async fn run_ask_core(
     let persona = crate::adapters::persona_adapter::PersonaAdapter::new(project_context);
     let persona_prompt = crate::domain::ports::PersonaPort::system_prompt(&persona, workspace);
     let empty_set = SkillActivationSet::new();
-    let mut system_prompt = crate::domain::services::skill_context::assemble_system_prompt(
-        &persona_prompt,
-        &empty_set,
-        workspace,
-    );
+    // `None` catalog: `ask` has no skill source (DF-FR41-DAEMON-ASK-NO-SKILL-SOURCE).
+    let mut system_prompt =
+        crate::domain::services::skill_context::assemble_system_prompt_with_agent(
+            &persona_prompt,
+            None,
+            None,
+            &empty_set,
+            workspace,
+        );
 
     // Story 13.1c (AC2, O7): append plan-mode addendum when dry_run.
     // Byte-unchanged when dry_run is false.

@@ -251,6 +251,7 @@ impl Fixture {
             Arc::new(NoOpPersona),
             Arc::new(ArcSwap::from_pointee(context)),
             Arc::new(ArcSwap::from_pointee(None)),
+            Arc::new(ArcSwap::from_pointee(None)),
             root.clone(),
             Arc::new(FileSystemStorage::with_workspace_root(
                 rustain::infrastructure::paths::sessions_dir(&root),
