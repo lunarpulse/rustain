@@ -184,6 +184,22 @@ For servers that don't emit the notification, tool lists are cached at connectio
   amendment D1).
 - **"composite adapter but no MCP servers"** — The profile was auto-rewritten to `builtin-full`. Add `[tools.config.mcp.*]` tables or create `.claude/mcp.json`.
 
+## Daemon
+
+`rustain daemon` composes the same MCP servers as the TUI under one rule: the
+profile's **own** tools adapter must be `composite` (a non-composite profile, and the
+composite the daemon substitutes to host A2A peers, carry no MCP servers). Servers
+come from the profile and `<workspace>/.claude/mcp.json` as resolved when the daemon
+starts; there is **no reload** (restart the daemon) and **no mid-session reconnect**
+(a server that dies after connecting stays listed until restart). Children inherit the
+daemon's full environment plus the server's `env`, run as the daemon's user in the
+workspace with **no sandbox**, and write stderr to the daemon log. MCP tools follow the
+daemon's headless approval policy (an attached writer reviews each call; unattended,
+only tools whose server-declared `read_only` hint is set run; the hint is
+self-declared by the server). Peer-tier attachments receive no MCP connection status,
+and the plaintext-`http` notice names the server's scheme, host and port only (never
+path, query or credentials), in the TUI and the daemon.
+
 ## Related
 
 - [Adapter Composition](adapter-composition.md#capability-registry) — Capability Registry and CPA trait integration (Story 9.3a)

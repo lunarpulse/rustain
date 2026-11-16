@@ -92,6 +92,8 @@ struct FakeServer {
     arms: Arc<Mutex<HashMap<String, Arm>>>,
     tasks: Arc<Mutex<HashMap<String, TaskRecord>>>,
     next_task: Arc<AtomicU32>,
+    /// C-3: `FAKE_MCP_INIT_GATE=<dir>` blocks `initialize` on the FIFO `<dir>/release`.
+    init_gate: Option<std::path::PathBuf>,
 }
 
 impl FakeServer {
@@ -106,6 +108,7 @@ impl FakeServer {
             arms: Arc::new(Mutex::new(HashMap::new())),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             next_task: Arc::new(AtomicU32::new(1)),
+            init_gate: std::env::var_os("FAKE_MCP_INIT_GATE").map(std::path::PathBuf::from),
         }
     }
     fn start_list_changed_timer(&self) {
@@ -413,6 +416,9 @@ impl ServerHandler for FakeServer {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<InitializeResult, McpError>> + Send + '_ {
         async move {
+            if let Some(gate) = &self.init_gate {
+                pass_init_gate(gate).await;
+            }
             if self.fail_initialize {
                 return Err(McpError::new(
                     ErrorCode::INTERNAL_ERROR,
@@ -434,6 +440,11 @@ impl ServerHandler for FakeServer {
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
             if self.hang_tools_list {
+                // C-3: `FAKE_MCP_LIST_ENTERED_FILE=<path>` is created on entry, so
+                // a test can wait until the server is inside `tools/list`.
+                if let Some(path) = std::env::var_os("FAKE_MCP_LIST_ENTERED_FILE") {
+                    let _ = std::fs::write(path, b"entered");
+                }
                 std::future::pending::<Result<ListToolsResult, McpError>>().await
             } else {
                 Ok(ListToolsResult::with_all_items(Self::tools()))
@@ -661,6 +672,21 @@ fn tool_result(text: &str, is_error: bool) -> Value {
     })
 }
 
+/// C-3 AC4: announce arrival (`<dir>/entered`), then block until the test
+/// opens the FIFO `<dir>/release` for writing (and writes a byte or closes it).
+async fn pass_init_gate(dir: &std::path::Path) {
+    let dir = dir.to_owned();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::File::create(dir.join("entered"));
+        let Ok(mut fifo) = std::fs::File::open(dir.join("release")) else {
+            return;
+        };
+        let mut byte = [0u8; 1];
+        let _ = std::io::Read::read(&mut fifo, &mut byte);
+    })
+    .await;
+}
+
 #[tokio::main]
 async fn main() {
     if let Some(delay) = duration_env("FAKE_MCP_DROP_AFTER_MS") {
@@ -681,5 +707,9 @@ async fn main() {
             let _ = running.waiting().await;
         }
         Err(error) => eprintln!("fake-mcp-server failed: {error}"),
+    }
+    // C-3 AC6: a server that ignores stdin EOF; only a kill ends it.
+    if enabled("FAKE_MCP_IGNORE_STDIN_EOF") {
+        std::future::pending::<()>().await;
     }
 }

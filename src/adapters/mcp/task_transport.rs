@@ -51,6 +51,15 @@ pub struct TaskGuardTransport {
 }
 
 impl TaskGuardTransport {
+    /// The child's process id (Story C-3 C3-01): lets the owner keep an
+    /// independent kill-and-reap authority over the child after this transport
+    /// has been moved into rmcp's service task.
+    pub fn child_id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(tokio::process::Child::id)
+    }
+}
+
+impl TaskGuardTransport {
     /// Spawn `cmd` with piped stdin/stdout and inherited stderr — the exact
     /// stdio shape rmcp's `TokioChildProcessBuilder` uses by default.
     pub fn spawn(cmd: &mut tokio::process::Command) -> std::io::Result<Self> {
@@ -153,7 +162,11 @@ impl Transport<RoleClient> for TaskGuardTransport {
         let write = Arc::clone(&self.write);
         let child = self.child.take();
         async move {
-            // Close stdin first so a cooperative child sees EOF and exits.
+            // NOTE (pre-existing, DF-C-3-MCP-STDIN-SHUTDOWN-NO-EOF): Tokio's
+            // `ChildStdin::shutdown` is a no-op on Unix and the extracted stdin is
+            // still held by `self.write`, so this does NOT deliver EOF: a child
+            // that waits for EOF is stopped by the bounded wait + kill below, not
+            // by cooperative cleanup.
             {
                 let mut guard = write.lock().await;
                 let _ = guard.shutdown().await;

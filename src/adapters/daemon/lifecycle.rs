@@ -52,6 +52,9 @@ pub struct DaemonRuntime {
     /// Story 12.2b — the per-process conversation (origin-tagged transcript). Fed
     /// to `emit_session_boundary` (AC4) and snapshotted on attach.
     pub conversation: Arc<tokio::sync::Mutex<crate::domain::models::Conversation>>,
+    /// Story C-3 (AD-11) — the composed core, so graceful shutdown can close MCP
+    /// admission and reap the MCP children before the PID file is removed.
+    pub core: Arc<super::runtime::DaemonCore>,
 }
 
 /// THE single shared emit seam — AC-12-1a-7 "one code path, three triggers" +
@@ -295,6 +298,10 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
     Ok(())
 }
 
+/// Bound on the daemon's concurrent MCP teardown (Story C-3 AD-11): inside the
+/// 5 s `daemon stop` budget, next to the 3 s boundary flush.
+const DAEMON_MCP_REAP_BOUND: Duration = Duration::from_secs(3);
+
 /// Graceful shutdown (AC-12-1a-3, NFR48 < 5s). Emits the `Shutdown` boundary
 /// through the single seam, then removes the PID file + socket. Each potentially
 /// blocking step is wrapped in a per-step `tokio::time::timeout` (mirroring the
@@ -303,23 +310,29 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
 async fn graceful_shutdown(rt: &DaemonRuntime) {
     tracing::info!("daemon graceful shutdown begin");
 
-    // Boundary emit (drain + flush) — capped so a stuck flush can't blow NFR48.
+    // Boundary emit (drain + flush) — capped so a stuck flush can't blow NFR48 —
+    // runs CONCURRENTLY with the MCP reap (Story C-3 AD-11): each is bounded to
+    // 3 s on its own, so the worst case adds no wall time to today's flush, and
+    // every MCP child has been closed or sent SIGKILL before the PID file goes.
     let transcript = { rt.conversation.lock().await.messages.clone() };
-    if tokio::time::timeout(
-        Duration::from_secs(3),
-        emit_session_boundary(
-            SessionBoundary::Shutdown,
-            &rt.memory,
-            &rt.recall,
-            &rt.workspace,
-            &transcript,
-        ),
-    )
-    .await
-    .is_err()
-    {
-        tracing::warn!("daemon shutdown: boundary flush timed out (>3s), proceeding to exit");
-    }
+    let flush = async {
+        if tokio::time::timeout(
+            Duration::from_secs(3),
+            emit_session_boundary(
+                SessionBoundary::Shutdown,
+                &rt.memory,
+                &rt.recall,
+                &rt.workspace,
+                &transcript,
+            ),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("daemon shutdown: boundary flush timed out (>3s), proceeding to exit");
+        }
+    };
+    tokio::join!(flush, rt.core.shutdown_mcp(DAEMON_MCP_REAP_BOUND));
 
     // Stop cold-tier loops before removing runtime files.
     if let Err(e) = rt.scheduler.shutdown_loop().await {

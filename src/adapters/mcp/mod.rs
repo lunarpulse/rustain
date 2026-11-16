@@ -1,6 +1,7 @@
 //! MCP adapter module — client, config parsers, lifecycle, reconnect.
 #![cfg(feature = "mcp")]
 
+pub mod child_handle;
 pub mod client;
 pub mod error;
 pub mod http;

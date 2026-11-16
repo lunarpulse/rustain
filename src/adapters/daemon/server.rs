@@ -31,6 +31,7 @@ use crate::adapters::a2a::driver::A2aDelegationRuntime;
 use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
+use super::attach_audience::{frame_variant_name, withheld_from_peer};
 use super::protocol::{
     AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, FrameError,
     MAX_FRAME_BYTES, PROTOCOL_VERSION, ProposalToken, ProtocolError, RecipientAction,
@@ -67,6 +68,8 @@ mod retro_share;
 use rap_inbound::DaemonPeerConsumer;
 mod team;
 use team::TeamSendPayload;
+#[cfg(test)]
+mod attach_audience_tests;
 mod turn_interrupt;
 
 /// Per-connection bounded writer queue depth. A connection that cannot keep up is
@@ -789,42 +792,6 @@ fn project_attach_frame(mut frame: DaemonFrame, tier: ConnectionTier) -> DaemonF
     frame
 }
 
-fn frame_variant_name(frame: &DaemonFrame) -> &'static str {
-    match frame {
-        DaemonFrame::AttachChallenge { .. } => "AttachChallenge",
-        DaemonFrame::AttachAck { .. } => "AttachAck",
-        DaemonFrame::Event(_) => "Event",
-        DaemonFrame::ToolEventWithheld { .. } => "ToolEventWithheld",
-        DaemonFrame::FrameTooLarge { .. } => "FrameTooLarge",
-        DaemonFrame::PeerRowOperation(_) => "PeerRowOperation",
-        DaemonFrame::History { .. } => "History",
-        DaemonFrame::ApprovalRequest { .. } => "ApprovalRequest",
-        DaemonFrame::ApprovalInputChunk { .. } => "ApprovalInputChunk",
-        DaemonFrame::ApprovalInputComplete { .. } => "ApprovalInputComplete",
-        DaemonFrame::ApprovalRefused { .. } => "ApprovalRefused",
-        DaemonFrame::ApprovalClosed { .. } => "ApprovalClosed",
-        DaemonFrame::ConsolidationProposed { .. } => "ConsolidationProposed",
-        DaemonFrame::PeerAccepted { .. } => "PeerAccepted",
-        DaemonFrame::PeerShareResult { .. } => "PeerShareResult",
-        DaemonFrame::RecipientActionResult { .. } => "RecipientActionResult",
-        DaemonFrame::RecipientContextState { .. } => "RecipientContextState",
-        DaemonFrame::TeamProposal { .. } => "TeamProposal",
-        DaemonFrame::TeamProposalClosed { .. } => "TeamProposalClosed",
-        DaemonFrame::TeamSendStarted { .. } => "TeamSendStarted",
-        DaemonFrame::TeamSendSettled { .. } => "TeamSendSettled",
-        DaemonFrame::TeamViewChunk { .. } => "TeamViewChunk",
-        DaemonFrame::TeamViewDone { .. } => "TeamViewDone",
-        DaemonFrame::TeamRetractPreviewed { .. } => "TeamRetractPreviewed",
-        DaemonFrame::TeamRetractAnswered { .. } => "TeamRetractAnswered",
-        DaemonFrame::TeamStatusResult { .. } => "TeamStatusResult",
-        DaemonFrame::SenderConsentRevoked { .. } => "SenderConsentRevoked",
-        DaemonFrame::ActiveTurn { .. } => "ActiveTurn",
-        DaemonFrame::InterruptResult { .. } => "InterruptResult",
-        DaemonFrame::Detached => "Detached",
-        DaemonFrame::Error(_) => "Error",
-    }
-}
-
 /// Bound only the attach copy, preserving complete messages and all metadata.
 /// An oversized envelope must fail explicitly, not masquerade as an AttachAck.
 fn bound_attach_snapshot(frame: &mut DaemonFrame) -> Option<u64> {
@@ -942,6 +909,10 @@ impl ConnRegistry {
     fn fanout(&self, frame: &DaemonFrame) -> Vec<u64> {
         let mut dead = Vec::new();
         for tier in [ConnectionTier::TrustedLocal, ConnectionTier::Peer] {
+            // Story C-3 (AD-12): MCP connection status goes to TrustedLocal only.
+            if tier == ConnectionTier::Peer && withheld_from_peer(frame) {
+                continue;
+            }
             let mut connections = self
                 .conns
                 .iter()

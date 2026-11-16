@@ -461,6 +461,36 @@ missing or unreadable file fails `daemon start` (the foreground process prints
 reuses the same text, so editing or deleting the file later changes nothing until
 `daemon stop` + `daemon start`. The daemon carries no workspace project context.
 
+**MCP servers (Story C-3).** When the profile's own tools adapter is `composite`,
+the servers resolved from the profile and `<workspace>/.claude/mcp.json` (read
+once, at daemon start: edit them, then `daemon stop` + `daemon start`) are composed
+like the TUI does. Their children start on **first activity** (at boot for a
+profile with a `cron` scheduler, in the background, never delaying readiness); an
+idle daemon spawns nothing. The first turn waits up to 15 s for the initial
+connect attempts to finish (`waiting up to 15 s for N MCP server(s) to settle` in
+the daemon log), then proceeds with whatever connected. A server that fails to
+start, handshake or list tools is dropped alone (a `warn` naming it in the daemon
+log); the others, the turn and the daemon continue. A server that dies after
+connecting stays listed until restart (no mid-session reconnect). Every `mcp__`
+call follows the headless approval policy below. On shutdown the daemon closes MCP
+admission, then disconnects every client concurrently within 3 s (the transport
+close waits up to 2 s, then kills the direct child; closing stdin delivers no EOF,
+a known pre-existing limitation). Every still-live child is then SIGKILLed through
+its pidfd (Linux 5.3+; never a bare pid) and observed to exit, concurrently under
+one shared ≤ 1 s deadline. Round 5 reduced the shutdown scope: **descendants are
+NOT stopped**. Only the direct child is targeted; descendants of wrapper launchers
+(`sh -c`, `npx`) and processes that call `setsid` remain outside the guarantee
+(`DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED`, owner 23-1).
+A child that cannot be stopped (no pidfd, a failed syscall, other platforms) is
+logged (`could NOT be stopped`), stays tracked, and PID-file removal proceeds
+best-effort; what then happens to it is only what its owner does (`kill_on_drop`
+sends SIGKILL when the transport is dropped; nothing confirms it).
+This runs beside the boundary flush, before the PID file is removed (`daemon MCP
+shutdown: N closed, M killed`). MCP child stderr is inherited, so it lands in the
+daemon log. A non-composite profile logs
+`hosts no MCP servers; N configured MCP server(s) not composed`; the A2A-upgraded
+composite stays MCP-free.
+
 ### Headless approval policy
 
 The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):

@@ -1168,6 +1168,18 @@ pub async fn run() -> Result<()> {
             })
             .unwrap_or_else(|| "noop".to_string());
         let selection = resolved_selection.cloned().unwrap_or_default();
+        // Story C-3 (AD-1) — what the active profile + workspace `.claude/mcp.json`
+        // resolved to; `build_daemon_core` applies the parity rule.
+        let resolved_mcp = resolved_profile.as_ref().map_or_else(
+            || crate::infrastructure::composition::DaemonMcpTools {
+                mcp_servers: Vec::new(),
+                include_builtin: true,
+            },
+            |profile| crate::infrastructure::composition::DaemonMcpTools {
+                mcp_servers: profile.mcp_servers.clone(),
+                include_builtin: profile.include_builtin_tools,
+            },
+        );
         let a2a_peers = active_a2a_roster(resolved_profile);
         // 18.9b-a review patch — refuse only the actions that BOOT a daemon
         // (AC3(a) demands refusing start). Gating every DaemonAction left a
@@ -1185,6 +1197,7 @@ pub async fn run() -> Result<()> {
             a2a_peers,
             cli.serve_a2a.clone(),
             p2p_listen,
+            resolved_mcp,
         )
         .await
         .map_err(|e| {

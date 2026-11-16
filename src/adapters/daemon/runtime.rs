@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arc_swap::ArcSwap;
 use tokio::sync::{OnceCell, mpsc};
+
+use super::mcp_admission::McpAdmission;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::filesystem::FileSystemStorage;
@@ -30,8 +32,8 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::{
     AppConfig, AssemblyBudget, ChannelKind, ChatMessage, CompletionOptions, ContextBudget,
     ContextBundle, ContextSource, Conversation, ItemAddress, Message, MessageRole,
-    ProvenancedEntry, Relevance, RetrievalMethod, SkillActivationSet, TurnOrigin,
-    generate_message_id,
+    ProvenancedEntry, Relevance, RetrievalMethod, SkillActivationSet, StopReason, StreamChunk,
+    TurnOrigin, generate_message_id,
 };
 use crate::domain::ports::{
     ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort, SecurityPort, StoragePort,
@@ -79,6 +81,9 @@ pub struct DaemonCore {
     /// signal. `0` at idle, `1` after first activity, **still `1`** after the
     /// second (build-once). An eager-build regression fails this in ms.
     build_count: Arc<AtomicUsize>,
+    /// Story C-3 (AD-3) — the gate between "start MCP children on first
+    /// activity" and "shutdown reaps them"; shared with the factory.
+    mcp_admission: Arc<McpAdmission>,
 }
 
 impl DaemonCore {
@@ -104,6 +109,7 @@ impl DaemonCore {
             runtime: OnceCell::new(),
             factory,
             build_count: Arc::new(AtomicUsize::new(0)),
+            mcp_admission: Arc::new(McpAdmission::default()),
         }
     }
 
@@ -142,6 +148,49 @@ impl DaemonCore {
     /// stays `1` — build-once).
     pub fn build_count(&self) -> usize {
         self.build_count.load(Ordering::SeqCst)
+    }
+
+    /// Story C-3 (AD-3) — hand the core the admission the factory shares, so
+    /// [`shutdown_mcp`](Self::shutdown_mcp) closes the same gate the factory's
+    /// MCP start passes through. A core without it (28 `new` call sites in
+    /// tests) keeps the default: open and empty.
+    pub fn with_mcp_admission(mut self, admission: Arc<McpAdmission>) -> Self {
+        self.mcp_admission = admission;
+        self
+    }
+
+    /// Story C-3 (AD-11) — close MCP admission, then stop every MCP child.
+    ///
+    /// (1) closing the admission means a first activity still in progress can no
+    /// longer start children; (2) the composite's connect/reconnect supervisors
+    /// are aborted so no reconnect respawns a child; (3) every client is
+    /// disconnected concurrently within `bound` (a healthy `disconnect` ends in
+    /// the transport's bounded 2 s wait and kill; stdin close delivers no EOF,
+    /// pre-existing); (4) every still-live spawn attempt of every client is then
+    /// SIGKILLed through its pidfd (Linux 5.3+, direct child only; wrapper
+    /// descendants are NOT stopped, DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED),
+    /// concurrently under ONE shared 1 s deadline, because dropping a `disconnect`
+    /// future past its bound does not stop a child owned by the service task.
+    /// Total worst case `bound` + 1 s. A child that cannot be stopped (no pidfd or
+    /// a failed syscall) is reported and left tracked; PID-file removal then
+    /// proceeds best-effort. A core whose runtime was never built (or whose
+    /// composite has no MCP servers) returns at once.
+    pub async fn shutdown_mcp(&self, bound: std::time::Duration) {
+        let Some(tools) = self.mcp_admission.close_and_take() else {
+            return;
+        };
+        let Some(composite) = tools
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>(
+        ) else {
+            return;
+        };
+        if composite.mcp_server_ids().is_empty() {
+            return;
+        }
+        composite.abort_mcp_supervisors().await;
+        let (closed, killed) = composite.shutdown_mcp_clients(bound).await;
+        tracing::info!("daemon MCP shutdown: {closed} closed, {killed} killed");
     }
 }
 
@@ -529,7 +578,6 @@ impl DaemonTurnRuntime {
                 &empty_set,
                 &self.workspace,
             );
-        let tool_defs = self.tools.available_tools();
 
         // Model resolution (defaults — no TUI retry/selected-model state).
         let config = self.app_config.load_full();
@@ -542,13 +590,18 @@ impl DaemonTurnRuntime {
             fallback_model: config.model.clone(),
         };
         let resolved = resolve_effective_model(&req, &config.router);
+        // Story C-3 (AD-4): the tool catalogue is read INSIDE the spawned task,
+        // after the (bounded) MCP settle wait, so a first turn never reads an
+        // empty `mcp__` catalogue because the servers are still handshaking. The
+        // wait lives here, not in `ensure_runtime`, so a cron profile's boot
+        // pre-warm never blocks daemon readiness.
         let options = CompletionOptions {
             session_id: Some(conversation.id.clone()),
             model: resolved.model.clone(),
             max_tokens: 8192, // TODO: wire max_tokens from model config when available
             system_prompt,
             temperature: None,
-            tools: tool_defs,
+            tools: Vec::new(),
         };
 
         let session_id = conversation
@@ -556,39 +609,125 @@ impl DaemonTurnRuntime {
             .clone()
             .unwrap_or_else(|| conversation.id.clone());
 
-        tokio::spawn(turn::run_turn(
-            self.provider.clone(),
-            messages,
-            options,
-            domain_tx.clone(),
-            self.security.clone(),
-            self.tools.clone(),
-            self.tool_scheduler.clone(),
-            conversation.id.clone(),
-            self.storage.clone(),
-            conversation.clone(),
-            None,
-            // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated
-            // rather than left silent. Measured at implementation and
-            // re-measured at the 2026-09-13 code review: `grep -n
-            // "ActiveAgent\|agent_snapshot\|active_agent"
-            // adapters/daemon/runtime.rs` returns ZERO hits — a daemon turn
-            // carries no custom-agent context and the wire protocol has no
-            // field to carry one, so there is no restriction to thread.
-            // ⛔ Not an oversight — the absence is structural.
-            // Load-bearing-ness is proved by mutant AC5(b), not by this comment.
-            None,
-            turn_cancel,
-            self.usage_ledger.clone(),
-            resolved,
-            None,
-            0,
-            None,
-            session_id,
-            turn_origin,
-            context_tainted,
-            None,
-        ))
+        let provider = self.provider.clone();
+        let domain_tx = domain_tx.clone();
+        let security = self.security.clone();
+        let tools = self.tools.clone();
+        let tool_scheduler = self.tool_scheduler.clone();
+        let conversation_id = conversation.id.clone();
+        let storage = self.storage.clone();
+        let conversation = conversation.clone();
+        let usage_ledger = self.usage_ledger.clone();
+
+        tokio::spawn(async move {
+            let mut options = options;
+            if !settle_mcp_before_tools(&tools, &domain_tx, &conversation_id, &turn_cancel).await {
+                return;
+            }
+            options.tools = tools.available_tools();
+            turn::run_turn(
+                provider,
+                messages,
+                options,
+                domain_tx,
+                security,
+                tools,
+                tool_scheduler,
+                conversation_id,
+                storage,
+                conversation,
+                None,
+                // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated
+                // rather than left silent. Measured at implementation and
+                // re-measured at the 2026-09-13 code review: `grep -n
+                // "ActiveAgent\|agent_snapshot\|active_agent"
+                // adapters/daemon/runtime.rs` returns ZERO hits — a daemon turn
+                // carries no custom-agent context and the wire protocol has no
+                // field to carry one, so there is no restriction to thread.
+                // ⛔ Not an oversight — the absence is structural.
+                // Load-bearing-ness is proved by mutant AC5(b), not by this comment.
+                None,
+                turn_cancel,
+                usage_ledger,
+                resolved,
+                None,
+                0,
+                None,
+                session_id,
+                turn_origin,
+                context_tainted,
+                None,
+            )
+            .await
+        })
+    }
+}
+
+/// Upper bound on how long a daemon turn waits for the MCP servers' initial
+/// connect attempts (AD-4): above the 10 s per-server handshake + `tools/list`.
+pub const DAEMON_MCP_SETTLE_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Story C-3 (AD-4) — wait (bounded, cancellable) for the composite toolset's MCP
+/// servers to finish their initial connect attempts before the turn reads its
+/// tool catalogue. Returns `false` when the turn was cancelled during the wait:
+/// the terminal `run_turn` itself sends for a cancelled turn has then already
+/// been emitted and the caller must return WITHOUT calling the provider
+/// (`run_turn` checks cancellation only from its second iteration on, so falling
+/// through would make one provider call for a cancelled turn). A toolset without
+/// MCP clients, or an already-settled one, returns `true` at once.
+async fn settle_mcp_before_tools(
+    tools: &Arc<dyn ToolSetPort>,
+    domain_tx: &mpsc::UnboundedSender<AppEvent>,
+    conversation_id: &str,
+    turn_cancel: &CancellationToken,
+) -> bool {
+    let Some(composite) = tools
+        .as_any()
+        .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>(
+    ) else {
+        return true;
+    };
+    let close_cancelled = || {
+        let _ = domain_tx.send(AppEvent::ProviderChunk {
+            conversation_id: conversation_id.to_string(),
+            chunk: StreamChunk::TurnComplete {
+                stop_reason: StopReason::Cancelled,
+            },
+        });
+        false
+    };
+    // C3-02: a cancellation that is already ready wins over everything below,
+    // including the settled fast path and a settle signal that fires at the same
+    // instant — `run_turn` checks cancellation only from its second iteration on.
+    if turn_cancel.is_cancelled() {
+        return close_cancelled();
+    }
+    if composite.is_mcp_settled() {
+        return true;
+    }
+    let ids = composite.mcp_server_ids();
+    tracing::info!(
+        "waiting up to 15 s for {} MCP server(s) to settle: {}",
+        ids.len(),
+        ids.join(", ")
+    );
+    tokio::select! {
+        biased;
+        _ = turn_cancel.cancelled() => close_cancelled(),
+        settled = composite.mcp_initial_connect_settled(DAEMON_MCP_SETTLE_BOUND) => {
+            if !settled {
+                tracing::warn!(
+                    "MCP settle bound elapsed; the turn proceeds with the connected servers (configured: {})",
+                    ids.join(", ")
+                );
+            }
+            // Re-check: a cancel that became ready while settling still wins.
+            if turn_cancel.is_cancelled() {
+                close_cancelled()
+            } else {
+                true
+            }
+        }
     }
 }
 
@@ -881,5 +1020,417 @@ mod tests {
                 HistorySource::Local
             ],
         );
+    }
+
+    /// An unsettled composite: one MCP client that is never started, so the
+    /// settle signal stays `false` and nothing is spawned.
+    fn unsettled_composite() -> Arc<dyn ToolSetPort> {
+        let spec = crate::domain::models::McpServerSpec {
+            id: "c3-unsettled".into(),
+            transport: crate::domain::models::McpTransport::Stdio,
+            command: Some("c3-never-started".into()),
+            args: Vec::new(),
+            env: Default::default(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        };
+        let client = Arc::new(crate::adapters::mcp::client::McpClientAdapter::new(
+            spec.clone(),
+            None,
+        ));
+        Arc::new(
+            crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
+                Arc::new(NoOpToolSet),
+                vec![client],
+                vec![spec],
+                true,
+                None,
+                None,
+                None,
+            ),
+        )
+    }
+
+    /// AD-4/AD-15(b): a turn cancelled while it waits for MCP to settle closes
+    /// exactly as `run_turn` would (one `TurnComplete { Cancelled }`) and makes NO
+    /// provider call; a settled composite then runs a normal turn (one call).
+    #[tokio::test]
+    async fn cancelled_settle_wait_closes_the_turn_without_a_provider_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rt = noop_runtime(tmp.path().to_path_buf());
+        let provider = Arc::new(crate::adapters::noop::RecordingProvider::default());
+        let composite = unsettled_composite();
+        {
+            let rt = Arc::get_mut(&mut rt).unwrap();
+            rt.provider = provider.clone();
+            rt.tools = composite.clone();
+        }
+        let conversation = Conversation {
+            id: "c3-settle".into(),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        rt.spawn_turn(
+            Vec::new(),
+            &conversation,
+            &tx,
+            TurnOrigin::Interactive,
+            cancelled,
+            false,
+        )
+        .await
+        .unwrap();
+        let mut terminals = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::ProviderChunk {
+                conversation_id,
+                chunk:
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled,
+                    },
+            } = event
+            {
+                assert_eq!(conversation_id, "c3-settle");
+                terminals += 1;
+            }
+        }
+        assert_eq!(terminals, 1, "exactly one Cancelled terminal");
+        assert!(
+            provider.requests.lock().await.is_empty(),
+            "a cancelled settle wait must not reach the provider"
+        );
+
+        // Settled composite + fresh token: one provider call.
+        composite
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()
+            .unwrap()
+            .mark_mcp_settled();
+        rt.spawn_turn(
+            Vec::new(),
+            &conversation,
+            &tx,
+            TurnOrigin::Interactive,
+            CancellationToken::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.requests.lock().await.len(), 1);
+    }
+
+    /// C3-02: a ready cancellation wins even when the composite is ALREADY
+    /// settled (the fast path): one Cancelled terminal, no provider call.
+    #[tokio::test]
+    async fn a_cancelled_turn_on_a_settled_composite_makes_no_provider_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rt = noop_runtime(tmp.path().to_path_buf());
+        let provider = Arc::new(crate::adapters::noop::RecordingProvider::default());
+        let composite = unsettled_composite();
+        composite
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()
+            .unwrap()
+            .mark_mcp_settled();
+        {
+            let rt = Arc::get_mut(&mut rt).unwrap();
+            rt.provider = provider.clone();
+            rt.tools = composite;
+        }
+        let conversation = Conversation {
+            id: "c3-fast".into(),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        rt.spawn_turn(
+            Vec::new(),
+            &conversation,
+            &tx,
+            TurnOrigin::Interactive,
+            cancelled,
+            false,
+        )
+        .await
+        .unwrap();
+        let mut terminals = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(
+                event,
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled
+                    },
+                    ..
+                }
+            ) {
+                terminals += 1;
+            }
+        }
+        assert_eq!(terminals, 1, "exactly one Cancelled terminal");
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    // ── C3-03 / AD-15(a): admission through the PRODUCTION shutdown, real child ──
+
+    /// A composite with one stdio client that is NOT an MCP server: `tail -f` on
+    /// a tagged file. It keeps the tag on its own command line, has no children,
+    /// and never completes the handshake, so its connect stays in flight.
+    #[cfg(target_os = "linux")]
+    fn tail_composite(dir: &std::path::Path, tag: &str) -> Arc<dyn ToolSetPort> {
+        let file = dir.join(tag);
+        std::fs::write(&file, "").unwrap();
+        let spec = crate::domain::models::McpServerSpec {
+            id: "c3-tail".into(),
+            transport: crate::domain::models::McpTransport::Stdio,
+            command: Some("tail".into()),
+            args: vec![
+                "-f".into(),
+                "/dev/null".into(),
+                file.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        };
+        let client = Arc::new(crate::adapters::mcp::client::McpClientAdapter::new(
+            spec.clone(),
+            None,
+        ));
+        Arc::new(
+            crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
+                Arc::new(NoOpToolSet),
+                vec![client],
+                vec![spec],
+                true,
+                None,
+                None,
+                None,
+            ),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn composite_of(
+        tools: &Arc<dyn ToolSetPort>,
+    ) -> &crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter {
+        tools
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tagged_process_exists(tag: &str) -> bool {
+        std::process::Command::new("pgrep")
+            .args(["-f", tag])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_core(workspace: PathBuf, admission: Arc<McpAdmission>) -> DaemonCore {
+        DaemonCore::new(
+            workspace,
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(crate::adapters::noop::NoOpMemory),
+            Arc::new(NoOpStorage),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(|| {
+                Err(AdapterCompositionError::MissingDimension {
+                    port: crate::domain::models::PortDimension::Persona,
+                })
+            }),
+        )
+        .with_mcp_admission(admission)
+    }
+
+    /// `/proc/<pid>` is gone, or the process is a zombie awaiting its owner's
+    /// reap: it has TERMINATED. (Shutdown guarantees exit; reaping is the owning
+    /// `Child`'s / Tokio's job and is asserted separately within a bound.)
+    #[cfg(target_os = "linux")]
+    fn terminated(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.trim_start().starts_with('Z')),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn reaped_within(pid: u32, secs: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        true
+    }
+
+    /// The child is observed (pid registered) BEFORE shutdown, and TERMINATED
+    /// when `shutdown_mcp` returns, through the production function. The connect
+    /// is still in `initialize` when shutdown aborts it (C3-01).
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_mcp_kills_a_real_child_before_returning() {
+        if !crate::adapters::mcp::child_handle::pidfd_supported() {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"SKIPPED shutdown_mcp_kills_a_real_child_before_returning: pidfd_open unavailable\n",
+            );
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let tag = format!("c3-reap-{}", generate_message_id());
+        let tools = tail_composite(tmp.path(), &tag);
+        let admission = Arc::new(McpAdmission::default());
+        let core = test_core(tmp.path().to_path_buf(), Arc::clone(&admission));
+        assert!(admission.start_if_open(&tools, || composite_of(&tools).start_mcp_connections()));
+
+        let client = Arc::clone(&composite_of(&tools).mcp_clients()[0]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            if let Some(pid) = client.live_child_pids().await.first().copied() {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert!(!terminated(pid), "control: alive before shutdown");
+
+        core.shutdown_mcp(std::time::Duration::from_secs(3)).await;
+
+        assert!(
+            terminated(pid),
+            "the child must have exited when shutdown returns"
+        );
+        assert!(reaped_within(pid, 5).await, "and be reaped by its owner");
+        // Never-built / second call: returns at once, nothing to stop.
+        core.shutdown_mcp(std::time::Duration::from_secs(3)).await;
+    }
+
+    /// AD-15(a) through the production shutdown, NON-VACUOUS: a starter parked
+    /// between the closed-check and `start()` holds the admission; `shutdown_mcp`
+    /// stays pending; the start closure then waits (still holding the admission)
+    /// until the child is POSITIVELY observed, so shutdown can only run against a
+    /// started child; after release shutdown terminates exactly that child.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_mcp_waits_for_a_parked_starter_then_stops_its_observed_child() {
+        if !crate::adapters::mcp::child_handle::pidfd_supported() {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"SKIPPED shutdown_mcp_waits_for_a_parked_starter_then_stops_its_observed_child: pidfd_open unavailable\n",
+            );
+            return;
+        }
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::mpsc;
+        let tmp = tempfile::tempdir().unwrap();
+        let tag = format!("c3-race-{}", generate_message_id());
+        let tools = tail_composite(tmp.path(), &tag);
+        let admission = Arc::new(McpAdmission::default());
+        let core = Arc::new(test_core(tmp.path().to_path_buf(), Arc::clone(&admission)));
+
+        let hook_reached = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx); // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: test-only, receiver shared into a Fn hook.
+        {
+            let hook_reached = Arc::clone(&hook_reached);
+            admission.set_between_check_and_start_hook(Box::new(move || {
+                hook_reached.store(true, Ordering::SeqCst);
+                entered_tx.send(()).expect("entered");
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .expect("released");
+            }));
+        }
+
+        let observed_pid = Arc::new(AtomicU32::new(0));
+        let handle = tokio::runtime::Handle::current();
+        let starter = {
+            let admission = Arc::clone(&admission);
+            let tools = Arc::clone(&tools);
+            let observed_pid = Arc::clone(&observed_pid);
+            std::thread::spawn(move || {
+                admission.start_if_open(&tools, || {
+                    let client = Arc::clone(&composite_of(&tools).mcp_clients()[0]);
+                    {
+                        let _entered = handle.enter();
+                        composite_of(&tools).start_mcp_connections();
+                    }
+                    // Still holding the admission: wait until the child exists.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        if let Some(pid) = handle.block_on(client.live_child_pids()).first() {
+                            observed_pid.store(*pid, Ordering::SeqCst);
+                            break;
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "the child never started"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                })
+            })
+        };
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("starter parked in the hook");
+        assert!(
+            hook_reached.load(Ordering::SeqCst),
+            "the hook must have been reached"
+        );
+
+        let mut closer = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move { core.shutdown_mcp(std::time::Duration::from_secs(3)).await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut closer)
+                .await
+                .is_err(),
+            "shutdown must stay pending while the starter holds the admission"
+        );
+        assert_eq!(
+            observed_pid.load(Ordering::SeqCst),
+            0,
+            "no child before the release"
+        );
+
+        release_tx.send(()).expect("release");
+        assert!(starter.join().expect("starter thread"), "start ran");
+        let pid = observed_pid.load(Ordering::SeqCst);
+        assert_ne!(
+            pid, 0,
+            "the child was positively observed before shutdown ran"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(20), closer)
+            .await
+            .expect("shutdown finishes once released")
+            .expect("shutdown task");
+        assert!(terminated(pid), "the observed child must have exited");
+        assert!(reaped_within(pid, 5).await);
+        // The gate is closed for good: a later start spawns nothing.
+        assert!(!admission.start_if_open(&tools, || panic!("must not start after shutdown")));
     }
 }

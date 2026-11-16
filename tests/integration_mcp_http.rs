@@ -1103,6 +1103,36 @@ async fn ac9_non_loopback_plaintext_warns_exactly_once_and_still_proceeds() {
     );
 }
 
+/// C-3 AC7 / AD-12b — the plaintext notice names the server and the URL's
+/// scheme, host and port only: userinfo, path and query never reach a notice.
+/// The id is unique to this test (the once-per-process guard is keyed by id).
+#[tokio::test]
+async fn ac9_plaintext_notice_names_the_origin_only() {
+    let refusing = FakeHttpMcpServer::refusing_endpoint().await;
+    let port = refusing
+        .url()
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|rest| rest.split('/').next())
+        .expect("refusing endpoint url is http://127.0.0.1:<port>/…")
+        .to_owned();
+    let url = format!("http://user:pw@0.0.0.0:{port}/p/C3-CANARY-PATH?token=C3-CANARY-QUERY");
+    let (client, mut rx) = adapter(http_spec("c3-notice-origin", &url));
+    assert!(client.connect().await.is_err());
+
+    let emitted = notices(&drain(&mut rx));
+    assert_eq!(emitted.len(), 1, "exactly one notice, got {emitted:?}");
+    assert_eq!(emitted[0].0, NoticeLevel::Warning);
+    let message = &emitted[0].1;
+    assert!(message.contains("c3-notice-origin"), "{message:?}");
+    assert!(message.contains(&format!("0.0.0.0:{port}")), "{message:?}");
+    for secret in ["C3-CANARY-PATH", "C3-CANARY-QUERY", "pw", "user"] {
+        assert!(
+            !message.contains(secret),
+            "must not carry {secret:?}: {message:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn ac9_loopback_and_https_are_silent() {
     let server = FakeHttpMcpServer::start(FakeHttpConfig::healthy()).await;

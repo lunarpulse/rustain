@@ -1322,11 +1322,42 @@ pub fn build_daemon_memory(
     build_memory(memory_adapter, None, &ctx)
 }
 
+/// Story C-3 (AD-1) — what the daemon composes of the profile's MCP
+/// configuration.
+#[derive(Debug, Clone)]
+pub struct DaemonMcpTools {
+    pub mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    pub include_builtin: bool,
+}
+
+/// Story C-3 (AD-1) — the parity rule. The daemon composes the resolved MCP
+/// servers (and `include_builtin_tools`) exactly when the profile's OWN tools
+/// adapter is `"composite"`, as the TUI does; every other adapter — including
+/// the A2A upgrade of a non-composite adapter, which is decided later and
+/// stays MCP-free — keeps today's daemon: no servers, builtin tools on.
+pub fn daemon_mcp_tools(
+    picked_tools_adapter: &str,
+    resolved_mcp: Vec<crate::domain::models::McpServerSpec>,
+    include_builtin: bool,
+) -> DaemonMcpTools {
+    if picked_tools_adapter == "composite" {
+        DaemonMcpTools {
+            mcp_servers: resolved_mcp,
+            include_builtin,
+        }
+    } else {
+        DaemonMcpTools {
+            mcp_servers: Vec::new(),
+            include_builtin: true,
+        }
+    }
+}
 /// Construct a daemon ComposeContext (Story 12.2b): like `build_daemon_memory`'s
 /// minimal context but with **real** session storage and the daemon's
 /// per-activation `domain_tx` wired, so `build_tools`/`build_context_assembler`
 /// compose live (connection-holding) adapters that emit capability events onto
-/// the daemon bus. Builtin tools only (no MCP servers) for the 12.2b producer.
+/// the daemon bus. Builtin tools only (no MCP servers) unless the factory passes
+/// the profile's servers under the parity rule ([`daemon_mcp_tools`]).
 #[cfg(unix)]
 pub(crate) fn daemon_compose_context(
     workspace_path: &std::path::Path,
@@ -1341,6 +1372,11 @@ pub(crate) fn daemon_compose_context(
     // this context on first activity, so a store minted inside would be a
     // second log the transport never writes to.
     peer_topic_store: Arc<crate::adapters::rap::PeerTopicStore>,
+    // Story C-3 (AD-1) — `Vec::new()`/`true` for every context that builds no
+    // tools (eager persona context, channel context); the factory passes the
+    // parity-rule result.
+    mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    include_builtin_tools: bool,
 ) -> ComposeContext {
     use crate::adapters::sandbox::NoOpSandbox;
     ComposeContext {
@@ -1349,8 +1385,8 @@ pub(crate) fn daemon_compose_context(
         project_context: ProjectContext::empty(),
         storage,
         skill_activator: Arc::new(SkillActivator::new()),
-        mcp_servers: Vec::new(),
-        include_builtin_tools: true,
+        mcp_servers,
+        include_builtin_tools,
         domain_tx: Some(domain_tx),
         channel_turn_tx,
         tool_exposure: "static-full".into(),
@@ -1435,6 +1471,7 @@ pub fn build_daemon_core(
     _node_journal: Arc<crate::infrastructure::subagent::NodeJournal>,
     #[cfg(feature = "a2a")] a2a_egress: Arc<crate::adapters::a2a::egress::A2aEgress>,
     team_proposals: Arc<crate::adapters::daemon::team_proposal::TeamProposalRegistry>,
+    resolved_mcp: DaemonMcpTools,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1462,6 +1499,38 @@ pub fn build_daemon_core(
     // 18.9b-a D1 — see `resolve_daemon_tools_adapter`. Resolved once per boot,
     // outside the first-activity factory below, so the disclosure fires once.
     let picked_tools_name = pick(PortDimension::Tools, "builtin-only");
+    // Story C-3 (AD-1) — the parity rule is applied to the profile's OWN tools
+    // adapter, before the A2A upgrade below can change it.
+    let configured_mcp = resolved_mcp.mcp_servers.len();
+    let daemon_mcp = daemon_mcp_tools(
+        &picked_tools_name,
+        resolved_mcp.mcp_servers,
+        resolved_mcp.include_builtin,
+    );
+    // Story C-3 (AD-10) — one announce per boot. A non-composite profile cannot
+    // host MCP servers, so say so rather than staying silent (the TUI has the
+    // same rule); the A2A upgrade notice below is unchanged.
+    if !daemon_mcp.mcp_servers.is_empty() {
+        let mut ids: Vec<&str> = daemon_mcp
+            .mcp_servers
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        tracing::info!(
+            "daemon composes {} MCP server(s) on first activity: {}",
+            ids.len(),
+            ids.join(", ")
+        );
+    } else if configured_mcp > 0 {
+        tracing::info!(
+            "daemon tools adapter '{}' hosts no MCP servers; {} configured MCP server(s) not composed",
+            picked_tools_name,
+            configured_mcp
+        );
+    }
+    // Story C-3 (AD-3) — shared by the factory's start and `shutdown_mcp`.
+    let admission = Arc::new(crate::adapters::daemon::mcp_admission::McpAdmission::default());
     #[cfg(feature = "a2a")]
     let (tools_name, daemon_tools_upgrade_notice) = resolve_daemon_tools_adapter(
         &picked_tools_name,
@@ -1506,6 +1575,8 @@ pub fn build_daemon_core(
         assembler_name.clone(),
         channel_turn_tx.clone(),
         Arc::clone(&peer_topic_store),
+        Vec::new(),
+        true,
     );
     let persona = compose_persona(
         &persona_ref,
@@ -1526,6 +1597,8 @@ pub fn build_daemon_core(
         // AD-9 — the persona file is read once, at boot; the factory reuses the
         // eager `Arc` so a file edited or deleted afterwards cannot change it.
         let factory_persona = Arc::clone(&persona);
+        let factory_mcp = daemon_mcp.clone();
+        let factory_admission = Arc::clone(&admission);
         #[cfg(feature = "a2a")]
         let a2a_egress = a2a_egress.clone();
         #[cfg(feature = "mcp")]
@@ -1542,6 +1615,8 @@ pub fn build_daemon_core(
                     assembler_name.clone(),
                     channel_turn_tx.clone(),
                     Arc::clone(&factory_topic_store),
+                    factory_mcp.mcp_servers.clone(),
+                    factory_mcp.include_builtin,
                 );
                 // Live, connection-holding parts — first activity only.
                 let provider: Arc<dyn StreamingProvider> = {
@@ -1643,6 +1718,19 @@ pub fn build_daemon_core(
                     )
                     .with_workspace_registrar(build_workspace_registrar()?),
                 );
+                // Story C-3 (AD-3) — start the MCP servers LAST: every fallible
+                // factory step above has succeeded, so an `Err` can no longer
+                // leave children running behind a factory that never produced a
+                // runtime. The admission makes check-closed + start one atomic
+                // step against `DaemonCore::shutdown_mcp`; when it is closed
+                // nothing starts and the composite is marked settled.
+                if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    if !factory_admission.start_if_open(&tools, || composite.start_mcp_connections()) {
+                        composite.mark_mcp_settled();
+                    }
+                }
                 Ok(Arc::new(DaemonTurnRuntime {
                     recipient_context: Arc::new(Default::default()),
                     provider,
@@ -1680,7 +1768,8 @@ pub fn build_daemon_core(
         persona,
         peer_topic_store,
         factory,
-    ))
+    )
+    .with_mcp_admission(admission))
 }
 
 /// Composition for CLI one-shot commands (`rustain ask`, future `rustain run`).
@@ -2653,5 +2742,41 @@ allowed_chat_ids = []
             }
             _ => panic!("expected UnknownAdapter"),
         }
+    }
+
+    // ── Story C-3 (AD-1): the daemon's MCP parity rule ──
+
+    fn mcp_spec(id: &str) -> crate::domain::models::McpServerSpec {
+        crate::domain::models::McpServerSpec {
+            id: id.to_string(),
+            transport: crate::domain::models::McpTransport::Stdio,
+            command: Some("c3-fixture".to_string()),
+            args: Vec::new(),
+            env: Default::default(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        }
+    }
+
+    #[test]
+    fn daemon_mcp_tools_composite_keeps_the_resolved_servers_and_builtin_flag() {
+        let got = daemon_mcp_tools("composite", vec![mcp_spec("a"), mcp_spec("b")], false);
+        let ids: Vec<&str> = got.mcp_servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(!got.include_builtin);
+    }
+
+    #[test]
+    fn daemon_mcp_tools_non_composite_is_todays_daemon() {
+        for adapter in ["builtin-only", "builtin-full"] {
+            let got = daemon_mcp_tools(adapter, vec![mcp_spec("a")], true);
+            assert!(got.mcp_servers.is_empty(), "{adapter}");
+            assert!(got.include_builtin, "{adapter}");
+        }
+        // `include_builtin = false` on a non-composite profile does not leak:
+        // the daemon's non-composite toolset keeps its builtin tools.
+        let got = daemon_mcp_tools("builtin-only", vec![mcp_spec("a")], false);
+        assert!(got.include_builtin);
     }
 }

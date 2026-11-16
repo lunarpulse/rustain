@@ -34,6 +34,21 @@ impl RedactedUrl {
         url::Url::parse(&self.0)
     }
 
+    /// Story C-3 (AD-12b): `scheme://host[:port]` only — never userinfo, path or
+    /// query, which can carry a secret (`?token=…`, `/p/<key>`). For notices,
+    /// log lines and anything an attachment can see; an unparseable value yields
+    /// a fixed placeholder rather than any of its text.
+    pub fn origin_display(&self) -> String {
+        match url::Url::parse(&self.0) {
+            Ok(parsed) => match (parsed.host_str(), parsed.port_or_known_default()) {
+                (Some(host), Some(port)) => format!("{}://{host}:{port}", parsed.scheme()),
+                (Some(host), None) => format!("{}://{host}", parsed.scheme()),
+                (None, _) => "(url without a host)".to_string(),
+            },
+            Err(_) => "(unparseable url)".to_string(),
+        }
+    }
+
     /// Strip userinfo from the URL for safe display.
     fn stripped(&self) -> std::borrow::Cow<'_, str> {
         match url::Url::parse(&self.0) {

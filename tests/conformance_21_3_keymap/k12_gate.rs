@@ -458,6 +458,7 @@ fn test_only_name(path: &Path) -> bool {
 const SKIPPED_TEST_FILES: &[&str] = &[
     "src/adapters/auth/flows/api_key/tests.rs",
     "src/adapters/daemon/approval_lifecycle_tests.rs",
+    "src/adapters/daemon/server/attach_audience_tests.rs",
     "src/adapters/daemon/server/turn_interrupt/tests.rs",
     "src/adapters/responses/tests.rs",
     "src/adapters/tui/auth_outcome_tests.rs",

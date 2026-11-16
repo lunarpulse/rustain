@@ -16,11 +16,17 @@ mod common;
 #[path = "../conformance_acp_mcp.rs"]
 mod conformance_acp_mcp;
 
+#[path = "../conformance_daemon_mcp.rs"]
+mod conformance_daemon_mcp;
+
 #[path = "../conformance_mcp_lifecycle.rs"]
 mod conformance_mcp_lifecycle;
 
 #[path = "../conformance_mcp_profile_swap.rs"]
 mod conformance_mcp_profile_swap;
+
+#[path = "../conformance_mcp_shutdown_reap.rs"]
+mod conformance_mcp_shutdown_reap;
 
 #[path = "../conformance_mcp_status_panel.rs"]
 mod conformance_mcp_status_panel;

@@ -64,6 +64,11 @@ pub struct CompositeToolsetAdapter {
     /// Set true (under the task lock) by `stop_mcp_connections` so a `start`
     /// racing teardown aborts its freshly-spawned task instead of leaking it.
     mcp_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Story C-3 (AD-4) — `true` once the initial connect attempt of every MCP
+    /// server has finished, or there is nothing to connect. The daemon's turn
+    /// task waits on it (bounded) before reading the tool catalogue; the TUI
+    /// never does.
+    mcp_settled: Arc<tokio::sync::watch::Sender<bool>>,
     /// Story 9.3b — optional skill activator for `SkillsProvider` registration.
     skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
     /// Story 10.3b — previous catalog snapshot for delta computation.
@@ -117,6 +122,7 @@ impl CompositeToolsetAdapter {
         if let Some(p) = subagent_provider {
             let _ = subagent_provider_cell.set(p);
         }
+        let mcp_clients_empty = mcp_clients.is_empty();
         Self {
             builtin,
             mcp_clients,
@@ -127,6 +133,7 @@ impl CompositeToolsetAdapter {
             a2a_subscription_handles: Arc::new(TokioMutex::new(Vec::new())),
             mcp_connection_tasks: Arc::new(TokioMutex::new(Vec::new())),
             mcp_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_settled: Arc::new(tokio::sync::watch::channel(mcp_clients_empty).0),
             skill_activator,
             prev_catalog: TokioMutex::new(Vec::new()),
             catalog_version: AtomicU64::new(0),
@@ -458,6 +465,41 @@ impl CompositeToolsetAdapter {
             .collect()
     }
 
+    /// Ids of every configured MCP server, sorted (daemon announce / settle log).
+    pub fn mcp_server_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .mcp_clients
+            .iter()
+            .map(|c| c.server_id().to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Story C-3 (AD-4) — whether the initial connect attempt of every MCP
+    /// server has finished (success or failure). `true` when there are no MCP
+    /// clients, or when `start_mcp_connections` was skipped
+    /// ([`mark_mcp_settled`](Self::mark_mcp_settled)).
+    pub fn is_mcp_settled(&self) -> bool {
+        *self.mcp_settled.borrow()
+    }
+
+    /// Mark the composite settled without connecting (admission closed, or the
+    /// supervisors were aborted): nothing will ever settle it otherwise.
+    pub fn mark_mcp_settled(&self) {
+        self.mcp_settled.send_replace(true);
+    }
+
+    /// Wait up to `bound` for the initial connect attempts to finish. `true`
+    /// when settled, `false` when the bound elapsed first.
+    pub async fn mcp_initial_connect_settled(&self, bound: std::time::Duration) -> bool {
+        let mut rx = self.mcp_settled.subscribe();
+        matches!(
+            tokio::time::timeout(bound, rx.wait_for(|settled| *settled)).await,
+            Ok(Ok(_))
+        )
+    }
+
     pub fn start_mcp_connections(&self) {
         if self.mcp_clients.is_empty() {
             return;
@@ -465,8 +507,10 @@ impl CompositeToolsetAdapter {
         let clients = self.mcp_clients.clone();
         let sink = Arc::clone(&self.mcp_connection_tasks);
         let closed = Arc::clone(&self.mcp_closed);
+        let settled = Arc::clone(&self.mcp_settled);
         let handle = tokio::spawn(async move {
             crate::adapters::mcp::lazy_connect::lazy_connect_all(clients, sink, closed).await;
+            settled.send_replace(true);
         });
         // Register under the SAME lock that stop() drains. If the session
         // already closed (or is draining), abort instead of leaking the task
@@ -475,22 +519,23 @@ impl CompositeToolsetAdapter {
             Ok(mut tasks) => {
                 if self.mcp_closed.load(std::sync::atomic::Ordering::SeqCst) {
                     handle.abort();
+                    self.mark_mcp_settled();
                 } else {
                     tasks.push(handle);
                 }
             }
             Err(_) => {
                 handle.abort();
+                self.mark_mcp_settled();
                 tracing::warn!("MCP connection supervisor busy; aborted duplicate start task");
             }
         }
     }
 
-    /// Cooperative cancel-then-reap for one session's MCP children. Idempotent:
-    /// drained connect/reconnect handles and disconnected clients make a second
-    /// call a no-op. Each child reap is time-bounded so a hung MCP shutdown
-    /// cannot stall session teardown.
-    pub async fn stop_mcp_connections(&self) {
+    /// First half of [`stop_mcp_connections`](Self::stop_mcp_connections): mark
+    /// the composite closed, then abort and await every connect and reconnect
+    /// supervisor so no reconnect can spawn a child afterwards. Idempotent.
+    pub async fn abort_mcp_supervisors(&self) {
         let tasks = {
             let mut tasks = self.mcp_connection_tasks.lock().await;
             // Mark closed FIRST, under the lock, so a concurrent start() aborts
@@ -505,6 +550,60 @@ impl CompositeToolsetAdapter {
             task.abort();
             let _ = task.await;
         }
+        self.mark_mcp_settled();
+    }
+
+    /// Story C-3 (AD-11, C3-01/R2-01/R2-02) — disconnect every client
+    /// CONCURRENTLY, each bounded by `bound`, then attempt to force-stop every
+    /// live spawn attempt (≤ 1 s more, concurrently across clients). Unstopped
+    /// attempts are logged and retained. Returns `(closed, killed)`.
+    ///
+    /// A healthy `disconnect` ends in the transport's bounded 2 s wait and kill
+    /// (stdin close delivers no EOF, pre-existing). But dropping a `disconnect`
+    /// future past its bound does not stop the child (the service task owns its
+    /// transport), and aborting a connect still in `initialize` or `tools/list`
+    /// leaves its child to an asynchronous close. So each client then SIGKILLs
+    /// every still-live attempt's direct child through its pidfd (descendants are
+    /// not stopped), concurrently under one shared deadline
+    /// (`force_stop_children`: no bare pid, no `waitpid`). A client counts as
+    /// killed when the force stop had to kill, or failed to stop
+    /// (`Stuck`/`Unstopped`), a child.
+    pub async fn shutdown_mcp_clients(&self, bound: std::time::Duration) -> (usize, usize) {
+        let results = futures::future::join_all(self.mcp_clients.iter().map(|client| async move {
+            match tokio::time::timeout(bound, client.disconnect()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(server = %client.server_id(), %error, "MCP disconnect failed during daemon shutdown");
+                }
+                Err(_) => {
+                    tracing::warn!(server = %client.server_id(), "MCP disconnect did not finish within the bound; force-stopping the child");
+                }
+            }
+            let reap = client
+                .force_stop_children(std::time::Duration::from_secs(1))
+                .await;
+            match reap {
+                crate::adapters::mcp::client::ChildReap::Stuck => {
+                    tracing::error!(server = %client.server_id(), "MCP child did not exit within the shared shutdown bound after SIGKILL");
+                }
+                crate::adapters::mcp::client::ChildReap::Unstopped => {
+                    tracing::error!(server = %client.server_id(), "MCP child could NOT be stopped (no pidfd or a failed syscall); it may outlive the daemon. PID-file removal proceeds best-effort");
+                }
+                _ => {}
+            }
+            reap == crate::adapters::mcp::client::ChildReap::Gone
+        }))
+        .await;
+        let closed = results.iter().filter(|closed| **closed).count();
+        (closed, results.len() - closed)
+    }
+
+    /// Cooperative cancel-then-reap for one session's MCP children. Idempotent:
+    /// drained connect/reconnect handles and disconnected clients make a second
+    /// call a no-op. Each child reap is time-bounded so a hung MCP shutdown
+    /// cannot stall session teardown.
+    pub async fn stop_mcp_connections(&self) {
+        self.abort_mcp_supervisors().await;
         for client in &self.mcp_clients {
             match tokio::time::timeout(MCP_REAP_TIMEOUT, client.disconnect()).await {
                 Ok(Ok(())) => {}

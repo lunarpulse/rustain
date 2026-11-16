@@ -21,6 +21,8 @@ use crate::adapters::cli::commands::DaemonAction;
 use crate::domain::models::AppConfig;
 
 #[cfg(unix)]
+mod attach_audience;
+#[cfg(unix)]
 pub(crate) mod attach_client;
 #[cfg(unix)]
 pub(crate) mod consent;
@@ -28,6 +30,8 @@ pub(crate) mod consent;
 mod crash;
 #[cfg(unix)]
 mod lifecycle;
+#[cfg(unix)]
+pub mod mcp_admission;
 #[cfg(unix)]
 mod pidfile;
 #[cfg(unix)]
@@ -101,6 +105,9 @@ pub async fn run_daemon(
     // core.
     serve_a2a: Option<String>,
     p2p_listen: bool,
+    // Story C-3 (AD-1) — the profile's resolved MCP servers and
+    // `include_builtin_tools`; `build_daemon_core` applies the parity rule.
+    resolved_mcp: crate::infrastructure::composition::DaemonMcpTools,
 ) -> Result<()> {
     #[cfg(unix)]
     {
@@ -115,6 +122,7 @@ pub async fn run_daemon(
                         a2a_peers,
                         serve_a2a,
                         p2p_listen,
+                        resolved_mcp,
                     )
                     .await
                 } else {
@@ -130,6 +138,7 @@ pub async fn run_daemon(
                     a2a_peers,
                     serve_a2a,
                     p2p_listen,
+                    resolved_mcp,
                 )
                 .await
             }
@@ -166,6 +175,7 @@ pub async fn run_daemon(
             selection,
             serve_a2a,
             p2p_listen,
+            resolved_mcp,
         );
         windows_not_supported()
     }
@@ -312,6 +322,7 @@ async fn run_daemon_foreground(
     a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     serve_a2a: Option<String>,
     p2p_listen: bool,
+    resolved_mcp: crate::infrastructure::composition::DaemonMcpTools,
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
 
@@ -483,6 +494,7 @@ async fn run_daemon_foreground(
             #[cfg(feature = "a2a")]
             a2a_egress,
             team_proposals.clone(),
+            resolved_mcp,
         )
         .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
     );
@@ -517,6 +529,8 @@ async fn run_daemon_foreground(
             config.assembler.strategy.clone(),
             Some(channel_turn_tx),
             core.peer_topic_store.clone(),
+            Vec::new(),
+            true,
         );
         crate::infrastructure::composition::build_channels(chan_name, chan_config, &chan_ctx)
             .unwrap_or_else(|e| {
@@ -697,6 +711,7 @@ async fn run_daemon_foreground(
         #[cfg(feature = "cron")]
         cron_completion_rx: Some(cron_completion_rx),
         conversation,
+        core: core.clone(),
     };
 
     // Write the PID file LAST (after we know paths resolve) — it is the readiness

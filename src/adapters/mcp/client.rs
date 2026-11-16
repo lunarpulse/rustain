@@ -1,6 +1,7 @@
 //! MCP client adapter — thin wrapper around `rmcp` for stdio transport.
 
 use std::sync::Arc;
+use std::sync::MutexGuard; // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: C3-R5-01, synchronous registration, never held across await
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::models::HealthSummary;
 use crate::domain::models::{McpConnectionState, McpServerSpec, McpTransport};
 
+use super::child_handle::{ChildHandle, ForceStop};
 use super::error::{HttpFailureKind, McpError};
 use super::http;
 use super::task_driver::McpTaskRuntime;
@@ -138,6 +140,20 @@ impl ClientHandler for McpClientService {
     }
 }
 
+/// What [`McpClientAdapter::force_stop_children`] had to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildReap {
+    /// Every child was already gone (or none was spawned).
+    Gone,
+    /// At least one child was still running: it was SIGKILLed and observed to exit.
+    Killed,
+    /// A child (or its group) did not exit within the shared bound.
+    Stuck,
+    /// No termination mechanism could be acquired for a child: it MAY STILL BE
+    /// RUNNING and stays tracked. Never treated as gone.
+    Unstopped,
+}
+
 /// Per-server MCP client handle.
 ///
 /// Uses `std::sync::RwLock` for `state` and `cached_tools` because these are
@@ -167,6 +183,13 @@ pub struct McpClientAdapter {
     /// widening the persisted `McpConnectionState` enum would churn every
     /// status-panel fixture for one string.
     last_failure_class: AtomicU8,
+    /// Story C-3 (C3-R2-01/02): one pidfd handle per spawn attempt, keyed by a
+    /// generation id. Closing one attempt's service forgets only its own entry.
+    child_attempts: std::sync::Mutex<Vec<(u64, Arc<ChildHandle>)>>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: C3-R5-01, sync registration, never held across an await
+    /// Generation counter for spawn attempts.
+    next_generation: AtomicU64,
+    /// Generation of the attempt whose service is currently stored in `running`.
+    running_generation: AtomicU64,
     /// Loopback verdict parsed once from the configured HTTP URL. The same
     /// value gates the D2 notice and travels into both adapter and doctor
     /// timeout errors.
@@ -197,8 +220,114 @@ impl McpClientAdapter {
             last_refresh_ms: std::sync::atomic::AtomicU64::new(0),
             task_runtime: std::sync::OnceLock::new(),
             last_failure_class: AtomicU8::new(FailureClass::Generic as u8),
+            child_attempts: std::sync::Mutex::new(Vec::new()), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: C3-R5-01
+            next_generation: AtomicU64::new(0),
+            running_generation: AtomicU64::new(0),
             http_local,
         }
+    }
+
+    fn attempts(&self) -> MutexGuard<'_, Vec<(u64, Arc<ChildHandle>)>> {
+        self.child_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Pids of the stdio children registered and not yet observed exited (test
+    /// and diagnostics aid; the pid is informational, never a kill authority).
+    pub async fn live_child_pids(&self) -> Vec<u32> {
+        self.attempts()
+            .iter()
+            .filter(|(_, handle)| !handle.has_exited())
+            .map(|(_, handle)| handle.pid())
+            .collect()
+    }
+
+    /// Forget one attempt's child record (its cleanup completed); every other
+    /// attempt stays registered for shutdown.
+    fn forget_generation(&self, generation: u64) {
+        self.attempts()
+            .retain(|(existing, _)| *existing != generation);
+    }
+
+    /// After a normal disconnect: make sure THIS attempt's child is gone (bounded)
+    /// and forget it only when it is; otherwise it stays tracked for shutdown.
+    /// Direct child only: wrapper descendants are not stopped (see `child_handle`).
+    async fn settle_generation(&self, generation: u64, bound: Duration) {
+        let handle = self
+            .attempts()
+            .iter()
+            .find(|(existing, _)| *existing == generation)
+            .map(|(_, handle)| Arc::clone(handle));
+        let Some(handle) = handle else { return };
+        match handle.force_stop(bound).await {
+            ForceStop::AlreadyExited | ForceStop::Killed => self.forget_generation(generation),
+            ForceStop::Stuck | ForceStop::Unstopped => {
+                tracing::warn!(server = %self.spec.id, pid = handle.pid(), "MCP child not confirmed gone after disconnect; kept for shutdown");
+            }
+        }
+    }
+
+    /// Register one spawn attempt's child. SYNCHRONOUS on purpose (C3-R5-01): the
+    /// caller holds the freshly spawned child with no `.await` between spawn and
+    /// this publication, so an abort can never drop an untracked child. Older
+    /// attempts whose leader already exited are pruned; older LIVE attempts are
+    /// left tracked (settled at disconnect or shutdown), never awaited here.
+    fn register_child(&self, generation: u64, handle: ChildHandle) {
+        let mut attempts = self.attempts();
+        attempts.retain(|(_, existing)| !existing.has_exited());
+        attempts.push((generation, Arc::new(handle)));
+    }
+
+    /// Story C-3 (AD-11, C3-R3-01/02) — force-stop EVERY live spawn attempt of
+    /// this client CONCURRENTLY under ONE shared deadline (all are signalled at
+    /// once and observed against the same `bound`, so N generations never
+    /// multiply the budget). Each attempt's direct child is SIGKILLed through its
+    /// pidfd; `waitpid` is never called. Attempts that stopped are forgotten;
+    /// attempts that did NOT stop (`Stuck`, or `Unstopped`: no pidfd or a failed
+    /// syscall) stay tracked and are reported, never counted as gone.
+    pub async fn force_stop_children(&self, bound: Duration) -> ChildReap {
+        let attempts: Vec<(u64, Arc<ChildHandle>)> = self
+            .attempts()
+            .iter()
+            .map(|(generation, handle)| (*generation, Arc::clone(handle)))
+            .collect();
+        let outcomes =
+            futures::future::join_all(attempts.iter().map(|(generation, handle)| async move {
+                (*generation, handle.pid(), handle.force_stop(bound).await)
+            }))
+            .await;
+        let mut result = ChildReap::Gone;
+        let mut stopped = Vec::new();
+        for (generation, pid, outcome) in outcomes {
+            match outcome {
+                ForceStop::AlreadyExited => stopped.push(generation),
+                ForceStop::Killed => {
+                    stopped.push(generation);
+                    if result == ChildReap::Gone {
+                        result = ChildReap::Killed;
+                    }
+                }
+                ForceStop::Stuck => {
+                    result = ChildReap::Stuck;
+                }
+                ForceStop::Unstopped => {
+                    tracing::error!(
+                        server = %self.spec.id,
+                        pid,
+                        "this MCP child could not be force-stopped (no pidfd or a failed syscall): it may still be running"
+                    );
+                    if result != ChildReap::Stuck {
+                        result = ChildReap::Unstopped;
+                    }
+                }
+            }
+        }
+        if !stopped.is_empty() {
+            self.attempts()
+                .retain(|(generation, _)| !stopped.contains(generation));
+        }
+        result
     }
 
     /// Inject the 17.5a task runtime (called once by the composition root).
@@ -262,10 +391,14 @@ impl McpClientAdapter {
         }
         drop(warned);
 
-        // `{url}` is the redacting `Display` form — `expose_url()` reaches the
-        // connect call and nothing else (A8).
+        // Story C-3 (AD-12b): the notice names scheme, host and port ONLY. The
+        // redacting `Display` form strips userinfo but keeps path and query,
+        // which can carry a secret, and this text reaches logs and (in the
+        // daemon) attachments. `expose_url()` reaches the connect call and
+        // nothing else (A8).
+        let origin = url.origin_display();
         let message = format!(
-            "MCP server '{}': connecting over plaintext http to a non-loopback host ({url}); \
+            "MCP server '{}': connecting over plaintext http to a non-loopback host ({origin}); \
              traffic and any auth token are unencrypted. Use https for remote servers.",
             self.spec.id
         );
@@ -405,6 +538,7 @@ impl McpClientAdapter {
         // The stdio child is spawned HERE, outside the handshake timeout,
         // exactly where Story 9.1 put it — moving it inside would change the
         // attempt accounting the lifecycle conformance suite pins.
+        let mut attempt_generation = 0u64;
         let stdio_transport = match self.spec.transport {
             McpTransport::Stdio => {
                 // P-14, and 9.9 A2: command validation is STDIO-SPECIFIC. An
@@ -436,12 +570,22 @@ impl McpClientAdapter {
                 // dropping the inlined result/error/inputRequests. The shim wraps
                 // task-shaped payloads so they arrive as `CustomResult` and decode
                 // through our own serde types. Non-task traffic is byte-identical.
-                Some(TaskGuardTransport::spawn(&mut cmd).map_err(|e| {
+                let spawned = TaskGuardTransport::spawn(&mut cmd).map_err(|e| {
                     let reason = format!("failed to spawn {command}: {e}");
                     self.record_failure_class(FailureClass::Generic);
                     self.handle_connection_failure(&reason);
                     McpError::SpawnFailed(reason)
-                })?)
+                })?;
+                // C3-R2-01/02, C3-R5-01: take a pidfd handle on the child while it
+                // is still unreaped and register it under a fresh attempt generation
+                // with NO `.await` between the spawn and the publication, so shutdown
+                // can force-stop every live attempt even when the future that owns
+                // its transport is dropped or aborted at any later await.
+                attempt_generation = self.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(pid) = spawned.child_id() {
+                    self.register_child(attempt_generation, ChildHandle::open(pid));
+                }
+                Some(spawned)
             }
             McpTransport::Http => None,
             McpTransport::Sse => unreachable!("SSE is refused above"),
@@ -527,6 +671,8 @@ impl McpClientAdapter {
                     {
                         let mut running_guard = self.running.lock().await;
                         *running_guard = Some(running);
+                        self.running_generation
+                            .store(attempt_generation, Ordering::SeqCst);
                     }
                     return Err(McpError::ToolsListFailed(reason));
                 }
@@ -547,6 +693,8 @@ impl McpClientAdapter {
             {
                 let mut running_guard = self.running.lock().await;
                 *running_guard = Some(running);
+                self.running_generation
+                    .store(attempt_generation, Ordering::SeqCst);
             }
 
             Ok(())
@@ -621,6 +769,17 @@ impl McpClientAdapter {
             let mut running_guard = self.running.lock().await;
             if let Some(mut running) = running_guard.take() {
                 let _ = running.close().await;
+                // The transport's close waited for (and if need be killed) THIS
+                // service's direct child; stdin close delivers no EOF
+                // (DF-C-3-MCP-STDIN-SHUTDOWN-NO-EOF). Confirm the child is gone
+                // through its pidfd and forget the attempt only then. Descendants
+                // of a wrapper are NOT stopped (DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED).
+                // A newer attempt's child (a retry spawned after this service was
+                // stored) stays registered (C3-R2-02).
+                let closed = self.running_generation.swap(0, Ordering::SeqCst);
+                if closed != 0 {
+                    self.settle_generation(closed, Duration::from_secs(1)).await;
+                }
             }
         }
 
@@ -972,4 +1131,289 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(all(test, unix))]
+mod child_generation_tests {
+    use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::adapters::mcp::child_handle::pidfd_supported;
+    use crate::adapters::mcp::child_handle::{
+        ExitState, SignalOutcome, classify_poll, classify_signal,
+    };
+
+    /// Capability probe. The pidfd tests need `pidfd_open` (Linux 5.3+); when it
+    /// is unavailable they SKIP LOUDLY with this named reason instead of passing
+    /// silently or failing for an environment reason.
+    #[cfg(target_os = "linux")]
+    fn pidfd_or_skip(test: &str) -> bool {
+        if pidfd_supported() {
+            return true;
+        }
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!("SKIPPED {test}: pidfd_open unavailable\n").as_bytes(),
+        );
+        false
+    }
+
+    fn dummy() -> McpClientAdapter {
+        McpClientAdapter::new(
+            McpServerSpec {
+                id: "c3-generations".into(),
+                transport: McpTransport::Stdio,
+                command: Some("unused".into()),
+                args: Vec::new(),
+                env: Default::default(),
+                url: None,
+                persistent: false,
+                source: crate::domain::models::McpServerSource::Workspace,
+            },
+            None,
+        )
+    }
+
+    /// A child spawned exactly as production spawns one (no process group).
+    fn sleeper() -> tokio::process::Child {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60").kill_on_drop(true);
+        cmd.spawn().expect("spawn sleep")
+    }
+
+    /// Reap `child` in the background, as the owning transport does.
+    fn reap_in_background(mut child: tokio::process::Child) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        })
+    }
+
+    /// C3-R5-02: every syscall result maps explicitly; nothing is "gone by default".
+    #[test]
+    fn syscall_results_map_to_explicit_outcomes() {
+        assert_eq!(classify_signal(Ok(())), SignalOutcome::Sent);
+        assert_eq!(
+            classify_signal(Err(libc::ESRCH)),
+            SignalOutcome::NoSuchProcess
+        );
+        assert_eq!(
+            classify_signal(Err(libc::EPERM)),
+            SignalOutcome::Failed(libc::EPERM)
+        );
+        assert_eq!(
+            classify_signal(Err(libc::EINVAL)),
+            SignalOutcome::Failed(libc::EINVAL)
+        );
+        assert_eq!(classify_poll(1, true, 0), ExitState::Exited);
+        assert_eq!(classify_poll(0, false, 0), ExitState::Running);
+        assert_eq!(
+            classify_poll(-1, false, libc::EINTR),
+            ExitState::Unknown(libc::EINTR)
+        );
+        assert_eq!(
+            classify_poll(1, false, 0),
+            ExitState::Unknown(0),
+            "POLLERR/POLLNVAL without POLLIN is not a clean exit"
+        );
+    }
+
+    /// C3-R5-02 end to end (Linux): an injected `EPERM` from `pidfd_send_signal`
+    /// is `Unstopped`, never gone: the child is untouched and stays tracked.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_failed_signal_is_unstopped_and_the_child_stays_tracked() {
+        if !pidfd_or_skip("a_failed_signal_is_unstopped_and_the_child_stays_tracked") {
+            return;
+        }
+        let client = dummy();
+        let mut child = sleeper();
+        let pid = child.id().unwrap();
+        client.register_child(1, ChildHandle::open_with(pid, true, Some(libc::EPERM)));
+        assert_eq!(
+            client.force_stop_children(Duration::from_millis(200)).await,
+            ChildReap::Unstopped
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the child was not touched"
+        );
+        assert_eq!(client.live_child_pids().await, vec![pid]);
+        child.kill().await.ok();
+    }
+
+    /// C3-R3-01: with the pidfd acquisition INJECTED to fail there is no safe
+    /// authority, so nothing is signalled and the child is `Unstopped`. (All Unix:
+    /// no pidfd is the normal case off Linux.)
+    #[tokio::test]
+    async fn without_a_pidfd_nothing_is_signalled_and_the_child_is_unstopped() {
+        let mut child = sleeper();
+        let handle = ChildHandle::open_with(child.id().unwrap(), false, None);
+        assert!(!handle.has_mechanism());
+        assert_eq!(
+            handle.force_stop(Duration::from_millis(200)).await,
+            ForceStop::Unstopped
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the child was not touched"
+        );
+        child.kill().await.ok();
+    }
+
+    /// The aggregate keeps an unstoppable child tracked and says so (all Unix).
+    #[tokio::test]
+    async fn with_no_mechanism_the_child_stays_tracked_as_unstopped() {
+        let client = dummy();
+        let mut child = sleeper();
+        let pid = child.id().unwrap();
+        client.register_child(1, ChildHandle::open_with(pid, false, None));
+        assert_eq!(
+            client.force_stop_children(Duration::from_millis(200)).await,
+            ChildReap::Unstopped
+        );
+        assert!(
+            client.attempts().iter().any(|(_, h)| h.pid() == pid),
+            "still tracked (it was never observed exited)"
+        );
+        child.kill().await.ok();
+    }
+
+    /// C3-R2-02 + C3-R3-02 (Linux): closing attempt A forgets only A's child; the
+    /// newer attempts B and C stay registered and ONE force stop kills both
+    /// concurrently under a single shared deadline.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn closing_one_generation_keeps_newer_attempts_and_the_stop_shares_one_deadline() {
+        if !pidfd_or_skip(
+            "closing_one_generation_keeps_newer_attempts_and_the_stop_shares_one_deadline",
+        ) {
+            return;
+        }
+        let client = dummy();
+        let a = sleeper();
+        let b = sleeper();
+        let c = sleeper();
+        let (pa, pb, pc) = (a.id().unwrap(), b.id().unwrap(), c.id().unwrap());
+        for (generation, pid) in [(1, pa), (2, pb), (3, pc)] {
+            client.register_child(generation, ChildHandle::open(pid));
+        }
+        client.forget_generation(1);
+        let mut live = client.live_child_pids().await;
+        live.sort_unstable();
+        let mut expected = vec![pb, pc];
+        expected.sort_unstable();
+        assert_eq!(live, expected, "only A's record is gone");
+
+        let (rb, rc) = (reap_in_background(b), reap_in_background(c));
+        let started = std::time::Instant::now();
+        let outcome = client.force_stop_children(Duration::from_secs(2)).await;
+        assert_eq!(outcome, ChildReap::Killed);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "both children stopped well inside one shared bound"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            rb.await.ok();
+            rc.await.ok();
+        })
+        .await
+        .expect("both reaped by their owners");
+        assert!(client.live_child_pids().await.is_empty());
+        let mut a = a;
+        assert!(a.try_wait().unwrap().is_none(), "A was not signalled");
+        a.kill().await.ok();
+    }
+
+    /// Cancellation at the first await after publication must not lose the new
+    /// attempt, even while an older generation remains live.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn abort_after_spawn_registration_leaves_new_child_for_shutdown() {
+        if !pidfd_or_skip("abort_after_spawn_registration_leaves_new_child_for_shutdown") {
+            return;
+        }
+        let client = Arc::new(dummy());
+        let mut older = sleeper();
+        client.register_child(1, ChildHandle::open(older.id().unwrap()));
+        let mut newer = sleeper();
+        let pid = newer.id().unwrap();
+        let (published, observed) = tokio::sync::oneshot::channel();
+        let task_client = Arc::clone(&client);
+        let task = tokio::spawn(async move {
+            task_client.register_child(2, ChildHandle::open(pid));
+            published.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        observed.await.expect("new attempt published");
+        assert!(newer.try_wait().unwrap().is_none(), "new child was alive");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            client.force_stop_children(Duration::from_secs(2)).await,
+            ChildReap::Killed
+        );
+        tokio::time::timeout(Duration::from_secs(2), newer.wait())
+            .await
+            .expect("new child exited")
+            .expect("new child reaped by owner");
+        older.wait().await.expect("older child reaped by owner");
+    }
+
+    /// C3-R5-01 (Linux): registration is synchronous and publishes the new
+    /// attempt FIRST: it never awaits or signals an older live attempt (so an
+    /// abort can never drop an untracked child), and it prunes only attempts whose
+    /// leader already exited.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn registration_publishes_without_awaiting_and_never_touches_a_live_older_attempt() {
+        if !pidfd_or_skip(
+            "registration_publishes_without_awaiting_and_never_touches_a_live_older_attempt",
+        ) {
+            return;
+        }
+        let client = dummy();
+        let mut older_live = sleeper();
+        let mut older_dead = sleeper();
+        let (pl, pd) = (older_live.id().unwrap(), older_dead.id().unwrap());
+        client.register_child(1, ChildHandle::open(pl));
+        client.register_child(2, ChildHandle::open(pd));
+        older_dead.kill().await.expect("kill");
+        older_dead.wait().await.expect("reaped");
+        let mut newest = sleeper();
+        let pn = newest.id().unwrap();
+        // A plain (non-async) call: there is no await point to abort inside.
+        client.register_child(3, ChildHandle::open(pn));
+        let mut pids: Vec<u32> = client.attempts().iter().map(|(_, h)| h.pid()).collect();
+        pids.sort_unstable();
+        let mut expected = vec![pl, pn];
+        expected.sort_unstable();
+        assert_eq!(
+            pids, expected,
+            "published; the exited attempt pruned; the live one kept"
+        );
+        assert!(
+            older_live.try_wait().unwrap().is_none(),
+            "the older live attempt was not signalled by registration"
+        );
+        older_live.kill().await.ok();
+        newest.kill().await.ok();
+    }
+
+    /// After a child exits and is reaped by its owner, `force_stop` reports
+    /// `AlreadyExited` and signals nothing (Linux).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_force_stop_after_the_child_exited_signals_nothing() {
+        if !pidfd_or_skip("a_force_stop_after_the_child_exited_signals_nothing") {
+            return;
+        }
+        let mut child = sleeper();
+        let handle = ChildHandle::open(child.id().unwrap());
+        child.kill().await.expect("kill");
+        child.wait().await.expect("reaped by its owner");
+        assert!(handle.has_exited());
+        assert_eq!(
+            handle.force_stop(Duration::from_secs(1)).await,
+            ForceStop::AlreadyExited
+        );
+    }
 }
