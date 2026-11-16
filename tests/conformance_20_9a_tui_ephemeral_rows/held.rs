@@ -101,7 +101,8 @@ async fn submitted_tab_producers_are_cancelled_by_owner_and_quit_closes_both() {
         let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval, 16);
         let driver = LocalTurnDriver::new(
             Arc::new(HeldProvider(provider_tx)), Arc::new(ArcSwap::from_pointee(AppConfig::default())), bus,
-            security, tools, scheduler, Arc::new(SkillActivator::new()), Arc::new(NoOpPersona),
+            security, tools, scheduler, Arc::new(SkillActivator::new()),
+            Arc::new(ArcSwap::from_pointee(Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>)),
             Arc::new(ArcSwap::from_pointee(Arc::new(NoOpContext) as Arc<dyn ContextPort>)),
             Arc::new(ArcSwap::from_pointee(None as Option<Arc<dyn ContextAssemblerPort>>)),
             Arc::new(ArcSwap::from_pointee(None)),

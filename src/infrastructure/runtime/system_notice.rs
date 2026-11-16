@@ -589,7 +589,9 @@ mod tests {
             tools,
             scheduler,
             Arc::new(SkillActivator::new()),
-            Arc::new(NoOpPersona),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpPersona) as Arc<dyn crate::domain::ports::PersonaPort>
+            )),
             Arc::new(ArcSwap::from_pointee(
                 Arc::new(NoOpContext) as Arc<dyn ContextPort>
             )),

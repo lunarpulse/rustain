@@ -82,6 +82,7 @@ pub(crate) struct SessionCore {
     router: Arc<crate::adapters::provider::ProviderRouter>,
     skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
     skill_exposure: Option<Arc<dyn crate::domain::ports::SkillExposurePort>>,
+    persona: Arc<dyn crate::domain::ports::PersonaPort>,
     mcp_event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AppEvent>>>,
 }
 
@@ -100,6 +101,7 @@ impl From<AcpCore> for SessionCore {
             router,
             skill_activator,
             skill_exposure,
+            persona,
             ..
         } = core;
         Self {
@@ -115,6 +117,7 @@ impl From<AcpCore> for SessionCore {
             mcp_event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             skill_activator,
             skill_exposure,
+            persona,
         }
     }
 }
@@ -588,6 +591,7 @@ impl RustainAcpAgent {
             registry,
             router,
             skill_exposure,
+            persona,
         ) = {
             let sessions = self.sessions.borrow();
             let state = sessions
@@ -610,6 +614,7 @@ impl RustainAcpAgent {
                 state.core.registry.clone(),
                 state.core.router.clone(),
                 state.core.skill_exposure.clone(),
+                state.core.persona.clone(),
             )
         };
 
@@ -715,9 +720,7 @@ impl RustainAcpAgent {
                 last_user.images = images;
             }
         }
-        let project_context = crate::domain::models::project_context::ProjectContext::empty();
-        let persona = crate::adapters::persona_adapter::PersonaAdapter::new(project_context);
-        let persona_prompt = PersonaPort::system_prompt(&persona, &cwd);
+        let persona_prompt = persona.system_prompt(&cwd);
         let empty_set = SkillActivationSet::new();
         let activation_set = skill_activator.snapshot_for_turn(&conversation_id).await;
         let resolved = resolve_effective_model(

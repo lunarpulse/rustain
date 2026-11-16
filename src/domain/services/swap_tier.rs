@@ -91,7 +91,13 @@ impl TransitionPlan {
                 .map(|a| a.adapter.clone())
                 .unwrap_or_else(|| "none".to_string());
 
-            if from_adapter != to_adapter {
+            // Story C-2 (AD-13): a persona is also changed by its `config`
+            // (the persona file); other ports still diff by adapter name only.
+            let persona_config_changed = port == PortDimension::Persona
+                && current.get(&port).and_then(|a| a._config.as_ref())
+                    != target.get(&port).and_then(|a| a._config.as_ref());
+
+            if from_adapter != to_adapter || persona_config_changed {
                 let tier = match port {
                     PortDimension::Tools => tools_tier_override.unwrap_or_else(|| swap_tier(port)),
                     _ => swap_tier(port),

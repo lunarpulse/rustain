@@ -119,6 +119,12 @@ pub(super) fn fix_profile_error(e: &crate::domain::errors::ProfileError) -> Stri
                 parent, child
             )
         }
+        ProfileError::PersonaConfigInvalid { .. } => {
+            "Fix: use `[persona] config = { file = \"devops.md\" }` (a relative path under the personas directory); `file` is the only key.".to_string()
+        }
+        ProfileError::AdapterConfigUnsupported { .. } => {
+            "Fix: remove the `config` table from that port; the adapter never read it.".to_string()
+        }
         _ => "Fix: review the error message and correct the profile file.".to_string(),
     }
 }

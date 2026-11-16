@@ -85,7 +85,8 @@ async fn assert_terminal_tail_usage(ollama: bool) {
         let scheduler = ToolScheduler::new(security.clone(), tools.clone(), ApprovalRuntime::new(16, Arc::new(NoOpApprovalPersistence)), 16);
         let driver = LocalTurnDriver::new(
             provider, Arc::new(ArcSwap::from_pointee(AppConfig { model: model.into(), ..Default::default() })),
-            bus, security, tools, scheduler, Arc::new(SkillActivator::new()), Arc::new(NoOpPersona),
+            bus, security, tools, scheduler, Arc::new(SkillActivator::new()),
+            Arc::new(ArcSwap::from_pointee(Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>)),
             Arc::new(ArcSwap::from_pointee(Arc::new(NoOpContext) as Arc<dyn ContextPort>)),
             Arc::new(ArcSwap::from_pointee(None as Option<Arc<dyn ContextAssemblerPort>>)),
             Arc::new(ArcSwap::from_pointee(None)),

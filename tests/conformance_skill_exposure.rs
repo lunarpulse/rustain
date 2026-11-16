@@ -297,6 +297,7 @@ fn test_compose_with_default_config_binds_l1_metadata() {
 
     let ctx = ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test"),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage),
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
@@ -353,6 +354,7 @@ fn test_compose_with_static_full_binds_static_full() {
 
     let ctx = ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test"),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage),
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),

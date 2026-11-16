@@ -1289,9 +1289,14 @@ async fn acp_composition_fetches_live_while_one_shot_cli_only_seeds() {
     models(&server, 200, json!([{"id":"headless-account-model"}])).await;
     let cfg = remote_config("openai", format!("{}/v1", server.uri()));
     let workspace = tempfile::tempdir().unwrap();
-    let core =
-        rustain::infrastructure::composition::build_acp_core(&cfg, workspace.path(), false, &[])
-            .unwrap();
+    let core = rustain::infrastructure::composition::build_acp_core(
+        &cfg,
+        workspace.path(),
+        false,
+        &[],
+        std::sync::Arc::new(rustain::adapters::noop::NoOpPersona),
+    )
+    .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !core
             .registry
@@ -1306,8 +1311,13 @@ async fn acp_composition_fetches_live_while_one_shot_cli_only_seeds() {
     .unwrap();
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     server.reset().await;
-    let cli = rustain::infrastructure::composition::build_cli_core(&cfg, workspace.path(), false)
-        .unwrap();
+    let cli = rustain::infrastructure::composition::build_cli_core(
+        &cfg,
+        workspace.path(),
+        false,
+        std::sync::Arc::new(rustain::adapters::noop::NoOpPersona),
+    )
+    .unwrap();
     // One-shot startup serves bundled ⊕ the matching account cache synchronously:
     // the authoritative cached roster, before and without any request.
     assert_eq!(

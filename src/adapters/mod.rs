@@ -39,6 +39,7 @@ pub mod p2p_reach;
 pub mod palette_registry;
 pub mod pem_tls;
 pub mod persona_adapter;
+pub mod persona_file;
 pub mod policy;
 pub mod profile_resolver;
 pub mod project_context_loader;

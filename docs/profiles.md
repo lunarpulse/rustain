@@ -38,7 +38,7 @@ tools     = builtin-full     # Bash/Read/Write/Edit/Glob/Grep + MCP + Skills
 ```toml
 extends = base
 preview = true
-persona   = personal-assistant  # warm-tone, life-organization framing
+persona   = personal-assistant  # embedded assistant persona (plan the day, tasks, notes); a persona file replaces it
 memory    = daily-log          # append-only daily-log memory (date-indexed)
 channels  = telegram           # feature-gated; falls back to terminal
 scheduler = cron               # feature-gated; falls back to none
@@ -80,8 +80,7 @@ preview = false                      # OPTIONAL — enables graceful fallback fo
 # Seven port-dimension tables (each OPTIONAL; missing → inherits from extends or falls back to noop)
 [persona]
 adapter = "coding"
-[persona.config]                     # OPTIONAL — adapter-specific TOML
-tone = "concise"
+config = { file = "devops.md" }      # OPTIONAL — persona file under <config dir>/personas/ (see below)
 
 [memory]
 adapter = "project-scoped"
@@ -111,6 +110,59 @@ adapter = "default"                 # memory + project-context injection (Story 
 default_plan_mode = false
 model = "claude-sonnet-4-6"
 ```
+
+### `[persona] config.file` — Persona File
+
+```toml
+[persona]
+adapter = "coding"                  # minimal, coding and personal-assistant accept a file
+config = { file = "devops.md" }     # or the table form: [persona.config] file = "devops.md"
+```
+
+The file is markdown read from `<config dir>/personas/` (`~/.config/rustain/personas/`,
+or `$RUSTAIN_CONFIG_DIR/personas/`) and becomes the persona prompt. `file` is the
+**only** key `[persona.config]` accepts.
+
+- **Path rule:** `file` is a relative path of `/`-separated segments. It must not be
+  empty, start with `/`, contain `\`, or contain an empty, `.` or `..` segment, so
+  `team/devops.md` is fine and `../x.md`, `./a.md`, `a//b.md` and `/etc/passwd` are
+  refused when the profile loads.
+- **Bound and encoding:** at most **65,536 bytes** of strict UTF-8 (one leading BOM is
+  stripped, trailing whitespace is trimmed, inner CRLF is kept). A larger file, invalid
+  UTF-8 or an empty file is an error, never a truncation.
+- **Containment (Unix):** the file is opened component by component with
+  `O_NOFOLLOW`; **no symlink below the personas directory is followed** (the
+  directory itself may be a symlink), and a directory, FIFO or device is refused. Non-Unix
+  builds read the joined path without the symlink and FIFO guarantees.
+- **Prompt shape:** the file body is followed by the project context for `coding`
+  (`body + "\n\n" + context`); `minimal` and `personal-assistant` send the body alone.
+  A profile without a file sends exactly what it sent before, except the built-in
+  `personal-assistant` profile, whose persona is now the embedded text above.
+- **Precedence:** `--persona <name>` (TUI, `ask`, ACP) or `/persona <name>` replaces the
+  whole persona reference, `config` included; otherwise the profile's `[persona]` after
+  `extends` (a child's `[persona]` replaces the parent's whole table, `config` included).
+  The file overrides an adapter's built-in text. An **active custom agent replaces the
+  persona prompt**, as before.
+- **Surfaces:** the TUI, the daemon (operator, Telegram, cron and inbound peer turns),
+  `rustain ask` and ACP. The daemon, `ask` and ACP carry **no workspace project
+  context** (`coding` there sends the file body alone), and `--persona` does not reach
+  the daemon (`daemon start` forwards only `--profile`).
+- **When it is read:** at startup (the daemon reads it once at start), on a profile
+  switch to a profile whose persona differs, and on `/config reload`. There is no file
+  watcher. A missing or unreadable file stops the run with exit 2 (TUI, `ask`, ACP;
+  the daemon's start fails) and a message naming the path; `--persona coding` rescues
+  a profile whose persona file is broken (on `/config reload` too, which keeps applying
+  `--persona`). A `/config reload` whose profile or composition fails changes nothing,
+  and a profile switch whose target persona cannot be built is rolled back before
+  anything is published. A switch that also changes a warm or cold port can still leave
+  its already-published hot ports in place when the warm/cold step later fails (a known
+  limitation).
+- **Status bar:** the `[ctx]` marker reflects the persona prompt computed at startup
+  only.
+- **Refused `config`:** an unknown persona key and any `config` table on `memory`
+  (except `vector-search`), `session` or `scheduler` stop the profile loading (exit 2):
+  those tables were never read, so accepting them was silence, not behaviour.
+  `rustain profile validate` also checks that the persona file exists and loads.
 
 ### `extends` — Profile Inheritance
 
@@ -336,7 +388,7 @@ interactive overwrite prompt.
 | `rustain profile edit <name>` | Open the profile TOML in `$EDITOR` (**TTY-only**; `--no-validate` to skip post-save check) |
 | `rustain profile switch <name>` | CLI stub for switching profiles (IPC requires a running TUI) |
 | `rustain profile validate <name>` | Run all 5 validation passes (default `--all` checks every profile) |
-| `rustain profile export <name>` | Flatten extends chain into a shareable self-contained TOML. ⚠ TOML only — no persona markdown — and sections are emitted **alphabetically** |
+| `rustain profile export <name>` | Flatten extends chain into a shareable self-contained TOML. ⚠ TOML only — it carries the persona `config` (the persona **file reference**, not the markdown) and drops every other port's `config`; sections are emitted **alphabetically** |
 | `rustain profile import <path>` | Validate and install a profile TOML from a local path or stdin (`-`), into `profiles/`. For unattended overwrite, pass `--force`; without it, an existing destination prompts interactively |
 | `rustain profile install <source>` | `gh:user/profile-name` → fetch over HTTPS into `profiles/community/` + a `.toml.source` sidecar. **Anything else is a local path** and delegates to `import`, landing in `profiles/`. ⚠ Undocumented here since Story 8.6b; the local-path arm is new in Story 19.12 |
 

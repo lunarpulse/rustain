@@ -308,6 +308,7 @@ async fn ac4_signal_cancel_before_shutdown() {
     let agent_core = Arc::new(AgentCore::test_noop());
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(NoOpStorage) as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),

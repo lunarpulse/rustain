@@ -24,6 +24,7 @@ use rustain::infrastructure::runtime::agent_core::AgentCore;
 fn test_compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-adapter-override-e2e"),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,

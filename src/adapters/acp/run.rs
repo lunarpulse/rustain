@@ -102,6 +102,7 @@ pub async fn run_acp(
     workspace: PathBuf,
     model_override: Option<String>,
     client_profile: AcpClientProfile,
+    persona: Arc<dyn crate::domain::ports::PersonaPort>,
 ) -> Result<()> {
     let outgoing = tokio::io::stdout().compat_write();
     let incoming = tokio::io::stdin().compat();
@@ -112,6 +113,7 @@ pub async fn run_acp(
         workspace,
         model_override,
         client_profile,
+        persona,
     )
     .await
 }
@@ -128,6 +130,7 @@ pub async fn serve_acp_with_io<W, R>(
     workspace: PathBuf,
     model_override: Option<String>,
     client_profile: AcpClientProfile,
+    persona: Arc<dyn crate::domain::ports::PersonaPort>,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + 'static,
@@ -136,11 +139,17 @@ where
     tracing::debug!(target: "acp", ?client_profile, "ACP client profile selected; R1 profiles are behavior-identical");
     let factory_config = app_config.clone();
     let core_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
-        crate::infrastructure::composition::build_acp_core(&factory_config, cwd, false, mcp_servers)
-            .map_err(|e| {
-                tracing::error!("ACP build_acp_core failed: {e:#}");
-                acp::Error::internal_error()
-            })
+        crate::infrastructure::composition::build_acp_core(
+            &factory_config,
+            cwd,
+            false,
+            mcp_servers,
+            Arc::clone(&persona),
+        )
+        .map_err(|e| {
+            tracing::error!("ACP build_acp_core failed: {e:#}");
+            acp::Error::internal_error()
+        })
     });
     serve_acp_with_acp_core_factory(
         outgoing,

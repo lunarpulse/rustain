@@ -85,10 +85,9 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
         });
 
     // Pass 2: construct new TomlProfileResolver and reload
-    let profiles_dir = match crate::infrastructure::paths::config_dir() {
-        Ok(dir) => dir.join("profiles"),
-        Err(_) => std::path::PathBuf::from(".rustain/profiles"),
-    };
+    // Story C-2 (AD-14): the config root the process was composed with, so a
+    // reload sees the same profiles directory startup and the switcher use.
+    let profiles_dir = ctx.compose_snapshot.config_dir.join("profiles");
 
     let new_resolver =
         match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
@@ -115,14 +114,28 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
                         Some(Arc::new(fallback) as Arc<dyn ProfileResolver>)
                     }
                     Err(e) => {
+                        // C2-06: no fallback profile means nothing valid to
+                        // reload to: fail, changing nothing.
                         tracing::error!("Coding fallback failed on reload: {}", e);
-                        None
+                        return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+                            success: false,
+                            error: Some(format!(
+                                "The profile '{name}' was not found and the 'coding' fallback could not be loaded: {e}. The previous configuration, profile and adapters stay active. Fix the profile, then run /config reload again."
+                            )),
+                        });
                     }
                 }
             }
             Err(e) => {
+                // AD-14: a profile that cannot load is a failed reload that
+                // changes nothing, never a silent success.
                 tracing::warn!("Profile reload failed, keeping previous: {}", e);
-                None
+                return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+                    success: false,
+                    error: Some(format!(
+                        "The profile could not be reloaded: {e}. The previous configuration, profile and adapters stay active. Fix the profile, then run /config reload again."
+                    )),
+                });
             }
         };
 
@@ -132,83 +145,121 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
         resolver_ref.unwrap_or(&noop),
         cli_config_overrides,
     );
-    match result {
-        Ok(new_config) => {
-            ctx.config_store.store(new_config);
-            if let Some(resolver) = &new_resolver {
-                ctx.profile_store.store(Arc::new(resolver.clone()));
-            }
-
-            // Story 8.3 AC-8 — re-compose AgentCore with new profile selection.
-            // Extends the D5 exemption precedent chain (8.1 → 8.2 → 8.3).
-            // Config + profile swaps above completed successfully; this block
-            // re-builds 7 port adapters. On composition failure, config + profile
-            // remain swapped but previous adapters are preserved (partial-reload).
-            if let Some(resolver_arc) = new_resolver.as_ref() {
-                if let Some(new_resolved) = resolver_arc.resolve_active() {
-                    let snapshot: &ComposeContext = ctx.compose_snapshot;
-                    match AgentCore::compose(&new_resolved.name, &new_resolved.selection, snapshot)
-                    {
-                        Ok(new_core) => {
-                            // ArcSwap each port individually — per spec AC-8,
-                            // no inter-port ordering invariant exists (Story 8.4
-                            // introduces hot/warm/cold tier transitions).
-                            ctx.agent_core
-                                .persona
-                                .store(Arc::clone(&*new_core.persona.load()));
-                            ctx.agent_core
-                                .memory
-                                .store(Arc::clone(&*new_core.memory.load()));
-                            ctx.agent_core
-                                .session
-                                .store(Arc::clone(&*new_core.session.load()));
-                            ctx.agent_core
-                                .tools
-                                .store(Arc::clone(&*new_core.tools.load()));
-                            ctx.agent_core
-                                .channels
-                                .store(Arc::clone(&*new_core.channels.load()));
-                            ctx.agent_core
-                                .scheduler
-                                .store(Arc::clone(&*new_core.scheduler.load()));
-                            ctx.agent_core
-                                .context
-                                .store(Arc::clone(&*new_core.context.load()));
-                            tracing::info!(
-                                profile = %new_resolved.name,
-                                "AgentCore re-composed on reload"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("AgentCore re-composition failed on reload: {}", e);
-                            return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
-                                success: false,
-                                error: Some(format!(
-                                    "The profile reloaded, but its adapters could not be set up: {}. The previous adapters stay active. Fix the profile settings, then run /config reload again.",
-                                    e
-                                )),
-                            });
-                        }
-                    }
-                }
-            }
-
-            HandlerOutcome::Notify(AppEvent::ConfigReloaded {
-                success: true,
-                error: None,
-            })
-        }
+    let new_config = match result {
+        Ok(new_config) => new_config,
         Err(e) => {
             tracing::warn!("config reload failed: {:?}", e);
-            HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+            return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
                 success: false,
                 error: Some(format!(
                     "Configuration reload failed, so the previous configuration and profile stay active. Fix the config file, then run /config reload again. Reason: {}",
                     short_reason(&e)
                 )),
-            })
+            });
         }
+    };
+
+    // Story 8.3 AC-8 / C-2 AD-14 — re-compose AgentCore with the new profile
+    // selection BEFORE storing anything: a composition failure (a missing
+    // persona file, say) leaves config, resolver and every adapter slot
+    // exactly as they were.
+    let recomposed = match new_resolver.as_ref().and_then(|r| r.resolve_active()) {
+        Some(new_resolved) => {
+            let snapshot: &ComposeContext = ctx.compose_snapshot;
+            // C2-02 (AD-8): `--persona` replaced the whole persona reference at
+            // startup and keeps doing so on reload.
+            let mut selection = new_resolved.selection.clone();
+            if let Some(name) = ctx.cli.persona.as_deref() {
+                selection.dimensions.insert(
+                    crate::domain::models::profile::PortDimension::Persona,
+                    crate::domain::models::profile::AdapterRef {
+                        adapter: name.to_string(),
+                        _config: None,
+                    },
+                );
+            }
+            // C2-05: compose with the memory adapter UNPUBLISHED (see below).
+            match AgentCore::compose_staged(&new_resolved.name, &selection, snapshot) {
+                Ok(new_core) => Some((new_resolved.name, new_core)),
+                Err(e) => {
+                    tracing::error!("AgentCore re-composition failed on reload: {}", e);
+                    return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+                        success: false,
+                        error: Some(format!(
+                            "The profile reloaded, but its adapters could not be set up: {e}. The previous configuration, profile and adapters stay active. Fix the profile settings, then run /config reload again."
+                        )),
+                    });
+                }
+            }
+        }
+        None => None,
+    };
+
+    // C2-05: the commit takes the same exclusive memory write gate a warm swap
+    // holds (no in-flight `remember` write can straddle the publication, and a
+    // concurrent swap is never overwritten). The handler is synchronous, so a gate
+    // that is busy fails the reload with nothing changed instead of blocking.
+    let _memory_gate = if recomposed.is_some() {
+        match ctx.compose_snapshot.memory_write_gate.try_write() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+                    success: false,
+                    error: Some(
+                        "A memory write or a profile swap is in progress, so the reload was not applied. The previous configuration, profile and adapters stay active. Run /config reload again in a moment."
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    ctx.config_store.store(new_config);
+    if let Some(resolver) = &new_resolver {
+        ctx.profile_store.store(Arc::new(resolver.clone()));
     }
+    if let Some((profile_name, new_core)) = recomposed {
+        // ArcSwap each port individually — per spec AC-8, no inter-port
+        // ordering invariant exists (Story 8.4 introduces hot/warm/cold tiers).
+        ctx.agent_core
+            .persona
+            .store(Arc::clone(&*new_core.persona.load()));
+        // C2-05: the memory adapter was composed UNPUBLISHED; it reaches the shared
+        // live slot (what `remember` and the memory context read) only here, at
+        // the commit point, under the write gate taken above.
+        let new_memory: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::clone(&**new_core.memory.load());
+        ctx.compose_snapshot
+            .memory_slot
+            .store(Arc::new(Arc::clone(&new_memory)));
+        ctx.agent_core.memory.store(Arc::new(new_memory));
+        ctx.agent_core
+            .session
+            .store(Arc::clone(&*new_core.session.load()));
+        ctx.agent_core
+            .tools
+            .store(Arc::clone(&*new_core.tools.load()));
+        ctx.agent_core
+            .channels
+            .store(Arc::clone(&*new_core.channels.load()));
+        ctx.agent_core
+            .scheduler
+            .store(Arc::clone(&*new_core.scheduler.load()));
+        ctx.agent_core
+            .context
+            .store(Arc::clone(&*new_core.context.load()));
+        tracing::info!(
+            profile = %profile_name,
+            "AgentCore re-composed on reload"
+        );
+    }
+
+    HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+        success: true,
+        error: None,
+    })
 }
 
 /// Truncate a `DomainError` to ≤80 bytes for the status-bar flash.
@@ -289,6 +340,7 @@ mod tests {
         let agent_core_arc = Arc::new(AgentCore::test_noop());
         let compose_snapshot_arc = Arc::new(crate::infrastructure::composition::ComposeContext {
             workspace_path: std::path::PathBuf::from("."),
+            config_dir: std::path::PathBuf::new(),
             project_context: crate::domain::models::project_context::ProjectContext::empty(),
             storage: Arc::new(crate::adapters::noop::NoOpStorage)
                 as Arc<dyn crate::domain::ports::StoragePort>,

@@ -840,6 +840,7 @@ pub async fn run_ask_core(
         event_tx,
         event_rx,
         ledger,
+        persona,
     } = core;
 
     // `run_turn` appends one ledger entry per provider call. Tap that boundary:
@@ -938,9 +939,7 @@ pub async fn run_ask_core(
 
     let messages = message_builder::build_api_messages(&conversation);
 
-    let project_context = crate::domain::models::project_context::ProjectContext::empty();
-    let persona = crate::adapters::persona_adapter::PersonaAdapter::new(project_context);
-    let persona_prompt = crate::domain::ports::PersonaPort::system_prompt(&persona, workspace);
+    let persona_prompt = persona.system_prompt(workspace);
     let empty_set = SkillActivationSet::new();
     // `None` catalog: `ask` has no skill source (DF-FR41-DAEMON-ASK-NO-SKILL-SOURCE).
     let mut system_prompt =
@@ -1462,6 +1461,7 @@ pub async fn run_ask(
     session_id: Option<String>,
     force_new: bool,
     model_override: Option<String>,
+    persona: Arc<dyn crate::domain::ports::PersonaPort>,
 ) -> Result<()> {
     let workspace = std::env::current_dir()?;
 
@@ -1514,8 +1514,9 @@ pub async fn run_ask(
 
     let effective_session = if force_new { None } else { session_id };
 
-    let core = crate::infrastructure::composition::build_cli_core(&app_config, &workspace, yolo)
-        .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
+    let core =
+        crate::infrastructure::composition::build_cli_core(&app_config, &workspace, yolo, persona)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
 
     let provider = core.provider.clone();
 

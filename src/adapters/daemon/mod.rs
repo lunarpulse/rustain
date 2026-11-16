@@ -464,10 +464,15 @@ async fn run_daemon_foreground(
     #[cfg(feature = "a2a")]
     let team_runtime = a2a_egress.runtime().clone();
     let team_proposals = std::sync::Arc::new(team_proposal::TeamProposalRegistry::new());
+    // Story C-2 (AD-11) — the config root the persona file resolves against;
+    // same fallback startup uses when the config dir cannot be created.
+    let config_dir =
+        crate::infrastructure::paths::config_dir().unwrap_or_else(|_| PathBuf::from(".rustain"));
 
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
             &workspace,
+            &config_dir,
             config_swap,
             selection.clone(),
             &memory_adapter,
@@ -506,6 +511,7 @@ async fn run_daemon_foreground(
             .and_then(|a| a._config.as_ref());
         let chan_ctx = crate::infrastructure::composition::daemon_compose_context(
             &workspace,
+            &config_dir,
             core.storage.clone(),
             domain_tx.clone(),
             config.assembler.strategy.clone(),

@@ -248,7 +248,9 @@ impl Fixture {
             self.tools.clone(),
             self.scheduler.clone(),
             self.skill.clone(),
-            Arc::new(NoOpPersona),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>
+            )),
             Arc::new(ArcSwap::from_pointee(context)),
             Arc::new(ArcSwap::from_pointee(None)),
             Arc::new(ArcSwap::from_pointee(None)),

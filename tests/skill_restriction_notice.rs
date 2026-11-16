@@ -291,7 +291,9 @@ pub(crate) async fn run_turn_front_door(
         tools,
         scheduler,
         Arc::new(SkillActivator::new()),
-        Arc::new(NoOpPersona),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>
+        )),
         Arc::new(ArcSwap::from_pointee(
             Arc::new(NoOpContext) as Arc<dyn rustain::domain::ports::ContextPort>
         )),

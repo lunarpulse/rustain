@@ -9,8 +9,10 @@ use super::prompt::fix_profile_error;
 use crate::adapters::cli::commands::Cli;
 use crate::domain::errors::ProfileError;
 use crate::domain::models::AppConfig;
+use crate::domain::models::persona_config::PersonaFileConfig;
 use crate::domain::ports::ProfileResolver;
 use crate::domain::services::identity_color;
+use crate::infrastructure::composition::compose_persona;
 use crate::infrastructure::paths;
 
 pub async fn run_profile_validate(
@@ -33,6 +35,7 @@ pub async fn run_profile_validate(
 
     let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
     let profiles_dir = config_dir.join("profiles");
+    let personas_dir = config_dir.join("personas");
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut any_failed = false;
@@ -44,6 +47,46 @@ pub async fn run_profile_validate(
         ) {
             Ok(resolver) => {
                 if let Some(resolved) = resolver.resolve_active() {
+                    // Story C-2 (AD-16): the file checks need I/O, so they run here
+                    // (the loader validates only the schema).
+                    if let Some(persona_ref) = resolved
+                        .selection
+                        .dimensions
+                        .get(&crate::domain::models::PortDimension::Persona)
+                    {
+                        if let Err(e) = compose_persona(
+                            persona_ref,
+                            &crate::domain::models::project_context::ProjectContext::empty(),
+                            &personas_dir,
+                        ) {
+                            any_failed = true;
+                            let file = PersonaFileConfig::from_config(persona_ref._config.as_ref())
+                                .ok()
+                                .flatten()
+                                .map(|cfg| personas_dir.join(&cfg.file))
+                                .unwrap_or_else(|| personas_dir.clone());
+                            let fix = format!(
+                                "Fix: create {} or correct [persona] config.file",
+                                file.display()
+                            );
+                            if json {
+                                results.push(serde_json::json!({
+                                    "valid": false,
+                                    "name": profile_name,
+                                    "error": {
+                                        "kind": "PersonaFile",
+                                        "detail": e.to_string(),
+                                        "fix": fix,
+                                    },
+                                }));
+                            } else {
+                                eprintln!("{e}");
+                                eprintln!("{fix}");
+                                eprintln!();
+                            }
+                            continue;
+                        }
+                    }
                     let color = identity_color::derive_identity_color(profile_name, None);
                     if json {
                         results.push(serde_json::json!({
@@ -142,6 +185,8 @@ fn error_kind(e: &ProfileError) -> &'static str {
         ProfileError::AdapterUnknown { .. } => "AdapterUnknown",
         ProfileError::AdapterFeatureGated { .. } => "AdapterFeatureGated",
         ProfileError::Parse { .. } => "Parse",
+        ProfileError::PersonaConfigInvalid { .. } => "PersonaConfigInvalid",
+        ProfileError::AdapterConfigUnsupported { .. } => "AdapterConfigUnsupported",
         _ => "Other",
     }
 }

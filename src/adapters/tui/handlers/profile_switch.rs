@@ -93,7 +93,7 @@ fn port_name(port: PortDimension) -> &'static str {
 
 #[allow(dead_code)]
 pub async fn handle_profile_switch_requested(
-    _state: &mut TuiState,
+    state: &mut TuiState,
     agent_core: &Arc<AgentCore>,
     compose_snapshot: &Arc<ComposeContext>,
     app_config: &Arc<ArcSwap<crate::domain::models::AppConfig>>,
@@ -138,16 +138,9 @@ pub async fn handle_profile_switch_requested(
         }
     };
 
-    let profiles_dir = match dirs::config_dir() {
-        Some(d) => d.join("rustain").join("profiles"),
-        None => {
-            return HandlerOutcome::Notify(AppEvent::ProfileSwitchFailed {
-                profile_name: target_name,
-                error: "Could not determine config directory".to_string(),
-                rolled_back: true,
-            });
-        }
-    };
+    // Story C-2 (AD-13): the config root the process was composed with
+    // (honours `RUSTAIN_CONFIG_DIR`), not `dirs::config_dir()`.
+    let profiles_dir = compose_snapshot.config_dir.join("profiles");
 
     let mut target_resolver =
         match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
@@ -186,8 +179,17 @@ pub async fn handle_profile_switch_requested(
         });
 
     let tools_tier = agent_core.tools.load_full().swap_tier();
+    // C2-04: the completion consumer clears every session override, so the
+    // diff must be taken against what is LIVE (profile selection overlaid with
+    // the session overrides); otherwise an overridden port whose target
+    // reference equals the profile's would never be rebuilt and would keep the
+    // override while its record is gone.
+    let mut current_dimensions = current_selection.dimensions.clone();
+    for (port, overridden) in &state.session_overrides {
+        current_dimensions.insert(*port, overridden.clone());
+    }
     let plan = TransitionPlan::from_selections(
-        &current_selection.dimensions,
+        &current_dimensions,
         &target_resolved.selection.dimensions,
         &target_name,
         identity_color.0,
@@ -274,7 +276,11 @@ pub async fn handle_profile_switch_requested(
             PortDimension::Persona => {
                 match crate::infrastructure::composition::build_persona(
                     &diff.to_adapter,
-                    None,
+                    target_resolved
+                        .selection
+                        .dimensions
+                        .get(&PortDimension::Persona)
+                        .and_then(|a| a._config.as_ref()),
                     &target_compose_snapshot,
                 ) {
                     Ok(a) => new_persona = Some(a),

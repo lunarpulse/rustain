@@ -173,6 +173,7 @@ fn make_catalog_core(
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -1399,6 +1400,7 @@ async fn slash_skill_activation_injects_skill_body_into_provider_system_prompt()
                 event_tx,
                 event_rx,
                 ledger,
+                persona: Arc::new(rustain::adapters::noop::NoOpPersona),
             }
         });
         let registry = SkillRegistry::from_skills(skills.clone());
@@ -1539,6 +1541,7 @@ fn capturing_acp_factory(
             event_tx,
             event_rx,
             ledger,
+            persona: Arc::new(rustain::adapters::noop::NoOpPersona),
         };
         let mut acp_core = AcpCore::from(cli_core);
         let registry = SkillRegistry::from_skills(skills.clone());
@@ -1706,6 +1709,7 @@ fn build_cli_core_does_not_expose_activate_skill_tool() {
         &rustain::domain::models::AppConfig::default(),
         workspace.path(),
         false,
+        Arc::new(rustain::adapters::noop::NoOpPersona),
     )
     .expect("build_cli_core must compose hermetically with AppConfig::default() + temp workspace");
 
@@ -2376,6 +2380,7 @@ fn scripted_factory(
             event_tx,
             event_rx,
             ledger,
+            persona: Arc::new(rustain::adapters::noop::NoOpPersona),
         }))
     })
 }

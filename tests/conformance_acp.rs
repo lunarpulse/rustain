@@ -287,6 +287,7 @@ fn make_core(workspace: &Path) -> CliCore {
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -1398,6 +1399,7 @@ fn make_core_with_sentinel(
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -2228,6 +2230,7 @@ fn make_delayed_core(workspace: &Path, delay: std::time::Duration) -> CliCore {
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -2386,6 +2389,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         event_tx,
         mut event_rx,
         ledger,
+        persona: _,
     } = core;
 
     // The same user prompt the ACP harness sends — both paths must see it.
@@ -2815,6 +2819,7 @@ fn make_history_core(
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -5463,8 +5468,14 @@ async fn eval3_acp_writes_one_ledger_row_per_prompt_keyed_by_the_acp_session() {
     let config = AppConfig::default();
     let factory_config = config.clone();
     let factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
-        let mut core = build_acp_core(&factory_config, cwd, false, mcp_servers)
-            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+        let mut core = build_acp_core(
+            &factory_config,
+            cwd,
+            false,
+            mcp_servers,
+            Arc::new(rustain::adapters::noop::NoOpPersona),
+        )
+        .map_err(|_| agent_client_protocol::Error::internal_error())?;
         // Seeding (Rule 2): only the provider is replaced; the ledger is the composed one.
         core.provider =
             scripted::ScriptedProvider::usage_turn(REPLY, 141, 10, 1408).into_provider();

@@ -371,6 +371,7 @@ fn cli_core(ws: &Path) -> CliCore {
         event_tx,
         event_rx,
         ledger: Arc::new(NoOpUsageLedger),
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -717,7 +718,9 @@ async fn k10_tui_tool_round_replays_in_turn_and_no_projection_carries_it() {
         tools,
         scheduler,
         Arc::new(SkillActivator::new()),
-        Arc::new(NoOpPersona),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>
+        )),
         Arc::new(ArcSwap::from_pointee(
             Arc::new(NoOpContext) as Arc<dyn ContextPort>
         )),

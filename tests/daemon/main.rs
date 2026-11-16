@@ -13,6 +13,9 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../conformance_persona_surfaces.rs"]
+mod conformance_persona_surfaces;
+
 #[path = "../conformance_daemon_cli.rs"]
 mod conformance_daemon_cli;
 

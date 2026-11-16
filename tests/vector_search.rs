@@ -28,6 +28,7 @@ use tokio::sync::mpsc::UnboundedSender;
 fn compose_ctx(workspace: PathBuf, domain_tx: Option<UnboundedSender<AppEvent>>) -> ComposeContext {
     ComposeContext {
         workspace_path: workspace,
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,

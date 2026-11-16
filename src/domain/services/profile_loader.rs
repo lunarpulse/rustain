@@ -5,6 +5,7 @@
 //! Story 8.2 AC-1, AC-2, AC-8.
 
 use crate::domain::errors::ProfileError;
+use crate::domain::models::persona_config::PersonaFileConfig;
 use crate::domain::models::{
     AdapterRef, PortDimension, ProfileDefinition, ProfileSelection, ResolvedProfile,
 };
@@ -218,6 +219,8 @@ impl<'a> ProfileLoader<'a> {
             profile_name,
         )?;
 
+        Self::validate_config(def, profile_name)?;
+
         Ok(def.clone())
     }
 
@@ -257,6 +260,38 @@ impl<'a> ProfileLoader<'a> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Story C-2 (AD-4) — refuse `config` that no adapter reads. Static (no
+    /// I/O): the persona file itself is read at composition. Tools, channels,
+    /// context and `vector-search` memory keep their own handling.
+    fn validate_config(def: &ProfileDefinition, profile_name: &str) -> Result<(), ProfileError> {
+        if let Some(persona) = def.persona.as_ref() {
+            PersonaFileConfig::from_config(persona._config.as_ref()).map_err(|e| {
+                ProfileError::PersonaConfigInvalid {
+                    profile: profile_name.to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+        }
+        let ignoring: [(PortDimension, &Option<AdapterRef>); 3] = [
+            (PortDimension::Memory, &def.memory),
+            (PortDimension::Session, &def.session),
+            (PortDimension::Scheduler, &def.scheduler),
+        ];
+        for (port, adapter_ref) in ignoring {
+            let Some(adapter_ref) = adapter_ref else {
+                continue;
+            };
+            if adapter_ref._config.is_some() && !adapter_reads_config(port, &adapter_ref.adapter) {
+                return Err(ProfileError::AdapterConfigUnsupported {
+                    profile: profile_name.to_string(),
+                    port,
+                    adapter: adapter_ref.adapter.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -301,6 +336,13 @@ impl<'a> ProfileLoader<'a> {
 /// Convert a `toml::Value` to a `figment::value::Value` via serde round-trip.
 fn toml_value_to_figment(tv: toml::Value) -> Option<figment::value::Value> {
     figment::value::Value::serialize(&tv).ok()
+}
+
+/// Whether `adapter` on `port` consumes its `config` table (AD-4). Only the
+/// `vector-search` memory adapter does among memory, session and scheduler
+/// (the other ports are handled by their own resolvers).
+fn adapter_reads_config(port: PortDimension, adapter: &str) -> bool {
+    matches!((port, adapter), (PortDimension::Memory, "vector-search"))
 }
 fn merge_toml_values(
     parent: Option<toml::Value>,
@@ -430,6 +472,153 @@ adapter = "none"
 adapter = "default"
 "#
         .to_string()
+    }
+
+    fn profile_with(persona_extra: &str, memory_extra: &str, other: &str) -> String {
+        format!(
+            r#"name = "p"
+[persona]
+adapter = "coding"
+{persona_extra}
+[memory]
+adapter = "noop"
+{memory_extra}
+[session]
+adapter = "basic"
+[tools]
+adapter = "builtin-only"
+[channels]
+adapter = "terminal"
+[scheduler]
+adapter = "none"
+{other}
+[context]
+adapter = "default"
+"#
+        )
+    }
+
+    fn load_p(toml: &str) -> Result<ResolvedProfile, ProfileError> {
+        let source = TestProfileSource::new(vec![("p", toml)]);
+        make_loader(&source).load("p")
+    }
+
+    #[test]
+    fn persona_file_config_resolves_and_reaches_the_selection() {
+        let resolved = load_p(&profile_with(
+            "config = { file = \"team/devops.md\" }",
+            "",
+            "",
+        ))
+        .unwrap();
+        let persona = &resolved.selection.dimensions[&PortDimension::Persona];
+        assert_eq!(
+            persona
+                ._config
+                .as_ref()
+                .unwrap()
+                .get("file")
+                .unwrap()
+                .as_str(),
+            Some("team/devops.md")
+        );
+    }
+
+    #[test]
+    fn unknown_persona_config_key_is_refused_naming_profile_and_key() {
+        let err = load_p(&profile_with("config = { tone = \"concise\" }", "", "")).unwrap_err();
+        assert!(
+            matches!(&err, ProfileError::PersonaConfigInvalid { profile, reason }
+                if profile == "p" && reason.contains("tone")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rule_breaking_persona_file_is_refused() {
+        let err = load_p(&profile_with("config = { file = \"../x.md\" }", "", "")).unwrap_err();
+        assert!(
+            matches!(&err, ProfileError::PersonaConfigInvalid { reason, .. }
+                if reason.contains("../x.md")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn config_on_memory_session_and_scheduler_is_refused() {
+        let memory = load_p(&profile_with("", "config = { x = 1 }", "")).unwrap_err();
+        assert!(
+            matches!(&memory, ProfileError::AdapterConfigUnsupported { port, adapter, .. }
+                if *port == PortDimension::Memory && adapter == "noop"),
+            "{memory:?}"
+        );
+        let session = load_p(&profile_with("", "", "").replace(
+            "adapter = \"basic\"",
+            "adapter = \"basic\"\nconfig = { x = 1 }",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&session, ProfileError::AdapterConfigUnsupported { port, .. }
+                if *port == PortDimension::Session),
+            "{session:?}"
+        );
+        let scheduler = load_p(&profile_with("", "", "config = { x = 1 }")).unwrap_err();
+        assert!(
+            matches!(&scheduler, ProfileError::AdapterConfigUnsupported { port, adapter, .. }
+                if *port == PortDimension::Scheduler && adapter == "none"),
+            "{scheduler:?}"
+        );
+    }
+
+    #[test]
+    fn only_vector_search_memory_reads_config() {
+        // `vector-search` is not in the adapter catalog today, so it cannot be
+        // loaded from a profile (DF); the rule itself is pinned here.
+        assert!(adapter_reads_config(PortDimension::Memory, "vector-search"));
+        for name in ["noop", "daily-log", "project-scoped", "long-term"] {
+            assert!(!adapter_reads_config(PortDimension::Memory, name), "{name}");
+        }
+        assert!(!adapter_reads_config(PortDimension::Session, "basic"));
+        assert!(!adapter_reads_config(PortDimension::Scheduler, "none"));
+    }
+
+    #[test]
+    fn extends_child_persona_replaces_the_whole_parent_table() {
+        let parent = profile_with("config = { file = \"parent.md\" }", "", "");
+        let child = r#"name = "c"
+extends = "p"
+[persona]
+adapter = "coding"
+"#;
+        let source = TestProfileSource::new(vec![("p", &parent), ("c", child)]);
+        let resolved = make_loader(&source).load("c").unwrap();
+        assert!(
+            resolved.selection.dimensions[&PortDimension::Persona]
+                ._config
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn extends_child_without_persona_inherits_the_parent_file() {
+        let parent = profile_with("config = { file = \"parent.md\" }", "", "");
+        let child = r#"name = "c"
+extends = "p"
+[memory]
+adapter = "daily-log"
+"#;
+        let source = TestProfileSource::new(vec![("p", &parent), ("c", child)]);
+        let resolved = make_loader(&source).load("c").unwrap();
+        assert_eq!(
+            resolved.selection.dimensions[&PortDimension::Persona]
+                ._config
+                .as_ref()
+                .unwrap()
+                .get("file")
+                .unwrap()
+                .as_str(),
+            Some("parent.md")
+        );
     }
 
     #[test]

@@ -325,6 +325,21 @@ pub enum ProfileError {
         found: String,
     },
 
+    /// Story C-2 — the persona `config` table is not what the loader reads.
+    #[error("Profile '{profile}': invalid [persona] config: {reason}")]
+    PersonaConfigInvalid { profile: String, reason: String },
+
+    /// Story C-2 — a `config` table on a port whose adapter never reads it.
+    #[error(
+        "Profile '{profile}': adapter '{adapter}' (port '{port:?}') takes no `config` table; \
+         it was never read — remove it."
+    )]
+    AdapterConfigUnsupported {
+        profile: String,
+        port: crate::domain::models::PortDimension,
+        adapter: String,
+    },
+
     #[error("Profile '{path}' failed to parse: {reason}")]
     Parse {
         path: std::path::PathBuf,

@@ -24,6 +24,12 @@ mod conformance_adapter_override;
 #[path = "../conformance_config_reload.rs"]
 mod conformance_config_reload;
 
+#[path = "../conformance_persona_file.rs"]
+mod conformance_persona_file;
+
+#[path = "../conformance_persona_switch.rs"]
+mod conformance_persona_switch;
+
 #[path = "../conformance_profile.rs"]
 mod conformance_profile;
 

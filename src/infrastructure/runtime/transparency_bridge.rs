@@ -2217,6 +2217,7 @@ mod tests {
         // warnings arrive on it, exactly as the event loop sees them.
         let compose_snapshot = Arc::new(crate::infrastructure::composition::ComposeContext {
             workspace_path: workspace.to_path_buf(),
+            config_dir: std::path::PathBuf::new(),
             project_context: crate::domain::models::project_context::ProjectContext::empty(),
             storage: Arc::new(crate::adapters::noop::NoOpStorage)
                 as Arc<dyn crate::domain::ports::StoragePort>,

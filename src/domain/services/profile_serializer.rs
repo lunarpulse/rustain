@@ -91,6 +91,13 @@ pub fn to_flat_toml(
                 "adapter".to_string(),
                 toml::Value::String(adapter_ref.adapter.clone()),
             );
+            // Story C-2 (AD-17): the persona `config` (the persona file reference)
+            // is carried; other ports' `config` stays unexported (DF).
+            if *dim == PortDimension::Persona {
+                if let Some(config) = &adapter_ref._config {
+                    port_table.insert("config".to_string(), config.clone());
+                }
+            }
             root.insert(label.to_string(), toml::Value::Table(port_table));
         }
     }
@@ -147,6 +154,34 @@ mod tests {
             a2a_peers: Vec::new(),
             include_builtin_tools: true,
         }
+    }
+
+    #[test]
+    fn persona_config_is_emitted_and_other_ports_config_is_not() {
+        let mut resolved = make_resolved("p", None);
+        let file_config: toml::Value = "file = \"p.md\"".parse().unwrap();
+        let other_config: toml::Value = "include_builtin = false".parse().unwrap();
+        resolved
+            .selection
+            .dimensions
+            .get_mut(&PortDimension::Persona)
+            .unwrap()
+            ._config = Some(file_config);
+        resolved
+            .selection
+            .dimensions
+            .get_mut(&PortDimension::Tools)
+            .unwrap()
+            ._config = Some(other_config);
+        let out = to_flat_toml(&resolved, false, ProfileSource::User).unwrap();
+        assert!(
+            out.contains(
+                "[persona]\nadapter = \"test-adapter\"\n\n[persona.config]\nfile = \"p.md\"\n"
+            ),
+            "{out}"
+        );
+        assert_eq!(out.matches(".config]").count(), 1, "{out}");
+        assert!(!out.contains("include_builtin"), "{out}");
     }
 
     #[test]

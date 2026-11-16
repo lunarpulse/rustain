@@ -497,12 +497,11 @@ impl OpenAiAdapter {
             message_count = messages.len(),
             "Sending OpenAI-compatible completion request"
         );
-        tracing::trace!(
-            request_body = %serde_json::to_string(&request_body).unwrap_or_default(),
-            "Full request body"
-        );
         let body = serde_json::to_vec(&request_body)
             .map_err(|_| ProviderError::Other("Could not encode completion request".into()))?;
+        // Size only: the body carries the system prompt (a profile's persona
+        // file) and the conversation, and trace output is persisted.
+        tracing::trace!(request_body_bytes = body.len(), "Request body encoded");
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_static("application/json"));
         if let Some(value) = authorization(&*self.profile.bearer(resolved)?)? {
@@ -1011,6 +1010,70 @@ mod tests {
         assert!(models[0].context_window.is_none());
         assert!(models[0].capabilities.is_none());
         assert!(models[0].pricing_tier.is_none());
+    }
+
+    /// C-2 AD-3 / C2-01: the persona (system prompt) and message contents never
+    /// reach the log, not even with trace logging on: the request is logged by
+    /// its size only.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn the_request_trace_never_logs_the_system_prompt_or_messages() {
+        use crate::domain::models::{Message, MessageRole};
+        use futures::StreamExt as _;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const PERSONA: &str = "C2-PERSONA-TRACE-CANARY-5521";
+        const USER: &str = "C2-USER-TRACE-CANARY-9913";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#
+                    )),
+            )
+            .mount(&server)
+            .await;
+        let adapter = fixed(
+            OpenAiCompatibleVariant::OpenAI,
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            Some(format!("{}/v1", server.uri())),
+        )
+        .unwrap();
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: USER.to_string(),
+            images: vec![],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+            reasoning_content: None,
+            provider_replay: vec![],
+        }];
+        let options = CompletionOptions {
+            session_id: None,
+            model: "gpt-4o".to_string(),
+            max_tokens: 64,
+            system_prompt: PERSONA.to_string(),
+            temperature: None,
+            tools: vec![],
+        };
+        let provider: &dyn StreamingProvider = &adapter;
+        let stream = provider.stream_completion(messages, options).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+        assert!(logs_contain("Sending OpenAI-compatible completion request"));
+        assert!(
+            logs_contain("Request body encoded"),
+            "the size-only trace ran"
+        );
+        assert!(!logs_contain(PERSONA), "the persona must never be logged");
+        assert!(!logs_contain(USER), "message content must never be logged");
     }
 
     mod tool_call_ordering {

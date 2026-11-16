@@ -454,6 +454,13 @@ idle-RSS gate on the systemd nightly lane.
 Refused tool-approval responses do not initialize this runtime: authority is
 checked first, and pending-request lookup uses only an already-built runtime.
 
+The profile's persona file (`[persona] config = { file = "…" }`, see
+[profiles.md](profiles.md)) is read **once, at daemon start**, by the eager part; a
+missing or unreadable file fails `daemon start` (the foreground process prints
+`rustain: daemon failed: composing daemon core: …`) and the first-activity factory
+reuses the same text, so editing or deleting the file later changes nothing until
+`daemon stop` + `daemon start`. The daemon carries no workspace project context.
+
 ### Headless approval policy
 
 The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):

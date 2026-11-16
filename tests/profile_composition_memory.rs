@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 fn compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-memory"),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,

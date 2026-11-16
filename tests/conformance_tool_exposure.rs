@@ -197,6 +197,7 @@ fn test_compose_with_default_config_binds_static_full() {
 
     let ctx = ComposeContext {
         workspace_path: PathBuf::from("/tmp/test"),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: std::sync::Arc::new(rustain::adapters::noop::NoOpStorage)
             as std::sync::Arc<dyn rustain::domain::ports::StoragePort>,
@@ -253,6 +254,7 @@ fn test_compose_with_unknown_exposure_returns_error() {
 
     let ctx = ComposeContext {
         workspace_path: PathBuf::from("/tmp/test"),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: std::sync::Arc::new(rustain::adapters::noop::NoOpStorage)
             as std::sync::Arc<dyn rustain::domain::ports::StoragePort>,

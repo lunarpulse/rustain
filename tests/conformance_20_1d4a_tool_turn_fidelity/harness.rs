@@ -201,6 +201,7 @@ pub(crate) fn cli_core(
         event_tx,
         event_rx,
         ledger: Arc::new(NoOpUsageLedger),
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -256,7 +257,9 @@ pub(crate) async fn tui_turn(
         tools,
         scheduler,
         Arc::new(SkillActivator::new()),
-        Arc::new(NoOpPersona),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>
+        )),
         Arc::new(ArcSwap::from_pointee(
             Arc::new(NoOpContext) as Arc<dyn ContextPort>
         )),

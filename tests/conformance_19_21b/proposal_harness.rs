@@ -519,7 +519,9 @@ impl ProposalFixture {
             tools_port,
             self.scheduler.clone(),
             self.skill_activator.clone(),
-            Arc::new(NoOpPersona),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpPersona) as Arc<dyn rustain::domain::ports::PersonaPort>
+            )),
             self.context.clone(),
             Arc::new(ArcSwap::from_pointee(None)),
             Arc::new(ArcSwap::from_pointee(None)),

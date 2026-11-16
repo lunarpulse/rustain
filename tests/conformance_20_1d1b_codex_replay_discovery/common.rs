@@ -327,6 +327,7 @@ pub(crate) async fn ask(
         event_tx,
         event_rx,
         ledger: Arc::new(NoOpUsageLedger),
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     };
     let mut out = Vec::new();
     let mut err = Vec::new();

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+pub mod daemon_proc;
 #[cfg(feature = "meta-search")]
 pub mod eval_corpus;
 #[cfg(feature = "meta-search")]

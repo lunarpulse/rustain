@@ -145,7 +145,7 @@ pub struct LocalTurnDriver {
     tools: Arc<dyn ToolSetPort>,
     tool_scheduler: Arc<ToolScheduler>,
     skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
-    persona: Arc<dyn PersonaPort>,
+    persona: Arc<ArcSwap<Arc<dyn PersonaPort>>>,
     context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
     context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
     /// The Tier-1 skill catalog's exposure port (FR41); a live slot read with
@@ -172,7 +172,7 @@ impl LocalTurnDriver {
         tools: Arc<dyn ToolSetPort>,
         tool_scheduler: Arc<ToolScheduler>,
         skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
-        persona: Arc<dyn PersonaPort>,
+        persona: Arc<ArcSwap<Arc<dyn PersonaPort>>>,
         context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
         context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
         skill_exposure: Arc<ArcSwap<Option<Arc<dyn SkillExposurePort>>>>,
@@ -240,7 +240,9 @@ impl LocalTurnDriver {
         let tools = &self.tools;
         let tool_scheduler = &self.tool_scheduler;
         let skill_activator = &self.skill_activator;
-        let persona = &self.persona;
+        // Story C-2 (AD-12): the live slot, loaded per turn like `context`, so a
+        // profile switch, `/config reload` or `/persona` reaches the next turn.
+        let persona = self.persona.load_full();
         let context = &self.context;
         let context_assembler = &self.context_assembler;
         let workspace_path: &std::path::Path = &self.workspace_path;

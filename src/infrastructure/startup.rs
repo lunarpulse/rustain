@@ -1269,12 +1269,31 @@ pub async fn run() -> Result<()> {
     if let Some(Command::Acp { client }) = cli.command.clone() {
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-        return crate::adapters::acp::run_acp(app_config, workspace, cli.model.clone(), client)
-            .await
-            .map_err(|e| {
-                tracing::error!("ACP subcommand failed: {e}");
-                SubcommandExit(SubcommandExit::GENERIC).into()
-            });
+        let selection = profile_resolver_arc
+            .resolve_active()
+            .map(|profile| profile.selection)
+            .unwrap_or_default();
+        let persona = crate::infrastructure::composition::compose_headless_persona(
+            &selection,
+            cli.persona.as_deref(),
+            &config_dir,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Adapter composition failed: {e}");
+            std::process::exit(2);
+        });
+        return crate::adapters::acp::run_acp(
+            app_config,
+            workspace,
+            cli.model.clone(),
+            client,
+            persona,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("ACP subcommand failed: {e}");
+            SubcommandExit(SubcommandExit::GENERIC).into()
+        });
     }
 
     // Story 13.1a — Ask subcommand intercept. MUST run before provider
@@ -1289,6 +1308,19 @@ pub async fn run() -> Result<()> {
         dry_run,
     }) = cli.command.clone()
     {
+        let selection = profile_resolver_arc
+            .resolve_active()
+            .map(|profile| profile.selection)
+            .unwrap_or_default();
+        let persona = crate::infrastructure::composition::compose_headless_persona(
+            &selection,
+            cli.persona.as_deref(),
+            &config_dir,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Adapter composition failed: {e}");
+            std::process::exit(2);
+        });
         return crate::adapters::cli::ask::run_ask(
             query,
             file,
@@ -1300,6 +1332,7 @@ pub async fn run() -> Result<()> {
             cli.session.clone(),
             cli.new,
             cli.model.clone(),
+            persona,
         )
         .await
         .map_err(|e| {
@@ -1724,6 +1757,7 @@ pub async fn run() -> Result<()> {
     });
     let compose_ctx = crate::infrastructure::composition::ComposeContext {
         workspace_path: workspace_path.clone(),
+        config_dir: config_dir.clone(),
         project_context: project_context.clone(),
         storage: Arc::clone(&tools_storage) as Arc<dyn StoragePort>,
         skill_activator: Arc::clone(&skill_activator),
@@ -1753,9 +1787,21 @@ pub async fn run() -> Result<()> {
         #[cfg(feature = "meta-search")]
         meta_search_engine: meta_search_engine.clone(),
     };
+    // AD-15 — `--persona` replaces the whole persona reference BEFORE compose,
+    // so it can rescue a profile whose persona file is broken.
+    let mut compose_selection = resolved.selection.clone();
+    if let Some(name) = cli.persona.as_deref() {
+        compose_selection.dimensions.insert(
+            crate::domain::models::profile::PortDimension::Persona,
+            crate::domain::models::profile::AdapterRef {
+                adapter: name.to_string(),
+                _config: None,
+            },
+        );
+    }
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
-        &resolved.selection,
+        &compose_selection,
         &compose_ctx,
     ) {
         Ok(core) => Arc::new(core),
@@ -1813,6 +1859,10 @@ pub async fn run() -> Result<()> {
             (PortDimension::Context, cli.context.as_deref()),
         ];
         for (port, name_opt) in &cli_overrides {
+            // AD-15 — `--persona` was applied to the selection before compose.
+            if *port == PortDimension::Persona {
+                continue;
+            }
             if let Some(name) = name_opt {
                 let adapter_ref = AdapterRef {
                     adapter: name.to_string(),

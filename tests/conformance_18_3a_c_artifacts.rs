@@ -1951,6 +1951,7 @@ fn artifact_app_state(
     let (event_bus, domain_rx) = EventBus::new(16);
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: workspace.to_path_buf(),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(NoOpStorage) as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),

@@ -28,6 +28,7 @@ const CONVERSATION_ID: &str = "conv-test-1";
 fn compose_ctx(domain_tx: Option<UnboundedSender<AppEvent>>) -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-composition-event-tx"),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,

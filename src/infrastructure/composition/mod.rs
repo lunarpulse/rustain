@@ -25,6 +25,11 @@ use crate::infrastructure::runtime::agent_core::AgentCore;
 #[derive(Clone)]
 pub struct ComposeContext {
     pub workspace_path: std::path::PathBuf,
+    /// Story C-2 — the configuration root (`RUSTAIN_CONFIG_DIR` or
+    /// `~/.config/rustain`, from `paths::config_dir()`); profiles live in
+    /// `<config_dir>/profiles`, persona files in `<config_dir>/personas`.
+    /// Composition never reads the environment itself.
+    pub config_dir: std::path::PathBuf,
     pub project_context: ProjectContext,
     pub storage: Arc<dyn StoragePort>,
     pub skill_activator: Arc<SkillActivator>,
@@ -113,6 +118,26 @@ impl AgentCore {
         selection: &ProfileSelection,
         ctx: &ComposeContext,
     ) -> Result<Self, AdapterCompositionError> {
+        Self::compose_inner(profile_name, selection, ctx, true)
+    }
+
+    /// Like [`compose`](Self::compose) but the memory adapter is NOT published
+    /// into `ctx.memory_slot`: the caller publishes it at its commit point
+    /// (`/config reload`, C2-05).
+    pub fn compose_staged(
+        profile_name: &str,
+        selection: &ProfileSelection,
+        ctx: &ComposeContext,
+    ) -> Result<Self, AdapterCompositionError> {
+        Self::compose_inner(profile_name, selection, ctx, false)
+    }
+
+    fn compose_inner(
+        profile_name: &str,
+        selection: &ProfileSelection,
+        ctx: &ComposeContext,
+        publish_memory: bool,
+    ) -> Result<Self, AdapterCompositionError> {
         let started = std::time::Instant::now();
         tracing::info!(profile = %profile_name, "Composing AgentCore for profile");
 
@@ -120,7 +145,11 @@ impl AgentCore {
             build_persona(n, c, ctx)
         })?;
         let memory = compose_one(PortDimension::Memory, selection, |n, c| {
-            build_memory(n, c, ctx)
+            if publish_memory {
+                build_memory(n, c, ctx)
+            } else {
+                build_memory_unpublished(n, c, ctx)
+            }
         })?;
         let session = compose_one(PortDimension::Session, selection, |n, c| {
             build_session(n, c, ctx)
@@ -213,35 +242,121 @@ where
 const PLACEHOLDER_ADAPTER_WARNING: &str =
     "Using a placeholder adapter; the real adapter is not available yet";
 
+/// Embedded persona text of the built-in `personal-assistant` profile (AD-5).
+const PERSONAL_ASSISTANT_PERSONA: &str =
+    include_str!("../../../profiles/personas/personal-assistant.md");
+
 pub fn build_persona(
     name: &str,
-    _config: Option<&toml::Value>,
+    config: Option<&toml::Value>,
     ctx: &ComposeContext,
 ) -> Result<Arc<dyn PersonaPort>, AdapterCompositionError> {
-    match name {
-        "minimal" => Ok(Arc::new(crate::adapters::noop::NoOpPersona)),
-        "coding" => Ok(Arc::new(PersonaAdapter::new(ctx.project_context.clone()))),
-        "personal-assistant" => {
-            tracing::warn!(
-                port = ?PortDimension::Persona,
-                adapter = %name,
-                "{PLACEHOLDER_ADAPTER_WARNING}"
-            );
-            Ok(Arc::new(crate::adapters::noop::NoOpPersona))
-        }
-        other => Err(AdapterCompositionError::UnknownAdapter {
+    compose_persona(
+        &AdapterRef {
+            adapter: name.to_string(),
+            _config: config.cloned(),
+        },
+        &ctx.project_context,
+        &ctx.config_dir.join("personas"),
+    )
+}
+
+/// Story C-2 (AD-6) — the one place a persona is composed from an
+/// `AdapterRef`: pure on its arguments, reads the persona file only when
+/// `config.file` is set. Used by the TUI, the daemon, `ask`, ACP and
+/// `profile validate`.
+pub fn compose_persona(
+    adapter_ref: &AdapterRef,
+    project_context: &ProjectContext,
+    personas_dir: &std::path::Path,
+) -> Result<Arc<dyn PersonaPort>, AdapterCompositionError> {
+    use crate::adapters::persona_file::load_persona_file;
+    use crate::domain::models::persona_config::PersonaFileConfig;
+
+    let name = adapter_ref.adapter.as_str();
+    if !matches!(name, "minimal" | "coding" | "personal-assistant") {
+        return Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Persona,
-            name: other.to_string(),
+            name: name.to_string(),
             available: vec![
                 "minimal".into(),
                 "coding".into(),
                 "personal-assistant".into(),
             ],
-        }),
+        });
     }
+    let failed = |source: Box<dyn std::error::Error + Send + Sync>| {
+        AdapterCompositionError::AdapterConstructionFailed {
+            port: PortDimension::Persona,
+            name: name.to_string(),
+            source,
+        }
+    };
+    let file = PersonaFileConfig::from_config(adapter_ref._config.as_ref())
+        .map_err(|e| failed(Box::new(e)))?;
+    let body: Option<Arc<str>> = match file {
+        Some(cfg) => Some(Arc::from(
+            load_persona_file(&cfg, personas_dir)
+                .map_err(|e| failed(Box::new(e)))?
+                .into_string(),
+        )),
+        None => None,
+    };
+    Ok(match name {
+        "minimal" => match body {
+            None => Arc::new(crate::adapters::noop::NoOpPersona),
+            Some(body) => Arc::new(PersonaAdapter::with_body(
+                Some(body),
+                ProjectContext::empty(),
+            )),
+        },
+        "coding" => Arc::new(PersonaAdapter::with_body(body, project_context.clone())),
+        _ => {
+            let body = body.unwrap_or_else(|| Arc::from(PERSONAL_ASSISTANT_PERSONA.trim_end()));
+            Arc::new(PersonaAdapter::with_body(
+                Some(body),
+                ProjectContext::empty(),
+            ))
+        }
+    })
 }
 
-pub fn build_memory(
+/// Story C-2 (AD-10) — the persona for `rustain ask` and ACP: the `--persona`
+/// override (replacing the whole reference, `config` included) or the active
+/// profile's persona, composed with an empty project context.
+pub fn compose_headless_persona(
+    selection: &ProfileSelection,
+    cli_persona: Option<&str>,
+    config_dir: &std::path::Path,
+) -> Result<Arc<dyn PersonaPort>, AdapterCompositionError> {
+    let adapter_ref = match cli_persona {
+        Some(adapter) => AdapterRef {
+            adapter: adapter.to_string(),
+            _config: None,
+        },
+        // No resolved profile (empty selection): the same `coding` default the
+        // daemon uses, which composes to the empty prompt `ask`/ACP always had.
+        None => selection
+            .dimensions
+            .get(&PortDimension::Persona)
+            .cloned()
+            .unwrap_or(AdapterRef {
+                adapter: "coding".to_string(),
+                _config: None,
+            }),
+    };
+    compose_persona(
+        &adapter_ref,
+        &ProjectContext::empty(),
+        &config_dir.join("personas"),
+    )
+}
+
+/// Story C-2 (C2-05): construct a memory adapter WITHOUT touching the shared
+/// live slot. A reload composes everything first and publishes only at its
+/// commit point, so a refused composition is never visible to a consumer of the
+/// slot and never overwrites a concurrent legitimate swap.
+pub fn build_memory_unpublished(
     name: &str,
     _config: Option<&toml::Value>,
     ctx: &ComposeContext,
@@ -294,10 +409,19 @@ pub fn build_memory(
             });
         }
     };
+    Ok(adapter)
+}
 
-    // Publish the composed memory port into the shared slot so the `remember`
-    // builtin tool (held by ToolSetAdapter via Arc::clone of this slot) routes
-    // writes to the live adapter — on both initial compose and profile reload.
+/// Build AND publish the memory port: the composed adapter is stored into the
+/// shared slot so the `remember` builtin tool (held by ToolSetAdapter via
+/// `Arc::clone` of this slot) routes writes to the live adapter — on initial
+/// compose and on a warm swap (which holds `memory_write_gate`).
+pub fn build_memory(
+    name: &str,
+    config: Option<&toml::Value>,
+    ctx: &ComposeContext,
+) -> Result<Arc<dyn MemoryPort>, AdapterCompositionError> {
+    let adapter = build_memory_unpublished(name, config, ctx)?;
     ctx.memory_slot.store(Arc::new(Arc::clone(&adapter)));
     Ok(adapter)
 }
@@ -1162,6 +1286,7 @@ pub fn build_daemon_memory(
     use crate::adapters::sandbox::NoOpSandbox;
     let ctx = ComposeContext {
         workspace_path: workspace_path.to_path_buf(),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: Arc::new(crate::adapters::noop::NoOpStorage) as Arc<dyn StoragePort>,
         skill_activator: Arc::new(SkillActivator::new()),
@@ -1205,6 +1330,7 @@ pub fn build_daemon_memory(
 #[cfg(unix)]
 pub(crate) fn daemon_compose_context(
     workspace_path: &std::path::Path,
+    config_dir: &std::path::Path,
     storage: Arc<dyn StoragePort>,
     domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
     assembler: String,
@@ -1219,6 +1345,7 @@ pub(crate) fn daemon_compose_context(
     use crate::adapters::sandbox::NoOpSandbox;
     ComposeContext {
         workspace_path: workspace_path.to_path_buf(),
+        config_dir: config_dir.to_path_buf(),
         project_context: ProjectContext::empty(),
         storage,
         skill_activator: Arc::new(SkillActivator::new()),
@@ -1296,6 +1423,7 @@ fn resolve_daemon_tools_adapter(tools_name: &str, a2a_peers: usize) -> (String, 
 #[cfg(unix)]
 pub fn build_daemon_core(
     workspace: &std::path::Path,
+    config_dir: &std::path::Path,
     config: Arc<arc_swap::ArcSwap<crate::domain::models::AppConfig>>,
     profile_selection: ProfileSelection,
     memory_adapter: &str,
@@ -1323,7 +1451,14 @@ pub fn build_daemon_core(
             .map(|a| a.adapter.clone())
             .unwrap_or_else(|| default.to_string())
     };
-    let persona_name = pick(PortDimension::Persona, "coding");
+    let persona_ref = profile_selection
+        .dimensions
+        .get(&PortDimension::Persona)
+        .cloned()
+        .unwrap_or(AdapterRef {
+            adapter: "coding".to_string(),
+            _config: None,
+        });
     // 18.9b-a D1 — see `resolve_daemon_tools_adapter`. Resolved once per boot,
     // outside the first-activity factory below, so the disclosure fires once.
     let picked_tools_name = pick(PortDimension::Tools, "builtin-only");
@@ -1365,13 +1500,18 @@ pub fn build_daemon_core(
     let peer_topic_store = Arc::new(crate::adapters::rap::PeerTopicStore::new());
     let eager_ctx = daemon_compose_context(
         workspace,
+        config_dir,
         storage.clone(),
         domain_tx.clone(),
         assembler_name.clone(),
         channel_turn_tx.clone(),
         Arc::clone(&peer_topic_store),
     );
-    let persona = build_persona(&persona_name, None, &eager_ctx)?;
+    let persona = compose_persona(
+        &persona_ref,
+        &eager_ctx.project_context,
+        &config_dir.join("personas"),
+    )?;
 
     // ── The lazy factory (built on first activity) ──────────────────────────
     let factory = {
@@ -1382,6 +1522,10 @@ pub fn build_daemon_core(
         let domain_tx = domain_tx.clone();
         let channel_turn_tx = channel_turn_tx.clone();
         let factory_topic_store = Arc::clone(&peer_topic_store);
+        let factory_config_dir = config_dir.to_path_buf();
+        // AD-9 — the persona file is read once, at boot; the factory reuses the
+        // eager `Arc` so a file edited or deleted afterwards cannot change it.
+        let factory_persona = Arc::clone(&persona);
         #[cfg(feature = "a2a")]
         let a2a_egress = a2a_egress.clone();
         #[cfg(feature = "mcp")]
@@ -1392,6 +1536,7 @@ pub fn build_daemon_core(
             move || -> Result<Arc<DaemonTurnRuntime>, AdapterCompositionError> {
                 let ctx = daemon_compose_context(
                     &workspace,
+                    &factory_config_dir,
                     storage.clone(),
                     domain_tx.clone(),
                     assembler_name.clone(),
@@ -1505,7 +1650,7 @@ pub fn build_daemon_core(
                     security: security.clone(),
                     tools,
                     tool_scheduler,
-                    persona: build_persona(&persona_name, None, &ctx)?,
+                    persona: Arc::clone(&factory_persona),
                     context_assembler: Arc::new(arc_swap::ArcSwap::from_pointee(Some(
                         context_assembler,
                     ))),
@@ -1556,6 +1701,9 @@ pub struct CliCore {
     pub event_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
     pub event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
     pub ledger: Arc<dyn crate::domain::ports::UsageLedgerPort>,
+    /// Story C-2 — the persona composed once at startup (profile persona file
+    /// or `--persona`).
+    pub persona: Arc<dyn PersonaPort>,
 }
 
 pub struct AcpCore {
@@ -1573,6 +1721,9 @@ pub struct AcpCore {
     pub skill_activator: Arc<SkillActivator>,
     /// Tier-1 skill catalog port (FR41). `None` = no catalog on this core.
     pub skill_exposure: Option<Arc<dyn crate::domain::ports::SkillExposurePort>>,
+    /// Story C-2 — the persona composed once at startup (profile persona file
+    /// or `--persona`); every ACP session core shares it.
+    pub persona: Arc<dyn PersonaPort>,
 }
 
 impl From<CliCore> for AcpCore {
@@ -1587,6 +1738,7 @@ impl From<CliCore> for AcpCore {
             event_tx,
             event_rx,
             ledger,
+            persona,
         } = core;
         let provider_id = provider.provider_id();
         let registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
@@ -1608,6 +1760,7 @@ impl From<CliCore> for AcpCore {
             skill_activator: Arc::new(SkillActivator::new()),
             // No skill source (empty activator above) → no catalog.
             skill_exposure: None,
+            persona,
         }
     }
 }
@@ -1616,6 +1769,7 @@ pub fn build_cli_core(
     app_config: &crate::domain::models::AppConfig,
     workspace: &std::path::Path,
     yolo: bool,
+    persona: Arc<dyn PersonaPort>,
 ) -> Result<CliCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::NoOpApprovalPersistence;
@@ -1645,6 +1799,7 @@ pub fn build_cli_core(
 
     let ctx = ComposeContext {
         workspace_path: workspace.to_path_buf(),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: storage.clone(),
         skill_activator: Arc::new(SkillActivator::new()),
@@ -1706,6 +1861,7 @@ pub fn build_cli_core(
         event_tx,
         event_rx,
         ledger,
+        persona,
     })
 }
 
@@ -1714,6 +1870,7 @@ pub fn build_acp_core(
     workspace: &std::path::Path,
     yolo: bool,
     mcp_servers: &[crate::domain::models::McpServerSpec],
+    persona: Arc<dyn PersonaPort>,
 ) -> Result<AcpCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::NoOpApprovalPersistence;
@@ -1757,6 +1914,7 @@ pub fn build_acp_core(
 
     let ctx = ComposeContext {
         workspace_path: workspace.to_path_buf(),
+        config_dir: std::path::PathBuf::new(),
         project_context: ProjectContext::empty(),
         storage: storage.clone(),
         skill_activator: skill_activator.clone(),
@@ -1879,6 +2037,7 @@ pub fn build_acp_core(
         router,
         skill_activator,
         skill_exposure,
+        persona,
     })
 }
 
@@ -1893,6 +2052,7 @@ mod tests {
         use crate::adapters::sandbox::NoOpSandbox;
         ComposeContext {
             workspace_path: PathBuf::from("/tmp/test"),
+            config_dir: PathBuf::new(),
             project_context: ProjectContext::empty(),
             storage: Arc::new(NoOpStorage) as Arc<dyn StoragePort>,
             skill_activator: Arc::new(SkillActivator::new()),

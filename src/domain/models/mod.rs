@@ -58,6 +58,7 @@ pub mod peer_identity;
 pub mod peer_reach;
 pub mod peer_ticket;
 mod permission;
+pub mod persona_config;
 pub mod plan;
 pub mod policy_principal;
 pub mod pricing;

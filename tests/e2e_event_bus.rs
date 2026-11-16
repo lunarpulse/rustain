@@ -116,6 +116,7 @@ fn test_app_state_honors_raw_capacity() {
     let agent_core = Arc::new(AgentCore::test_noop());
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
@@ -203,6 +204,7 @@ fn test_app_state_session_cancel_is_root_token() {
     let agent_core2 = Arc::new(AgentCore::test_noop());
     let compose_snapshot2 = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,

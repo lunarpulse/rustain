@@ -193,6 +193,7 @@ fn make_cli_core(workspace: &Path) -> CliCore {
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -568,6 +569,7 @@ async fn build_acp_core_composite_branch_makes_forwarded_mcp_tool_callable() {
         workspace.path(),
         false,
         &[spec],
+        Arc::new(rustain::adapters::noop::NoOpPersona),
     )
     .expect(
         "build_acp_core must compose hermetically with AppConfig::default() + a temp workspace",
@@ -659,8 +661,14 @@ async fn close_session_reaps_real_forwarded_mcp_child() {
     let workspace = tempfile::tempdir().expect("workspace");
     let config = AppConfig::default();
     let factory: AcpCoreFactory = Rc::new(move |cwd, specs| {
-        build_acp_core(&config, cwd, false, specs)
-            .map_err(|_| agent_client_protocol::Error::internal_error())
+        build_acp_core(
+            &config,
+            cwd,
+            false,
+            specs,
+            Arc::new(rustain::adapters::noop::NoOpPersona),
+        )
+        .map_err(|_| agent_client_protocol::Error::internal_error())
     });
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);

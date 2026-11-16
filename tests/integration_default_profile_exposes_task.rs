@@ -94,6 +94,7 @@ impl ProviderInfoPort for StubInfo {
 fn ctx_zero_mcp() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-adr-10-5"),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,

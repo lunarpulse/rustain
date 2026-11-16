@@ -1,16 +1,27 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::ports::PersonaPort;
 
-/// PersonaPort adapter that returns assembled project context as system prompt.
+/// PersonaPort adapter: an optional persona body (Story C-2: the profile's
+/// persona file or an embedded built-in) followed by the assembled project
+/// context. With no body the prompt is the project context alone.
 pub struct PersonaAdapter {
+    body: Option<Arc<str>>,
     project_context: ProjectContext,
 }
 
 impl PersonaAdapter {
     pub fn new(project_context: ProjectContext) -> Self {
-        Self { project_context }
+        Self::with_body(None, project_context)
+    }
+
+    pub fn with_body(body: Option<Arc<str>>, project_context: ProjectContext) -> Self {
+        Self {
+            body,
+            project_context,
+        }
     }
 
     /// Whether any project context files were loaded.
@@ -46,6 +57,65 @@ impl PersonaAdapter {
 
 impl PersonaPort for PersonaAdapter {
     fn system_prompt(&self, _workspace_path: &Path) -> String {
-        self.project_context.assembled_prompt()
+        let context = self.project_context.assembled_prompt();
+        match &self.body {
+            None => context,
+            Some(body) if context.is_empty() => body.to_string(),
+            Some(body) => format!("{body}\n\n{context}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::project_context::{ContextFileType, ProjectContextFile};
+
+    fn one_file_context() -> ProjectContext {
+        let content = "C2-CTX-LINE".to_string();
+        ProjectContext {
+            total_chars: content.len(),
+            files: vec![ProjectContextFile {
+                path: "/ws/CLAUDE.md".into(),
+                content,
+                priority: 1,
+                source_type: ContextFileType::ClaudeMd,
+            }],
+            truncated: false,
+        }
+    }
+
+    fn prompt(adapter: &PersonaAdapter) -> String {
+        adapter.system_prompt(Path::new("/ws"))
+    }
+
+    #[test]
+    fn no_body_is_byte_identical_to_the_project_context() {
+        let ctx = one_file_context();
+        assert_eq!(
+            prompt(&PersonaAdapter::new(ctx.clone())),
+            ctx.assembled_prompt()
+        );
+        assert_eq!(
+            prompt(&PersonaAdapter::with_body(None, ctx.clone())),
+            ctx.assembled_prompt()
+        );
+        assert_eq!(prompt(&PersonaAdapter::new(ProjectContext::empty())), "");
+    }
+
+    #[test]
+    fn body_alone_when_the_context_is_empty() {
+        let adapter = PersonaAdapter::with_body(Some(Arc::from("BODY")), ProjectContext::empty());
+        assert_eq!(prompt(&adapter), "BODY");
+    }
+
+    #[test]
+    fn body_then_blank_line_then_context() {
+        let ctx = one_file_context();
+        let adapter = PersonaAdapter::with_body(Some(Arc::from("BODY")), ctx.clone());
+        assert_eq!(
+            prompt(&adapter),
+            format!("BODY\n\n{}", ctx.assembled_prompt())
+        );
     }
 }

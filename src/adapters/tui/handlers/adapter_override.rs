@@ -97,22 +97,17 @@ pub async fn handle_clear_adapter_override(
     // Determine the profile-default adapter name for this port.
     // We need to resolve the active profile to find the default.
     let resolver = profile_resolver.load_full();
-    let default_name: Option<String> = if let Some(resolved) = resolver.resolve_active() {
-        resolved
-            .selection
-            .dimensions
-            .get(&port)
-            .map(|r| r.adapter.clone())
-    } else {
-        None
-    };
+    // C2-03: restore the COMPLETE resolved reference (adapter and `config`, e.g.
+    // the persona file), not just the adapter name.
+    let profile_ref: Option<AdapterRef> = resolver
+        .resolve_active()
+        .and_then(|resolved| resolved.selection.dimensions.get(&port).cloned());
 
-    let adapter_name = default_name.unwrap_or_else(|| default_adapter_fallback(port).to_string());
-
-    let adapter_ref = AdapterRef {
-        adapter: adapter_name.clone(),
+    let adapter_ref = profile_ref.unwrap_or_else(|| AdapterRef {
+        adapter: default_adapter_fallback(port).to_string(),
         _config: None,
-    };
+    });
+    let adapter_name = adapter_ref.adapter.clone();
 
     match composition::build_for_port(port, &adapter_ref, compose_snapshot) {
         Ok(built) => {

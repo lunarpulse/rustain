@@ -43,6 +43,7 @@ fn build_test_core(provider: Arc<dyn StreamingProvider>) -> CliCore {
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -715,6 +716,7 @@ fn build_test_core_with_security(
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -2486,6 +2488,7 @@ fn build_plan_test_core(provider: Arc<dyn StreamingProvider>) -> CliCore {
         event_tx,
         event_rx,
         ledger,
+        persona: Arc::new(rustain::adapters::noop::NoOpPersona),
     }
 }
 
@@ -3576,8 +3579,13 @@ async fn run_ask_production(
     workspace: &std::path::Path,
 ) -> (ExitCode, String) {
     let config = default_config();
-    let core = rustain::infrastructure::composition::build_cli_core(&config, workspace, false)
-        .expect("build_cli_core");
+    let core = rustain::infrastructure::composition::build_cli_core(
+        &config,
+        workspace,
+        false,
+        Arc::new(rustain::adapters::noop::NoOpPersona),
+    )
+    .expect("build_cli_core");
     let mut stdout = Cursor::new(Vec::new());
     let mut stderr = Cursor::new(Vec::new());
     let exit = rustain::adapters::cli::ask::run_ask_core(

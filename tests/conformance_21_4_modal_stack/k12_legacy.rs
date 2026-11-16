@@ -686,6 +686,7 @@ mod local_occlusion {
         let sandbox_policy = Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive));
         let compose = Arc::new(ComposeContext {
             workspace_path: workspace.to_path_buf(),
+            config_dir: std::path::PathBuf::new(),
             project_context: rustain::domain::models::project_context::ProjectContext::empty(),
             storage: Arc::new(NoOpStorage),
             skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),

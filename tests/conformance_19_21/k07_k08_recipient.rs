@@ -501,6 +501,7 @@ fn local_view_app_state(workspace: &Path) -> AppState {
     let (event_bus, domain_rx) = EventBus::new(64);
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: workspace.to_path_buf(),
+        config_dir: std::path::PathBuf::new(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
         storage: Arc::new(NoOpStorage) as Arc<dyn StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
