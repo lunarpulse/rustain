@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import harness
 import pexpect
 
-from test_story_20_1c_locked_providers import PROVIDER_ENV, _NativeTUI, _plain, _sensitive_env, _sha256
+from native_provider_helpers import PROVIDER_ENV, _NativeTUI, _plain, _sensitive_env, _sha256
 from test_story_20_1e2_accounts_init import _modal
 
 OLD_KEY = "sk-20-9g-old-synthetic-secret"

@@ -198,6 +198,7 @@ tests_tui/
   keys.py                 # Keyboard constants (Chat, Confirm, Permission, etc.)
   manual_test_ledger.py   # Plain script: one scripted turn + the ledger rows it minted
   mcp_support.py          # MCP group: READY_ROW, open_adapters/wait_mcp_ready (the echo server connected, one panel row)
+  native_provider_helpers.py # Shared isolated provider TUI and screen helpers
   decision_frame_helpers.py # Waits and the exact L3 decision-sheet predicate (decision_frame, sheet) shared by 21.1 S2 and 21.6
   fixtures/scene_provider.py    # Anthropic-API stand-in: scripted turns, no account
   fixtures/scenes/smoke.json    # The scene it serves (one text turn, one Write turn)

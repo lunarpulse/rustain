@@ -486,6 +486,96 @@ async fn the_export_lands_under_the_paths_module_and_is_owner_only() {
     }
 }
 
+#[tokio::test]
+async fn cli_export_never_touches_the_seen_boundary() {
+    use rustain::domain::models::LogVisitCandidate;
+    use rustain::infrastructure::subagent::node_journal::NodeJournal;
+    use rustain::infrastructure::transparency_awareness::{
+        SeenBoundary, SeenLoad, SeenStore, VisitCommit,
+    };
+
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+    let fixture = current_fixture_entries();
+    let mut entries = Vec::new();
+    for entry in &fixture[..4] {
+        entries.push(journal.append(entry.record.clone()).await.unwrap());
+    }
+
+    let seen = SeenStore::for_workspace(workspace.path());
+    let boundary = SeenBoundary {
+        seen_seq: 4,
+        reset_revision: 0,
+    };
+    assert_eq!(
+        seen.commit_visits(
+            &[LogVisitCandidate {
+                seen_through: 4,
+                reset_revision: 0,
+            }],
+            || {
+                let bytes = std::fs::read_to_string(journal.path()).map_err(|e| e.to_string())?;
+                let last = bytes.lines().last().ok_or("empty journal")?;
+                let entry: JournalEntry = serde_json::from_str(last).map_err(|e| e.to_string())?;
+                Ok(entry.seq)
+            },
+        )
+        .unwrap(),
+        VisitCommit::Committed(boundary)
+    );
+    let seen_path = workspace.path().join(".rustain/transparency-seen.json");
+    // Make a same-content rewrite detectable without relying on clock granularity.
+    std::fs::File::options()
+        .write(true)
+        .open(&seen_path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)),
+        )
+        .unwrap();
+    let before = std::fs::read(&seen_path).unwrap();
+    let modified = std::fs::metadata(&seen_path).unwrap().modified().unwrap();
+
+    entries.push(journal.append(fixture[4].record.clone()).await.unwrap());
+    assert_eq!(entries.last().unwrap().seq, 5);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustain"))
+        .current_dir(workspace.path())
+        .env_clear()
+        .env("HOME", home.path())
+        .env("RUSTAIN_DATA_DIR", data.path())
+        .env("RUSTAIN_CONFIG_DIR", config.path())
+        .args(["team", "log", "--export"])
+        .output()
+        .expect("run the real CLI");
+    assert!(
+        output.status.success(),
+        "team log --export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let export_path =
+        rustain::infrastructure::paths::transparency_export_path(workspace.path()).unwrap();
+    let exported = std::fs::read_to_string(export_path).expect("CLI created the export");
+    let rows = fold_transparency(&entries);
+    assert_eq!(rows.len(), 5, "all seeded journal entries are disclosable");
+    assert_eq!(
+        exported,
+        render_export(&rows),
+        "export contains all journal rows"
+    );
+    assert_eq!(std::fs::read(&seen_path).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&seen_path).unwrap().modified().unwrap(),
+        modified,
+        "export must not rewrite the preference, even with identical bytes"
+    );
+    assert_eq!(seen.load(), SeenLoad::Valid(boundary));
+}
+
 // ── AC7 — structural replay scope and self-detecting divergence ─────────────
 
 #[test]

@@ -1188,6 +1188,13 @@ fn k5_wrapper_reads_the_environment_once() {
     denied[3] = ("STY", Some("x"));
     let off = pty_child(child, &denied);
     assert!(off.contains("K5_OSC8=false"), "{off}");
+    let mut herdr = base.to_vec();
+    herdr[1] = ("TERM_PROGRAM", Some("herdr"));
+    let herdr_on = pty_child(child, &herdr);
+    assert!(herdr_on.contains("K5_OSC8=true"), "{herdr_on}");
+    herdr[3] = ("STY", Some("x"));
+    let herdr_off = pty_child(child, &herdr);
+    assert!(herdr_off.contains("K5_OSC8=false"), "{herdr_off}");
 }
 
 // ---------------------------------------------------------------- K6b

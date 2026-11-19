@@ -681,6 +681,299 @@ data: {\"type\":\"message_stop\"}\n\
         mock.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn an_sse_error_turn_writes_exactly_one_zero_output_ledger_row() {
+        use std::path::Path;
+        use std::sync::Arc;
+
+        use rustain::adapters::anthropic::AnthropicAdapter;
+        use rustain::adapters::filesystem::FileSystemStorage;
+        use rustain::adapters::ledger::FileUsageLedger;
+        use rustain::domain::events::AppEvent;
+        use rustain::domain::models::conversation::PersistedConversation;
+        use rustain::domain::models::router::{EscalationReason, ModelTier, StepKind};
+        use rustain::domain::ports::StoragePort;
+        use rustain::domain::services::model_router::ResolvedModel;
+        use rustain::domain::services::reducer::reduce;
+        use rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle;
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The real ledger resolves its root from the process environment.
+        // Set it only in a child containing this single test, not in the core suite.
+        const ROOT: &str = "RUSTAIN_TEST_SSE_LEDGER_ROOT";
+        let Some(root) = std::env::var_os(ROOT) else {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path().join("data");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "anthropic_streaming::streaming_integration::an_sse_error_turn_writes_exactly_one_zero_output_ledger_row",
+                    "--nocapture",
+                ])
+                .env(ROOT, temp.path())
+                .env("RUSTAIN_DATA_DIR", &data_dir)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && data_dir.join("usage/sess-k5-desync.jsonl").is_file(),
+                "ledger witness child did not pass and persist its row: {output:?}"
+            );
+            return;
+        };
+
+        fn turn_snapshot(conversation_id: &str, session_id: &str, text: &str) -> Conversation {
+            let mut conversation = make_conversation();
+            conversation.id = conversation_id.into();
+            conversation.session_id = Some(session_id.into());
+            conversation.messages.push(ChatMessage {
+                id: generate_conversation_id(),
+                role: MessageRole::User,
+                content: text.into(),
+                ..ChatMessage::default()
+            });
+            conversation
+        }
+
+        fn assert_ledger_row(
+            usage_dir: &Path,
+            session_id: &str,
+            conversation_id: &str,
+            tokens_in: u64,
+            tokens_out: u64,
+        ) {
+            let path = usage_dir.join(format!("{session_id}.jsonl"));
+            let jsonl = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            let line = jsonl.strip_suffix('\n').expect("unterminated ledger row");
+            assert!(!line.contains('\n'), "expected one ledger row: {jsonl}");
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["sessionId"].as_str(), Some(session_id));
+            assert_eq!(row["conversationId"].as_str(), Some(conversation_id));
+            assert_eq!(row["providerId"].as_str(), Some("anthropic"));
+            assert_eq!(row["model"].as_str(), Some("claude-sonnet-4-6"));
+            assert_eq!(row["stepKind"].as_str(), Some("test"));
+            assert_eq!(row["usage"]["tokensIn"].as_u64(), Some(tokens_in));
+            assert_eq!(row["usage"]["tokensOut"].as_u64(), Some(tokens_out));
+        }
+
+        fn assert_desync_session(path: &Path, clean_exit: bool) {
+            let json = std::fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            assert!(!json.contains("scene pong"), "{json}");
+            let saved: PersistedConversation = serde_json::from_str(&json).unwrap();
+            assert_eq!(saved.id, "desync-conv");
+            assert_eq!(saved.session_id.as_deref(), Some("sess-k5-desync"));
+            assert_eq!(saved.clean_exit, clean_exit);
+            assert!(saved.turns.is_empty(), "no durable assistant turn: {json}");
+            assert_eq!(saved.messages.len(), 1, "{json}");
+            assert_eq!(saved.messages[0].role, MessageRole::User);
+            assert_eq!(saved.messages[0].content, "desync prompt");
+        }
+
+        async fn run(
+            provider: Arc<AnthropicAdapter>,
+            storage: Arc<FileSystemStorage>,
+            ledger: Arc<FileUsageLedger>,
+            conversation: &Conversation,
+        ) -> Vec<StreamChunk> {
+            let security = Arc::new(rustain::adapters::noop::NoOpSecurity);
+            let tools = Arc::new(rustain::adapters::noop::NoOpToolSet);
+            let approval = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+                16,
+                Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+            );
+            let scheduler = rustain::domain::services::tool_scheduler::ToolScheduler::new(
+                security.clone(),
+                tools.clone(),
+                approval,
+                16,
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            rustain::infrastructure::runtime::turn::run_turn(
+                provider,
+                vec![Message {
+                    role: MessageRole::User,
+                    content: conversation.messages[0].content.clone(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                    provider_replay: vec![],
+                }],
+                CompletionOptions {
+                    session_id: None,
+                    model: "claude-sonnet-4-6".into(),
+                    max_tokens: 100,
+                    system_prompt: String::new(),
+                    temperature: None,
+                    tools: vec![],
+                },
+                tx,
+                security,
+                tools,
+                scheduler,
+                conversation.id.clone(),
+                storage,
+                conversation.clone(),
+                None,
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                ledger,
+                ResolvedModel {
+                    model: "claude-sonnet-4-6".into(),
+                    tier: ModelTier::CheapAgentic,
+                    escalation_reason: EscalationReason::None,
+                },
+                Some(StepKind::Test),
+                0,
+                None,
+                conversation.session_id.clone().expect("session id"),
+                rustain::domain::models::TurnOrigin::Interactive,
+                false,
+                None,
+            )
+            .await;
+            let mut chunks = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                let AppEvent::ProviderChunk {
+                    conversation_id,
+                    chunk,
+                } = event
+                else {
+                    panic!("expected a streamed provider chunk, got {event:?}");
+                };
+                assert_eq!(conversation_id, conversation.id);
+                chunks.push(chunk);
+            }
+            chunks
+        }
+
+        let root = std::path::PathBuf::from(root);
+        let data_dir = root.join("data");
+        let sessions_dir = rustain::infrastructure::paths::sessions_dir(&root);
+        let storage = Arc::new(FileSystemStorage::with_workspace_root(
+            sessions_dir.clone(),
+            root,
+        ));
+        let usage_dir = data_dir.join("usage");
+        let ledger = Arc::new(FileUsageLedger::new());
+
+        let server = MockServer::start().await;
+        let text_sse = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"scene pong\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let error_sse = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"scene_desync\",\"message\":\"turn 1 expected scene ping\"}}\n\n";
+        for (prompt, response) in [("control prompt", text_sse), ("desync prompt", error_sse)] {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .and(body_string_contains(prompt))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(response, "text/event-stream"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let provider = Arc::new(
+            AnthropicAdapter::new(
+                AuthMode::ApiKey("test-key".into()),
+                "claude-sonnet-4-6".into(),
+                Some(server.uri()),
+            )
+            .unwrap(),
+        );
+
+        let mut control = turn_snapshot("control-conv", "sess-k5-control", "control prompt");
+        let control_chunks = run(provider.clone(), storage.clone(), ledger.clone(), &control).await;
+        assert!(control_chunks.iter().any(|chunk| matches!(
+            chunk,
+            StreamChunk::Text { content, .. } if content == "scene pong"
+        )));
+        assert!(matches!(
+            control_chunks.last(),
+            Some(StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn
+            })
+        ));
+        assert_ledger_row(&usage_dir, "sess-k5-control", "control-conv", 10, 3);
+
+        let (mut reducer, clock) = test_reducer_state(1000);
+        for chunk in control_chunks {
+            if matches!(
+                reduce(&mut reducer, chunk, &clock),
+                ChunkAction::TurnComplete { persist: true, .. }
+            ) {
+                control.usage = reducer.pending_usage.take();
+                control.turns.push(reducer.committed_turn.take().unwrap());
+                control.rebuild_messages_mirror();
+                storage.save_conversation(&control).await.unwrap();
+            }
+        }
+        let control_json =
+            std::fs::read_to_string(sessions_dir.join("control-conv.meta.json")).unwrap();
+        let saved: PersistedConversation = serde_json::from_str(&control_json).unwrap();
+        assert_eq!(saved.messages.len(), 2, "{control_json}");
+        assert_eq!(saved.messages[1].role, MessageRole::Assistant);
+        assert_eq!(saved.messages[1].content, "scene pong");
+
+        let mut desync = turn_snapshot("desync-conv", "sess-k5-desync", "desync prompt");
+        let chunks = run(provider, storage.clone(), ledger, &desync).await;
+        assert!(
+            matches!(
+                chunks.as_slice(),
+                [
+                    StreamChunk::Error { content },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled
+                    }
+                ] if content == "scene_desync: turn 1 expected scene ping"
+            ),
+            "{chunks:?}"
+        );
+        assert_ledger_row(&usage_dir, "sess-k5-desync", "desync-conv", 0, 0);
+        assert_eq!(std::fs::read_dir(&usage_dir).unwrap().count(), 2);
+
+        // This file must come from run_turn's own pre-call save, not the
+        // graceful-save call below. Cancellation does not persist a completed turn.
+        let desync_path = sessions_dir.join("desync-conv.meta.json");
+        assert_desync_session(&desync_path, false);
+
+        // Drive the TUI's cancellation and clean-exit storage seams directly:
+        // the error remains visible in the tab but must not enter the transcript.
+        let (mut reducer, clock) = test_reducer_state(1000);
+        let mut streaming = make_streaming();
+        let error = chunks.into_iter().next().unwrap();
+        assert!(matches!(
+            reduce(&mut reducer, error, &clock),
+            ChunkAction::NeedsRedraw
+        ));
+        TuiTurnLifecycle::default().interrupt(
+            &mut streaming,
+            &mut desync,
+            &mut reducer,
+            &clock,
+            &mut None,
+        );
+        assert_eq!(desync.messages.len(), 2);
+        assert_eq!(
+            desync.messages[1].content,
+            "scene_desync: turn 1 expected scene ping"
+        );
+        assert!(desync.messages[1].is_ephemeral_display());
+        storage
+            .save_conversation_with_exit(&desync, true)
+            .await
+            .unwrap();
+        assert_desync_session(&desync_path, true);
+    }
+
     // ─── Review fix: run_turn synthesizes TurnComplete on stream disconnect ──
 
     // Covers: FR1 (streaming), FR14 (retry/backoff)

@@ -380,21 +380,6 @@ mod tests {
         FileSystemStorage::new(sessions_dir)
     }
 
-    #[test]
-    fn test_migrate_unknown_source_error_message() {
-        let mut registry = ImporterRegistry::new();
-        registry.register("claude-code", Box::new(ClaudeCodeImporter::new()));
-        let sources = registry.available_sources();
-        // Simulate the error message construction from run_migrate
-        let sources_str = sources.join(", ");
-        let msg = format!(
-            "Unsupported import source: aider. Supported sources: {}",
-            sources_str
-        );
-        assert!(msg.contains("aider"));
-        assert!(msg.contains("claude-code"));
-    }
-
     #[tokio::test]
     async fn test_migrate_dry_run_does_not_write() {
         let tmp = tempfile::TempDir::new().unwrap();

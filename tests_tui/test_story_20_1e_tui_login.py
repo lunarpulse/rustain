@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 import harness
 
-from test_story_20_1c_locked_providers import (
+from native_provider_helpers import (
     PROVIDER_ENV, _NativeTUI, _capture, _plain, _sensitive_env, _sha256, _wait,
     _modal_complete as _modal,
 )
@@ -361,3 +361,5 @@ def test_tui_login_bloom_and_browser_cancel_80x24(monkeypatch):
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"NATIVE_20_1E_EVIDENCE={evidence}", flush=True)
+
+

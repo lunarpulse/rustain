@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 
 import harness
 
-from test_story_20_1c_locked_providers import (
+from native_provider_helpers import (
     PROVIDER_ENV, _NativeTUI, _capture, _plain, _sensitive_env, _sha256, _wait,
 )
 from test_story_20_1e_tui_login import _assert_link_cells, _launch_target, _link_rows, _modal

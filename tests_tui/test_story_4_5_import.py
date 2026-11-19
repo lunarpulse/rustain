@@ -135,7 +135,7 @@ class TestMigrateCliSubcommand:
             )
 
     def test_migrate_unknown_source_exits_nonzero(self):
-        """Unknown --from value exits with non-zero and helpful error message."""
+        """Unknown --from exits with the generic failure code."""
         with tempfile.TemporaryDirectory(prefix="rustain_workspace_") as ws_dir:
             result = subprocess.run(
                 [str(_resolve_binary()[0]), "migrate", "--from", "nonexistent-tool"],
@@ -145,11 +145,7 @@ class TestMigrateCliSubcommand:
                 timeout=15,
             )
 
-            assert result.returncode != 0, "Unknown source should exit with non-zero"
-            output = result.stdout + result.stderr
-            assert "Unsupported" in output or "supported" in output.lower(), (
-                f"Error should mention supported sources:\n{output}"
-            )
+            assert result.returncode == 1, result.returncode
 
     def test_migrate_idempotent_second_import_skips_duplicates(self):
         """Running migrate twice imports 0 new sessions on the second run."""

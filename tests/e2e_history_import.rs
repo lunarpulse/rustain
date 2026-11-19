@@ -27,9 +27,7 @@ use rustain::domain::ports::StoragePort;
 use rustain::domain::services::claude_code_jsonl::{
     convert_lines_to_chat_messages, extract_candidate_metadata, parse_jsonl_line,
 };
-use rustain::domain::services::import::{
-    ConversationImporter, ImportCandidate, ImportResult, ImporterRegistry,
-};
+use rustain::domain::services::import::{ConversationImporter, ImportCandidate, ImportResult};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -122,28 +120,14 @@ fn test_e2e_migrate_without_from_is_clap_error() {
 #[tokio::test]
 async fn test_e2e_migrate_unknown_source_errors() {
     let result = run_migrate("aider".to_string(), None, false, false, false).await;
-    assert!(result.is_err());
-    let err_str = result.unwrap_err().to_string();
-    // Should contain the SubcommandExit marker (not the detailed message which goes to stderr)
-    // The actual message is printed to stderr; here we just check the error propagates
-    // The key test is that the command failed with a non-zero result
-    // (message printed to stderr, not captured here)
-    let _ = err_str; // error message goes to stderr, not captured
-}
-
-// More direct test of the error message logic:
-#[test]
-fn test_e2e_migrate_unknown_source_error_contains_supported_list() {
-    let mut registry = ImporterRegistry::new();
-    registry.register("claude-code", Box::new(ClaudeCodeImporter::new()));
-    let sources = registry.available_sources();
-    // Simulate what run_migrate does for unknown source
-    let msg = format!(
-        "Unsupported import source: aider. Supported sources: {}",
-        sources.join(", ")
+    let err = result.expect_err("unknown source must fail");
+    let exit = err
+        .downcast_ref::<rustain::infrastructure::startup::SubcommandExit>()
+        .expect("unknown source returns a SubcommandExit");
+    assert_eq!(
+        exit.0,
+        rustain::infrastructure::startup::SubcommandExit::GENERIC
     );
-    assert!(msg.contains("aider"), "error must mention the bad source");
-    assert!(msg.contains("claude-code"), "error must list valid sources");
 }
 
 // ── AC3: Discovery lists candidates ───────────────────────────────────────────

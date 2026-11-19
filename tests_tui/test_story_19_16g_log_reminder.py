@@ -1,24 +1,7 @@
-"""Story 19.16g — the recipient learns a retract happened, on the real surface.
+"""Story 19.16g: standalone and daemon-attached transparency reminders.
 
-The real binary under a PTY, a real isolated workspace journal, and product-side
-evidence only: the rendered status bar, the persisted seen-through preference
-(`.rustain/transparency-seen.json`), and the scene provider's request log.
-
-What this lane proves and what it does NOT:
-
-- It proves the SURFACE: a closed log discovers a newer durable row at a later
-  scheduled observation, renders a passive bounded `log: N`, keeps it through
-  unrelated input and a streamed turn, clears it only through a displayed log
-  visit, and keeps the boundary across a restart — on the standalone chord and
-  slash rails and on the daemon-attached slash rail (writable and read-only).
-- The rows are appended from this process under the journal writers' own
-  `flock` protocol (lock sidecar, contiguous `seq`, fsync). ⚠ That is a
-  stand-in for "another process durably appends", NOT the production writer:
-  the production writer (`NodeJournal`) and the real served retract are proven
-  by the Rust keystones `closed_log_observes_a_later_durable_retract` and
-  `tests/a2a_server.rs::story_19_16g_a_served_retract_reaches_a_closed_log_reminder`.
-- The latency printed below is measured, never promised: the client polls on a
-  ≥ 1 s interval and nothing here is an NFR64 propagation claim.
+The standalone test checks a completed turn preserves the reminder; the attached
+writer and reader check local visits and the persisted seen boundary.
 """
 
 from __future__ import annotations
@@ -143,6 +126,7 @@ def scene_env(stub, tmp_path) -> dict[str, str]:
     return stub.env("scene-ci", home)
 
 
+
 # ── Standalone rail ──────────────────────────────────────────────────────────
 
 
@@ -233,7 +217,6 @@ def test_standalone_reminder_discovers_clears_and_survives_restart(tmp_path, stu
     )
     assert (workspace / ".rustain" / "transparency.jsonl").exists()
     assert (workspace / ".rustain" / "transparency-seen.json").read_bytes() == before
-
 
 # ── Daemon-attached rail ─────────────────────────────────────────────────────
 

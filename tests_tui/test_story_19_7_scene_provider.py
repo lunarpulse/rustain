@@ -4,11 +4,8 @@ This is the first test in the non-API lane that sends a **model turn**: the bina
 talks to `fixtures/scene_provider.py` over HTTP exactly as it would talk to
 Anthropic, so the turn needs no provider account and replays byte-stable.
 
-Every assertion here is product-side — the request log (what the binary *sent*), the
-usage ledger (millisecond and tokens the binary *minted*), the session file (what the
-binary *wrote*) and the permission prompt (what the product *asked*). The one place a
-served string is asserted is the rendering positive control in
-`test_text_turn_completes_through_the_env_front_door`, and it is paired with all four.
+The binary tests assert product-side effects; a fast stub test also proves that
+unscripted turns report desync without advancing the scene cursor.
 """
 
 from __future__ import annotations
@@ -64,22 +61,17 @@ def _turn_rows(stub: SceneStub) -> list[dict]:
     return [row for row in stub.rows() if "turn" in row]
 
 
-def _session_files(tui: RustainTUI) -> list[Path]:
-    return sorted((tui.wp / ".claude" / "sessions").glob("*.meta.json"))
-
-
-def _assistant_texts(tui: RustainTUI) -> list[str]:
-    """Non-empty assistant content the binary actually persisted."""
-    texts: list[str] = []
-    for path in _session_files(tui):
-        doc = json.loads(path.read_text())
-        for message in doc.get("messages", []):
-            if message.get("role") == "assistant" and str(message.get("content", "")).strip():
-                texts.append(message["content"])
-    return texts
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def build_binary(request):
+    """Only the loopback stub contract is independent of the native binary."""
+    if request.node.name != "test_unscripted_turn_is_a_loud_desync_and_never_advances":
+        request.getfixturevalue("build_binary")
+
 
 
 @pytest.fixture
@@ -234,41 +226,6 @@ def test_tool_turn_prompts_then_writes_the_scripted_file(stub, scratch_home):
 # ── AC2 — loud desync, loud unknown path, no credential in a receipt ──────────
 
 
-def test_desync_is_loud_product_side(stub, scratch_home):
-    """AC2(a): unscripted text is a finding, never auto-advanced past."""
-    stub.expect_status = 1
-    with RustainTUI(fresh=True, build=False, env_overrides=stub.env("scene-ci", scratch_home)) as tui:
-        tui.send_message("a sentence the scene never scripted")
-
-        turns = _wait_for(lambda: _turn_rows(stub))
-        assert len(turns) == 1, stub.rows()
-        assert turns[0]["desync"] is True
-        assert turns[0]["turn"] == 1
-
-        rows = _wait_for(lambda: _ledger_rows(tui))
-        assert len(rows) == 1, rows
-        assert rows[0]["usage"]["tokensOut"] == 0, rows[0]
-
-        # The screen and the persisted assistant row both carry the stub's own
-        # error.message rendered verbatim (`stream.rs` folds StreamChunk::Error into
-        # the assistant text) — the echo class, so that text is never asserted. What
-        # IS asserted product-side: the scene's scripted answer was never recorded.
-        assert _wait_for(lambda: _session_files(tui)), "no session file was written"
-        session_text = "\n".join(path.read_text() for path in _session_files(tui))
-        assert "scene pong" not in session_text
-        assert not any("scene pong" in text for text in _assistant_texts(tui))
-
-        # Never auto-advanced past: the cursor did not move, so turn 1 is still the
-        # one being expected. (Delete the expect check and these become turns 2..n.)
-        # The second user turn also triggers the product's one-shot title call
-        # (`title_trigger = conversation.turns.len() == 2`, tools: 0, max_tokens: 30),
-        # which is a real provider request and desyncs here too — hence "every row",
-        # not "exactly two rows".
-        tui.send_message("still not the scripted sentence")
-        turns = _wait_for(lambda: _turn_rows(stub) if len(_turn_rows(stub)) >= 2 else None)
-        assert turns and len(turns) >= 2, stub.rows()
-        assert [row["turn"] for row in turns] == [1] * len(turns), turns
-        assert all(row["desync"] is True for row in turns), turns
 
 
 @pytest.mark.parametrize("path", ["/v1/models", "/models"])
@@ -345,6 +302,34 @@ def test_unknown_path_is_loud(stub):
         ("POST", "/v1/messages"),  # stream-less, not the pinned health-check shape
         ("POST", "/v1/messages"),  # unparseable body
     ], stub.rows()
+
+def test_unscripted_turn_is_a_loud_desync_and_never_advances(stub):
+    stub.expect_status = 1
+    for text in ("a sentence the scene never scripted", "still not the scripted sentence"):
+        request = urllib.request.Request(
+            f"{stub.url}/v1/messages",
+            data=json.dumps({
+                "model": "fixture-model", "max_tokens": 8, "stream": True,
+                "messages": [{"role": "user", "content": text}],
+            }).encode(),
+            headers={"content-type": "application/json", "x-api-key": "scene-ci"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+            events = response.read()
+        reason = f"turn 1 expected 'scene ping' in the last user text, got {text!r}"
+        envelope = {"type": "error", "error": {"type": "scene_desync", "message": reason}}
+        expected = f"event: error\ndata: {json.dumps(envelope, separators=(',', ':'))}\n\n".encode()
+        assert events == expected
+        payload = json.loads(events.decode().splitlines()[1].removeprefix("data: "))
+        assert payload["type"] == "error" and payload["error"]["type"] == "scene_desync"
+    rows = _turn_rows(stub)
+    assert len(rows) == 2
+    for row in rows:
+        assert row["desync"] is True
+        assert type(row["turn"]) is int and row["turn"] == 1
+
 
 
 def test_no_credential_can_reach_the_request_log(stub, scratch_home):

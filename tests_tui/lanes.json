@@ -63,14 +63,13 @@
     "test_terminal_screen.py": "core"
   },
   "tests": {
-    "test_story_19_7_scene_provider.py::test_desync_is_loud_product_side": "native_nightly",
     "test_story_21_6_decision_queue.py::test_e_proposal_predicate_whole_sheets_and_torn_frames": "native_nightly",
     "test_story_21_6_decision_queue.py::test_e_queue_draft_and_dismissed_rows": "native_nightly",
     "test_story_21_6_decision_queue.py::test_leg_e_team_proposal_80x24": "native_nightly",
     "test_story_21_7_mission_control.py::test_leg_e_history_window_at_80x24": "native_nightly"
   },
   "manual": {
-    "test_story_19_16g_log_reminder.py::test_standalone_reminder_discovers_clears_and_survives_restart": "flaky under load at reruns=0 (E2n 31/64 failed, 2 rounds x 32 concurrent); owner tui-5 (MOVE-DOWN: src/infrastructure/transparency_awareness.rs closed_log_observes_a_later_durable_retract, tests/a2a_server.rs 19_16g)",
-    "test_story_20_1d4a_tool_turn_reload.py": "needs a `test-instrumentation` build no lane builds (the test skips without it); owner tui-5 (Rust twin tests/conformance_20_1d4a_tool_turn_fidelity/gemini.rs)"
+    "test_story_19_16g_log_reminder.py::test_standalone_reminder_discovers_clears_and_survives_restart": "retained: completed streamed turn preserves the reminder; tui-7 decides move-down/witness/keep; manual because 31/64 failed under concurrent load",
+    "test_story_20_1d4a_tool_turn_reload.py": "manual: MCP stdio image_content to Gemini inlineData has no executed twin; owner tui-6"
   }
 }

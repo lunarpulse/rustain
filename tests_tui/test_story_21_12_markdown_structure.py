@@ -21,7 +21,7 @@ import harness
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fixtures.scene_provider import SceneStub  # noqa: E402
-from test_story_20_1c_locked_providers import (  # noqa: E402
+from native_provider_helpers import (  # noqa: E402
     PROVIDER_ENV, _NativeTUI, _capture, _sensitive_env, _sha256, _wait, status_ready,
 )
 

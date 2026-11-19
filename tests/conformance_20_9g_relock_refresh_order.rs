@@ -5,8 +5,12 @@ use crate::conformance_20_1e2_tui_accounts::common::{
     Held, K1, K2, Tui, World, accept, activate_openai, answer_models, bearer, config_with,
     key_login, listing, openai, stub, turn_bearer, until_accounts, until_changed,
 };
+use ratatui::layout::Rect;
 use rustain::adapters::model_catalog_cache::RefreshCheckpoint;
-use rustain::domain::events::{DomainKey, LoginEvent};
+use rustain::adapters::tui::layout::compute_layout;
+use rustain::adapters::tui::presentation::{Surface, geometry};
+use rustain::adapters::tui::theme::Theme;
+use rustain::domain::events::{DomainInputEvent, DomainKey, LoginEvent};
 use rustain::domain::models::provider::DiscoveryStatus;
 use rustain::infrastructure::model_discovery::rejected_notice;
 use serial_test::serial;
@@ -146,6 +150,7 @@ async fn k1_relock_relogin_retires_prelogout_refresh() {
         let (listener, base) = stub().await;
         let mut tui = Tui::new(config_with(&[("openai", openai(&base, true))]));
         key_login(&mut tui, &listener, K1).await;
+        assert_eq!(models(&tui), ["m-one"]);
         let a = tick(&tui);
         let held_a = request(&listener, K1).await;
         logout(&mut tui).await;
@@ -196,6 +201,59 @@ async fn k1_relock_relogin_retires_prelogout_refresh() {
         );
         assert_eq!(models(&tui), ["new-only"]);
         no_rejection(&tui);
+        // Login returns to the picker; close it and reopen through the real chord.
+        tui.key(DomainKey::Esc);
+        tui.key(DomainKey::CtrlX);
+        tui.input(DomainInputEvent::KeyPress('m'));
+        assert_eq!(
+            tui.state.modal_stack.top().unwrap().surface,
+            Surface::ModelSelector
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = compute_layout(area, &Theme::dark(), &tui.state.input_buffer, 1, false)
+            .expect("80x24 meets the minimum");
+        let rect = geometry::frame_rect(geometry::modal_region(&layout, area));
+        let screen = tui.frame_at(80, 24);
+        for row in screen.lines() {
+            assert!(!row.contains("m-one"), "obsolete model on screen: {screen}");
+            assert!(
+                !row.contains("rejected its credential"),
+                "obsolete rejection on screen: {screen}"
+            );
+        }
+        let buffer = tui.login_buffer_at(80, 24, false);
+        let row = |y| {
+            (rect.x..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let top = row(rect.y);
+        assert!(
+            top.starts_with('┌') && top.contains("Select Model"),
+            "{top}"
+        );
+        let bottom = row(rect.bottom() - 1);
+        assert!(bottom.starts_with('└') && bottom.ends_with('┘'), "{bottom}");
+        assert!(
+            bottom
+                .chars()
+                .skip(1)
+                .take(rect.width as usize - 2)
+                .all(|c| c == '─'),
+            "{bottom}"
+        );
+        let inner: Vec<_> = (rect.y + 1..rect.bottom() - 1).map(row).collect();
+        for line in &inner {
+            assert!(line.starts_with('│') && line.ends_with('│'), "{line}");
+        }
+        let selected: Vec<_> = inner.iter().filter(|line| line.contains('▸')).collect();
+        assert_eq!(selected.len(), 1, "picker rows: {inner:?}");
+        assert!(
+            selected[0].contains("new-only"),
+            "selected row: {}",
+            selected[0]
+        );
+        tui.key(DomainKey::Esc);
         let model = activate_openai(&mut tui).await;
         assert_eq!(
             turn_bearer(&tui, &listener, &model).await,

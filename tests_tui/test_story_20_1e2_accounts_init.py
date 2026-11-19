@@ -25,7 +25,7 @@ import harness
 import pexpect
 import pyte
 
-from test_story_20_1c_locked_providers import (
+from native_provider_helpers import (
     PROVIDER_ENV, _NativeTUI, _capture, _plain, _sensitive_env, _sha256, _wait,
     _modal_complete as _modal,
 )
