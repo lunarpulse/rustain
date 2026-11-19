@@ -649,6 +649,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         };
         assert_eq!(format_token_usage(&usage), "↑1.2k ↓3.4k");
     }
@@ -690,6 +691,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         };
         t.draw(|frame| {
             render(
@@ -781,6 +783,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: cache_read,
             reasoning_tokens: None,
+            counters_observed: false,
         }
     }
 
@@ -812,6 +815,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         };
         let db = DailyBudgetState {
             spent_today_usd: 4.25,
@@ -872,6 +876,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         };
         let db = DailyBudgetState {
             spent_today_usd: 10.0,
@@ -1584,6 +1589,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         };
         for width in [60u16, 80, 130] {
             for attached in [

@@ -81,7 +81,10 @@ pub(crate) async fn recompute_daily_budget(
 ) -> Option<DailyBudgetState> {
     let limit = config.budget.daily_limit_usd?;
     let since = info.today_start_unix_ms();
-    let entries = usage_ledger.read_since(since).await.unwrap_or_default();
+    let entries = usage_ledger
+        .read_since(since, crate::domain::ports::LedgerReadMode::Lenient)
+        .await
+        .unwrap_or_default();
     let spent = budget_gate::daily_spend(&entries, config);
     Some(DailyBudgetState {
         spent_today_usd: spent,
@@ -326,6 +329,7 @@ mod tests {
         async fn read_since(
             &self,
             _: i64,
+            _: crate::domain::ports::LedgerReadMode,
         ) -> Result<
             Vec<crate::domain::models::usage::UsageLedgerEntry>,
             crate::domain::errors::StorageError,
@@ -367,6 +371,7 @@ mod tests {
                 cache_read_tokens: Some(c),
                 reasoning_tokens: Some(r),
             },
+            provenance: None,
         })
         .collect();
         let mut config = AppConfig::default();

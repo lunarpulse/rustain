@@ -374,6 +374,9 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             state.pending_usage = Some(usage);
             ChunkAction::None
         }
+        StreamChunk::AccountingUsage { .. } | StreamChunk::AccountingRetry { .. } => {
+            ChunkAction::None
+        }
 
         // ── Text ─────────────────────────────────────────────────────────
         StreamChunk::Text { content, .. } => {
@@ -829,6 +832,7 @@ mod tests {
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },
@@ -983,6 +987,7 @@ mod tests {
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_tokens: None,
+                        counters_observed: false,
                     },
                     session_id: None,
                 }],
@@ -1266,6 +1271,7 @@ mod tests {
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },

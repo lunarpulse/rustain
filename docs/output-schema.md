@@ -13,13 +13,18 @@ This document is the stable contract for the `--output-format json` and `--outpu
 The `--format` alias does **not** exist and was intentionally dropped (it never shipped; see Story 13.1b party-mode O5).
 
 ## Schema version
-Every JSON document and NDJSON event carries:
+Every JSON document and NDJSON event carries a `schema_version` string. With
+no `ask` limits or daily budget configured, the version remains:
 
 ```json
 "schema_version": "1.3"
 ```
 
 (v1.0 shipped in Story 13.1b; v1.1 adds the dry-run fields in Story 13.1c; v1.2 adds the `call_usage` stream event; v1.3 makes the `usage` counts disjoint for every provider.)
+
+With any `ask` limit or daily budget configured, the version is `"1.4"` on
+the whole document or every NDJSON line, including structured setup errors.
+The version does not depend on whether a limit is reached.
 
 The version is a **string** following `major.minor` semantics:
 
@@ -41,10 +46,11 @@ A single pretty-printed JSON object on stdout.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | string | Always `"1.3"`. |
+| `schema_version` | string | `"1.3"` without limits; `"1.4"` with a limit or daily budget configured. |
 | `response` | string \| null | Assistant text. `null` in the error envelope. |
 | `model` | string | The resolved concrete model used for the turn. |
 | `stop_reason` | string | One of: `end_turn`, `tool_use`, `max_tokens`, `cancelled`. |
+| `limit_reason` | string | Optional; present only on a bounded stop. See [v1.4](#v14--ask-execution-limits). |
 | `usage` | object \| null | Token usage summed over every provider call of the turn, or explicit `null` if the provider emitted no `Usage` chunk. |
 | `usage.input_tokens` | number | Prompt tokens billed at the input rate. Excludes cache reads and cache writes (from v1.3, for every provider). |
 | `usage.output_tokens` | number | Every generated token, reasoning included. |
@@ -66,7 +72,7 @@ A single pretty-printed JSON object on stdout.
 | `dry_run` | boolean | `true` when `--dry-run` was specified, `false` otherwise. |
 | `plan` | object \| null | Proposed plan (see `PlanOut` shape), or `null` when no plan was proposed. |
 | `tools_would_use` | array of string | Deduplicated, sorted tool names the model attempted that the plan-mode gate would block. |
-| `error` | object \| null | Present only on turn failure. Same envelope as success; `response` is `null`. |
+| `error` | object | Present on ordinary operational failure (`response` is `null`); omitted on a bounded stop. |
 | `error.message` | string | Human-readable failure reason. |
 
 ### Error envelope
@@ -92,24 +98,29 @@ A single pretty-printed JSON object on stdout.
 
 ## `--output-format stream-json` events
 
-One compact JSON object per line. Every line carries `schema_version: "1.3"` and a `type` discriminator.
+One compact JSON object per line. Every line carries the invocation's
+`schema_version` and a `type` discriminator.
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
 | `text` | `schema_version`, `content` | Assistant text delta. |
 | `tool_use` | `schema_version`, `id`, `name`, `input` | A tool call was requested. |
 | `tool_result` | `schema_version`, `id`, `result` | A tool result arrived. `result` has the same shape as `tool_calls[].result` in `json` mode: `{ content: string, is_error: boolean }`. |
-| `call_usage` | `schema_version`, `usage`, `model` | Token usage of one provider call (same shape as the `json` `usage` object) and the model that served it. One line per call that reported usage; a report of zero tokens is still a report. |
-| `usage` | `schema_version`, `usage` | Turn total (same shape as the `json` `usage` object). Emitted once near the end of the stream, not per-chunk. Not emitted when the turn fails. |
-| `turn_complete` | `schema_version`, `stop_reason`, `deny_count`, `dry_run`, `tools_would_use` | Terminal event; the turn finished. `deny_count` is the number of auto-denied tool calls. `dry_run` and `tools_would_use` carry the same values as the `json` envelope. |
+| `call_usage` | `schema_version`, `usage`, `model` | Token usage of one provider call (same shape as the `json` `usage` object) and the model that served it. One line per call that reported usage for display; a report of zero tokens is still a report. |
+| `usage` | `schema_version`, `usage` | Turn total (same shape as the `json` `usage` object). Emitted once near the end of the stream, not per-chunk. Not emitted before a terminal `error`. |
+| `turn_complete` | `schema_version`, `stop_reason`, `deny_count`, `dry_run`, `tools_would_use`, optional `limit_reason` | Terminal event for a completed or bounded turn. `deny_count`, `dry_run`, `tools_would_use`, and `limit_reason` carry the same values as the `json` document. |
 | `plan_proposed` | `schema_version`, `dry_run`, `plan` | Emitted before `turn_complete` when a plan was proposed. `plan` has the same `PlanOut` shape as in `json` mode. |
 | `error` | `schema_version`, `error` | Terminal event; the turn failed. Prior events remain valid. `error` has the same shape as the `json` error: `{ message: string }`. |
-Only `turn_complete` and `error` are terminal. On error, only `error` is emitted — `turn_complete` is NOT emitted. Each event object is serialized with `serde_json::to_string` (compact, single-line) so no embedded newline can break the NDJSON framing.
+Only `turn_complete` and `error` are terminal. An ordinary operational
+failure emits only `error` as its terminal event. Each event object is
+serialized with `serde_json::to_string` (compact, single-line) so no
+embedded newline can break the NDJSON framing.
 
 ## Denials
 `deny_count` is a first-class scalar in both `json` and `stream-json`. It equals the number of tool calls auto-denied during the turn. This lets automation consumers detect denials without scraping stderr.
 
-The exit code remains binary: `0` if the turn completed, non-zero if it failed to complete. A denial is **not** a turn failure.
+An auto-denial is **not** a turn failure and does not by itself change the
+exit status. See [exit status](#exit-status).
 
 In `text` mode, denials remain stderr-only as they were in Story 13.1a.
 
@@ -156,7 +167,7 @@ The domain `Plan` type serializes with `camelCase` internally (for TUI/storage c
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
-| `plan_proposed` | `schema_version`, `dry_run`, `plan` | Terminal event emitted before `turn_complete` when a plan was proposed. `plan` has the `PlanOut` shape (snake_case keys). |
+| `plan_proposed` | `schema_version`, `dry_run`, `plan` | Nonterminal event emitted before `turn_complete` when a plan was proposed. `plan` has the `PlanOut` shape (snake_case keys). |
 
 `turn_complete` now additionally carries `dry_run: bool` and `tools_would_use: string[]`.
 
@@ -186,7 +197,9 @@ A turn takes one provider call per tool round, so a turn that uses tools makes s
 
 `call_usage` lines appear in call order. A call's line is written after the last chunk of that call and before the first event of the next call.
 
-When the turn fails, the calls that reported usage are written before the terminal `error` and no `usage` total follows. That includes a call that reported usage and then failed. Sum the `call_usage` lines to get the cost of a failed turn.
+On ordinary turn failure, the calls that reported usage are written before
+the terminal `error` and no `usage` total follows. That includes a call that
+reported usage and then failed.
 
 ## v1.3 — Disjoint usage counts
 
@@ -204,16 +217,85 @@ Only the meaning of `input_tokens` changes, and only for streams served over the
 
 A pre-1.3 stream does not say which transport served it, so the provider name alone cannot decide this for OpenRouter (default transport: Responses; Chat only when `RUSTAIN_OPENROUTER_RESPONSES` is `0`) or GitHub Copilot (Chat, Responses or Messages, chosen per model). A consumer of such old streams must obtain the transport elsewhere, or treat the cost as unknown. From 1.3 no such distinction is needed: read `schema_version`, and for `1.3` and later use the counts as they are.
 
+## v1.4 — Ask execution limits
+
+The optional `ask` limits are independent of one another and of the
+configured daily budget. An omitted flag sets no bound of that kind.
+
+| Option | Unit and boundary |
+|--------|-------------------|
+| `--max-turns` | Positive integer number of admitted provider calls, including continuations. The last allowed call can finish normally; if it requests tools that would require another provider call, neither those tools nor the next call are started. |
+| `--max-duration` | Positive elapsed seconds on a monotonic clock. Starts at execution entry after file/stdin, prompt and configuration preparation. Includes admission, provider streaming and tool waits. |
+| `--max-cost` | Positive USD ceiling for this invocation. Observed usage is priced at a settled call boundary; at or above the ceiling, no further work is admitted. |
+| `[budget].daily_limit_usd` | Configured USD ceiling for the local budget day. `ask` checks a strict snapshot of available local ledger records before the first provider call and again at each settled call boundary. This includes prior spend and is separate from the invocation ceiling. |
+
+Cost bounds are best-effort and checked after a call, not an invoice
+guarantee or a prediction of in-flight spend. The local daily snapshot
+cannot reconstruct missing historical rows or reserve spend against
+concurrent writers. An unreadable snapshot, records that may belong to
+the budget day but cannot be parsed, or usage that cannot be proved and
+priced block further work. A reported zero at a known price is valid;
+an absent counter or synthesized zero is not. A stop cancels blocked
+work and waits for call settlement; it does not undo side effects that
+already started.
+Unproved or unpriceable usage from an admitted call also blocks an
+invocation that uses `--max-cost` without a daily budget.
+
+At the same decision boundary, the precedence is `max_duration`,
+`accounting_error`, `daily_budget`, `max_cost`, `max_turns`, then normal
+completion. The effective reason appears as `limit_reason` on the final
+JSON document or on the single NDJSON `turn_complete` event. It is
+omitted for normal completion and for ordinary operational errors.
+`stop_reason` stays separate: the provider's reported reason is
+unchanged, or is `cancelled` if a bounded turn stopped before any
+provider reason was seen.
+
+A bounded stop preserves assistant output already observed (which can
+be empty or partial), along with usage already reported for display.
+The JSON `response` is a string even if empty. In NDJSON, prior events
+remain valid and any remaining usage or plan events precede the terminal
+event. The existing `--final-message-only` response selection still
+applies. For text output, the reason is printed on stderr even with
+that option.
+
+### Usage ledger compatibility
+
+New shared JSONL receipts can carry optional `provenance`: `observed`
+when the serving transport establishes the required counters, `unknown`
+when it does not. Legacy rows remain readable and are not rewritten;
+strict daily `ask` refuses unproved legacy or estimated rows in the
+applicable day. Other ledger readers retain their existing policies.
+This metadata is not part of the `ask` output usage objects.
+
+An interrupted call in a limited `ask` run settles its latest trustworthy
+observed usage once. If none is available, it writes one `unknown`
+receipt only when `--max-cost` or a daily budget is configured. A denied
+provider admission has no receipt. Without limits, the existing
+interruption and append-failure behavior is unchanged.
+If a limited call's append fails, `accounting_error` stops further
+admission unless a higher-priority deadline has already expired.
+
+### Exit status
+
+| Code | Meaning |
+|------|---------|
+| `0` | Normal completion. |
+| `1` | A bounded stop or an operational error. |
+| `2` | Arguments rejected by the CLI parser. |
+
 ## Stdout/stderr discipline
 
 - **stdout** carries only the rendered output for the selected format.
-- **stderr** carries tool-call narration, the resume hint, the human-readable deny-count summary, and errors — unchanged from Story 13.1a.
+- **stderr** carries tool-call narration, the resume hint, the human-readable deny-count summary, errors, and bounded-stop reasons.
 
 Under `--final-message-only`, the JSON `response` field is narrowed to the final assistant block and stderr narration is quieted; the JSON shape and stdout channel do not change.
 
 ## Version-bump enforcement
 
-A schema fingerprint test pins the v1.3 field-path set. If the fingerprint changes, the failure message instructs the maintainer to decide whether the change is additive (bump minor) or breaking (bump major) and then update the recorded fingerprint. This makes schema changes loud and intentional.
+A schema fingerprint test pins the no-limit v1.3 field-path set. The
+v1.4 `limit_reason` is additive and only appears on bounded terminal
+output. If the field paths change again, decide whether the change is
+additive or breaking before updating the corresponding fingerprint.
 
 ## See also
 

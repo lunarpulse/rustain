@@ -12,7 +12,7 @@ use rustain::adapters::ledger::flat_file::FileUsageLedger;
 use rustain::domain::models::pricing::PricingConfig;
 use rustain::domain::models::router::{EscalationReason, ModelTier, StepKind};
 use rustain::domain::models::usage::{TokenUsage, UsageLedgerEntry};
-use rustain::domain::ports::UsageLedgerPort;
+use rustain::domain::ports::{LedgerReadMode, UsageLedgerPort};
 use rustain::domain::services::cost_calculator::{cost_breakdown, cumulative_cost};
 
 fn entry(session: &str, ts: i64, model: &str, tin: u32, tout: u32) -> UsageLedgerEntry {
@@ -33,6 +33,7 @@ fn entry(session: &str, ts: i64, model: &str, tin: u32, tout: u32) -> UsageLedge
             cache_read_tokens: None,
             reasoning_tokens: None,
         },
+        provenance: None,
     }
 }
 
@@ -111,7 +112,10 @@ async fn ledger_to_cost_breakdown_end_to_end() {
         .await
         .expect("append 4");
 
-    let all = ledger.read_since(0).await.expect("read_since");
+    let all = ledger
+        .read_since(0, LedgerReadMode::Lenient)
+        .await
+        .expect("read_since");
     assert_eq!(all.len(), 4);
 
     let pricing = pricing();
@@ -142,7 +146,10 @@ async fn ledger_to_cost_breakdown_end_to_end() {
     assert!((cum - 14.30).abs() < 1e-9);
 
     // read_since(2500) filters out ts < 2500 → returns 2 entries (ts=3000, 4000)
-    let recent = ledger.read_since(2500).await.expect("read_since recent");
+    let recent = ledger
+        .read_since(2500, LedgerReadMode::Lenient)
+        .await
+        .expect("read_since recent");
     assert_eq!(recent.len(), 2);
 
     match original {
@@ -195,7 +202,10 @@ async fn legacy_rows_are_read_unchanged_and_priced_with_the_new_formula() {
     };
     let before = bytes(tmp.path());
 
-    let rows = ledger.read_since(0).await.expect("read_since");
+    let rows = ledger
+        .read_since(0, LedgerReadMode::Lenient)
+        .await
+        .expect("read_since");
     assert_eq!(rows.len(), 2);
     let by_model = |m: &str| rows.iter().find(|r| r.model == m).expect("row").clone();
     let (c, a) = (by_model("deepseek-v4-flash"), by_model("sonnet-cached"));
@@ -253,7 +263,10 @@ async fn ledger_returns_empty_when_no_usage_dir() {
     let ledger: Arc<dyn UsageLedgerPort> = Arc::new(FileUsageLedger::new());
 
     // No appends yet
-    let empty = ledger.read_since(0).await.expect("read_since empty");
+    let empty = ledger
+        .read_since(0, LedgerReadMode::Lenient)
+        .await
+        .expect("read_since empty");
     assert!(empty.is_empty());
     let empty_session = ledger
         .read_session("nope")

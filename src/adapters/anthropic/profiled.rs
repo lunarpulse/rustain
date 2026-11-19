@@ -90,7 +90,7 @@ struct MessagesAttempt {
 
 impl MessagesAttempt {
     /// Re-issues send the stored request, which carries a won identity.
-    async fn exchange(&mut self) -> Result<Outcome, ProviderError> {
+    async fn exchange(&mut self) -> Result<Outcome, Rejected> {
         http_retry::send_adopting(
             &self.client,
             &mut self.request,
@@ -100,6 +100,7 @@ impl MessagesAttempt {
             self.profile.retry(),
         )
         .await
+        .map_err(|failure| Rejected::transport(failure.error, failure.possibly_billed))
     }
     fn error(&self, status: u16, headers: &HeaderMap, body: &str) -> ProviderError {
         self.profile
@@ -112,7 +113,7 @@ impl MessagesAttempt {
 impl stream_retry::Attempt for MessagesAttempt {
     /// omp's provider-loop verdict travels with a failed open.
     async fn open(&mut self) -> Result<BoxStream<'static, StreamChunk>, Rejected> {
-        match self.exchange().await.map_err(Rejected::transport)? {
+        match self.exchange().await? {
             Outcome::Success(response) => Ok(chunks(response)),
             Outcome::Failure {
                 status,
@@ -221,12 +222,9 @@ impl AnthropicAdapter {
             let mut attempt = self.profiled_attempt(profile, &resolved, &messages, &options)?;
             let opened = match (resilience, deadline) {
                 (Some(policy), Some(deadline)) => {
-                    stream_retry::first_open(deadline, policy, async {
-                        attempt.exchange().await.map_err(Rejected::transport)
-                    })
-                    .await
+                    stream_retry::first_open(deadline, policy, attempt.exchange()).await
                 }
-                _ => attempt.exchange().await.map_err(Rejected::from),
+                _ => attempt.exchange().await,
             };
             let rejected = match opened {
                 Ok(Outcome::Success(response)) => {

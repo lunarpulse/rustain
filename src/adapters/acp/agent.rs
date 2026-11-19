@@ -814,6 +814,7 @@ impl RustainAcpAgent {
             // else, which is what FR151 asks for.
             false,
             Some(skill_activator),
+            None,
         ));
         drop(tools);
         drop(tool_scheduler);

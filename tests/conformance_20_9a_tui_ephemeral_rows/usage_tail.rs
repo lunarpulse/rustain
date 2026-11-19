@@ -174,6 +174,7 @@ async fn normal_terminal_is_buffered_until_eof_with_usage_before_commit() {
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },

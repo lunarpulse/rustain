@@ -129,6 +129,7 @@ fn test_compaction_complete_sets_compaction_state() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         reasoning_tokens: None,
+        counters_observed: false,
     });
 
     // Simulate CompactionComplete event handling

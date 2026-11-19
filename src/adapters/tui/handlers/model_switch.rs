@@ -496,6 +496,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: cache_read,
                 reasoning_tokens: None,
+                counters_observed: false,
             }),
             ..Default::default()
         };

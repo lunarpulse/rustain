@@ -12,13 +12,16 @@ use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
     CompletionOptions, EscalationReason, Message, MessageRole, NotCapturedReason, NoticeLevel,
     ProvenanceTag, StepKind, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallInfo,
-    ToolResultMessage, ToolUseMessage, TurnOrigin, UsageLedgerEntry, WriteDiffState,
+    ToolResultMessage, ToolUseMessage, TurnOrigin, UsageInfo, UsageLedgerEntry, UsageProvenance,
+    WriteDiffState,
 };
 use crate::domain::ports::{
     SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
 };
 use crate::domain::services::model_router::ResolvedModel;
-use crate::domain::services::tool_scheduler::ToolScheduler;
+use crate::domain::services::tool_scheduler::{ToolExecutionBound, ToolScheduler};
+
+use super::ask_limits::{AskExecution, deadline_elapsed, interruptible};
 
 /// Execute a turn: stream completion, execute tools, loop until EndTurn.
 ///
@@ -29,6 +32,52 @@ use crate::domain::services::tool_scheduler::ToolScheduler;
 /// 4. On TurnComplete(EndTurn): done
 /// Maximum number of tool execution loop iterations before forcing termination.
 const MAX_TOOL_ITERATIONS: usize = 256;
+
+fn checked_add_attempt_usage(a: &UsageInfo, b: &UsageInfo) -> Option<UsageInfo> {
+    fn add_optional(a: Option<u32>, b: Option<u32>) -> Option<Option<u32>> {
+        match (a, b) {
+            (Some(a), Some(b)) => a.checked_add(b).map(Some),
+            _ => Some(a.or(b)),
+        }
+    }
+
+    Some(UsageInfo {
+        input_tokens: a.input_tokens.checked_add(b.input_tokens)?,
+        output_tokens: a.output_tokens.checked_add(b.output_tokens)?,
+        cache_creation_input_tokens: add_optional(
+            a.cache_creation_input_tokens,
+            b.cache_creation_input_tokens,
+        )?,
+        cache_read_input_tokens: add_optional(
+            a.cache_read_input_tokens,
+            b.cache_read_input_tokens,
+        )?,
+        reasoning_tokens: add_optional(a.reasoning_tokens, b.reasoning_tokens)?,
+        counters_observed: true,
+    })
+}
+
+fn omitted_retry_spend(usage: &UsageInfo) -> bool {
+    usage.input_tokens != 0
+        || usage.output_tokens != 0
+        || usage.cache_creation_input_tokens.unwrap_or(0) != 0
+        || usage.cache_read_input_tokens.unwrap_or(0) != 0
+        || usage.reasoning_tokens.unwrap_or(0) != 0
+}
+
+enum AttemptProof {
+    Unproved,
+    Display,
+    Snapshot(UsageInfo),
+}
+
+fn same_usage_amount(a: &UsageInfo, b: &UsageInfo) -> bool {
+    a.input_tokens == b.input_tokens
+        && a.output_tokens == b.output_tokens
+        && a.cache_creation_input_tokens == b.cache_creation_input_tokens
+        && a.cache_read_input_tokens == b.cache_read_input_tokens
+        && a.reasoning_tokens == b.reasoning_tokens
+}
 
 /// Story 19.1 A3 — the ONE infrastructure site that populates a completed
 /// Write's display diff. Reads the pre-write snapshot back through
@@ -168,6 +217,7 @@ pub async fn run_turn(
     // during this turn. The initial snapshot still owns prompt composition;
     // this handle refreshes scheduler enforcement between tool calls.
     skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
+    mut ask_execution: Option<AskExecution>,
 ) {
     if options.session_id.as_deref() != Some(conversation_id.as_str()) {
         options.session_id = Some(conversation_id.clone());
@@ -179,7 +229,22 @@ pub async fn run_turn(
     // from storage. Without this, the first tool call in a new conversation
     // fails checkpoint creation — snapshots get the sentinel CheckpointId(0)
     // and are never revertible.
-    if let Err(e) = storage.save_conversation(&conversation_snapshot).await {
+    let pre_turn_save = storage.save_conversation(&conversation_snapshot);
+    let saved = if let Some(execution) = &mut ask_execution {
+        if execution.stopped_before_work() {
+            return;
+        }
+        match interruptible(execution.deadline(), Some(&turn_cancel), pre_turn_save).await {
+            Ok(result) => result,
+            Err(_) => {
+                execution.stopped_before_work();
+                return;
+            }
+        }
+    } else {
+        pre_turn_save.await
+    };
+    if let Err(e) = saved {
         tracing::warn!(
             "Pre-turn conversation save failed — checkpoint creation may fail: {}",
             e
@@ -203,7 +268,7 @@ pub async fn run_turn(
         // otherwise lets the loop continue and finish a turn reported Interrupted.
         // Like every other early exit, it closes the turn with a Cancelled
         // terminal (no await before `return`, so an abort cannot double it).
-        if iteration > 0 && turn_cancel.is_cancelled() {
+        if ask_execution.is_none() && iteration > 0 && turn_cancel.is_cancelled() {
             let _ = event_tx.send(AppEvent::ProviderChunk {
                 conversation_id: conversation_id.clone(),
                 chunk: StreamChunk::TurnComplete {
@@ -214,6 +279,11 @@ pub async fn run_turn(
         }
         iteration += 1;
         if iteration > MAX_TOOL_ITERATIONS {
+            if let Some(execution) = &mut ask_execution {
+                if execution.stopped_before_work() || turn_cancel.is_cancelled() {
+                    return;
+                }
+            }
             tracing::warn!(
                 "Tool execution loop exceeded {} iterations — terminating",
                 MAX_TOOL_ITERATIONS
@@ -235,93 +305,247 @@ pub async fn run_turn(
             });
             return;
         }
-        match provider
-            .stream_completion(messages.clone(), options.clone())
-            .await
-        {
-            Ok(stream) => {
-                futures::pin_mut!(stream);
-                let mut received_turn_complete = false;
-                let mut forwarded_error = false;
-                let mut stop_reason = StopReason::EndTurn;
-                let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
-                let mut accumulated_text = String::new();
-                let mut accumulated_thinking = String::new();
-                // Story 20.1d1b: provider replay items ride the in-turn assistant
-                // message; the stream emits them only after a terminal event.
-                let mut accumulated_replay = Vec::new();
-
-                let mut iteration_usage: Option<crate::domain::models::UsageInfo> = None;
-
-                while let Some(chunk) = stream.next().await {
-                    match &chunk {
-                        StreamChunk::TurnComplete { stop_reason: sr } => {
-                            received_turn_complete = true;
-                            stop_reason = sr.clone();
-                        }
-                        StreamChunk::ToolUse { id, name, input } => {
-                            tool_calls.push(ToolCallInfo {
-                                id: id.clone(),
-                                name: name.clone(),
-                                input: input.clone(),
-                                result: None,
-                                started_at_ms: Some(now_ms()),
-                                completed_at_ms: None,
-                                status: None,
-                                provider_id: None,
-                            });
-                        }
-                        StreamChunk::Text { content, .. } => {
-                            accumulated_text.push_str(content);
-                        }
-                        StreamChunk::Thinking { content, .. } => {
-                            accumulated_thinking.push_str(content);
-                        }
-                        StreamChunk::ProviderReplay { item } => {
-                            accumulated_replay.push(item.clone());
-                        }
-                        StreamChunk::Usage { usage, .. } => {
-                            iteration_usage = Some(usage.clone());
-                        }
-                        StreamChunk::Error { .. } => forwarded_error = true,
-                        _ => {}
-                    }
-                    let _ = event_tx.send(AppEvent::ProviderChunk {
-                        conversation_id: conversation_id.clone(),
-                        chunk,
-                    });
+        if let Some(execution) = &mut ask_execution {
+            if !execution.may_admit(ledger.as_ref(), &turn_cancel).await {
+                return;
+            }
+        }
+        let limited = ask_execution.is_some();
+        let deadline = ask_execution.as_ref().and_then(AskExecution::deadline);
+        let mut admitted = false;
+        let mut received_turn_complete = false;
+        let mut forwarded_error = false;
+        let mut stop_reason = StopReason::EndTurn;
+        let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+        let mut accumulated_text = String::new();
+        let mut accumulated_thinking = String::new();
+        // Story 20.1d1b: provider replay items ride the in-turn assistant
+        // message; the stream emits them only after a terminal event.
+        let mut accumulated_replay = Vec::new();
+        let mut display_usage: Option<UsageInfo> = None;
+        let mut attempt_proof = AttemptProof::Unproved;
+        // For limited calls, hold the exact sum of abandoned attempts. For
+        // other callers the old amount omits retries; only known zero fits.
+        // Err means incomplete, unrepresentable, or omitted spend.
+        let mut prior_attempt_usage: Result<Option<UsageInfo>, ()> = Ok(None);
+        let call_messages = messages.clone();
+        let call_options = options.clone();
+        let provider_call = async {
+            if let Some(execution) = &mut ask_execution {
+                execution.mark_admitted();
+            }
+            admitted = true;
+            let stream = provider
+                .stream_completion(call_messages, call_options)
+                .await?;
+            futures::pin_mut!(stream);
+            loop {
+                // A continuously ready stream need not yield to the outer
+                // select; keep checking at the per-chunk boundary, too.
+                if limited && (deadline_elapsed(deadline) || turn_cancel.is_cancelled()) {
+                    return Ok(false);
                 }
-
-                // Write ledger entry for this provider call (success path)
-                let ledger_entry = UsageLedgerEntry {
-                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                    session_id: session_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                    provider_id: provider.provider_id(),
-                    model: options.model.clone(),
-                    tier: resolved.tier,
-                    step_kind,
-                    escalation_reason: resolved.escalation_reason,
-                    usage: match iteration_usage {
-                        // Story 7.5 AC8 — cache/reasoning attribution.
-                        // DF-S71c-1 carries forward: only the LAST Usage chunk per
-                        // iteration is retained; Anthropic emits Usage exactly once
-                        // per call so this is correct for the current adapter set.
-                        Some(ref u) => TokenUsage::from_usage(u, parent_ctx_tokens),
-                        None => TokenUsage {
-                            tokens_in: 0,
-                            tokens_out: 0,
-                            parent_ctx: parent_ctx_tokens,
-                            cache_creation_tokens: None,
-                            cache_read_tokens: None,
-                            reasoning_tokens: None,
-                        },
-                    },
+                let Some(chunk) = stream.next().await else {
+                    return Ok::<_, crate::domain::errors::ProviderError>(true);
                 };
-                if let Err(e) = ledger.append(ledger_entry).await {
-                    tracing::warn!("Usage ledger append failed: {}", e);
+                match &chunk {
+                    StreamChunk::TurnComplete { stop_reason: sr } => {
+                        received_turn_complete = true;
+                        stop_reason = sr.clone();
+                    }
+                    StreamChunk::ToolUse { id, name, input } => {
+                        tool_calls.push(ToolCallInfo {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            result: None,
+                            started_at_ms: Some(now_ms()),
+                            completed_at_ms: None,
+                            status: None,
+                            provider_id: None,
+                        });
+                    }
+                    StreamChunk::Text { content, .. } => {
+                        accumulated_text.push_str(content);
+                    }
+                    StreamChunk::Thinking { content, .. } => {
+                        accumulated_thinking.push_str(content);
+                    }
+                    StreamChunk::ProviderReplay { item } => {
+                        accumulated_replay.push(item.clone());
+                    }
+                    StreamChunk::Usage { usage, .. } => {
+                        if usage.counters_observed {
+                            attempt_proof = AttemptProof::Display;
+                        } else if matches!(attempt_proof, AttemptProof::Display)
+                            && let Some(previous) = display_usage.take()
+                        {
+                            attempt_proof = AttemptProof::Snapshot(previous);
+                        }
+                        display_usage = Some(usage.clone());
+                    }
+                    StreamChunk::AccountingUsage { usage } => {
+                        if usage.counters_observed {
+                            attempt_proof = AttemptProof::Snapshot(usage.clone());
+                        }
+                        continue; // Internal transport accounting is never an AppEvent.
+                    }
+                    StreamChunk::AccountingRetry { usage } => {
+                        attempt_proof = AttemptProof::Unproved;
+                        if limited {
+                            display_usage = None;
+                        }
+                        let total = std::mem::replace(&mut prior_attempt_usage, Ok(None));
+                        prior_attempt_usage = total.and_then(|total| {
+                            let previous =
+                                usage.as_ref().filter(|u| u.counters_observed).ok_or(())?;
+                            if limited {
+                                match total {
+                                    Some(total) => checked_add_attempt_usage(&total, previous)
+                                        .map(Some)
+                                        .ok_or(()),
+                                    None => Ok(Some(previous.clone())),
+                                }
+                            } else if omitted_retry_spend(previous) {
+                                Err(())
+                            } else {
+                                Ok(None)
+                            }
+                        });
+                        continue;
+                    }
+                    StreamChunk::Error { .. } => forwarded_error = true,
+                    _ => {}
                 }
+                let _ = event_tx.send(AppEvent::ProviderChunk {
+                    conversation_id: conversation_id.clone(),
+                    chunk,
+                });
+            }
+        };
+        let call = if limited {
+            interruptible(deadline, Some(&turn_cancel), provider_call).await
+        } else {
+            Ok(provider_call.await)
+        };
+        if !admitted {
+            if let Some(execution) = &mut ask_execution {
+                execution.stopped_before_work();
+            }
+            return;
+        }
 
+        let stream_closed = matches!(&call, Ok(Ok(true)));
+        let open_failed = matches!(&call, Ok(Err(_)));
+        let interrupted = !open_failed
+            && (!stream_closed
+                || !received_turn_complete
+                || forwarded_error
+                || stop_reason == StopReason::Cancelled);
+        let amount = |usage: &UsageInfo| TokenUsage::from_usage(usage, parent_ctx_tokens);
+        let (usage, observed) = if limited {
+            let current = match &attempt_proof {
+                AttemptProof::Unproved => None,
+                AttemptProof::Display => display_usage.as_ref(),
+                AttemptProof::Snapshot(usage) => Some(usage),
+            };
+            // Only the retry marker settles the previous attempt. The latest
+            // proved current snapshot contributes once, even if also displayed.
+            let proved = current.and_then(|current| match prior_attempt_usage {
+                Ok(Some(prior)) => checked_add_attempt_usage(&prior, current)
+                    .as_ref()
+                    .map(amount),
+                Ok(None) => Some(amount(current)),
+                Err(()) => None,
+            });
+            let observed = proved.is_some();
+            // A completed call can keep its unproved display amount for
+            // diagnostics. Strict pricing never uses an unknown row.
+            let usage = proved.or_else(|| {
+                if interrupted {
+                    None
+                } else {
+                    display_usage.as_ref().map(amount)
+                }
+            });
+            (usage, observed)
+        } else {
+            // Keep the old amount. An internal snapshot can prove it but
+            // cannot substitute a different amount on this path.
+            let observed = prior_attempt_usage.is_ok()
+                && match &attempt_proof {
+                    AttemptProof::Unproved => false,
+                    AttemptProof::Display => true,
+                    AttemptProof::Snapshot(proof) => display_usage
+                        .as_ref()
+                        .is_some_and(|display| same_usage_amount(display, proof)),
+                };
+            (display_usage.as_ref().map(amount), observed)
+        };
+        let mut accounting = Ok(());
+        if !interrupted
+            || !limited
+            || usage.is_some()
+            || ask_execution
+                .as_ref()
+                .is_some_and(AskExecution::money_configured)
+        {
+            let ledger_entry = UsageLedgerEntry {
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                session_id: session_id.clone(),
+                conversation_id: conversation_id.clone(),
+                provider_id: provider.provider_id(),
+                model: options.model.clone(),
+                tier: resolved.tier,
+                step_kind,
+                escalation_reason: resolved.escalation_reason,
+                usage: usage.unwrap_or(TokenUsage {
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    parent_ctx: parent_ctx_tokens,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                    reasoning_tokens: None,
+                }),
+                provenance: Some(if observed {
+                    UsageProvenance::Observed
+                } else {
+                    UsageProvenance::Unknown
+                }),
+            };
+            if let Some(execution) = &mut ask_execution {
+                accounting = execution.price_settled_call(&ledger_entry);
+            }
+            // Don't race the append against cancellation: once started, its
+            // outcome must be known, and nothing else may be admitted first.
+            if let Err(e) = ledger.append(ledger_entry).await {
+                if open_failed {
+                    tracing::warn!("Usage ledger append failed on error path: {e}");
+                } else {
+                    tracing::warn!("Usage ledger append failed: {e}");
+                }
+                accounting = Err("could not append the provider call's usage receipt");
+            }
+        }
+        if let Some(execution) = &mut ask_execution {
+            let continuation = stream_closed
+                && received_turn_complete
+                && stop_reason == StopReason::ToolUse
+                && !tool_calls.is_empty()
+                && !forwarded_error
+                && !turn_cancel.is_cancelled();
+            if execution
+                .stopped_after_settlement(ledger.as_ref(), accounting, continuation)
+                .await
+                || turn_cancel.is_cancelled()
+                || forwarded_error
+            {
+                return;
+            }
+        }
+
+        match call {
+            Ok(Ok(true)) => {
                 // Safety: synthesize TurnComplete if stream ended without one. A
                 // provider error already forwarded says what happened; the
                 // generic disconnect text would only repeat it.
@@ -349,8 +573,14 @@ pub async fn run_turn(
                     return;
                 }
 
-                match stop_reason {
-                    StopReason::ToolUse => {
+                if stop_reason == StopReason::ToolUse {
+                    let tool_bound = limited.then_some(ToolExecutionBound { deadline });
+                    let scoped_cancel = limited.then(|| turn_cancel.child_token());
+                    let tool_cancel = scoped_cancel.as_ref().unwrap_or(&turn_cancel);
+                    let tool_interrupted =
+                        || limited && (deadline_elapsed(deadline) || tool_cancel.is_cancelled());
+                    let mut scheduled_tools = false;
+                    let tool_work = async {
                         // Execute tool calls and continue the loop
                         if tool_calls.is_empty() {
                             tracing::warn!(
@@ -362,7 +592,7 @@ pub async fn run_turn(
                                     stop_reason: StopReason::EndTurn,
                                 },
                             });
-                            return;
+                            return false;
                         }
 
                         // Build the assistant message with accumulated text and tool_use blocks.
@@ -438,6 +668,9 @@ pub async fn run_turn(
                         let mut indexed_results: Vec<(usize, ToolResultMessage)> = Vec::new();
 
                         for (orig_idx, tc) in asks {
+                            if tool_interrupted() {
+                                return false;
+                            }
                             let question = tc
                                 .input
                                 .get("question")
@@ -455,16 +688,22 @@ pub async fn run_turn(
                                 a = resp_rx => match a {
                                     Ok(a) => a,
                                     Err(_) => {
+                                        if tool_interrupted() {
+                                            return false;
+                                        }
                                         let _ = event_tx.send(AppEvent::ProviderChunk {
                                             conversation_id: conversation_id.clone(),
                                             chunk: StreamChunk::TurnComplete {
                                                 stop_reason: StopReason::Cancelled,
                                             },
                                         });
-                                        return;
+                                        return false;
                                     }
                                 },
-                                _ = turn_cancel.cancelled() => {
+                                _ = tool_cancel.cancelled() => {
+                                    if tool_interrupted() {
+                                        return false;
+                                    }
                                     let _ = event_tx.send(AppEvent::ProviderChunk {
                                         conversation_id: conversation_id.clone(),
                                         chunk: StreamChunk::ToolResult {
@@ -482,7 +721,7 @@ pub async fn run_turn(
                                             stop_reason: StopReason::Cancelled,
                                         },
                                     });
-                                    return;
+                                    return false;
                                 }
                             };
                             let result = crate::domain::models::ToolResult {
@@ -515,6 +754,9 @@ pub async fn run_turn(
                         }
 
                         if !regular.is_empty() {
+                            if tool_interrupted() {
+                                return false;
+                            }
                             let batch_with_idx: Vec<(
                                 usize,
                                 crate::domain::models::ToolCallRequest,
@@ -550,6 +792,10 @@ pub async fn run_turn(
                             {
                                 let mut terminal = Vec::with_capacity(requests.len());
                                 for request in requests {
+                                    if tool_interrupted() {
+                                        return false;
+                                    }
+                                    scheduled_tools = true;
                                     let mut one = {
                                         let skill_restriction =
                                             activation_set.as_ref().and_then(|s| {
@@ -559,14 +805,15 @@ pub async fn run_turn(
                                             });
                                         tool_scheduler
                                             .clone()
-                                            .schedule_with_provenance_and_restriction(
+                                            .schedule_with_provenance_and_restriction_until(
                                                 source.clone(),
                                                 vec![request],
-                                                turn_cancel.clone(),
+                                                tool_cancel.clone(),
                                                 skill_restriction.as_ref(),
                                                 agent_restriction.as_ref(),
                                                 provenance,
                                                 Some(turn_origin.route()),
+                                                tool_bound,
                                             )
                                             .await
                                     };
@@ -596,16 +843,18 @@ pub async fn run_turn(
                                         s.active_skills(),
                                     )
                                 });
+                                scheduled_tools = true;
                                 tool_scheduler
                                     .clone()
-                                    .schedule_with_provenance_and_restriction(
+                                    .schedule_with_provenance_and_restriction_until(
                                         source,
                                         requests,
-                                        turn_cancel.clone(),
+                                        tool_cancel.clone(),
                                         skill_restriction.as_ref(),
                                         agent_restriction.as_ref(),
                                         provenance,
                                         Some(turn_origin.route()),
+                                        tool_bound,
                                     )
                                     .await
                             };
@@ -707,13 +956,16 @@ pub async fn run_turn(
                                     },
                                 ));
                                 if was_cancelled {
+                                    if tool_interrupted() {
+                                        return false;
+                                    }
                                     let _ = event_tx.send(AppEvent::ProviderChunk {
                                         conversation_id: conversation_id.clone(),
                                         chunk: StreamChunk::TurnComplete {
                                             stop_reason: StopReason::Cancelled,
                                         },
                                     });
-                                    return;
+                                    return false;
                                 }
                             }
                         }
@@ -734,40 +986,35 @@ pub async fn run_turn(
                             provider_replay: vec![],
                         });
 
-                        // Loop back to stream_completion
-                        continue;
+                        true
+                    };
+                    let result = if limited {
+                        interruptible(deadline, Some(&turn_cancel), tool_work).await
+                    } else {
+                        Ok(tool_work.await)
+                    };
+                    if let Some(execution) = &mut ask_execution {
+                        if result.is_err() || tool_interrupted() {
+                            tool_cancel.cancel();
+                            if scheduled_tools {
+                                tool_scheduler
+                                    .cancel_ask_approvals(
+                                        &turn_origin.approval_source(&conversation_id),
+                                    )
+                                    .await;
+                            }
+                            execution.stopped_before_work();
+                            return;
+                        }
                     }
-                    StopReason::EndTurn | StopReason::MaxTokens | StopReason::Cancelled => {
-                        // Turn is done
+                    if !result.unwrap_or(false) {
                         return;
                     }
+                } else {
+                    return;
                 }
             }
-            Err(e) => {
-                // Write failure ledger entry before emitting notice
-                let failure_entry = UsageLedgerEntry {
-                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                    session_id: session_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                    provider_id: provider.provider_id(),
-                    model: options.model.clone(),
-                    tier: resolved.tier,
-                    step_kind,
-                    escalation_reason: resolved.escalation_reason,
-                    usage: TokenUsage {
-                        tokens_in: 0,
-                        tokens_out: 0,
-                        parent_ctx: parent_ctx_tokens,
-                        // Failed call — no usage data to attribute (Story 7.5 AC8).
-                        cache_creation_tokens: None,
-                        cache_read_tokens: None,
-                        reasoning_tokens: None,
-                    },
-                };
-                if let Err(le) = ledger.append(failure_entry).await {
-                    tracing::warn!("Usage ledger append failed on error path: {}", le);
-                }
-
+            Ok(Err(e)) => {
                 let _ = event_tx.send(AppEvent::SystemNotice {
                     conversation_id: Some(conversation_id.clone()),
                     level: NoticeLevel::Error,
@@ -775,6 +1022,7 @@ pub async fn run_turn(
                 });
                 return;
             }
+            Ok(Ok(false)) | Err(_) => return,
         }
     }
 }

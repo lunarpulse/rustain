@@ -824,6 +824,7 @@ impl LocalTurnDriver {
             TurnOrigin::Interactive,
             context_tainted,
             Some(skill_activator.clone()),
+            None,
         ));
         lifecycle.install_task(&conversation.id, producer_id, handle);
 

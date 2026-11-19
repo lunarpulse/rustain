@@ -1371,7 +1371,18 @@ async fn k10_signatures_reach_only_the_session_store() {
     tracing::info!(chunk = ?replay[0], "replay chunk observed");
     let (bus, _domain_rx) = EventBus::new(64);
     let mut raw = bus.subscribe_raw();
+    let mut accounting = 0;
     for chunk in &chunks {
+        // Like run_turn, consume transport accounting before constructing an AppEvent.
+        if let StreamChunk::AccountingUsage { usage } = chunk {
+            assert!(usage.counters_observed);
+            accounting += 1;
+            continue;
+        }
+        if matches!(chunk, StreamChunk::AccountingRetry { .. }) {
+            accounting += 1;
+            continue;
+        }
         let provider_event = AppEvent::ProviderChunk {
             conversation_id: "k10".into(),
             chunk: chunk.clone(),
@@ -1398,15 +1409,36 @@ async fn k10_signatures_reach_only_the_session_store() {
             assert!(!leaks(&format!("{update:?}")));
         }
     }
+    assert_eq!(
+        accounting, 1,
+        "the fixture yields one transport accounting update"
+    );
+    let mut display = chunks.iter().filter(|chunk| {
+        !matches!(
+            chunk,
+            StreamChunk::AccountingUsage { .. }
+                | StreamChunk::AccountingRetry { .. }
+                | StreamChunk::ProviderReplay { .. }
+        )
+    });
     let mut observed = 0;
     while let Ok(event) = raw.try_recv() {
+        let RawEventKind::Provider(chunk) = &event.kind else {
+            panic!("expected a provider event, got {:?}", event.kind);
+        };
+        let expected = display.next().expect("unexpected extra observer chunk");
+        assert_eq!(
+            serde_json::to_value(chunk).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "display chunks must arrive in provider order"
+        );
         observed += 1;
         assert!(!leaks(&serde_json::to_string(&event).unwrap()));
     }
     assert_eq!(
         observed,
-        chunks.len() - replay.len(),
-        "only the replay chunk is withheld"
+        chunks.len() - accounting - replay.len(),
+        "only transport accounting and provider replay are withheld"
     );
 
     // The TUI renders the turn without it; the persisted conversation keeps it.

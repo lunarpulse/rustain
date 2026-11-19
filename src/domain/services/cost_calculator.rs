@@ -211,6 +211,7 @@ pub(crate) mod test_support {
             step_kind: None,
             escalation_reason: EscalationReason::None,
             usage: TokenUsage::from_usage(usage, 0),
+            provenance: None,
         }
     }
 
@@ -277,6 +278,7 @@ mod tests {
                 cache_read_tokens: None,
                 reasoning_tokens: None,
             },
+            provenance: None,
         }
     }
 

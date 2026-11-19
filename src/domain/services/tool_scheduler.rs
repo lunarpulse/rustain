@@ -39,6 +39,22 @@ pub enum ApprovalResumeChange {
     Source(ApprovalSource),
 }
 
+/// An opt-in effect gate for a bounded headless turn. Other callers retain
+/// the scheduler's existing cancellation and admission behavior.
+#[derive(Clone, Copy)]
+pub(crate) struct ToolExecutionBound {
+    pub(crate) deadline: Option<tokio::time::Instant>,
+}
+
+impl ToolExecutionBound {
+    fn blocked(self, cancel: &CancellationToken) -> bool {
+        cancel.is_cancelled()
+            || self
+                .deadline
+                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+    }
+}
+
 /// Schedules and executes tool calls with lifecycle event broadcast.
 pub struct ToolScheduler {
     security: Arc<dyn SecurityPort>,
@@ -186,6 +202,30 @@ impl ToolScheduler {
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
     ) -> Vec<ToolCall> {
+        self.schedule_with_provenance_and_restriction_until(
+            source,
+            batch,
+            cancel,
+            skill_restriction,
+            agent_restriction,
+            provenance,
+            route,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn schedule_with_provenance_and_restriction_until(
+        self: Arc<Self>,
+        source: ApprovalSource,
+        batch: Vec<ToolCallRequest>,
+        cancel: CancellationToken,
+        skill_restriction: Option<&SkillToolRestriction>,
+        agent_restriction: Option<&AgentToolRestriction>,
+        provenance: crate::domain::models::ProvenanceTag,
+        route: Option<crate::domain::models::turn::TurnRoute>,
+        bound: Option<ToolExecutionBound>,
+    ) -> Vec<ToolCall> {
         let all_parallel = batch
             .iter()
             .all(|req| self.tools.is_parallel_safe(&req.tool_name));
@@ -201,7 +241,7 @@ impl ToolScheduler {
                 let skill = skill_owned.clone();
                 let agent = agent_owned.clone();
                 futures.push_back(async move {
-                    s.run_one(src, req, c, skill, agent, provenance, route)
+                    s.run_one(src, req, c, skill, agent, provenance, route, bound)
                         .await
                 });
             }
@@ -224,12 +264,24 @@ impl ToolScheduler {
                             agent_owned.clone(),
                             provenance,
                             route,
+                            bound,
                         )
                         .await,
                 );
             }
             out
         }
+    }
+
+    /// Clean up approval requests when `ask` drops a scoped tool batch.
+    /// A headless invocation owns its approval runtime and foreground source.
+    pub(crate) async fn cancel_ask_approvals(&self, source: &ApprovalSource) {
+        self.approval_runtime
+            .cancel_by_source(
+                source,
+                crate::domain::services::approval_runtime::CancelReason::SourceAborted,
+            )
+            .await;
     }
 
     async fn run_one(
@@ -241,6 +293,7 @@ impl ToolScheduler {
         agent_restriction: Option<AgentToolRestriction>,
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
+        bound: Option<ToolExecutionBound>,
     ) -> ToolCall {
         #[cfg(any(test, feature = "test-instrumentation"))]
         let mut req = req;
@@ -267,7 +320,7 @@ impl ToolScheduler {
                 },
             );
         }
-        if cancel.is_cancelled() {
+        if bound.map_or_else(|| cancel.is_cancelled(), |bound| bound.blocked(&cancel)) {
             return self.terminal(
                 &conversation_id,
                 ToolCall::Cancelled {
@@ -461,8 +514,21 @@ impl ToolScheduler {
             skill_restriction: skill_restriction.as_ref(),
         };
         let progress_tx = self.progress_tx.read().await.clone();
+        let input = req.input.clone();
+        // Policy, approval and progress setup may all have awaited since the
+        // batch was admitted. Check again at the actual side-effect boundary.
+        if bound.is_some_and(|bound| bound.blocked(&cancel)) {
+            return self.terminal(
+                &conversation_id,
+                ToolCall::Cancelled {
+                    id,
+                    request: req,
+                    reason: "cancelled-before-execute".into(),
+                },
+            );
+        }
         let exec = tokio::select! {
-            r = self.tools.execute_invocation(&req.tool_name, &req.id, req.input.clone(), cancel.clone(), progress_tx, &invocation) => r,
+            r = self.tools.execute_invocation(&req.tool_name, &req.id, input, cancel.clone(), progress_tx, &invocation) => r,
             _ = cancel.cancelled() => {
                 return self.terminal(&conversation_id, ToolCall::Cancelled {
                     id, request: req, reason: "cancelled-during-execute".into()
@@ -746,6 +812,7 @@ mod tests {
                 None,
                 crate::domain::models::ProvenanceTag::UserOriginated,
                 None,
+                None,
             )
             .await;
         assert!(result.is_terminal());
@@ -793,6 +860,7 @@ mod tests {
                 None,
                 crate::domain::models::ProvenanceTag::UserOriginated,
                 None,
+                None,
             )
             .await;
         assert!(matches!(result, ToolCall::Cancelled { reason, .. } if reason == "pre-schedule"));
@@ -821,6 +889,7 @@ mod tests {
                     None,
                     crate::domain::models::ProvenanceTag::UserOriginated,
                     None,
+                    None,
                 )
                 .await
         });
@@ -831,6 +900,47 @@ mod tests {
         assert!(
             matches!(result, ToolCall::Cancelled { reason, .. } if reason == "cancelled-during-execute")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_effect_rechecks_deadline_after_scheduler_wait() {
+        let sched = make_scheduler(crate::domain::models::PermissionMode::Yolo, false, 0);
+        let mut transitions = sched.subscribe();
+        // Releasing this gate is what makes the tool eligible to begin.
+        let progress_gate = sched.progress_tx.write().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let task = tokio::spawn(sched.clone().run_one(
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            ToolCallRequest {
+                id: "t1".into(),
+                tool_name: "Mock".into(),
+                input: serde_json::json!({}),
+            },
+            CancellationToken::new(),
+            None,
+            None,
+            crate::domain::models::ProvenanceTag::UserOriginated,
+            None,
+            Some(ToolExecutionBound {
+                deadline: Some(deadline),
+            }),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(
+                transitions.recv().await.unwrap().call,
+                ToolCall::Executing { .. }
+            ) {}
+        })
+        .await
+        .expect("scheduler reached the progress gate");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        drop(progress_gate);
+        assert!(matches!(
+            task.await.unwrap(),
+            ToolCall::Cancelled { reason, .. } if reason == "cancelled-before-execute"
+        ));
     }
 
     #[tokio::test]

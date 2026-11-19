@@ -288,6 +288,23 @@ where
     Ok(Box::pin(stream))
 }
 
+fn with_open_accounting(
+    stream: BoxStream<'static, StreamChunk>,
+    ambiguous_retries: u8,
+) -> BoxStream<'static, StreamChunk> {
+    if ambiguous_retries == 0 {
+        stream
+    } else {
+        // Eager opens must retain their existing Result and watchdog behavior.
+        // Surface their abandoned sends before any data from the opened body.
+        futures::stream::iter(
+            (0..ambiguous_retries).map(|_| StreamChunk::AccountingRetry { usage: None }),
+        )
+        .chain(stream)
+        .boxed()
+    }
+}
+
 /// One logical completion request for one resolved credential: the encoded
 /// body, its headers and the request-scoped identity state.
 struct ChatAttempt {
@@ -301,16 +318,18 @@ struct ChatAttempt {
 
 impl ChatAttempt {
     /// Re-issues send the stored request, which carries a won identity.
-    async fn exchange(&mut self) -> Result<Outcome, ProviderError> {
-        http_retry::send_adopting(
+    async fn exchange(&mut self, ambiguous_retries: &mut u8) -> Result<Outcome, ProviderError> {
+        http_retry::send_adopting_accounted(
             &self.client,
             &mut self.request,
             self.state
                 .as_deref_mut()
                 .map(|s| s as &mut dyn RequestState),
             self.profile.retry(),
+            ambiguous_retries,
         )
         .await
+        .map_err(|failure| failure.error)
     }
     fn error(&self, status: u16, headers: &HeaderMap, body: &str) -> ProviderError {
         self.profile
@@ -333,10 +352,12 @@ impl stream_retry::Attempt for ChatAttempt {
     /// Every failed open is final here: the Chat route's HTTP attempts already
     /// ran under `OPENAI_WIRE`.
     async fn open(&mut self) -> Result<BoxStream<'static, StreamChunk>, stream_retry::Rejected> {
-        match self.exchange().await? {
+        let mut ambiguous_retries = 0;
+        match self.exchange(&mut ambiguous_retries).await? {
             Outcome::Success(response) => {
                 let errors = self.in_band(&response);
-                Ok(open_stream(response, errors).await?)
+                let opened = open_stream(response, errors).await?;
+                Ok(with_open_accounting(opened, ambiguous_retries))
             }
             Outcome::Failure {
                 status,
@@ -566,15 +587,21 @@ impl OpenAiAdapter {
             None => self.resolve().await?,
         };
         let mut recovered = false;
+        let mut ambiguous_retries = 0;
         loop {
             // The first-event watchdog is armed once the credential is read.
             let deadline = resilience.map(|_| stream_retry::deadline());
             let mut attempt = self.attempt(&resolved, &messages, &options)?;
             let outcome = match (resilience, deadline) {
                 (Some(policy), Some(deadline)) => {
-                    stream_retry::first_open(deadline, policy, attempt.exchange()).await?
+                    stream_retry::first_open(
+                        deadline,
+                        policy,
+                        attempt.exchange(&mut ambiguous_retries),
+                    )
+                    .await?
                 }
-                _ => attempt.exchange().await?,
+                _ => attempt.exchange(&mut ambiguous_retries).await?,
             };
             match outcome {
                 Outcome::Success(response) => {
@@ -591,6 +618,7 @@ impl OpenAiAdapter {
                         }
                         _ => open_stream(response, errors).await?,
                     };
+                    let first = with_open_accounting(first, ambiguous_retries);
                     return Ok(match (resilience, deadline) {
                         (Some(policy), Some(deadline)) => {
                             stream_retry::resume(first, Box::new(attempt), policy, deadline)
@@ -1480,6 +1508,100 @@ mod open_tests {
             Err(ProviderError::Other(text)) => Err(text),
             Err(other) => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn chat_accounting_requires_the_usage_to_be_terminal() {
+        const EMPTY_FINISH: &str = r#"{"choices":[{"index":0,"delta":{},"finish_reason":""}]}"#;
+        let usage = r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1}}"#;
+        for (frames, observed_display, observed_terminal) in [
+            (vec![usage, FRAME, STOP, "[DONE]"], false, false),
+            (vec![FRAME, usage], false, false),
+            (vec![FRAME, EMPTY_FINISH, usage], false, false),
+            (vec![FRAME, STOP, usage], true, false),
+            (vec![FRAME, usage, "[DONE]"], false, true),
+        ] {
+            let sequence = frames
+                .into_iter()
+                .map(|f| format!("data: {f}\n\n"))
+                .collect::<String>();
+            let chunks = opened(body(vec![sequence.into_bytes()])).await.unwrap();
+            assert_eq!(text(&chunks), "hi");
+            let display: Vec<_> = chunks
+                .iter()
+                .filter_map(|c| match c {
+                    StreamChunk::Usage { usage, .. } => Some(usage.counters_observed),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(display, [observed_display]);
+            assert_eq!(
+                chunks.iter().any(|c| matches!(c,
+                    StreamChunk::AccountingUsage { usage } if usage.counters_observed
+                        && usage.input_tokens == 7 && usage.output_tokens == 1
+                )),
+                observed_terminal
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_open_counts_ambiguous_retries_but_not_rate_limit_denials() {
+        use crate::adapters::provider::request_profile::RequestProfile;
+        use crate::adapters::responses::transport::test_support::{options, user};
+
+        #[derive(Debug)]
+        struct RetryingChat(String);
+        impl RequestProfile for RetryingChat {
+            fn base_url(&self, _: &Resolved) -> Result<String, ProviderError> {
+                Ok(self.0.clone())
+            }
+            fn retry(&self) -> Option<&'static http_retry::HttpRetryPolicy> {
+                Some(&http_retry::OPENAI_WIRE)
+            }
+        }
+        impl ChatProfile for RetryingChat {}
+
+        let server = MockServer::start().await;
+        for (status, priority) in [(503, 1), (429, 2)] {
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(status).insert_header("retry-after", "0"))
+                .with_priority(priority)
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("data: {FRAME}\n\ndata: {STOP}\n\n")),
+            )
+            .mount(&server)
+            .await;
+        let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::OpenAI,
+            ChatCredential::Fixed(SecretString::new(TOKEN.into())),
+            "m".into(),
+            Arc::new(RetryingChat(server.uri())),
+        )
+        .unwrap();
+        let chunks = adapter
+            .stream_completion(vec![user("hi")], options("m"))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                StreamChunk::AccountingRetry { usage: None },
+                StreamChunk::Text { .. },
+                StreamChunk::TurnComplete { .. },
+            ]
+        ));
     }
 
     /// CP2-R4: a chunk crossing the cap is fed only up to it; a frame that

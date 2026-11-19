@@ -479,16 +479,26 @@ async fn assert_abort_during_in_band_retry(reopen: bool) {
             (listener, socket)
         });
         tokio::time::advance(Duration::from_millis(251)).await;
+        let mut saw_retry_accounting = false;
         let (listener, socket) = loop {
-            assert!(
-                stream.next().now_or_never().is_none(),
-                "reopen must await the gated HTTP response"
-            );
+            match stream.next().now_or_never() {
+                None => {}
+                Some(Some(StreamChunk::AccountingRetry { usage: None }))
+                    if !saw_retry_accounting =>
+                {
+                    saw_retry_accounting = true;
+                }
+                other => panic!("reopen must await the gated HTTP response: {other:?}"),
+            }
             if let Some(result) = (&mut second).now_or_never() {
                 break result.unwrap();
             }
             tokio::task::yield_now().await;
         };
+        assert!(
+            saw_retry_accounting,
+            "accounting must mark the abandoned attempt before reopening"
+        );
         reopened_socket = Some(socket);
         listener
     } else {

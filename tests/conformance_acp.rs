@@ -203,6 +203,7 @@ mod scripted {
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: Some(cache_read),
                         reasoning_tokens: None,
+                        counters_observed: false,
                     },
                     session_id: None,
                 },
@@ -2443,6 +2444,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         "direct-test".into(),
         rustain::domain::models::TurnOrigin::Interactive,
         false,
+        None,
         None,
     ));
     // `tools`/`tool_scheduler` were moved (or cloned) into run_turn above; the
@@ -5554,6 +5556,7 @@ async fn eval3_acp_writes_one_ledger_row_per_prompt_keyed_by_the_acp_session() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: Some(1408),
             reasoning_tokens: None,
+            counters_observed: false,
         },
         0,
     ))

@@ -15,7 +15,7 @@
 use crate::adapters::tui::presentation::{Surface, reducer};
 use crate::adapters::tui::state::{SessionUsageSummary, TuiState, TurnUsageRow};
 use crate::domain::models::{AppConfig, Conversation, MessageRole, SessionManager, SessionState};
-use crate::domain::ports::{ProviderInfoPort, UsageLedgerPort};
+use crate::domain::ports::{LedgerReadMode, ProviderInfoPort, UsageLedgerPort};
 use crate::domain::services::cost_calculator;
 
 use super::HandlerOutcome;
@@ -36,7 +36,10 @@ pub async fn handle_open_usage_panel(
     }
     state.usage_panel.initialize();
     let since = info.today_start_unix_ms();
-    let entries_today = usage_ledger.read_since(since).await.unwrap_or_default();
+    let entries_today = usage_ledger
+        .read_since(since, LedgerReadMode::Lenient)
+        .await
+        .unwrap_or_default();
 
     // Per-session entries for the current session (for turn-row join)
     let session_id_opt = match session_manager.state() {

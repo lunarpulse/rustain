@@ -1,4 +1,6 @@
+use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::adapters::cli::peer::PeerAction;
 use crate::adapters::cli::relay::RelayAction;
@@ -91,6 +93,41 @@ pub struct Cli {
     pub serve_a2a: Option<String>,
 }
 
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+pub struct AskLimits {
+    /// Maximum number of provider calls, including continuations
+    #[arg(long, value_name = "CALLS")]
+    pub max_turns: Option<NonZeroU64>,
+    /// Execution deadline in seconds, starting after prompt and configuration preparation
+    #[arg(long, value_name = "SECONDS", value_parser = parse_ask_duration)]
+    pub max_duration: Option<Duration>,
+    /// Cost ceiling in USD based on observed usage; one call may reach or exceed it
+    #[arg(long = "max-cost", value_name = "USD", value_parser = parse_positive_finite)]
+    pub max_cost_usd: Option<f64>,
+}
+
+fn parse_positive_finite(value: &str) -> Result<f64, &'static str> {
+    let error = "expected a finite number greater than zero";
+    let number: f64 = value.parse().map_err(|_| error)?;
+    if number.is_finite() && number > 0.0 {
+        Ok(number)
+    } else {
+        Err(error)
+    }
+}
+
+fn parse_ask_duration(value: &str) -> Result<Duration, &'static str> {
+    let duration = Duration::try_from_secs_f64(parse_positive_finite(value)?)
+        .map_err(|_| "duration is too large")?;
+    if duration.is_zero() {
+        return Err("duration rounds to zero nanoseconds");
+    }
+    if Instant::now().checked_add(duration).is_none() {
+        return Err("duration is too large for a monotonic deadline");
+    }
+    Ok(duration)
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Initialize rustain configuration
@@ -166,6 +203,9 @@ pub enum Command {
 
     /// Run a one-shot query and print the assistant's response to stdout.
     /// Non-interactive: no TUI launched. Composable with pipes and scripts.
+    ///
+    /// Limits are optional and independent. They do not roll back side effects.
+    /// Exit codes: 0 for success, 1 for a limit stop or execution error, 2 for invalid arguments.
     Ask {
         /// The query to send to the LLM
         query: String,
@@ -185,6 +225,8 @@ pub enum Command {
         /// No session state is written. Conflicts with --yolo (opposite permission posture).
         #[arg(long, conflicts_with = "yolo")]
         dry_run: bool,
+        #[command(flatten)]
+        limits: AskLimits,
     },
     /// Check for updates or update rustain to the latest version.
     /// Verifies cryptographic signatures and checksums before replacing the binary.

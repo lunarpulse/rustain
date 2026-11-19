@@ -140,6 +140,7 @@ impl StreamingProvider for HeldProvider {
                             cache_creation_input_tokens: None,
                             cache_read_input_tokens: None,
                             reasoning_tokens: None,
+                            counters_observed: false,
                         },
                         session_id: None,
                     },
@@ -1898,6 +1899,7 @@ mod c2b_budget_channel {
         async fn read_since(
             &self,
             since_unix_ms: i64,
+            _: crate::domain::ports::LedgerReadMode,
         ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
             self.last_since.store(since_unix_ms, Ordering::SeqCst);
             if self.unreadable {
@@ -1934,6 +1936,7 @@ mod c2b_budget_channel {
                 cache_read_tokens: None,
                 reasoning_tokens: None,
             },
+            provenance: None,
         }
     }
 
@@ -2461,6 +2464,7 @@ impl crate::domain::ports::UsageLedgerPort for C2bFenceLedger {
     async fn read_since(
         &self,
         _: i64,
+        _: crate::domain::ports::LedgerReadMode,
     ) -> Result<
         Vec<crate::domain::models::usage::UsageLedgerEntry>,
         crate::domain::errors::StorageError,

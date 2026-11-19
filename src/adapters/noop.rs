@@ -301,7 +301,14 @@ impl UsageLedgerPort for NoOpUsageLedger {
         Ok(Vec::new())
     }
 
-    async fn read_since(&self, _since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+    async fn read_since(
+        &self,
+        _since_unix_ms: i64,
+        mode: crate::domain::ports::LedgerReadMode,
+    ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        if matches!(mode, crate::domain::ports::LedgerReadMode::Strict { .. }) {
+            return Err(StorageError::Other("usage ledger is disabled".into()));
+        }
         Ok(Vec::new())
     }
 }

@@ -575,7 +575,10 @@ async fn run_job(task: CronJobTask) {
     if config.budget.daily_limit_usd.is_some_and(f64::is_finite) {
         let marker = match rt
             .usage_ledger
-            .read_since(crate::infrastructure::clock_util::today_start_unix_ms())
+            .read_since(
+                crate::infrastructure::clock_util::today_start_unix_ms(),
+                crate::domain::ports::LedgerReadMode::Lenient,
+            )
             .await
         {
             Ok(entries) => daily_budget_stop(&entries, &config).map(CronMarker::BudgetReached),
@@ -3417,7 +3420,11 @@ prompt = "nope"
                     .cloned()
                     .collect())
             }
-            async fn read_since(&self, since: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+            async fn read_since(
+                &self,
+                since: i64,
+                _: crate::domain::ports::LedgerReadMode,
+            ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
                 self.since.store(since, AtomicOrdering::SeqCst);
                 if self.fail {
                     return Err(StorageError::Other(LEDGER_CANARY.into()));
@@ -3498,6 +3505,7 @@ prompt = "nope"
                     cache_read_tokens: None,
                     reasoning_tokens: None,
                 },
+                provenance: None,
             }
         }
 

@@ -167,7 +167,7 @@ pub use skill_exposure::SkillExposurePort;
 pub use storage::StoragePort;
 pub use tool_exposure::ToolExposurePort;
 pub use toolset::ToolSetPort;
-pub use usage_ledger::UsageLedgerPort;
+pub use usage_ledger::{LedgerReadMode, UsageLedgerPort};
 pub use workspace_registry::{
     WorkspaceEntry, WorkspaceRegistrarPort, WorkspaceRegistryError, WorkspaceRegistryReaderPort,
 };

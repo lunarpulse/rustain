@@ -234,6 +234,7 @@ fn test_status_bar_token_usage() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         reasoning_tokens: None,
+        counters_observed: false,
     };
     let terminal = render_status_bar(
         80,
@@ -471,6 +472,7 @@ fn test_status_bar_shows_context_window_ratio() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         }),
         200_000,
         false,
@@ -512,6 +514,7 @@ fn test_status_bar_hides_context_window_when_zero() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         }),
         0, // unknown model / no context window
         false,
@@ -544,6 +547,7 @@ fn test_status_bar_context_window_threshold_text() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         }),
         200_000, // 5%
         false,
@@ -568,6 +572,7 @@ fn test_status_bar_context_window_threshold_text() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         }),
         200_000, // 85%
         false,
@@ -592,6 +597,7 @@ fn test_status_bar_context_window_threshold_text() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: None,
+            counters_observed: false,
         }),
         200_000, // 98%
         false,

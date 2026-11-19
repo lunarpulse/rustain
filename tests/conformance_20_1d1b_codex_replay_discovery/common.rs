@@ -294,6 +294,7 @@ pub(crate) fn opts(query: &str, format: OutputFormat, session: Option<String>) -
         model_override: None,
         session_id: session,
         dry_run: false,
+        limits: Default::default(),
     }
 }
 

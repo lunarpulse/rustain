@@ -475,30 +475,59 @@ fn integer(value: &Value) -> Option<i64> {
     })
 }
 
-fn tokens(value: &Value) -> Option<u32> {
-    value.as_u64().map(|n| n.min(u64::from(u32::MAX)) as u32)
+fn tokens(value: Option<&Value>, observed: &mut bool) -> Option<u32> {
+    let raw = value?.as_u64();
+    *observed &= raw.is_some_and(|n| n <= u64::from(u32::MAX));
+    raw.map(|n| n.min(u64::from(u32::MAX)) as u32)
 }
 
 /// omp `populateResponsesUsageFromResponse`: when the reported total shows the
 /// primary counts already include orchestration tokens, those are subtracted.
 /// Without orchestration fields this is the plain mapping.
-fn parse_usage(usage: &Value) -> UsageInfo {
-    let details = &usage["input_tokens_details"];
-    let output_details = &usage["output_tokens_details"];
-    let input = tokens(&usage["input_tokens"]).unwrap_or(0);
-    let output = tokens(&usage["output_tokens"]).unwrap_or(0);
-    let orchestration_input = tokens(&details["orchestration_input_tokens"]).unwrap_or(0);
-    let orchestration_output = tokens(&output_details["orchestration_output_tokens"]).unwrap_or(0);
-    let orchestration_cached = tokens(&details["orchestration_input_cached_tokens"])
-        .unwrap_or(0)
-        .min(orchestration_input);
-    let primary = i64::from(input) + i64::from(output);
-    let separate = primary + i64::from(orchestration_input) + i64::from(orchestration_output);
-    let included = usage["total_tokens"].as_f64().is_some_and(|total| {
-        (orchestration_input > 0 || orchestration_output > 0)
-            && (total - primary as f64).abs() <= (total - separate as f64).abs()
-    });
+pub(super) fn parse_usage(usage: &Value) -> UsageInfo {
+    let details = usage.get("input_tokens_details");
+    let output_details = usage.get("output_tokens_details");
+    let mut observed =
+        details.is_none_or(Value::is_object) && output_details.is_none_or(Value::is_object);
+    let (details, output_details) = (
+        details.unwrap_or(&Value::Null),
+        output_details.unwrap_or(&Value::Null),
+    );
+    let input = tokens(usage.get("input_tokens"), &mut observed);
+    let output = tokens(usage.get("output_tokens"), &mut observed);
+    observed &= input.is_some() && output.is_some();
+    let (input, output) = (input.unwrap_or(0), output.unwrap_or(0));
+    let orchestration_input =
+        tokens(details.get("orchestration_input_tokens"), &mut observed).unwrap_or(0);
+    let orchestration_output = tokens(
+        output_details.get("orchestration_output_tokens"),
+        &mut observed,
+    )
+    .unwrap_or(0);
+    let raw_orchestration_cached = tokens(
+        details.get("orchestration_input_cached_tokens"),
+        &mut observed,
+    )
+    .unwrap_or(0);
+    let orchestration_cached = raw_orchestration_cached.min(orchestration_input);
+    observed &= raw_orchestration_cached == orchestration_cached;
+    let included = if orchestration_input > 0 || orchestration_output > 0 {
+        let primary = u64::from(input) + u64::from(output);
+        let separate = primary + u64::from(orchestration_input) + u64::from(orchestration_output);
+        let total = &usage["total_tokens"];
+        // The display uses the closest total. Accounting requires an exact
+        // match when that total determines whether orchestration is included.
+        observed &= total
+            .as_u64()
+            .is_some_and(|total| total == primary || total == separate);
+        total
+            .as_f64()
+            .is_some_and(|total| (total - primary as f64).abs() <= (total - separate as f64).abs())
+    } else {
+        false
+    };
     let (input, output, orchestration_cached) = if included {
+        observed &= input >= orchestration_input && output >= orchestration_output;
         (
             input.saturating_sub(orchestration_input),
             output.saturating_sub(orchestration_output),
@@ -507,18 +536,20 @@ fn parse_usage(usage: &Value) -> UsageInfo {
     } else {
         (input, output, 0)
     };
-    let cached = tokens(&details["cached_tokens"])
-        .or_else(|| tokens(&usage["prompt_cache_hit_tokens"]))
-        .map(|cached| cached.saturating_sub(orchestration_cached));
-    let written = tokens(&details["cache_write_tokens"])
-        .or_else(|| tokens(&usage["prompt_cache_miss_tokens"]));
-    UsageInfo::from_inclusive_counts(
-        input,
-        output,
-        cached,
-        written,
-        tokens(&output_details["reasoning_tokens"]),
-    )
+    let cached = tokens(details.get("cached_tokens"), &mut observed)
+        .or(tokens(usage.get("prompt_cache_hit_tokens"), &mut observed));
+    observed &= cached.unwrap_or(0) >= orchestration_cached;
+    let cached = cached.map(|cached| cached.saturating_sub(orchestration_cached));
+    let written = tokens(details.get("cache_write_tokens"), &mut observed)
+        .or(tokens(usage.get("prompt_cache_miss_tokens"), &mut observed));
+    let reasoning = tokens(output_details.get("reasoning_tokens"), &mut observed);
+    let mut normalized =
+        UsageInfo::from_inclusive_counts(input, output, cached, written, reasoning);
+    normalized.counters_observed = observed
+        && normalized.cache_read_input_tokens == cached
+        && normalized.cache_creation_input_tokens == written
+        && normalized.reasoning_tokens == reasoning;
+    normalized
 }
 
 fn failure(value: &Value, dialect: Dialect) -> EventError {
@@ -740,6 +771,57 @@ fn codex_failure(value: &Value) -> EventError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_usage_requires_exact_pricing_counters() {
+        use serde_json::json;
+
+        for (wire, input, output, observed) in [
+            (json!({"input_tokens": 0, "output_tokens": 0}), 0, 0, true),
+            (json!({"output_tokens": 8}), 0, 8, false),
+            (
+                json!({"input_tokens": 4294967296_u64, "output_tokens": 8}),
+                u32::MAX,
+                8,
+                false,
+            ),
+            (
+                json!({"input_tokens": 10, "output_tokens": 8, "prompt_cache_hit_tokens": "2"}),
+                10,
+                8,
+                false,
+            ),
+            (
+                json!({"input_tokens": 10, "output_tokens": 8, "input_tokens_details": {"cached_tokens": 4294967296_u64}}),
+                0,
+                8,
+                false,
+            ),
+            (
+                json!({"input_tokens": 10, "output_tokens": 8, "output_tokens_details": {"reasoning_tokens": 9}}),
+                10,
+                8,
+                false,
+            ),
+            (
+                json!({"input_tokens": 10, "output_tokens": 8, "total_tokens": 18, "input_tokens_details": {"orchestration_input_tokens": 3}}),
+                7,
+                8,
+                true,
+            ),
+            (
+                json!({"input_tokens": 10, "output_tokens": 8, "total_tokens": 19, "input_tokens_details": {"orchestration_input_tokens": 3}}),
+                7,
+                8,
+                false,
+            ),
+        ] {
+            let usage = parse_usage(&wire);
+            assert_eq!(usage.input_tokens, input, "{wire}");
+            assert_eq!(usage.output_tokens, output, "{wire}");
+            assert_eq!(usage.counters_observed, observed, "{wire}");
+        }
+    }
 
     #[test]
     fn stream_read_errors_are_transient() {

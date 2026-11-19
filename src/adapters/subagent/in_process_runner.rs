@@ -2085,6 +2085,7 @@ mod tests {
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_tokens: None,
+                        counters_observed: false,
                     },
                     session_id: None,
                 },

@@ -170,6 +170,7 @@ async fn submitted_tab_producers_are_cancelled_by_owner_and_quit_closes_both() {
                 stream.send(StreamChunk::Usage { usage: rustain::domain::models::UsageInfo {
                     input_tokens: 11, output_tokens: 7, cache_creation_input_tokens: None,
                     cache_read_input_tokens: None, reasoning_tokens: None,
+                    counters_observed: false,
                 }, session_id: None }).unwrap();
                 for _ in 0..5 {
                     loop {

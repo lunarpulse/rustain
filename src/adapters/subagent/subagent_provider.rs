@@ -602,6 +602,7 @@ impl SubagentProvider {
                             cache_read_tokens: None,
                             reasoning_tokens: None,
                         },
+                        provenance: None,
                     };
                     let _ = ledger.append(entry).await;
                 }

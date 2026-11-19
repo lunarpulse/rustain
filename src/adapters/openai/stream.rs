@@ -66,14 +66,14 @@ struct ToolAccumulator {
 pub struct OpenAiStreamTransformer {
     /// Active tool accumulators indexed by their tool call index.
     active_tools: std::collections::HashMap<usize, ToolAccumulator>,
-    /// Cumulative input tokens (extracted from usage when available).
-    input_tokens: u32,
-    /// Cumulative output tokens.
-    output_tokens: u32,
     /// The turn produced text, thinking or a tool call.
     output: bool,
     /// A `finish_reason` ended the turn.
     finished: bool,
+    accounting_finished: bool,
+    saw_done: bool,
+    /// A complete, choice-less usage frame becomes authoritative if immediately followed by `[DONE]`.
+    trailing_usage: Option<UsageInfo>,
     /// Words an error event; `None` uses the unbranded default text.
     errors: Option<Arc<InBandText>>,
     /// An in-stream error ended the stream.
@@ -90,10 +90,11 @@ impl OpenAiStreamTransformer {
     pub fn new() -> Self {
         Self {
             active_tools: std::collections::HashMap::new(),
-            input_tokens: 0,
-            output_tokens: 0,
             output: false,
             finished: false,
+            accounting_finished: false,
+            saw_done: false,
+            trailing_usage: None,
             errors: None,
             failed: false,
         }
@@ -178,14 +179,20 @@ impl OpenAiStreamTransformer {
         }
         // `[DONE]` is the protocol's terminal: a turn that produced output but
         // no `finish_reason` completed by server agreement and ends as a
-        // default stop; after a `finish_reason` it adds nothing.
+        // default stop; after a `finish_reason` it changes no display output.
         if frame.data.trim() == "[DONE]" {
             let mut chunks = Vec::new();
+            self.saw_done = true;
+            if let Some(mut usage) = self.trailing_usage.take() {
+                usage.counters_observed = true;
+                chunks.push(StreamChunk::AccountingUsage { usage });
+            }
             if self.output && !self.finished {
                 self.finish(StopReason::EndTurn, &mut chunks);
             }
             return chunks;
         }
+        self.trailing_usage = None;
 
         // One typed parse on the normal path: `error` is an optional member of
         // the chunk type, so serde's decoded key matching sees an escaped key
@@ -304,6 +311,7 @@ impl OpenAiStreamTransformer {
 
             // Finish reason — emit the tool calls (if any) and TurnComplete
             if let Some(reason) = &choice.finish_reason {
+                self.accounting_finished |= !reason.trim().is_empty();
                 match reason.as_str() {
                     "stop" => self.finish(StopReason::EndTurn, &mut chunks),
                     "tool_calls" => self.finish(StopReason::ToolUse, &mut chunks),
@@ -323,14 +331,10 @@ impl OpenAiStreamTransformer {
             }
         }
 
-        // Emit usage on the final SSE chunk (OpenAI sends it when
-        // `stream_options.include_usage = true`, with `choices: []`). The turn
-        // runtime consumes `StreamChunk::Usage` (last-writer-wins) and appends
-        // a `UsageLedgerEntry` — this is the missing link for non-Anthropic
-        // token tracking. See case file: openai-usage-calculation.
-        if let Some(ref usage) = event.usage {
-            self.input_tokens = usage.prompt_tokens;
-            self.output_tokens = usage.completion_tokens;
+        // Display accepts every decoded usage update. Accounting accepts exact
+        // counts only on or after a finish, or in a trailing usage-only frame
+        // confirmed by the next `[DONE]`.
+        if let Some(usage) = event.usage {
             let reasoning_tokens = usage
                 .completion_tokens_details
                 .as_ref()
@@ -344,14 +348,33 @@ impl OpenAiStreamTransformer {
                 .prompt_tokens_details
                 .as_ref()
                 .and_then(|d| d.cached_tokens);
+            let mut normalized = UsageInfo::from_inclusive_counts(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                cache_read_input_tokens,
+                None,
+                reasoning_tokens,
+            );
+            // Typed decoding requires both counters, including explicit zero.
+            // Keep display's clamping, but don't trust a clamped breakdown.
+            let exact = normalized.cache_read_input_tokens == cache_read_input_tokens
+                && normalized.reasoning_tokens == reasoning_tokens;
+            if exact && !self.saw_done {
+                if self.accounting_finished
+                    && event.choices.iter().all(|choice| {
+                        choice
+                            .finish_reason
+                            .as_deref()
+                            .is_some_and(|reason| !reason.trim().is_empty())
+                    })
+                {
+                    normalized.counters_observed = true;
+                } else if event.choices.is_empty() {
+                    self.trailing_usage = Some(normalized.clone());
+                }
+            }
             chunks.push(StreamChunk::Usage {
-                usage: UsageInfo::from_inclusive_counts(
-                    self.input_tokens,
-                    self.output_tokens,
-                    cache_read_input_tokens,
-                    None,
-                    reasoning_tokens,
-                ),
+                usage: normalized,
                 session_id: None,
             });
         }
@@ -397,10 +420,54 @@ mod tests {
                     "cache fields stay None for OpenAI-compat providers"
                 );
                 assert_eq!(usage.cache_read_input_tokens, None);
+                assert!(!usage.counters_observed, "not yet terminal");
                 assert_eq!(*session_id, None, "session_id not set by adapter");
             }
             other => panic!("expected StreamChunk::Usage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_observation_requires_both_counters_including_explicit_zero() {
+        let usage = the_usage_of(&[
+            frame(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#),
+            frame(r#"{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}"#),
+        ]);
+        assert_eq!((usage.input_tokens, usage.output_tokens), (0, 0));
+        assert!(usage.counters_observed);
+
+        for missing in [
+            r#"{"choices":[],"usage":{"prompt_tokens":0}}"#,
+            r#"{"choices":[],"usage":{"completion_tokens":0}}"#,
+        ] {
+            assert!(all(&[frame(missing)]).is_empty(), "{missing}");
+        }
+    }
+
+    #[test]
+    fn clamped_breakdowns_keep_display_counts_but_are_not_observed() {
+        let terminal = || frame(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#);
+        let cache_above_prompt = the_usage_of(&[
+            terminal(),
+            frame(
+                r#"{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,
+                "prompt_tokens_details":{"cached_tokens":5}}}"#,
+            ),
+        ]);
+        assert_eq!(cache_above_prompt.input_tokens, 0);
+        assert_eq!(cache_above_prompt.cache_read_input_tokens, Some(4));
+        assert!(!cache_above_prompt.counters_observed);
+
+        let reasoning_above_completion = the_usage_of(&[
+            terminal(),
+            frame(
+                r#"{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,
+                "completion_tokens_details":{"reasoning_tokens":3}}}"#,
+            ),
+        ]);
+        assert_eq!(reasoning_above_completion.output_tokens, 2);
+        assert_eq!(reasoning_above_completion.reasoning_tokens, Some(2));
+        assert!(!reasoning_above_completion.counters_observed);
     }
 
     #[test]
@@ -891,6 +958,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: Some(1408),
             reasoning_tokens: None,
+            counters_observed: false,
         };
         assert_eq!(copilot.input_tokens, anthropic.input_tokens);
         assert_eq!(copilot.output_tokens, anthropic.output_tokens);
@@ -926,6 +994,8 @@ mod tests {
             r#"{"choices":[{"index":0}]}"#,
             r#"{"choices":[{"delta":{"content":"a"}}]}"#,
             r#"{"choices":[],"usage":{"prompt_tokens":1}}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":-1}}}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"completion_tokens_details":{"reasoning_tokens":4294967296}}}"#,
         ] {
             assert!(
                 serde_json::from_str::<OpenAiStreamEvent>(missing).is_err(),

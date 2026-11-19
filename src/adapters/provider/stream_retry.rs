@@ -41,7 +41,7 @@ use crate::adapters::responses::{
 };
 use crate::domain::{
     errors::ProviderError,
-    models::{StopReason, StreamChunk},
+    models::{StopReason, StreamChunk, UsageInfo},
 };
 
 /// omp `MAX_EMPTY_COMPLETION_RETRIES`.
@@ -98,6 +98,7 @@ pub struct Rejected {
     pub error: ProviderError,
     retryable: bool,
     hint_ms: Option<u64>,
+    possibly_billed: bool,
 }
 
 /// A final error, never re-issued.
@@ -107,6 +108,7 @@ impl From<ProviderError> for Rejected {
             error,
             retryable: false,
             hint_ms: None,
+            possibly_billed: false,
         }
     }
 }
@@ -123,12 +125,15 @@ impl Rejected {
             error,
             retryable: (matches!(status, 408 | 429) || status >= 500) && !limited,
             hint_ms: retry_after(headers, crate::infrastructure::utils::auth_now_ms()),
+            possibly_billed: status != 429
+                && !retry::admission_rejection(headers, body)
+                && !retry::request_body_read_timeout(status, body),
         }
     }
 
     /// A send that got no answer: omp re-issues every network failure of its
     /// client (connection error, timeout, unreachable, refused, TLS).
-    pub fn transport(error: ProviderError) -> Self {
+    pub(crate) fn transport(error: ProviderError, possibly_billed: bool) -> Self {
         Self {
             retryable: matches!(
                 error,
@@ -136,6 +141,7 @@ impl Rejected {
             ),
             error,
             hint_ms: None,
+            possibly_billed,
         }
     }
 }
@@ -252,7 +258,7 @@ pub async fn reopen(
 ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
     // No attempt is live: `reissue` arms the re-open's window before use.
     let mut state = State::new(attempt, policy, None, Instant::now());
-    match state.reissue(Ending::Rejected(rejected)).await {
+    match state.reissue(Some(Ending::Rejected(rejected)), true).await {
         Reissued::Opened | Reissued::Finished => Ok(state.into_stream()),
         Reissued::Rejected(error) => Err(error),
         Reissued::Watchdog => Err(ProviderError::ConnectionFailed(policy.first_event.into())),
@@ -263,6 +269,8 @@ struct State {
     attempt: Box<dyn Attempt>,
     policy: &'static StreamResilience,
     inner: Option<BoxStream<'static, StreamChunk>>,
+    /// A replay passed its backoff and emitted its marker, but has not opened.
+    open_pending: bool,
     /// The live attempt's first-event deadline: the caller's for the first
     /// attempt, armed afresh for each re-opened one (omp's per-attempt timer).
     attempt_deadline: Instant,
@@ -273,6 +281,7 @@ struct State {
     committed: bool,
     /// Pre-output chunks of the current attempt; dropped with a discarded attempt.
     buffered: Vec<StreamChunk>,
+    attempt_usage: Option<UsageInfo>,
     pending: VecDeque<StreamChunk>,
     empty_retries: u8,
     transient_retries: u8,
@@ -286,6 +295,15 @@ enum Ending {
     Failed(String),
     /// A re-issue (or the first attempt) failed to open.
     Rejected(Rejected),
+}
+
+impl Ending {
+    fn possibly_billed(&self) -> bool {
+        match self {
+            Self::Eof | Self::Failed(_) => true,
+            Self::Rejected(rejected) => rejected.possibly_billed,
+        }
+    }
 }
 
 /// How a pre-commit re-issue ended.
@@ -321,12 +339,14 @@ impl State {
             attempt,
             policy,
             inner,
+            open_pending: false,
             attempt_deadline: first_deadline,
             seen_event: false,
             attempt_event: false,
             idle_deadline: first_deadline,
             committed: false,
             buffered: Vec::new(),
+            attempt_usage: None,
             pending: VecDeque::new(),
             empty_retries: 0,
             transient_retries: 0,
@@ -378,6 +398,10 @@ impl State {
             if self.finished {
                 return None;
             }
+            if std::mem::take(&mut self.open_pending) {
+                self.resume_after(None).await;
+                continue;
+            }
             let deadline = if self.seen_event || self.attempt_event {
                 self.idle_deadline
             } else {
@@ -406,6 +430,16 @@ impl State {
                     });
                     continue;
                 }
+                // Runtime needs these counters even if the attempt stalls before visible output.
+                // They neither commit the attempt nor participate in watchdog or retry decisions.
+                Ok(Some(StreamChunk::AccountingUsage { usage })) => {
+                    self.attempt_usage = Some(usage.clone());
+                    return Some(StreamChunk::AccountingUsage { usage });
+                }
+                Ok(Some(chunk @ StreamChunk::AccountingRetry { .. })) => {
+                    self.attempt_usage = None;
+                    return Some(chunk);
+                }
                 Ok(Some(chunk)) => {
                     self.attempt_event = true;
                     self.seen_event = true;
@@ -433,7 +467,33 @@ impl State {
                     if let StreamChunk::Error { content } = chunk {
                         Ending::Failed(content)
                     } else {
+                        let accounting = match &chunk {
+                            StreamChunk::Usage { usage, .. }
+                                if usage.counters_observed
+                                    && self.buffered.iter().any(|chunk| {
+                                        matches!(chunk, StreamChunk::TurnComplete { .. })
+                                    }) =>
+                            {
+                                Some(usage.clone())
+                            }
+                            StreamChunk::TurnComplete { .. } if self.attempt_usage.is_none() => {
+                                self.buffered
+                                    .iter()
+                                    .rev()
+                                    .find_map(|chunk| match chunk {
+                                        StreamChunk::Usage { usage, .. } => Some(usage),
+                                        _ => None,
+                                    })
+                                    .filter(|usage| usage.counters_observed)
+                                    .cloned()
+                            }
+                            _ => None,
+                        };
                         self.buffered.push(chunk);
+                        if let Some(usage) = accounting {
+                            self.attempt_usage = Some(usage.clone());
+                            return Some(StreamChunk::AccountingUsage { usage });
+                        }
                         continue;
                     }
                 }
@@ -454,54 +514,71 @@ impl State {
                 }
                 continue;
             }
-            match self.reissue(ending).await {
-                Reissued::Opened | Reissued::Finished => {}
-                Reissued::Rejected(error) => self.finish_with(StreamChunk::Error {
-                    content: error.to_string(),
-                }),
-                Reissued::Watchdog => self.finish_with(StreamChunk::Error {
-                    content: self.policy.first_event.into(),
-                }),
-            }
+            self.resume_after(Some(ending)).await;
+        }
+    }
+
+    async fn resume_after(&mut self, ending: Option<Ending>) {
+        match self.reissue(ending, false).await {
+            Reissued::Opened | Reissued::Finished => {}
+            Reissued::Rejected(error) => self.finish_with(StreamChunk::Error {
+                content: error.to_string(),
+            }),
+            Reissued::Watchdog => self.finish_with(StreamChunk::Error {
+                content: self.policy.first_event.into(),
+            }),
         }
     }
 
     /// Re-issues after a pre-commit ending while the route allows it, again on
     /// each rejected re-open; otherwise finishes with the buffered chunks (and
     /// the in-stream failure).
-    async fn reissue(&mut self, mut ending: Ending) -> Reissued {
+    async fn reissue(&mut self, mut ending: Option<Ending>, eager: bool) -> Reissued {
         loop {
-            let delay = match &ending {
-                Ending::Eof => (self.empty_retries < EMPTY_RETRIES && self.empty_completion())
-                    .then(|| {
-                        let delay = BASE_DELAY_MS << self.empty_retries;
-                        self.empty_retries += 1;
-                        delay
-                    }),
-                Ending::Failed(message) => self.provider_retry(generic_retryable(message), None),
-                Ending::Rejected(rejected) => {
-                    self.provider_retry(rejected.retryable, rejected.hint_ms)
-                }
-            };
-            let Some(delay) = delay else {
-                let mut flushed = std::mem::take(&mut self.buffered);
-                self.pending.extend(flushed.drain(..));
-                self.finished = true;
-                self.inner = None;
-                return match ending {
-                    Ending::Eof => Reissued::Finished,
+            if let Some(ending) = ending.take() {
+                let delay = match &ending {
+                    Ending::Eof => (self.empty_retries < EMPTY_RETRIES && self.empty_completion())
+                        .then(|| {
+                            let delay = BASE_DELAY_MS << self.empty_retries;
+                            self.empty_retries += 1;
+                            delay
+                        }),
                     Ending::Failed(message) => {
-                        self.pending
-                            .push_back(StreamChunk::Error { content: message });
-                        Reissued::Finished
+                        self.provider_retry(generic_retryable(message), None)
                     }
-                    Ending::Rejected(rejected) => Reissued::Rejected(rejected.error),
+                    Ending::Rejected(rejected) => {
+                        self.provider_retry(rejected.retryable, rejected.hint_ms)
+                    }
                 };
-            };
-            // Discard the attempt: its buffered pre-output chunks never surface.
-            self.inner = None;
-            self.buffered.clear();
-            tokio::time::sleep(retry::delay(delay)).await;
+                let Some(delay) = delay else {
+                    let mut flushed = std::mem::take(&mut self.buffered);
+                    self.pending.extend(flushed.drain(..));
+                    self.finished = true;
+                    self.inner = None;
+                    return match ending {
+                        Ending::Eof => Reissued::Finished,
+                        Ending::Failed(message) => {
+                            self.pending
+                                .push_back(StreamChunk::Error { content: message });
+                            Reissued::Finished
+                        }
+                        Ending::Rejected(rejected) => Reissued::Rejected(rejected.error),
+                    };
+                };
+                // A discarded attempt's buffered pre-output chunks never surface.
+                self.inner = None;
+                self.buffered.clear();
+                tokio::time::sleep(retry::delay(delay)).await;
+                if ending.possibly_billed() {
+                    self.pending.push_back(StreamChunk::AccountingRetry {
+                        usage: self.attempt_usage.take(),
+                    });
+                    if !eager {
+                        self.open_pending = true;
+                        return Reissued::Opened;
+                    }
+                }
+            }
             // Every re-opened attempt gets its own full first-event window.
             let deadline = Instant::now() + retry::stream_timeout();
             self.attempt_deadline = deadline;
@@ -512,7 +589,7 @@ impl State {
                     self.idle_deadline = deadline;
                     return Reissued::Opened;
                 }
-                Ok(Err(rejected)) => ending = Ending::Rejected(rejected),
+                Ok(Err(rejected)) => ending = Some(Ending::Rejected(rejected)),
                 Err(_) => return Reissued::Watchdog,
             }
         }
@@ -535,7 +612,6 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::UsageInfo;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -571,6 +647,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
                 reasoning_tokens: None,
+                counters_observed: false,
             },
             session_id: None,
         }
@@ -635,6 +712,53 @@ mod tests {
         .await;
         assert_eq!(opened, 2);
         assert_eq!(texts(&chunks), ["text:hi", "stop"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_marker_closes_only_the_attempt_about_to_be_replaced() {
+        let StreamChunk::Usage {
+            usage: mut observed,
+            ..
+        } = usage(0)
+        else {
+            unreachable!()
+        };
+        observed.input_tokens = 17;
+        observed.counters_observed = true;
+        let observed = StreamChunk::Usage {
+            usage: observed,
+            session_id: None,
+        };
+        let opened = Arc::new(AtomicUsize::new(0));
+        let script = Script {
+            attempts: vec![
+                Some(vec![stop(), observed]),
+                Some(vec![usage(0)]),
+                Some(vec![text("third"), stop()]),
+            ],
+            opened: opened.clone(),
+        };
+        let mut stream = stream(Box::new(script), &CHAT).await.unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::AccountingUsage { usage }) if usage.input_tokens == 17
+        ));
+        let start = Instant::now();
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::AccountingRetry { usage: Some(usage) }) if usage.input_tokens == 17
+        ));
+        assert!(Instant::now() >= start + retry::delay(BASE_DELAY_MS));
+        assert_eq!(opened.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            stream.next().await,
+            Some(StreamChunk::AccountingRetry { usage: None })
+        ));
+        assert_eq!(opened.load(Ordering::SeqCst), 2);
+        let remaining = stream.collect::<Vec<_>>().await;
+        assert_eq!(opened.load(Ordering::SeqCst), 3);
+        assert_eq!(texts(&remaining), ["text:third", "stop"]);
+        assert_eq!(remaining.len(), 2, "abandoned display usage does not leak");
     }
 
     #[tokio::test(start_paused = true)]
@@ -837,7 +961,7 @@ mod tests {
             status(401, &[], "unauthorized"),
             status(429, &[("retry-after", "61")], "slow down"),
             status(429, &[], "monthly quota exceeded"),
-            Rejected::transport(ProviderError::Other("no body".into())),
+            Rejected::transport(ProviderError::Other("no body".into()), false),
             Rejected::from(ProviderError::Offline("down".into())),
         ] {
             let (result, opened, _) = reopened(first, vec![ok()]).await;
@@ -848,8 +972,8 @@ mod tests {
         for first in [
             status(408, &[], "timeout"),
             status(529, &[("x-should-retry", "false")], "overloaded"),
-            Rejected::transport(ProviderError::Offline("refused".into())),
-            Rejected::transport(ProviderError::ConnectionFailed("reset".into())),
+            Rejected::transport(ProviderError::Offline("refused".into()), false),
+            Rejected::transport(ProviderError::ConnectionFailed("reset".into()), true),
         ] {
             let (result, opened, _) = reopened(first, vec![ok()]).await;
             assert_eq!(result.unwrap(), ["text:ok", "stop"]);

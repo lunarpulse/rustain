@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::adapters::cli::commands::AskLimits;
 use crate::domain::events::AppEvent;
 use crate::domain::models::conversation::{
     ChatMessage, Conversation, generate_conversation_id, generate_message_id,
@@ -21,10 +22,11 @@ use crate::domain::models::{
     SkillActivationSet, StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin,
     UsageInfo, UsageLedgerEntry,
 };
-use crate::domain::ports::{StreamingProvider, UsageLedgerPort};
+use crate::domain::ports::{LedgerReadMode, StreamingProvider, UsageLedgerPort};
 use crate::domain::services::message_builder::{self, ResolvedFileContext};
 use crate::domain::services::model_router::{ModelResolutionRequest, resolve_effective_model};
 use crate::infrastructure::composition::CliCore;
+use crate::infrastructure::runtime::ask_limits::AskExecution;
 use crate::infrastructure::runtime::turn;
 
 use crate::domain::errors::{ProviderError, StorageError};
@@ -80,6 +82,14 @@ impl OutputFormat {
 /// `usage` counts are disjoint for every provider (see `UsageInfo`), where OpenAI-style
 /// providers reported `input_tokens` including cache reads before.
 const SCHEMA_VERSION: &str = "1.3";
+const LIMITED_SCHEMA_VERSION: &str = "1.4";
+
+fn ask_limits_configured(limits: AskLimits, config: &AppConfig) -> bool {
+    limits.max_turns.is_some()
+        || limits.max_duration.is_some()
+        || limits.max_cost_usd.is_some()
+        || config.budget.daily_limit_usd.is_some()
+}
 
 /// Output-only snake_case DTO for token usage (boundary coercion, AC1/O6).
 #[derive(Debug, Clone, Serialize)]
@@ -251,6 +261,8 @@ struct AskResponse {
     response: Option<String>,
     model: String,
     stop_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_reason: Option<&'static str>,
     usage: Option<UsageOut>,
     tool_calls: Vec<ToolCallOut>,
     session_id: String,
@@ -297,6 +309,8 @@ struct StreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    limit_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     deny_count: Option<u32>,
     /// Story 13.1c: present on `plan_proposed` and `turn_complete` events.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -326,6 +340,7 @@ struct AskOutcome {
     last_block_start: usize,
     tool_calls: Vec<ToolCallInfo>,
     turn_stop_reason: StopReason,
+    limit_reason: Option<&'static str>,
     turn_usage: Option<UsageInfo>,
     model: String,
     session_id: String,
@@ -342,12 +357,21 @@ struct AskOutcome {
 /// Only this struct writes to `out` in `run_ask_core`.
 struct AskRenderer<'a> {
     fmt: OutputFormat,
+    schema_version: &'static str,
     out: &'a mut dyn Write,
 }
 
 impl<'a> AskRenderer<'a> {
-    fn new(fmt: OutputFormat, out: &'a mut dyn Write) -> Self {
-        Self { fmt, out }
+    fn new(fmt: OutputFormat, limited: bool, out: &'a mut dyn Write) -> Self {
+        Self {
+            fmt,
+            schema_version: if limited {
+                LIMITED_SCHEMA_VERSION
+            } else {
+                SCHEMA_VERSION
+            },
+            out,
+        }
     }
 
     /// Emit a stream-json event line for an in-flight chunk.
@@ -357,7 +381,7 @@ impl<'a> AskRenderer<'a> {
         }
         let event = match chunk {
             StreamChunk::Text { content, .. } => StreamEvent {
-                schema_version: SCHEMA_VERSION,
+                schema_version: self.schema_version,
                 event_type: "text",
                 content: Some(content.clone()),
                 id: None,
@@ -367,6 +391,7 @@ impl<'a> AskRenderer<'a> {
                 usage: None,
                 model: None,
                 stop_reason: None,
+                limit_reason: None,
                 deny_count: None,
                 dry_run: None,
                 plan: None,
@@ -374,7 +399,7 @@ impl<'a> AskRenderer<'a> {
                 error: None,
             },
             StreamChunk::ToolUse { id, name, input } => StreamEvent {
-                schema_version: SCHEMA_VERSION,
+                schema_version: self.schema_version,
                 event_type: "tool_use",
                 content: None,
                 id: Some(id.clone()),
@@ -384,6 +409,7 @@ impl<'a> AskRenderer<'a> {
                 usage: None,
                 model: None,
                 stop_reason: None,
+                limit_reason: None,
                 deny_count: None,
                 dry_run: None,
                 plan: None,
@@ -396,7 +422,7 @@ impl<'a> AskRenderer<'a> {
                 is_error,
                 ..
             } => StreamEvent {
-                schema_version: SCHEMA_VERSION,
+                schema_version: self.schema_version,
                 event_type: "tool_result",
                 content: None,
                 id: Some(id.clone()),
@@ -409,6 +435,7 @@ impl<'a> AskRenderer<'a> {
                 usage: None,
                 model: None,
                 stop_reason: None,
+                limit_reason: None,
                 deny_count: None,
                 dry_run: None,
                 plan: None,
@@ -429,7 +456,7 @@ impl<'a> AskRenderer<'a> {
             return Ok(());
         }
         let event = StreamEvent {
-            schema_version: SCHEMA_VERSION,
+            schema_version: self.schema_version,
             event_type: "call_usage",
             content: None,
             id: None,
@@ -439,6 +466,7 @@ impl<'a> AskRenderer<'a> {
             usage: Some(usage.into()),
             model: Some(model.to_string()),
             stop_reason: None,
+            limit_reason: None,
             deny_count: None,
             dry_run: None,
             plan: None,
@@ -538,10 +566,11 @@ impl<'a> AskRenderer<'a> {
             }
             OutputFormat::Json => {
                 let doc = AskResponse {
-                    schema_version: SCHEMA_VERSION,
+                    schema_version: self.schema_version,
                     response: Some(response_text.to_string()),
                     model: outcome.model.clone(),
                     stop_reason: stop_reason_str(&outcome.turn_stop_reason).to_string(),
+                    limit_reason: outcome.limit_reason,
                     usage: outcome.turn_usage.as_ref().map(|u| u.into()),
                     tool_calls: outcome.tool_calls.iter().map(|tc| tc.into()).collect(),
                     session_id: outcome.session_id.clone(),
@@ -558,7 +587,7 @@ impl<'a> AskRenderer<'a> {
             OutputFormat::StreamJson => {
                 if let Some(ref usage) = outcome.turn_usage {
                     let event = StreamEvent {
-                        schema_version: SCHEMA_VERSION,
+                        schema_version: self.schema_version,
                         event_type: "usage",
                         content: None,
                         id: None,
@@ -568,6 +597,7 @@ impl<'a> AskRenderer<'a> {
                         usage: Some(usage.into()),
                         model: None,
                         stop_reason: None,
+                        limit_reason: None,
                         deny_count: None,
                         dry_run: None,
                         plan: None,
@@ -580,7 +610,7 @@ impl<'a> AskRenderer<'a> {
                 // Story 13.1c: emit plan_proposed line when a plan exists (before turn_complete).
                 if let Some(ref plan) = outcome.proposed_plan {
                     let event = StreamEvent {
-                        schema_version: SCHEMA_VERSION,
+                        schema_version: self.schema_version,
                         event_type: "plan_proposed",
                         content: None,
                         id: None,
@@ -590,6 +620,7 @@ impl<'a> AskRenderer<'a> {
                         usage: None,
                         model: None,
                         stop_reason: None,
+                        limit_reason: None,
                         deny_count: None,
                         dry_run: Some(outcome.dry_run),
                         plan: Some(plan.into()),
@@ -600,7 +631,7 @@ impl<'a> AskRenderer<'a> {
                     writeln!(self.out, "{}", line)?;
                 }
                 let complete = StreamEvent {
-                    schema_version: SCHEMA_VERSION,
+                    schema_version: self.schema_version,
                     event_type: "turn_complete",
                     content: None,
                     id: None,
@@ -610,6 +641,7 @@ impl<'a> AskRenderer<'a> {
                     usage: None,
                     model: None,
                     stop_reason: Some(stop_reason_str(&outcome.turn_stop_reason).to_string()),
+                    limit_reason: outcome.limit_reason,
                     deny_count: Some(outcome.deny_count),
                     dry_run: Some(outcome.dry_run),
                     plan: None,
@@ -628,10 +660,11 @@ impl<'a> AskRenderer<'a> {
             OutputFormat::Text => Ok(()),
             OutputFormat::Json => {
                 let doc = AskResponse {
-                    schema_version: SCHEMA_VERSION,
+                    schema_version: self.schema_version,
                     response: None,
                     model: String::new(),
                     stop_reason: String::new(),
+                    limit_reason: None,
                     usage: None,
                     tool_calls: vec![],
                     session_id: String::new(),
@@ -648,7 +681,7 @@ impl<'a> AskRenderer<'a> {
             }
             OutputFormat::StreamJson => {
                 let event = StreamEvent {
-                    schema_version: SCHEMA_VERSION,
+                    schema_version: self.schema_version,
                     event_type: "error",
                     content: None,
                     id: None,
@@ -658,6 +691,7 @@ impl<'a> AskRenderer<'a> {
                     usage: None,
                     model: None,
                     stop_reason: None,
+                    limit_reason: None,
                     deny_count: None,
                     dry_run: Some(dry_run),
                     plan: None,
@@ -681,38 +715,49 @@ struct CallBoundary {
     resume: tokio::sync::oneshot::Sender<()>,
 }
 
-/// Tells the `ask` event loop that a provider call has ended, then forwards
-/// the entry to the wrapped ledger. `run_turn` appends exactly one entry per
-/// provider call, after that call's stream ends; it is the only per-call
-/// boundary `ask` can observe.
+/// Wraps the ledger to report a call boundary to the renderer. With limits
+/// enabled the append settles first; the producer still waits for the
+/// renderer to take the boundary before it can send the next call's events.
 struct CallUsageTap {
     inner: Arc<dyn UsageLedgerPort>,
     tx: tokio::sync::mpsc::UnboundedSender<CallBoundary>,
+    limited: bool,
 }
 
 #[async_trait]
 impl UsageLedgerPort for CallUsageTap {
     async fn append(&self, entry: UsageLedgerEntry) -> Result<(), StorageError> {
-        // Hold the turn until `ask` has taken the boundary: a usage chunk of
-        // the next call must not arrive first and be counted for this one.
-        // `ask` dropping the receiver ends the wait.
-        let (resume, resumed) = tokio::sync::oneshot::channel();
-        let boundary = CallBoundary {
-            model: entry.model.clone(),
-            resume,
-        };
-        if self.tx.send(boundary).is_ok() {
-            let _ = resumed.await;
+        let model = entry.model.clone();
+        if self.limited {
+            let result = self.inner.append(entry).await;
+            self.handoff(model).await;
+            result
+        } else {
+            self.handoff(model).await;
+            self.inner.append(entry).await
         }
-        self.inner.append(entry).await
     }
 
     async fn read_session(&self, session_id: &str) -> Result<Vec<UsageLedgerEntry>, StorageError> {
         self.inner.read_session(session_id).await
     }
 
-    async fn read_since(&self, since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
-        self.inner.read_since(since_unix_ms).await
+    async fn read_since(
+        &self,
+        since_unix_ms: i64,
+        mode: LedgerReadMode,
+    ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        self.inner.read_since(since_unix_ms, mode).await
+    }
+}
+
+impl CallUsageTap {
+    async fn handoff(&self, model: String) {
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        if self.tx.send(CallBoundary { model, resume }).is_ok() {
+            // Dropping the acknowledgement or its receiver's queue releases the producer.
+            let _ = resumed.await;
+        }
     }
 }
 
@@ -720,22 +765,27 @@ impl UsageLedgerPort for CallUsageTap {
 /// last call's ledger row is written before the process exits.
 const TURN_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Every exit of `run_ask_core` after the turn is spawned goes through here:
-/// no further provider call, then wait (bounded) for the turn task.
+/// Cancel further work and release the tap before joining. Limited runs must
+/// not abort a producer while it is settling an admitted call.
 async fn finish_turn(
     exit: ExitCode,
     cancel: CancellationToken,
     call_usage_rx: tokio::sync::mpsc::UnboundedReceiver<CallBoundary>,
-    mut turn: tokio::task::JoinHandle<()>,
+    turn: Option<tokio::task::JoinHandle<()>>,
+    limited: bool,
 ) -> ExitCode {
     cancel.cancel();
     // The tap stops waiting for a boundary nobody takes.
     drop(call_usage_rx);
-    if tokio::time::timeout(TURN_DRAIN_GRACE, &mut turn)
-        .await
-        .is_err()
-    {
-        turn.abort();
+    if let Some(mut turn) = turn {
+        if limited {
+            let _ = turn.await;
+        } else if tokio::time::timeout(TURN_DRAIN_GRACE, &mut turn)
+            .await
+            .is_err()
+        {
+            turn.abort();
+        }
     }
     exit
 }
@@ -764,7 +814,10 @@ fn record_call_usage(
 ) -> Result<(), std::io::Error> {
     let written = renderer.on_call_usage(model, &call);
     *total = Some(match total.take() {
-        None => call,
+        None => UsageInfo {
+            counters_observed: false,
+            ..call
+        },
         Some(sum) => UsageInfo {
             input_tokens: sum.input_tokens.saturating_add(call.input_tokens),
             output_tokens: sum.output_tokens.saturating_add(call.output_tokens),
@@ -777,6 +830,7 @@ fn record_call_usage(
                 call.cache_read_input_tokens,
             ),
             reasoning_tokens: add_tokens(sum.reasoning_tokens, call.reasoning_tokens),
+            counters_observed: false,
         },
     });
     written
@@ -786,6 +840,7 @@ fn record_call_usage(
 /// write a structured error document to stdout. Returns FAILURE.
 fn emit_cli_error(
     fmt: OutputFormat,
+    limited: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
     message: &str,
@@ -793,17 +848,17 @@ fn emit_cli_error(
 ) -> ExitCode {
     let _ = writeln!(err, "Error: {}", message);
     if fmt != OutputFormat::Text {
-        let mut renderer = AskRenderer::new(fmt, out);
+        let mut renderer = AskRenderer::new(fmt, limited, out);
         let _ = renderer.emit_error(message, dry_run);
     }
     ExitCode::FAILURE
 }
 /// Used by `run_ask` for pre-turn failures (e.g. unreadable --file) where
 /// returning a `Result` would route through the generic text-only error printer.
-fn exit_with_cli_error(fmt: OutputFormat, message: &str, dry_run: bool) -> ! {
+fn exit_with_cli_error(fmt: OutputFormat, limited: bool, message: &str, dry_run: bool) -> ! {
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    let _ = emit_cli_error(fmt, &mut stdout, &mut stderr, message, dry_run);
+    let _ = emit_cli_error(fmt, limited, &mut stdout, &mut stderr, message, dry_run);
     let _ = stdout.flush();
     let _ = stderr.flush();
     std::process::exit(1);
@@ -819,6 +874,7 @@ pub struct AskOpts {
     pub session_id: Option<String>,
     /// Story 13.1c: dry-run plan mode — no state-mutating tools, no session write.
     pub dry_run: bool,
+    pub limits: AskLimits,
 }
 pub async fn run_ask_core(
     provider: Arc<dyn StreamingProvider>,
@@ -843,12 +899,15 @@ pub async fn run_ask_core(
         persona,
     } = core;
 
+    let limited = ask_limits_configured(opts.limits, app_config);
+
     // `run_turn` appends one ledger entry per provider call. Tap that boundary:
     // it yields the turn total and the per-call `call_usage` lines.
     let (call_usage_tx, mut call_usage_rx) = tokio::sync::mpsc::unbounded_channel();
     let ledger: Arc<dyn UsageLedgerPort> = Arc::new(CallUsageTap {
         inner: ledger,
         tx: call_usage_tx,
+        limited,
     });
 
     // Story 13.1c: enter Plan mode when dry_run so the permission_chain gate
@@ -863,6 +922,7 @@ pub async fn run_ask_core(
     if opts.query.trim().is_empty() {
         return emit_cli_error(
             output_format,
+            limited,
             out,
             err,
             "query cannot be empty",
@@ -876,6 +936,7 @@ pub async fn run_ask_core(
             Ok(None) => {
                 return emit_cli_error(
                     output_format,
+                    limited,
                     out,
                     err,
                     &format!("session '{}' not found", sid),
@@ -885,6 +946,7 @@ pub async fn run_ask_core(
             Err(e) => {
                 return emit_cli_error(
                     output_format,
+                    limited,
                     out,
                     err,
                     &format!("loading session: {}", e),
@@ -1024,21 +1086,37 @@ pub async fn run_ask_core(
 
     let conv_id = conversation.id.clone();
     let mut event_rx = event_rx;
-
-    // Move event_tx into the turn — when the turn ends, the channel closes,
-    // unblocking the event_rx.recv() loop below.
+    let turn_storage = storage.clone();
+    let conversation_snapshot = conversation.clone();
     let drain_cancel = turn_cancel.clone();
+
+    // Input, prompt, configuration, and model resolution are complete. Start
+    // the deadline before the producer saves the session or admits a call.
+    let (execution, stop_rx) = if limited {
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let execution = AskExecution::new(
+            opts.limits.max_turns,
+            opts.limits.max_duration,
+            opts.limits.max_cost_usd,
+            app_config,
+            stop_tx,
+        );
+        (execution, Some(stop_rx))
+    } else {
+        (None, None)
+    };
+
     let turn_task = tokio::spawn(turn::run_turn(
         provider,
         messages,
         options,
         event_tx,
-        security.clone(),
-        tools.clone(),
-        tool_scheduler.clone(),
-        conv_id.clone(),
-        storage.clone(),
-        conversation.clone(),
+        security,
+        tools,
+        tool_scheduler,
+        conv_id,
+        turn_storage,
+        conversation_snapshot,
         None,
         // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated rather
         // than left silent. Measured at implementation and re-measured at the
@@ -1051,7 +1129,7 @@ pub async fn run_ask_core(
         // site turns the `ask` tests RED (receipted as MUTANT 20).
         None,
         turn_cancel,
-        ledger.clone(),
+        ledger,
         resolved,
         None,
         0,
@@ -1064,19 +1142,19 @@ pub async fn run_ask_core(
         // ⛔ Not a suppressed taint — the absence is structural.
         false,
         None,
+        execution,
     ));
-    // Drop local Arc clones of tools/tool_scheduler so any event senders
-    // held inside ToolSetPort adaptors are released. The spawned run_turn
-    // task now holds the only remaining clones; when it finishes, the channel
-    // closes and the event loop below can exit.
-    drop(tools);
-    drop(tool_scheduler);
+    let mut turn_task = Some(turn_task);
 
     let mut assistant_text = String::new();
     let mut last_block_start = 0usize;
     let mut turn_complete = false;
     let mut turn_error: Option<ProviderError> = None;
-    let mut turn_stop_reason = StopReason::EndTurn;
+    let mut turn_stop_reason = if limited {
+        StopReason::Cancelled
+    } else {
+        StopReason::EndTurn
+    };
     let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
     // Usage chunk of the provider call that is still open. The ledger tap
     // closes the call; a call that sent no usage is not reported.
@@ -1092,46 +1170,80 @@ pub async fn run_ask_core(
     let mut spans = Vec::new();
     // Story 13.1c: accumulate the last proposed plan (last-wins, AC6).
     let mut proposed_plan: Option<Plan> = None;
-    let mut renderer = AskRenderer::new(output_format, out);
+    let mut renderer = AskRenderer::new(output_format, limited, out);
+    let mut pending_boundary: Option<CallBoundary> = None;
+    let mut producer_failed = false;
+    // If the caller drops this future, cancel before dropping the tap or
+    // releasing any queued acknowledgement; the producer owns settlement.
+    let _cancel_on_drop = limited.then(|| drain_cancel.clone().drop_guard());
     loop {
-        let event = tokio::select! {
-            biased;
-            event = event_rx.recv() => event,
-            msg = deny_msg_rx.recv() => {
-                if let Some(msg) = msg {
-                    let _ = writeln!(err, "{}", msg);
+        let event = if let Some(boundary) = pending_boundary.take() {
+            match event_rx.try_recv() {
+                Ok(event) => {
+                    pending_boundary = Some(boundary);
+                    Some(event)
                 }
-                continue;
+                Err(_) => {
+                    // The producer sent all of this call's events before
+                    // the boundary and cannot send the next call's yet.
+                    // Recheck the queue now: polling it first in select!
+                    // alone does not order two concurrently sent channels.
+                    let written = match open_call_usage.take() {
+                        Some(usage) => record_call_usage(
+                            &mut renderer,
+                            &mut usage_total,
+                            &boundary.model,
+                            usage,
+                        ),
+                        None => Ok(()),
+                    };
+                    if written.is_err() {
+                        drain_cancel.cancel();
+                    }
+                    let _ = boundary.resume.send(());
+                    if let Err(e) = written {
+                        begin_exit(
+                            &drain_cancel,
+                            err,
+                            format_args!("Error: failed to write stream output: {}", e),
+                        );
+                        return finish_turn(
+                            ExitCode::FAILURE,
+                            drain_cancel,
+                            call_usage_rx,
+                            turn_task,
+                            limited,
+                        )
+                        .await;
+                    }
+                    continue;
+                }
             }
-            Some(boundary) = call_usage_rx.recv() => {
-                // Events are polled first and the turn waits in `append`, so
-                // every chunk of this call has been handled and none of the
-                // next call exists yet.
-                let written = match open_call_usage.take() {
-                    Some(usage) => record_call_usage(
-                        &mut renderer,
-                        &mut usage_total,
-                        &boundary.model,
-                        usage,
-                    ),
-                    None => Ok(()),
-                };
-                if written.is_err() {
-                    // Cancel before the release, so the turn starts nothing more.
-                    drain_cancel.cancel();
+        } else {
+            tokio::select! {
+                biased;
+                Some(result) = async {
+                    match turn_task.as_mut() {
+                        Some(task) => Some(task.await),
+                        None => None,
+                    }
+                }, if limited && turn_task.is_some() => {
+                    producer_failed = result.is_err();
+                    turn_task = None;
+                    // External tool event senders can outlive the turn. The
+                    // producer is joined, so drain only the already queued events.
+                    event_rx.close();
+                    continue;
                 }
-                let _ = boundary.resume.send(());
-                if let Err(e) = written {
-                    begin_exit(&drain_cancel, err, format_args!("Error: failed to write stream output: {}", e));
-                    return finish_turn(
-                        ExitCode::FAILURE,
-                        drain_cancel,
-                        call_usage_rx,
-                        turn_task,
-                    )
-                    .await;
+                event = event_rx.recv() => event,
+                Some(msg) = deny_msg_rx.recv() => {
+                    let _ = writeln!(err, "{}", msg);
+                    continue;
                 }
-                continue;
+                Some(boundary) = call_usage_rx.recv() => {
+                    pending_boundary = Some(boundary);
+                    continue;
+                }
             }
         };
         let Some(event) = event else { break };
@@ -1147,11 +1259,13 @@ pub async fn run_ask_core(
                                 err,
                                 format_args!("Error: failed to write stream output: {}", e),
                             );
+                            drop(pending_boundary);
                             return finish_turn(
                                 ExitCode::FAILURE,
                                 drain_cancel,
                                 call_usage_rx,
                                 turn_task,
+                                limited,
                             )
                             .await;
                         }
@@ -1184,11 +1298,13 @@ pub async fn run_ask_core(
                                 err,
                                 format_args!("Error: failed to write stream output: {}", e),
                             );
+                            drop(pending_boundary);
                             return finish_turn(
                                 ExitCode::FAILURE,
                                 drain_cancel,
                                 call_usage_rx,
                                 turn_task,
+                                limited,
                             )
                             .await;
                         }
@@ -1230,11 +1346,13 @@ pub async fn run_ask_core(
                                 err,
                                 format_args!("Error: failed to write stream output: {}", e),
                             );
+                            drop(pending_boundary);
                             return finish_turn(
                                 ExitCode::FAILURE,
                                 drain_cancel,
                                 call_usage_rx,
                                 turn_task,
+                                limited,
                             )
                             .await;
                         }
@@ -1268,6 +1386,13 @@ pub async fn run_ask_core(
                 }
                 StreamChunk::Error { content } => {
                     let parsed = parse_provider_error_display(content);
+                    if limited {
+                        // Stop a stream that may never close, but let the
+                        // producer settle and decide bounded-stop precedence.
+                        drain_cancel.cancel();
+                        turn_error.get_or_insert(parsed);
+                        continue;
+                    }
                     if !parsed.is_offline() {
                         begin_exit(&drain_cancel, err, format_args!("Error: {}", content));
                     } else {
@@ -1281,6 +1406,11 @@ pub async fn run_ask_core(
             AppEvent::SystemNotice { level, message, .. } => {
                 if *level == crate::domain::models::NoticeLevel::Error {
                     let parsed = parse_provider_error_display(message);
+                    if limited {
+                        drain_cancel.cancel();
+                        turn_error.get_or_insert(parsed);
+                        continue;
+                    }
                     // Defer stderr output for offline errors — handled post-loop (AC3).
                     if !parsed.is_offline() {
                         begin_exit(&drain_cancel, err, format_args!("Error: {}", message));
@@ -1301,30 +1431,46 @@ pub async fn run_ask_core(
         }
     }
 
-    // A turn that ended has had every boundary taken above. A turn cut short
-    // by an error can leave a call open: its entry is appended only when the
-    // provider stream ends, which may be never. Report the usage that call
-    // already sent. At most one boundary is waiting, because the turn holds
-    // in `append`; it names the model when the stream did end.
-    let open_call_model = match call_usage_rx.try_recv() {
-        Ok(boundary) => {
+    // The channel may close just before the producer becomes join-ready.
+    // Limited output is not terminal until the producer has settled and joined.
+    if limited && let Some(task) = turn_task.take() {
+        producer_failed = task.await.is_err();
+    }
+    let ask_stop = stop_rx.and_then(|mut rx| rx.try_recv().ok());
+    let limit_reason = ask_stop.as_ref().map(|stop| stop.reason.as_str());
+
+    // Inactive turns retain the legacy error-time handoff, which may lack an
+    // append if the stream never closes. A limited interruption without a
+    // receipt may still have display usage (not proven accounting evidence).
+    let open_call_model = pending_boundary
+        .or_else(|| call_usage_rx.try_recv().ok())
+        .map(|boundary| {
             // Cancel first: the released turn must not start another call.
             drain_cancel.cancel();
             let _ = boundary.resume.send(());
             boundary.model
-        }
-        Err(_) => model_used.clone(),
-    };
-    if let Some(usage) = open_call_usage.take() {
-        if let Err(e) = record_call_usage(&mut renderer, &mut usage_total, &open_call_model, usage)
-        {
-            begin_exit(
-                &drain_cancel,
-                err,
-                format_args!("Error: failed to write stream output: {}", e),
-            );
-            return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
-        }
+        });
+    if let Some(usage) = open_call_usage.take()
+        && let Err(e) = record_call_usage(
+            &mut renderer,
+            &mut usage_total,
+            open_call_model.as_deref().unwrap_or(&model_used),
+            usage,
+        )
+    {
+        begin_exit(
+            &drain_cancel,
+            err,
+            format_args!("Error: failed to write stream output: {}", e),
+        );
+        return finish_turn(
+            ExitCode::FAILURE,
+            drain_cancel,
+            call_usage_rx,
+            turn_task,
+            limited,
+        )
+        .await;
     }
 
     if let Some(handle) = deny_consumer {
@@ -1334,14 +1480,21 @@ pub async fn run_ask_core(
         let _ = writeln!(err, "{}", msg);
     }
 
-    if let Some(ref error) = turn_error {
+    if let Some(stop) = &ask_stop {
+        let reason = stop.reason.as_str();
+        if let Some(detail) = &stop.detail {
+            let _ = writeln!(err, "Ask stopped: {reason}: {detail}");
+        } else {
+            let _ = writeln!(err, "Ask stopped: {reason}");
+        }
+    } else if let Some(error) = &turn_error {
         // Story 13.2 (AC3): surface a specific offline message when a transport-level
         // failure occurs — matched on the domain variant, not a string prefix.
         if error.is_offline() {
             let msg = "✗ No provider available (offline). Use --dry-run for plan-only, or configure a local LLM.";
             drain_cancel.cancel();
-            let exit = emit_cli_error(output_format, out, err, msg, opts.dry_run);
-            return finish_turn(exit, drain_cancel, call_usage_rx, turn_task).await;
+            let exit = emit_cli_error(output_format, limited, out, err, msg, opts.dry_run);
+            return finish_turn(exit, drain_cancel, call_usage_rx, turn_task, limited).await;
         }
         begin_exit(
             &drain_cancel,
@@ -1349,17 +1502,32 @@ pub async fn run_ask_core(
             format_args!("Error: turn failed: {}", error),
         );
         let _ = renderer.emit_error(&format!("turn failed: {}", error), opts.dry_run);
-        return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
+        return finish_turn(
+            ExitCode::FAILURE,
+            drain_cancel,
+            call_usage_rx,
+            turn_task,
+            limited,
+        )
+        .await;
     }
 
-    if !turn_complete {
-        begin_exit(
-            &drain_cancel,
-            err,
-            format_args!("Error: turn did not complete"),
-        );
-        let _ = renderer.emit_error("turn did not complete", opts.dry_run);
-        return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
+    if ask_stop.is_none() && (!turn_complete || producer_failed) {
+        let message = if producer_failed {
+            "turn producer failed"
+        } else {
+            "turn did not complete"
+        };
+        begin_exit(&drain_cancel, err, format_args!("Error: {message}"));
+        let _ = renderer.emit_error(message, opts.dry_run);
+        return finish_turn(
+            ExitCode::FAILURE,
+            drain_cancel,
+            call_usage_rx,
+            turn_task,
+            limited,
+        )
+        .await;
     }
 
     // Story 13.1c (AC4): derive tools_would_use — deduplicated, sorted tool names
@@ -1382,6 +1550,7 @@ pub async fn run_ask_core(
         last_block_start,
         tool_calls,
         turn_stop_reason,
+        limit_reason,
         turn_usage: usage_total,
         model: model_used,
         session_id: conversation
@@ -1399,7 +1568,17 @@ pub async fn run_ask_core(
             err,
             format_args!("Error: failed to write output: {}", e),
         );
-        return finish_turn(ExitCode::FAILURE, drain_cancel, call_usage_rx, turn_task).await;
+        return finish_turn(
+            ExitCode::FAILURE,
+            drain_cancel,
+            call_usage_rx,
+            turn_task,
+            limited,
+        )
+        .await;
+    }
+    if ask_stop.is_some() {
+        return ExitCode::FAILURE;
     }
 
     // Story 13.1c (AC7): dry-run saves no reply and prints no resume hint. Its
@@ -1447,7 +1626,14 @@ pub async fn run_ask_core(
         );
     }
 
-    finish_turn(ExitCode::SUCCESS, drain_cancel, call_usage_rx, turn_task).await
+    finish_turn(
+        ExitCode::SUCCESS,
+        drain_cancel,
+        call_usage_rx,
+        turn_task,
+        limited,
+    )
+    .await
 }
 
 pub async fn run_ask(
@@ -1457,6 +1643,7 @@ pub async fn run_ask(
     final_message_only: bool,
     output_format: String,
     dry_run: bool,
+    limits: AskLimits,
     app_config: AppConfig,
     session_id: Option<String>,
     force_new: bool,
@@ -1466,6 +1653,7 @@ pub async fn run_ask(
     let workspace = std::env::current_dir()?;
 
     let resolved_output_format = OutputFormat::parse(&output_format).unwrap_or(OutputFormat::Text);
+    let limited = ask_limits_configured(limits, &app_config);
 
     let mut resolved_files = Vec::new();
     for path in &files {
@@ -1474,7 +1662,7 @@ pub async fn run_ask(
             Err(e) => {
                 let msg = format!("cannot read file '{}': {}", path.display(), e);
                 if resolved_output_format != OutputFormat::Text {
-                    exit_with_cli_error(resolved_output_format, &msg, dry_run);
+                    exit_with_cli_error(resolved_output_format, limited, &msg, dry_run);
                 }
                 return Err(anyhow::anyhow!(msg));
             }
@@ -1498,7 +1686,7 @@ pub async fn run_ask(
             Err(e) => {
                 let msg = format!("failed to read stdin: {}", e);
                 if resolved_output_format != OutputFormat::Text {
-                    exit_with_cli_error(resolved_output_format, &msg, dry_run);
+                    exit_with_cli_error(resolved_output_format, limited, &msg, dry_run);
                 }
                 return Err(e);
             }
@@ -1529,6 +1717,7 @@ pub async fn run_ask(
         model_override,
         session_id: effective_session,
         dry_run,
+        limits,
     };
     let exit_code = run_ask_core(
         provider,

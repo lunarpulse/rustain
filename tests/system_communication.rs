@@ -243,6 +243,7 @@ fn test_token_usage_display_formatting() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         reasoning_tokens: None,
+        counters_observed: false,
     };
     assert_eq!(status_bar::format_token_usage(&usage), "↑1.2k ↓3.4k");
 
@@ -252,6 +253,7 @@ fn test_token_usage_display_formatting() {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         reasoning_tokens: None,
+        counters_observed: false,
     };
     assert_eq!(status_bar::format_token_usage(&small_usage), "↑50 ↓100");
 }

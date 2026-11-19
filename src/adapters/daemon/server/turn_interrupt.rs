@@ -380,6 +380,7 @@ impl AttachServer {
             if config.budget.daily_limit_usd.is_some_and(f64::is_finite) {
                 let refusal = match rt.usage_ledger.read_since(
                     crate::infrastructure::clock_util::today_start_unix_ms(),
+                    crate::domain::ports::LedgerReadMode::Lenient,
                 ).await {
                     Ok(entries) => crate::domain::services::budget_gate::daily_budget_stop(&entries, &config)
                         .map(|stop| format!(

@@ -34,12 +34,13 @@ use super::{
 };
 use crate::{
     adapters::{
-        anthropic::sse::SseLineBuffer, model_catalog_cache::replay_scope,
-        provider::request_profile::Alternate,
+        anthropic::sse::SseLineBuffer,
+        model_catalog_cache::replay_scope,
+        provider::{http_retry::possibly_billed_send, request_profile::Alternate},
     },
     domain::{
         errors::ProviderError,
-        models::{CompletionOptions, Message, ResolvedAuth, StopReason, StreamChunk},
+        models::{CompletionOptions, Message, ResolvedAuth, StopReason, StreamChunk, UsageInfo},
     },
     infrastructure::key_resolver::{CredentialHandle, Resolved},
 };
@@ -306,6 +307,32 @@ fn retryable(message: &str) -> EventError {
     }
 }
 
+fn record_open_retry(pending: &mut VecDeque<StreamChunk>, possibly_billed: bool) {
+    if possibly_billed {
+        pending.push_back(StreamChunk::AccountingRetry { usage: None });
+    }
+}
+
+/// Only terminal error envelopes can establish failed-attempt counters.
+fn failed_usage(value: &Value, policy: RetryPolicy) -> Option<UsageInfo> {
+    let kind = value["type"].as_str()?;
+    if !matches!(
+        kind,
+        "response.failed" | "response.incomplete" | "response.completed" | "response.done"
+    ) {
+        return None;
+    }
+    let response = &value["response"];
+    let status = response["status"].as_str();
+    let failed = kind == "response.failed"
+        || matches!(status, Some("failed" | "cancelled"))
+        || (policy == RetryPolicy::Generic
+            && (kind == "response.incomplete" || status == Some("incomplete"))
+            && response["incomplete_details"]["reason"] == "content_filter");
+    let usage = events::parse_usage(response.get("usage").filter(|_| failed)?);
+    usage.counters_observed.then_some(usage)
+}
+
 /// One logical request: its credential, profile and once-encoded body.
 struct Exchange<H, W> {
     host: Arc<H>,
@@ -341,7 +368,7 @@ impl<H: Host, W: Wire> Exchange<H, W> {
         mapper.with_dialect(self.wire.dialect())
     }
 
-    async fn open(&mut self) -> Result<Opened, ProviderError> {
+    async fn open(&mut self, pending: &mut VecDeque<StreamChunk>) -> Result<Opened, ProviderError> {
         let policy = self.policy;
         let texts = policy.texts();
         let mut attempt: u32 = 0;
@@ -370,6 +397,13 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                         policy
                             .backoff(&self.cancel, policy.default_delay(attempt), watchdog)
                             .await?;
+                        record_open_retry(
+                            pending,
+                            match &other {
+                                Ok(Err(error)) => possibly_billed_send(error),
+                                _ => true,
+                            },
+                        );
                         continue;
                     }
                     return Err(match other {
@@ -420,6 +454,10 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                         policy
                             .backoff(&self.cancel, policy.default_delay(attempt), watchdog)
                             .await?;
+                        record_open_retry(
+                            pending,
+                            status != 429 && !retry::admission_rejection(&headers, ""),
+                        );
                         continue;
                     }
                     return Err(ProviderError::ConnectionFailed(texts.error_body.into()));
@@ -445,6 +483,7 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                         policy
                             .backoff(&self.cancel, policy.default_delay(attempt), watchdog)
                             .await?;
+                        record_open_retry(pending, error.as_ref().is_none_or(possibly_billed_send));
                         continue;
                     }
                     return Err(match error {
@@ -472,6 +511,13 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                 if let Some(delay) = delay {
                     attempt += 1;
                     policy.backoff(&self.cancel, delay, watchdog).await?;
+                    record_open_retry(
+                        pending,
+                        status != 429
+                            && (policy == RetryPolicy::Generic
+                                || (!retry::admission_rejection(&headers, &body)
+                                    && !retry::request_body_read_timeout(status, &body))),
+                    );
                     continue;
                 }
             }
@@ -546,6 +592,8 @@ struct StreamState<H, W> {
     buffer: SseLineBuffer,
     mapper: EventMapper,
     pending: VecDeque<StreamChunk>,
+    retry_at: Option<Instant>,
+    retry_usage: Option<UsageInfo>,
     deadline: Instant,
     /// This attempt parsed an event: later timeouts are idle stalls.
     seen_event: bool,
@@ -611,6 +659,10 @@ impl<H: Host, W: Wire> StreamState<H, W> {
             if self.finished {
                 return None;
             }
+            if self.response.is_none() {
+                self.reopen().await;
+                continue;
+            }
             let texts = self.ctx.policy.texts();
             let received = tokio::select! {biased;()=self.ctx.cancel.cancelled()=>{self.finished=true;self.response.take();return Some(StreamChunk::TurnComplete{stop_reason:StopReason::Cancelled});},value=tokio::time::timeout_at(self.deadline,self.response.as_mut().expect("live response").chunk())=>value};
             let mut failure = None;
@@ -639,6 +691,7 @@ impl<H: Host, W: Wire> StreamState<H, W> {
                 }
             };
             let mut empty = false;
+            let mut retry_usage = None;
             for frame in frames {
                 if frame.data.trim().is_empty() {
                     continue;
@@ -683,18 +736,26 @@ impl<H: Host, W: Wire> StreamState<H, W> {
                     }
                     _ => {}
                 }
+                let terminal_usage = failed_usage(&value, self.ctx.policy);
                 match self.mapper.event(value) {
                     Ok(chunks) => {
                         // Decide before forwarding: a retried empty completion drops its
                         // whole terminal batch, replay items and usage included.
                         if self.mapper.terminal() && self.empty_completion(&chunks) {
                             empty = true;
+                            retry_usage = chunks.into_iter().find_map(|chunk| match chunk {
+                                StreamChunk::Usage { usage, .. } if usage.counters_observed => {
+                                    Some(usage)
+                                }
+                                _ => None,
+                            });
                             self.response.take();
                             break;
                         }
                         self.pending.extend(chunks);
                     }
                     Err(mut error) => {
+                        retry_usage = terminal_usage;
                         // Only provider-supplied text crosses this redaction boundary.
                         error.message = self.ctx.wire.redact(&error.message, &self.ctx.headers);
                         failure = Some(error);
@@ -721,6 +782,10 @@ impl<H: Host, W: Wire> StreamState<H, W> {
                     Some(delay) => Some(delay),
                     None => {
                         self.finished = true;
+                        if let Some(usage) = retry_usage.take() {
+                            self.pending
+                                .push_back(StreamChunk::AccountingUsage { usage });
+                        }
                         self.pending.push_back(StreamChunk::Error {
                             content: error.message,
                         });
@@ -734,35 +799,52 @@ impl<H: Host, W: Wire> StreamState<H, W> {
                 continue;
             };
             self.pending.clear();
-            let reopened = match wait(&self.ctx.cancel, retry::delay(delay)).await {
-                Ok(()) => self.ctx.open().await,
-                Err(e) => Err(e),
-            };
-            match reopened {
-                Ok(opened) => {
-                    self.response = Some(opened.response);
-                    self.deadline = opened.deadline;
-                    self.buffer = SseLineBuffer::new();
-                    // A fresh mapper discards the failed attempt's replay buffer.
-                    self.mapper = self.ctx.mapper();
-                    self.seen_event = false;
-                    self.unsafe_seen = false;
-                }
-                // An abort during backoff or reopen ends like any other abort.
-                Err(ProviderError::Cancelled) => {
-                    self.finished = true;
-                    self.pending.push_back(StreamChunk::TurnComplete {
-                        stop_reason: StopReason::Cancelled,
-                    });
-                }
-                Err(error) => {
-                    self.finished = true;
-                    self.pending.push_back(StreamChunk::Error {
-                        content: error.to_string(),
+            if let Some(usage) = &retry_usage {
+                self.pending.push_back(StreamChunk::AccountingUsage {
+                    usage: usage.clone(),
+                });
+            }
+            self.retry_usage = retry_usage;
+            self.retry_at = Some(Instant::now() + retry::delay(delay));
+        }
+    }
+
+    async fn reopen(&mut self) {
+        if let Some(retry_at) = self.retry_at.take() {
+            tokio::select! {biased;
+                () = self.ctx.cancel.cancelled() => self.finish_cancelled(),
+                () = tokio::time::sleep_until(retry_at) => {
+                    self.pending.push_back(StreamChunk::AccountingRetry {
+                        usage: self.retry_usage.take(),
                     });
                 }
             }
+            return;
         }
+        match self.ctx.open(&mut self.pending).await {
+            Ok(opened) => {
+                self.response = Some(opened.response);
+                self.deadline = opened.deadline;
+                self.buffer = SseLineBuffer::new();
+                self.mapper = self.ctx.mapper();
+                self.seen_event = false;
+                self.unsafe_seen = false;
+            }
+            Err(ProviderError::Cancelled) => self.finish_cancelled(),
+            Err(error) => {
+                self.finished = true;
+                self.pending.push_back(StreamChunk::Error {
+                    content: error.to_string(),
+                });
+            }
+        }
+    }
+
+    fn finish_cancelled(&mut self) {
+        self.finished = true;
+        self.pending.push_back(StreamChunk::TurnComplete {
+            stop_reason: StopReason::Cancelled,
+        });
     }
 }
 
@@ -812,14 +894,17 @@ pub async fn stream<H: Host, W: Wire>(
         cancel,
         headers: HeaderMap::new(),
     };
-    let opened = ctx.open().await?;
+    let mut pending = VecDeque::new();
+    let opened = ctx.open(&mut pending).await?;
     let mapper = ctx.mapper();
     let state = StreamState {
         ctx,
         response: Some(opened.response),
         buffer: SseLineBuffer::new(),
         mapper,
-        pending: VecDeque::new(),
+        pending,
+        retry_at: None,
+        retry_usage: None,
         deadline: opened.deadline,
         seen_event: false,
         unsafe_seen: false,
@@ -1045,11 +1130,11 @@ mod tests {
         }
     }
 
-    struct TestWire;
+    struct TestWire(Dialect);
 
     impl WireProfile for TestWire {
         fn dialect(&self) -> Dialect {
-            Dialect::Codex
+            self.0
         }
         fn prompt_cache_key(&self) -> Option<&str> {
             None
@@ -1125,7 +1210,7 @@ mod tests {
                     &url,
                     cancel,
                     resolved,
-                    TestWire,
+                    TestWire(Dialect::Codex),
                     request,
                     options("m")
                 ),
@@ -1168,6 +1253,86 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn responses_reissues_keep_only_verified_terminal_counters() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (kind, usage, expected) in [
+            (
+                "response.completed",
+                json!({"input_tokens": 9, "output_tokens": 1}),
+                Some(9),
+            ),
+            (
+                "response.failed",
+                json!({"input_tokens": 11, "output_tokens": 2}),
+                Some(11),
+            ),
+            ("response.failed", json!({"input_tokens": 13}), None),
+        ] {
+            let server = MockServer::start().await;
+            let first = json!({
+                "type": kind, "response": {
+                    "usage": usage,
+                    "error": {"code": "server_error", "message": "temporarily overloaded"}
+                }
+            });
+            Mock::given(method("POST"))
+                .and(path("/responses"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string(format!("data: {first}\n\n")),
+                )
+                .with_priority(1)
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            let answer = concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n",
+            );
+            Mock::given(method("POST"))
+                .and(path("/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(answer))
+                .mount(&server)
+                .await;
+            let host = TestHost::new(runtime_handle());
+            let cancel = host.abort_slot().arm();
+            let resolved = host.handle.current().await.unwrap();
+            let mut opened = within(stream(
+                host,
+                &format!("{}/responses", server.uri()),
+                cancel,
+                resolved,
+                TestWire(Dialect::Generic),
+                vec![user("hi")],
+                options("m"),
+            ))
+            .await
+            .unwrap();
+            if let Some(tokens) = expected {
+                assert!(matches!(
+                    within(opened.next()).await,
+                    Some(StreamChunk::AccountingUsage { usage }) if usage.input_tokens == tokens
+                ));
+            }
+            let Some(StreamChunk::AccountingRetry { usage }) = within(opened.next()).await else {
+                panic!("expected the retry marker before the second POST");
+            };
+            assert_eq!(usage.map(|usage| usage.input_tokens), expected);
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            assert!(
+                matches!(within(opened.collect::<Vec<_>>()).await.as_slice(), [
+                StreamChunk::Text { .. },
+                StreamChunk::Usage { usage, .. },
+                StreamChunk::TurnComplete { .. },
+            ] if usage.counters_observed && usage.input_tokens == 7)
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
+    }
+
     /// Keystone (b): an abort during a 401 refresh ends the open without a resend.
     #[tokio::test]
     async fn abort_during_401_recovery_cancels_before_the_resend() {
@@ -1187,7 +1352,7 @@ mod tests {
                     &url,
                     cancel,
                     resolved,
-                    TestWire,
+                    TestWire(Dialect::Codex),
                     request,
                     options("m"),
                 )

@@ -48,6 +48,7 @@ pub fn smoke_conversation() -> Conversation {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: Some(1_300),
+            counters_observed: false,
         },
         session_id: None,
     });

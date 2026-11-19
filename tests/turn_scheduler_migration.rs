@@ -370,6 +370,7 @@ async fn turn_scheduler_migration() {
         rustain::domain::models::TurnOrigin::Interactive,
         false,
         None,
+        None,
     )
     .await;
 
@@ -467,6 +468,7 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
         "sess-taint".into(),
         rustain::domain::models::TurnOrigin::Interactive,
         false,
+        None,
         None,
     ));
 
@@ -588,6 +590,7 @@ async fn scripted_turn(chunks: Vec<StreamChunk>) -> Vec<StreamChunk> {
         "sess-scripted".into(),
         rustain::domain::models::TurnOrigin::Interactive,
         false,
+        None,
         None,
     )
     .await;

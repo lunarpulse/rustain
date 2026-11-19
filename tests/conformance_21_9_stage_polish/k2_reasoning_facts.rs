@@ -32,6 +32,7 @@ fn usage(reasoning: Option<u32>) -> StreamChunk {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             reasoning_tokens: reasoning,
+            counters_observed: false,
         },
         session_id: None,
     }

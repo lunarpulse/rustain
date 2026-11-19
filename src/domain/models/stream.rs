@@ -67,6 +67,18 @@ pub enum StreamChunk {
         usage: UsageInfo,
         session_id: Option<String>,
     },
+    /// Latest proved usage for this attempt. Runtime consumes it without
+    /// forwarding a provider event.
+    #[serde(skip)]
+    AccountingUsage {
+        usage: UsageInfo,
+    },
+    /// The preceding attempt's terminal usage, or `None` if it may have
+    /// incurred unverified spend. Starts a fresh accounting attempt.
+    #[serde(skip)]
+    AccountingRetry {
+        usage: Option<UsageInfo>,
+    },
     /// Provider-owned replay state from a completed response (Story 20.1d1b
     /// E1). Operator-private: kept in the operator's own history only.
     ProviderReplay {
@@ -82,15 +94,17 @@ pub enum StreamChunk {
 
 impl StreamChunk {
     /// Proposal arguments and results belong to the operator review surface,
-    /// not the tier-agnostic observer stream. Provider replay state is
-    /// account-bound model state that never leaves the operator's history.
+    /// not the tier-agnostic observer stream. Provider replay state and
+    /// runtime-only accounting are likewise excluded from observers.
     pub fn is_operator_private(&self) -> bool {
         match self {
             Self::ToolUse { name, .. } => name == super::team_proposal::TEAM_PROPOSAL_TOOL_NAME,
             Self::ToolResult {
                 operator_private, ..
             } => *operator_private,
-            Self::ProviderReplay { .. } => true,
+            Self::ProviderReplay { .. }
+            | Self::AccountingUsage { .. }
+            | Self::AccountingRetry { .. } => true,
             _ => false,
         }
     }

@@ -244,6 +244,7 @@ pub struct MessageStartPayload {
 
 #[derive(Debug, Deserialize)]
 pub struct InputUsage {
+    /// Required if a message_start usage object is present, including zero.
     pub input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: Option<u32>,
@@ -253,6 +254,8 @@ pub struct InputUsage {
 
 #[derive(Debug, Deserialize)]
 pub struct OutputUsage {
+    /// Required if a message_delta usage object is present. The provisional
+    /// output count in message_start is deliberately not used here.
     pub output_tokens: u32,
 }
 
@@ -429,6 +432,21 @@ mod tests {
                 assert_eq!(usage.unwrap().output_tokens, 42);
             }
             _ => panic!("Expected MessageDelta"),
+        }
+    }
+
+    #[test]
+    fn anthropic_partial_or_invalid_counted_usage_does_not_decode() {
+        for data in [
+            r#"{"type":"message_start","message":{"usage":{"output_tokens":0}}}"#,
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":-1}}}"#,
+            r#"{"type":"message_delta","delta":{},"usage":{}}"#,
+            r#"{"type":"message_delta","delta":{},"usage":{"output_tokens":4294967296}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AnthropicEvent>(data).is_err(),
+                "{data}"
+            );
         }
     }
 

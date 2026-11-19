@@ -20,6 +20,13 @@ use rustain::domain::services::message_builder::ResolvedFileContext;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::composition::CliCore;
 use sha2::{Digest, Sha256};
+
+#[cfg(feature = "ollama")]
+include!("cli_ask/eval5_limits.rs");
+
+#[path = "cli_ask/eval5_interruption.rs"]
+mod eval5_interruption;
+
 fn default_config() -> rustain::domain::models::AppConfig {
     rustain::domain::models::AppConfig::default()
 }
@@ -275,6 +282,7 @@ fn make_opts(query: &str) -> rustain::adapters::cli::ask::AskOpts {
         model_override: None,
         session_id: None,
         dry_run: false,
+        limits: Default::default(),
     }
 }
 
@@ -1052,6 +1060,7 @@ impl StreamingProvider for ScriptedProvider {
 fn usage_chunk(input_tokens: u32, output_tokens: u32, cache_read: Option<u32>) -> StreamChunk {
     StreamChunk::Usage {
         usage: UsageInfo {
+            counters_observed: false,
             input_tokens,
             output_tokens,
             cache_creation_input_tokens: None,
@@ -1093,6 +1102,7 @@ fn make_opts_with_format(query: &str, fmt: OutputFormat) -> rustain::adapters::c
         model_override: None,
         session_id: None,
         dry_run: false,
+        limits: Default::default(),
     }
 }
 
@@ -1145,6 +1155,7 @@ async fn p0_13_1b_text_identity() {
 #[tokio::test]
 async fn p0_13_1b_json_shape() {
     let usage = UsageInfo {
+        counters_observed: false,
         input_tokens: 10,
         output_tokens: 20,
         cache_creation_input_tokens: Some(1),
@@ -1205,6 +1216,7 @@ async fn p0_13_1b_json_shape() {
 #[tokio::test]
 async fn p0_13_1b_g1_usage_matrix() {
     let usage = UsageInfo {
+        counters_observed: false,
         input_tokens: 1,
         output_tokens: 2,
         cache_creation_input_tokens: None,
@@ -1285,6 +1297,7 @@ async fn p0_13_1b_g1_usage_matrix() {
                 },
                 StreamChunk::Usage {
                     usage: UsageInfo {
+                        counters_observed: false,
                         input_tokens: 1,
                         output_tokens: 2,
                         cache_creation_input_tokens: None,
@@ -1295,6 +1308,7 @@ async fn p0_13_1b_g1_usage_matrix() {
                 },
                 StreamChunk::Usage {
                     usage: UsageInfo {
+                        counters_observed: false,
                         input_tokens: 3,
                         output_tokens: 4,
                         cache_creation_input_tokens: None,
@@ -1430,6 +1444,7 @@ impl rustain::domain::ports::UsageLedgerPort for RecordingLedger {
     async fn read_since(
         &self,
         _: i64,
+        _: rustain::domain::ports::LedgerReadMode,
     ) -> Result<Vec<rustain::domain::models::UsageLedgerEntry>, rustain::domain::errors::StorageError>
     {
         Ok(self.entries.lock().unwrap().clone())
@@ -1525,6 +1540,7 @@ fn usage_chunk_full(
 ) -> StreamChunk {
     StreamChunk::Usage {
         usage: UsageInfo {
+            counters_observed: false,
             input_tokens,
             output_tokens,
             cache_creation_input_tokens: None,
@@ -1811,6 +1827,7 @@ async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
     // Happy path: every line is a parseable object, no embedded newlines,
     // terminal line is turn_complete.
     let usage = UsageInfo {
+        counters_observed: false,
         input_tokens: 5,
         output_tokens: 6,
         cache_creation_input_tokens: None,
@@ -2100,6 +2117,7 @@ const SCHEMA_FINGERPRINT: &str = "112b6076580916c050311a3fd91a433946528f2c64dfbb
 #[tokio::test]
 async fn p0_13_1b_g4_schema_fingerprint() {
     let usage = UsageInfo {
+        counters_observed: false,
         input_tokens: 1,
         output_tokens: 2,
         cache_creation_input_tokens: Some(3),
@@ -2192,6 +2210,7 @@ fn assert_all_keys_snake_case(value: &serde_json::Value) {
 #[tokio::test]
 async fn p0_13_1b_g5_snake_case_lint() {
     let usage = UsageInfo {
+        counters_observed: false,
         input_tokens: 1,
         output_tokens: 2,
         cache_creation_input_tokens: Some(3),
@@ -2392,6 +2411,7 @@ fn p0_13_1b_json_error_unreadable_file() {
             .contains("cannot read file")
     );
 }
+
 // ================== Story 13.1c: Dry-Run Plan Mode ==================
 
 /// ToolSet that handles `propose_plan` by parsing the plan and emitting PlanProposed
@@ -2502,6 +2522,7 @@ fn make_dry_run_opts(query: &str, fmt: OutputFormat) -> rustain::adapters::cli::
         model_override: None,
         session_id: None,
         dry_run: true,
+        limits: Default::default(),
     }
 }
 
@@ -3626,6 +3647,7 @@ fn usage_of_call_line(call: &serde_json::Value) -> UsageInfo {
     let u = &call["usage"];
     let count = |key: &str| u[key].as_u64().map(|n| u32::try_from(n).unwrap());
     UsageInfo {
+        counters_observed: false,
         input_tokens: count("input_tokens").expect("input_tokens is emitted"),
         output_tokens: count("output_tokens").expect("output_tokens is emitted"),
         cache_creation_input_tokens: count("cache_creation_input_tokens"),
@@ -3725,7 +3747,7 @@ async fn eval3_ask_writes_one_ledger_row_per_provider_call() {
     }
 
     let since = rustain::adapters::ledger::FileUsageLedger::new()
-        .read_since(t0)
+        .read_since(t0, rustain::domain::ports::LedgerReadMode::Lenient)
         .await
         .unwrap();
     let key = |rows: &[rustain::domain::models::UsageLedgerEntry]| {
@@ -4141,6 +4163,7 @@ impl rustain::domain::ports::UsageLedgerPort for FailingLedger {
     async fn read_since(
         &self,
         _: i64,
+        _: rustain::domain::ports::LedgerReadMode,
     ) -> Result<Vec<rustain::domain::models::UsageLedgerEntry>, rustain::domain::errors::StorageError>
     {
         Ok(Vec::new())

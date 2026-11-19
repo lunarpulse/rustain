@@ -1319,6 +1319,7 @@ pub async fn run() -> Result<()> {
         final_message_only,
         output_format,
         dry_run,
+        limits,
     }) = cli.command.clone()
     {
         let selection = profile_resolver_arc
@@ -1341,6 +1342,7 @@ pub async fn run() -> Result<()> {
             final_message_only,
             output_format,
             dry_run,
+            limits,
             app_config,
             cli.session.clone(),
             cli.new,

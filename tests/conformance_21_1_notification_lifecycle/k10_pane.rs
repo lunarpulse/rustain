@@ -656,6 +656,7 @@ fn long_status_row(state: &TuiState, width: u16, long: bool) -> String {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
         reasoning_tokens: None,
+        counters_observed: false,
     };
     let budget = DailyBudgetState {
         spent_today_usd: 123_456.78,

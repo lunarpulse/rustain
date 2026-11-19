@@ -33,6 +33,10 @@ pub struct UsageInfo {
     /// Reasoning tokens (e.g., Claude extended thinking), a part of
     /// `output_tokens`. Added in S7.1a for cost tracking parity (FR36).
     pub reasoning_tokens: Option<u32>,
+    /// The serving transport established the counters used for accounting.
+    /// Not part of normalized usage or persisted session data.
+    #[serde(skip)]
+    pub counters_observed: bool,
 }
 
 impl UsageInfo {
@@ -42,6 +46,8 @@ impl UsageInfo {
     /// A cache count above the prompt it is a part of is a provider error and
     /// is clamped, so [`UsageInfo::prompt_tokens`] of the result always equals
     /// `prompt` (cache reads first, then writes).
+    /// This does not establish provenance; the adapter must validate the
+    /// provider's counters before trusting the result.
     pub fn from_inclusive_counts(
         prompt: u32,
         completion: u32,
@@ -57,6 +63,7 @@ impl UsageInfo {
             cache_creation_input_tokens: cache_write,
             cache_read_input_tokens: cache_read,
             reasoning_tokens: reasoning.map(|r| r.min(completion)),
+            counters_observed: false,
         }
     }
 
@@ -126,6 +133,17 @@ pub struct UsageLedgerEntry {
     pub step_kind: Option<StepKind>,
     pub escalation_reason: EscalationReason,
     pub usage: TokenUsage,
+    /// `None` preserves the legacy/unmarked format and does not imply observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<UsageProvenance>,
+}
+
+/// Whether the ledger row's counters were established by the serving transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageProvenance {
+    Observed,
+    Unknown,
 }
 
 /// Information about an available model from a provider.
@@ -212,6 +230,7 @@ mod tests {
                 "{prompt}/{completion}/{read:?}/{write:?}"
             );
             assert_eq!(got.prompt_tokens(), size, "{prompt}/{read:?}/{write:?}");
+            assert!(!got.counters_observed);
         }
     }
 
@@ -223,6 +242,7 @@ mod tests {
             cache_creation_input_tokens: Some(2000),
             cache_read_input_tokens: Some(1408),
             reasoning_tokens: None,
+            counters_observed: false,
         };
         assert_eq!(u.prompt_tokens(), 3549);
         let big = UsageInfo {
@@ -241,6 +261,7 @@ mod tests {
             cache_creation_input_tokens: Some(3),
             cache_read_input_tokens: Some(4),
             reasoning_tokens: Some(5),
+            counters_observed: false,
         };
         let row = TokenUsage::from_usage(&u, 7);
         assert_eq!(
@@ -254,5 +275,63 @@ mod tests {
             ),
             (1, 2, Some(3), Some(4), Some(5), 7)
         );
+    }
+
+    #[test]
+    fn normalized_usage_neither_serializes_nor_trusts_the_observation_flag() {
+        let mut usage = UsageInfo::from_inclusive_counts(3, 2, Some(1), None, Some(1));
+        usage.counters_observed = true;
+        let expected = serde_json::json!({
+            "inputTokens": 2,
+            "outputTokens": 2,
+            "cacheCreationInputTokens": null,
+            "cacheReadInputTokens": 1,
+            "reasoningTokens": 1
+        });
+        let mut json = serde_json::to_value(&usage).unwrap();
+        assert_eq!(json, expected);
+        json["countersObserved"] = true.into();
+        let decoded: UsageInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(counts(&decoded), counts(&usage));
+        assert!(!decoded.counters_observed);
+    }
+
+    #[test]
+    fn ledger_row_provenance_is_compatible_in_both_directions() {
+        // Exact pre-provenance row schema used to decode JSONL.
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyRow {
+            timestamp_ms: i64,
+            session_id: String,
+            conversation_id: String,
+            provider_id: String,
+            model: String,
+            tier: ModelTier,
+            step_kind: Option<StepKind>,
+            escalation_reason: EscalationReason,
+            usage: TokenUsage,
+        }
+
+        let old_json = r#"{"timestampMs":1747238400000,"sessionId":"s","conversationId":"c","providerId":"router","model":"m","tier":"cheap_agentic","stepKind":"edit","escalationReason":"none","usage":{"tokensIn":0,"tokensOut":0,"parentCtx":7,"cacheCreationTokens":null,"cacheReadTokens":null,"reasoningTokens":null}}"#;
+        // Match the production reader's per-line UsageLedgerEntry decode.
+        let mut row: UsageLedgerEntry = serde_json::from_str(old_json).unwrap();
+        assert_eq!(row.provenance, None);
+        assert_eq!(serde_json::to_string(&row).unwrap(), old_json);
+
+        for (flag, wire) in [
+            (UsageProvenance::Observed, "observed"),
+            (UsageProvenance::Unknown, "unknown"),
+        ] {
+            row.provenance = Some(flag);
+            let new_json = serde_json::to_string(&row).unwrap();
+            let decoded: UsageLedgerEntry = serde_json::from_str(&new_json).unwrap();
+            assert_eq!(decoded.provenance, Some(flag));
+            let new_value: serde_json::Value = serde_json::from_str(&new_json).unwrap();
+            assert_eq!(new_value["provenance"], wire);
+
+            let legacy: LegacyRow = serde_json::from_str(&new_json).unwrap();
+            assert_eq!(serde_json::to_string(&legacy).unwrap(), old_json);
+        }
     }
 }

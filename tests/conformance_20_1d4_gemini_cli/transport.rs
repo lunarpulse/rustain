@@ -139,28 +139,35 @@ fn replay(model: &str, parts: Value) -> String {
     )
 }
 
-/// One line per chunk; replay payloads print with serde's key order on both sides.
+/// One line per display trace chunk; replay payloads print with serde's key order on both sides.
 fn describe(chunks: &[StreamChunk]) -> Vec<String> {
     chunks
         .iter()
-        .map(|chunk| match chunk {
-            StreamChunk::Text { content, .. } => format!("text:{content}"),
-            StreamChunk::Thinking { content, .. } => format!("thinking:{content}"),
-            StreamChunk::ToolUse { id, name, input } => format!("tool:{id}:{name}:{input}"),
-            StreamChunk::ProviderReplay { item } => {
-                format!("replay:{}:{}:{}", item.provider, item.model, item.payload)
-            }
-            StreamChunk::Usage { usage, .. } => format!(
-                "usage:{}:{}:{:?}:{:?}:{:?}",
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
-                usage.reasoning_tokens
-            ),
-            StreamChunk::TurnComplete { stop_reason } => format!("done:{stop_reason:?}"),
-            StreamChunk::Error { content } => format!("error:{content}"),
-            other => format!("{other:?}"),
+        .filter_map(|chunk| {
+            Some(match chunk {
+                StreamChunk::AccountingUsage { .. } | StreamChunk::AccountingRetry { .. } => {
+                    return None;
+                }
+                StreamChunk::Text { content, .. } => format!("text:{content}"),
+                StreamChunk::Thinking { content, .. } => format!("thinking:{content}"),
+                StreamChunk::ToolUse { id, name, input } => format!("tool:{id}:{name}:{input}"),
+                StreamChunk::ProviderReplay { item } => {
+                    format!("replay:{}:{}:{}", item.provider, item.model, item.payload)
+                }
+                StreamChunk::Usage { usage, .. } => format!(
+                    "usage:{}:{}:{:?}:{:?}:{:?}",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.reasoning_tokens
+                ),
+                StreamChunk::TurnComplete { stop_reason } => format!("done:{stop_reason:?}"),
+                StreamChunk::Error { content } => format!("error:{content}"),
+                other @ (StreamChunk::ToolResult { .. } | StreamChunk::Blocked { .. }) => {
+                    format!("{other:?}")
+                }
+            })
         })
         .collect()
 }
@@ -780,7 +787,13 @@ async fn k07_missing_and_duplicate_tool_ids_are_generated() {
         }]}})])))
         .mount(&server)
         .await;
-    let chunks = collect(&build(), vec![user("ids")], options(MODEL)).await;
+    let mut chunks = collect(&build(), vec![user("ids")], options(MODEL)).await;
+    chunks.retain(|chunk| {
+        !matches!(
+            chunk,
+            StreamChunk::AccountingUsage { .. } | StreamChunk::AccountingRetry { .. }
+        )
+    });
     let calls: Vec<(String, String, Value)> = chunks
         .iter()
         .filter_map(|chunk| match chunk {

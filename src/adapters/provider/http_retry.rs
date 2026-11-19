@@ -101,6 +101,36 @@ pub enum Outcome {
     },
 }
 
+/// A failure before establishing the connection or building the request
+/// reached no model. A failed send after that may already have generated.
+pub(crate) fn possibly_billed_send(error: &reqwest::Error) -> bool {
+    !error.is_connect() && !error.is_builder()
+}
+
+/// Preserve the delivery fact lost when collapsing reqwest errors to text.
+pub(crate) struct FailedSend {
+    pub error: ProviderError,
+    pub possibly_billed: bool,
+}
+
+impl From<ProviderError> for FailedSend {
+    fn from(error: ProviderError) -> Self {
+        Self {
+            error,
+            possibly_billed: false,
+        }
+    }
+}
+
+impl From<reqwest::Error> for FailedSend {
+    fn from(error: reqwest::Error) -> Self {
+        Self {
+            possibly_billed: possibly_billed_send(&error),
+            error: super::classify_reqwest_error(&error),
+        }
+    }
+}
+
 /// Sends `request` (headers already set) under `policy`, consulting `state`
 /// for one identity alternate on a 403/400 of each attempt. A transport error
 /// that survives the policy is returned as `Err`.
@@ -110,22 +140,35 @@ pub async fn send(
     state: Option<&mut (dyn RequestState + '_)>,
     policy: Option<&HttpRetryPolicy>,
 ) -> Result<Outcome, ProviderError> {
-    exchange(client, request, state, policy)
+    exchange(client, request, state, policy, &mut 0)
         .await
         .map(|(outcome, _)| outcome)
+        .map_err(|failure| failure.error)
 }
 
 /// [`send`] for a stored request that provider re-issues send again: an
 /// identity alternate that wins is written into `request`, so every later
 /// re-issue of the same logical request sends the won identity directly
 /// (omp rebuilds its headers from the learned identity on each re-issue).
-pub async fn send_adopting(
+pub(crate) async fn send_adopting(
     client: &reqwest::Client,
     request: &mut reqwest::Request,
     state: Option<&mut (dyn RequestState + '_)>,
     policy: Option<&HttpRetryPolicy>,
-) -> Result<Outcome, ProviderError> {
-    let (outcome, won) = exchange(client, request, state, policy).await?;
+) -> Result<Outcome, FailedSend> {
+    send_adopting_accounted(client, request, state, policy, &mut 0).await
+}
+
+/// The Chat open boundary also reports how many abandoned HTTP requests
+/// could have incurred usage. Denials and failed connections are excluded.
+pub(crate) async fn send_adopting_accounted(
+    client: &reqwest::Client,
+    request: &mut reqwest::Request,
+    state: Option<&mut (dyn RequestState + '_)>,
+    policy: Option<&HttpRetryPolicy>,
+    ambiguous_retries: &mut u8,
+) -> Result<Outcome, FailedSend> {
+    let (outcome, won) = exchange(client, request, state, policy, ambiguous_retries).await?;
     if let Some(won) = won {
         for (name, value) in &won {
             request.headers_mut().insert(name, value.clone());
@@ -140,7 +183,8 @@ async fn exchange(
     request: &reqwest::Request,
     mut state: Option<&mut (dyn RequestState + '_)>,
     policy: Option<&HttpRetryPolicy>,
-) -> Result<(Outcome, Option<HeaderMap>), ProviderError> {
+    ambiguous_retries: &mut u8,
+) -> Result<(Outcome, Option<HeaderMap>), FailedSend> {
     let reuse = || {
         request
             .try_clone()
@@ -154,9 +198,10 @@ async fn exchange(
                 if let Some(delay) = policy.and_then(|p| p.transport_delay(retries + 1)) {
                     retries += 1;
                     tokio::time::sleep(retry::delay(delay)).await;
+                    *ambiguous_retries += u8::from(possibly_billed_send(&error));
                     continue;
                 }
-                return Err(super::classify_reqwest_error(&error));
+                return Err(error.into());
             }
         };
         if response.status().is_success() {
@@ -191,9 +236,10 @@ async fn exchange(
                     if let Some(delay) = policy.and_then(|p| p.transport_delay(retries + 1)) {
                         retries += 1;
                         tokio::time::sleep(retry::delay(delay)).await;
+                        *ambiguous_retries += u8::from(possibly_billed_send(&error));
                         continue;
                     }
-                    return Err(super::classify_reqwest_error(&error));
+                    return Err(error.into());
                 }
             }
         }
@@ -202,6 +248,7 @@ async fn exchange(
         {
             retries += 1;
             tokio::time::sleep(retry::delay(delay)).await;
+            *ambiguous_retries += u8::from(status != 429);
             continue;
         }
         return Ok((

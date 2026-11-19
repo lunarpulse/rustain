@@ -401,7 +401,7 @@ pub use turn_group::{
     jaccard_similarity,
 };
 #[allow(unused_imports)]
-pub use usage::{ModelInfo, TokenUsage, UsageInfo, UsageLedgerEntry};
+pub use usage::{ModelInfo, TokenUsage, UsageInfo, UsageLedgerEntry, UsageProvenance};
 #[allow(unused_imports)]
 pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,

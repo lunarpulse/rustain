@@ -45,7 +45,7 @@ use crate::{
         errors::ProviderError,
         models::{
             CompletionOptions, Message, ModelDescriptor, ResolvedAuth, StopReason, StreamChunk,
-            provider::DiscoveredModels,
+            UsageInfo, provider::DiscoveredModels,
         },
         ports::{ProbeOutcome, StreamingProvider},
     },
@@ -288,17 +288,14 @@ impl Call {
         Ok(())
     }
 
-    async fn wait(&self, delay: Duration) -> Result<(), ProviderError> {
-        tokio::select! {biased;()=self.cancel.cancelled()=>Err(ProviderError::Cancelled),()=tokio::time::sleep(delay)=>Ok(())}
-    }
-
     /// omp `fetchWithRetry` under one pre-response watchdog that spans every
     /// attempt and backoff until headers arrive. `attempts` is 1 for the plain
     /// empty-response re-POST.
-    async fn open(&mut self, attempts: u32) -> Result<reqwest::Response, ProviderError> {
+    async fn open(&mut self, attempts: u32) -> Result<(reqwest::Response, u32), ProviderError> {
         let watchdog = Instant::now() + retry::timeout(self.profile.first_event_ms);
         let timed_out = || ProviderError::ConnectionFailed(FIRST_EVENT_TIMEOUT.into());
         let mut attempt = 0;
+        let mut ambiguous_retries = 0;
         loop {
             // Cloning a built request shares its encoded body.
             let mut request = self
@@ -319,13 +316,16 @@ impl Call {
                     }
                     self.backoff(retry::default_delay_ms(attempt), watchdog)
                         .await?;
+                    ambiguous_retries += u32::from(
+                        crate::adapters::provider::http_retry::possibly_billed_send(&error),
+                    );
                     attempt += 1;
                     continue;
                 }
             };
             let status = response.status().as_u16();
             if response.status().is_success() {
-                return Ok(response);
+                return Ok((response, ambiguous_retries));
             }
             // A recovery may refresh over the network: an abort ends it promptly.
             if status == 401
@@ -359,6 +359,14 @@ impl Call {
                         .unwrap_or_else(|| retry::default_delay_ms(attempt))
                         .min(retry::MAX_DELAY_MS);
                     self.backoff(delay, watchdog).await?;
+                    if status != 429
+                        && !crate::adapters::responses::retry::admission_rejection(&headers, &body)
+                        && !crate::adapters::responses::retry::request_body_read_timeout(
+                            status, &body,
+                        )
+                    {
+                        ambiguous_retries += 1;
+                    }
                     attempt += 1;
                     continue;
                 }
@@ -390,10 +398,13 @@ impl Call {
 
 struct StreamState {
     call: Call,
+    // A live state with no body has approved an empty-attempt retry.
     response: Option<reqwest::Response>,
     buffer: SseLineBuffer,
     mapper: events::Mapper,
     pending: VecDeque<StreamChunk>,
+    attempt_usage: Option<UsageInfo>,
+    retry_at: Option<Instant>,
     /// The first-SSE-event allowance of this attempt; `None` once an event arrived.
     /// Gemini CLI has no idle timeout after the first event.
     first_event: Option<Instant>,
@@ -412,22 +423,52 @@ impl StreamState {
 
     async fn pull(&mut self) -> Option<StreamChunk> {
         loop {
+            if let Some(usage) = self.mapper.take_accounting_usage() {
+                self.attempt_usage = Some(usage.clone());
+                return Some(StreamChunk::AccountingUsage { usage });
+            }
             if let Some(chunk) = self.pending.pop_front() {
                 return Some(chunk);
             }
             if self.finished {
                 return None;
             }
+            // Drain accounting and visible output before a retry can wait for
+            // another body. Neither kind changes the mapper's empty decision.
+            let Some(response) = self.response.as_mut() else {
+                if let Some(retry_at) = self.retry_at.take() {
+                    tokio::select! {biased;
+                        () = self.call.cancel.cancelled() => {
+                            self.finished = true;
+                            return Some(StreamChunk::TurnComplete { stop_reason: StopReason::Cancelled });
+                        }
+                        () = tokio::time::sleep_until(retry_at) => {
+                            return Some(StreamChunk::AccountingRetry {
+                                usage: self.attempt_usage.take(),
+                            });
+                        }
+                    }
+                }
+                match self.call.open(1).await {
+                    Ok((response, _)) => self.start(response),
+                    Err(ProviderError::Cancelled) => {
+                        self.finished = true;
+                        self.pending.push_back(StreamChunk::TurnComplete {
+                            stop_reason: StopReason::Cancelled,
+                        });
+                    }
+                    Err(error) => self.fail(error.to_string()),
+                }
+                continue;
+            };
             let deadline = self.first_event;
             let cancel = &self.call.cancel;
-            let response = &mut self.response;
             let received = tokio::select! {biased;
                 ()=cancel.cancelled()=>None,
                 read=async {
-                    match (response.as_mut(), deadline) {
-                        (None, _) => Ok(Ok(None)),
-                        (Some(response), Some(deadline)) => tokio::time::timeout_at(deadline, response.chunk()).await,
-                        (Some(response), None) => Ok(response.chunk().await),
+                    match deadline {
+                        Some(deadline) => tokio::time::timeout_at(deadline, response.chunk()).await,
+                        None => Ok(response.chunk().await),
                     }
                 }=>Some(read),
             };
@@ -501,21 +542,9 @@ impl StreamState {
                 }
                 events::Finish::Empty if self.empty_retries < retry::EMPTY_RETRIES => {
                     self.empty_retries += 1;
-                    let delay = retry::delay(retry::empty_delay_ms(self.empty_retries));
-                    let reopened = match self.call.wait(delay).await {
-                        Ok(()) => self.call.open(1).await,
-                        Err(error) => Err(error),
-                    };
-                    match reopened {
-                        Ok(response) => self.start(response),
-                        Err(ProviderError::Cancelled) => {
-                            self.finished = true;
-                            self.pending.push_back(StreamChunk::TurnComplete {
-                                stop_reason: StopReason::Cancelled,
-                            });
-                        }
-                        Err(error) => self.fail(error.to_string()),
-                    }
+                    self.retry_at = Some(
+                        Instant::now() + retry::delay(retry::empty_delay_ms(self.empty_retries)),
+                    );
                 }
                 events::Finish::Empty => self.fail(EMPTY.into()),
             }
@@ -562,14 +591,18 @@ impl StreamingProvider for GeminiCliAdapter {
             cancel,
         };
         call.encode()?;
-        let response = call.open(retry::ATTEMPTS).await?;
+        let (response, ambiguous_retries) = call.open(retry::ATTEMPTS).await?;
         let mapper = call.mapper();
         let mut state = StreamState {
             call,
             response: None,
             buffer: SseLineBuffer::new(),
             mapper,
-            pending: VecDeque::new(),
+            pending: (0..ambiguous_retries)
+                .map(|_| StreamChunk::AccountingRetry { usage: None })
+                .collect(),
+            attempt_usage: None,
+            retry_at: None,
             first_event: None,
             empty_retries: 0,
             finished: false,
@@ -664,11 +697,12 @@ mod tests {
     use super::*;
     use crate::{
         adapters::responses::transport::test_support::{
-            accept, loopback, options, reject, stored_oauth, user, within,
+            accept, hold_open, loopback, options, reject, stored_oauth, user, within,
         },
         domain::models::CredentialIdentity,
     };
-    use futures::FutureExt;
+    use futures::{FutureExt, StreamExt};
+    use tokio::io::AsyncWriteExt;
 
     fn identity() -> CredentialIdentity {
         CredentialIdentity {
@@ -733,6 +767,124 @@ mod tests {
             "the rejected request is never resent"
         );
         assert_eq!(adapter.inner.abort.live(), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_usage_reaches_the_driver_before_the_body_closes() {
+        let (handle, _refresh, _dir) = stored_oauth(PROVIDER_KIND, false, identity()).await;
+        let (listener, origin) = loopback().await;
+        let adapter = GeminiCliAdapter::new(handle, origin).unwrap();
+        let (stream, mut socket) = within(async {
+            tokio::join!(
+                adapter.stream_completion(vec![user("hi")], options("gemini-2.5-pro")),
+                async {
+                    let mut socket = accept(&listener).await;
+                    hold_open(&mut socket).await;
+                    socket
+                }
+            )
+        })
+        .await;
+        let mut stream = stream.unwrap();
+        let data = concat!(
+            "data: ",
+            r#"{"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}}"#,
+            "\n\n",
+        );
+        socket
+            .write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            within(stream.next()).await,
+            Some(StreamChunk::AccountingUsage { usage })
+                if usage.counters_observed && usage.input_tokens == 5 && usage.output_tokens == 2
+        ));
+        assert!(matches!(
+            within(stream.next()).await,
+            Some(StreamChunk::Text { content, .. }) if content == "hi"
+        ));
+        assert!(
+            stream.next().now_or_never().is_none(),
+            "display usage still buffered"
+        );
+
+        adapter.abort().await.unwrap();
+        assert!(matches!(
+            within(stream.next()).await,
+            Some(StreamChunk::TurnComplete {
+                stop_reason: StopReason::Cancelled
+            })
+        ));
+        assert!(within(stream.next()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_retry_uses_only_usage_at_or_after_the_gemini_finish() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let (handle, _refresh, _dir) = stored_oauth(PROVIDER_KIND, false, identity()).await;
+        for terminal in [true, false] {
+            let server = MockServer::start().await;
+            let mut first = serde_json::json!({"response": {
+                "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1}
+            }});
+            if terminal {
+                first["response"]["candidates"] = serde_json::json!([{"finishReason":"STOP"}]);
+            }
+            let mut empty = format!("data: {first}\n\n");
+            if !terminal {
+                empty.push_str(
+                    "data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}]}}\n\n",
+                );
+            }
+            empty.push_str("data: [DONE]\n\n");
+            let endpoint = "/v1internal:streamGenerateContent";
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_string(empty))
+                .with_priority(1)
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            let reply = r#"{"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}"#;
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string(format!("data: {reply}\n\n")),
+                )
+                .mount(&server)
+                .await;
+            let adapter = GeminiCliAdapter::new(handle.clone(), server.uri()).unwrap();
+            let mut stream =
+                within(adapter.stream_completion(vec![user("hi")], options("gemini-2.5-pro")))
+                    .await
+                    .unwrap();
+            if terminal {
+                assert!(matches!(
+                    within(stream.next()).await,
+                    Some(StreamChunk::AccountingUsage { .. })
+                ));
+            }
+            let marker = within(stream.next()).await;
+            if terminal {
+                assert!(
+                    matches!(marker, Some(StreamChunk::AccountingRetry { usage: Some(usage) })
+                    if usage.counters_observed && usage.input_tokens == 5 && usage.output_tokens == 1)
+                );
+            } else {
+                assert!(matches!(
+                    marker,
+                    Some(StreamChunk::AccountingRetry { usage: None })
+                ));
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            assert!(matches!(within(stream.next()).await,
+                Some(StreamChunk::Text { content, .. }) if content == "ok"));
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
     }
 
     #[test]

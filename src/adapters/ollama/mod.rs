@@ -487,6 +487,8 @@ impl OllamaStreamTransformer {
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                         reasoning_tokens: None,
+                        counters_observed: response.prompt_eval_count.is_some()
+                            && response.eval_count.is_some(),
                     },
                     session_id: None,
                 });
@@ -860,9 +862,38 @@ mod tests {
             StreamChunk::Usage { usage, .. } => {
                 assert_eq!(usage.input_tokens, 10);
                 assert_eq!(usage.output_tokens, 2);
+                assert!(usage.counters_observed);
             }
             _ => panic!("Expected Usage chunk"),
         }
+    }
+
+    #[test]
+    fn ollama_usage_distinguishes_missing_and_reported_zero() {
+        for (counts, observed) in [
+            (r#""eval_count":2"#, false),
+            (r#""prompt_eval_count":0,"eval_count":2"#, true),
+        ] {
+            let mut t = OllamaStreamTransformer::new("llama3".to_owned());
+            t.process_line(&format!(r#"{{"model":"llama3","done":true,{counts}}}"#));
+            assert!(matches!(
+                t.pop_pending(),
+                Some(StreamChunk::TurnComplete { .. })
+            ));
+            assert!(matches!(
+                t.pop_pending(),
+                Some(StreamChunk::Usage { usage, .. })
+                    if usage.input_tokens == 0
+                        && usage.output_tokens == 2
+                        && usage.counters_observed == observed
+            ));
+        }
+
+        let mut t = OllamaStreamTransformer::new("llama3".to_owned());
+        t.process_line(
+            r#"{"model":"llama3","done":true,"prompt_eval_count":4294967296,"eval_count":2}"#,
+        );
+        assert!(t.pop_pending().is_none());
     }
     #[test]
     fn story19_19_review_context_prefix_reaches_ollama_user_message_and_preserves_tool_order() {

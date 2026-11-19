@@ -669,6 +669,7 @@ impl DaemonTurnRuntime {
                 turn_origin,
                 context_tainted,
                 None,
+                None,
             )
             .await
         })
@@ -895,6 +896,7 @@ mod tests {
                 "transient-runtime-session".into(),
                 TurnOrigin::Interactive,
                 false,
+                None,
                 None,
             )
             .await;

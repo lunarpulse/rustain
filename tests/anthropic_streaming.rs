@@ -174,6 +174,7 @@ data: {\"type\":\"message_stop\"}\n\
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },
@@ -218,6 +219,7 @@ data: {\"type\":\"message_stop\"}\n\
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },
@@ -266,6 +268,7 @@ data: {\"type\":\"message_stop\"}\n\
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },
@@ -280,6 +283,7 @@ data: {\"type\":\"message_stop\"}\n\
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                     reasoning_tokens: None,
+                    counters_observed: false,
                 },
                 session_id: None,
             },
@@ -833,6 +837,7 @@ data: {\"type\":\"message_stop\"}\n\
                 rustain::domain::models::TurnOrigin::Interactive,
                 false,
                 None,
+                None,
             )
             .await;
             let mut chunks = Vec::new();
@@ -1090,6 +1095,7 @@ data: {\"type\":\"message_stop\"}\n\
             "sess-test".into(),
             rustain::domain::models::TurnOrigin::Interactive,
             false,
+            None,
             None,
         )
         .await;

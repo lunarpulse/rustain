@@ -127,6 +127,7 @@ pub(crate) struct Mapper {
     reason: Reason,
     saw_finish: bool,
     usage: Option<UsageInfo>,
+    accounting_usage: Option<UsageInfo>,
     /// Visible text stays held while it is whitespace-only and nothing meaningful arrived.
     holding_text: bool,
     held_text: String,
@@ -158,6 +159,7 @@ impl Mapper {
             reason: Reason::Stop,
             saw_finish: false,
             usage: None,
+            accounting_usage: None,
             holding_text: true,
             held_text: String::new(),
             thinking_started: false,
@@ -212,9 +214,22 @@ impl Mapper {
 
         let metadata = &response["usageMetadata"];
         if truthy(metadata) {
-            self.usage = Some(usage(metadata));
+            let mut usage = usage(metadata);
+            // Usage before a candidate finishes may be provisional. Only a
+            // complete report at or after the finish is accounting evidence.
+            usage.counters_observed &= self.saw_finish;
+            if usage.counters_observed {
+                self.accounting_usage = Some(usage.clone());
+            }
+            self.usage = Some(usage);
         }
         Ok(out)
+    }
+
+    /// Latest trustworthy report not yet consumed by the transport. Keeping
+    /// this out of the mapped content leaves the empty-attempt test unchanged.
+    pub(super) fn take_accounting_usage(&mut self) -> Option<UsageInfo> {
+        self.accounting_usage.take()
     }
 
     /// End of this attempt's body (EOF or `[DONE]`).
@@ -481,7 +496,10 @@ impl Mapper {
 }
 
 /// omp `mapGoogleUsage` → rustain usage split.
-pub(crate) fn usage(metadata: &Value) -> UsageInfo {
+fn usage(metadata: &Value) -> UsageInfo {
+    if let Some(usage) = exact_usage(metadata) {
+        return usage;
+    }
     let candidates = js_number(&metadata["candidatesTokenCount"]);
     let thoughts = js_number(&metadata["thoughtsTokenCount"]);
     let total = js_number(&metadata["totalTokenCount"]);
@@ -502,6 +520,41 @@ pub(crate) fn usage(metadata: &Value) -> UsageInfo {
         None,
         (thoughts > 0.0).then_some(thoughts as u32),
     )
+}
+
+fn exact_usage(metadata: &Value) -> Option<UsageInfo> {
+    fn count(value: &Value) -> Option<u32> {
+        u32::try_from(value.as_u64()?).ok()
+    }
+
+    let prompt = count(&metadata["promptTokenCount"])?;
+    let candidates = count(&metadata["candidatesTokenCount"])?;
+    let thoughts = metadata.get("thoughtsTokenCount").map_or(Some(0), count)?;
+    let cache_read = metadata
+        .get("cachedContentTokenCount")
+        .map_or(Some(0), count)?;
+    let output = candidates.checked_add(thoughts)?;
+    if cache_read > prompt {
+        return None;
+    }
+    // The display only uses total when the reported prompt is zero. A
+    // corroborating total (or none) leaves that explicit zero unchanged.
+    if prompt == 0
+        && metadata
+            .get("totalTokenCount")
+            .is_some_and(|total| count(total) != Some(output))
+    {
+        return None;
+    }
+    let mut usage = UsageInfo::from_inclusive_counts(
+        prompt,
+        output,
+        (cache_read > 0).then_some(cache_read),
+        None,
+        (thoughts > 0).then_some(thoughts),
+    );
+    usage.counters_observed = true;
+    Some(usage)
 }
 
 fn next_tool_call_id(name: &str) -> String {
@@ -962,6 +1015,108 @@ mod tests {
             assert_eq!(u.cache_creation_input_tokens, None);
             assert_eq!(u.reasoning_tokens, reasoning, "{metadata}");
         }
+    }
+
+    #[test]
+    fn gemini_observes_explicit_counts_without_guessing_or_clamping() {
+        for (wire, input, output, observed) in [
+            (
+                json!({"promptTokenCount": 0, "candidatesTokenCount": 0}),
+                0,
+                0,
+                true,
+            ),
+            (
+                json!({"promptTokenCount": 0, "candidatesTokenCount": 2, "totalTokenCount": 2}),
+                0,
+                2,
+                true,
+            ),
+            (
+                json!({"promptTokenCount": 0, "candidatesTokenCount": 2, "totalTokenCount": 7}),
+                5,
+                2,
+                false,
+            ),
+            (
+                json!({"candidatesTokenCount": 2, "totalTokenCount": 7}),
+                5,
+                2,
+                false,
+            ),
+            (
+                json!({"promptTokenCount": 5, "totalTokenCount": 7}),
+                5,
+                0,
+                false,
+            ),
+            (
+                json!({"promptTokenCount": 5, "candidatesTokenCount": u32::MAX, "thoughtsTokenCount": 1}),
+                5,
+                u32::MAX,
+                false,
+            ),
+            (
+                json!({"promptTokenCount": 5, "candidatesTokenCount": 2, "thoughtsTokenCount": "1"}),
+                5,
+                2,
+                false,
+            ),
+            (
+                json!({"promptTokenCount": 5, "candidatesTokenCount": 2, "cachedContentTokenCount": 6}),
+                0,
+                2,
+                false,
+            ),
+        ] {
+            let usage = usage(&wire);
+            assert_eq!(usage.input_tokens, input, "{wire}");
+            assert_eq!(usage.output_tokens, output, "{wire}");
+            assert_eq!(usage.counters_observed, observed, "{wire}");
+        }
+    }
+
+    #[test]
+    fn gemini_exposes_complete_usage_once_before_display_flush() {
+        let mut m = mapper(false);
+        let usage_only = json!({"response": {"usageMetadata": {
+            "promptTokenCount": 5, "candidatesTokenCount": 2
+        }}});
+        assert!(feed(&mut m, usage_only.clone()).is_empty());
+        assert!(m.take_accounting_usage().is_none(), "provisional report");
+        let visible = feed(
+            &mut m,
+            json!({"response": {"candidates": [{
+                "content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"
+            }]}}),
+        );
+        assert_eq!(texts(&visible), ["hi"]);
+        assert!(m.take_accounting_usage().is_none(), "no final report yet");
+        assert!(feed(&mut m, usage_only.clone()).is_empty());
+        let early = m
+            .take_accounting_usage()
+            .expect("complete usage before EOF");
+        assert!(early.counters_observed);
+        assert_eq!((early.input_tokens, early.output_tokens), (5, 2));
+        assert!(m.take_accounting_usage().is_none());
+        let tail = done(m.finish());
+        assert!(matches!(
+            tail.as_slice(),
+            [
+                StreamChunk::ProviderReplay { .. },
+                StreamChunk::Usage { usage, .. },
+                StreamChunk::TurnComplete { .. },
+            ] if usage.counters_observed && usage.input_tokens == 5 && usage.output_tokens == 2
+        ));
+
+        let mut empty = mapper(false);
+        feed(
+            &mut empty,
+            json!({"response": {"candidates": [{"finishReason": "STOP"}]}}),
+        );
+        assert!(feed(&mut empty, usage_only).is_empty());
+        assert!(empty.take_accounting_usage().is_some());
+        assert!(matches!(empty.finish(), Finish::Empty));
     }
 
     /// eval-2 AC3 (e): thoughts are part of the output, so they price once.

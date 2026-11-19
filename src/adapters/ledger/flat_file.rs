@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::domain::errors::StorageError;
 use crate::domain::models::usage::UsageLedgerEntry;
-use crate::domain::ports::UsageLedgerPort;
+use crate::domain::ports::{LedgerReadMode, UsageLedgerPort};
 
 /// Stateless flat-file ledger — resolves path per entry from `session_id`.
 pub struct FileUsageLedger;
@@ -19,10 +19,18 @@ impl FileUsageLedger {
         Self
     }
 
-    async fn read_path(path: &std::path::Path) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+    async fn read_path(
+        path: &std::path::Path,
+        since_unix_ms: i64,
+        mode: LedgerReadMode,
+    ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
         let contents = match tokio::fs::read_to_string(path).await {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound && mode == LedgerReadMode::Lenient =>
+            {
+                return Ok(Vec::new());
+            }
             Err(e) => return Err(StorageError::IoError(e.to_string())),
         };
         let mut out = Vec::new();
@@ -31,9 +39,36 @@ impl FileUsageLedger {
             if trimmed.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<UsageLedgerEntry>(trimmed) {
-                Ok(entry) => out.push(entry),
-                Err(e) => tracing::warn!("ledger line skipped (path={}): {e}", path.display()),
+            if let LedgerReadMode::Strict { end_unix_ms } = mode {
+                // Derived struct decoders also accept positional arrays.
+                if !trimmed.starts_with('{') {
+                    return Err(StorageError::SerializationError(
+                        "usage ledger row must be a JSON object".into(),
+                    ));
+                }
+
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Timestamp {
+                    timestamp_ms: i64,
+                }
+                // Validate the whole JSON object, rejecting a missing, duplicate
+                // or non-integer timestamp before excluding an out-of-window row.
+                let timestamp = serde_json::from_str::<Timestamp>(trimmed)
+                    .map_err(|e| StorageError::SerializationError(e.to_string()))?
+                    .timestamp_ms;
+                if (since_unix_ms..end_unix_ms).contains(&timestamp) {
+                    out.push(
+                        serde_json::from_str(trimmed)
+                            .map_err(|e| StorageError::SerializationError(e.to_string()))?,
+                    );
+                }
+            } else {
+                match serde_json::from_str::<UsageLedgerEntry>(trimmed) {
+                    Ok(entry) if entry.timestamp_ms >= since_unix_ms => out.push(entry),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("ledger line skipped (path={}): {e}", path.display()),
+                }
             }
         }
         Ok(out)
@@ -42,6 +77,7 @@ impl FileUsageLedger {
     async fn read_since_in_dir(
         dir: Result<std::path::PathBuf, StorageError>,
         since_unix_ms: i64,
+        mode: LedgerReadMode,
     ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
         let dir = dir?;
         let mut rd = match tokio::fs::read_dir(&dir).await {
@@ -59,12 +95,19 @@ impl FileUsageLedger {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            out.extend(
-                Self::read_path(&path)
-                    .await?
-                    .into_iter()
-                    .filter(|entry| entry.timestamp_ms >= since_unix_ms),
-            );
+            if matches!(mode, LedgerReadMode::Strict { .. })
+                && !entry
+                    .file_type()
+                    .await
+                    .map_err(|e| StorageError::IoError(e.to_string()))?
+                    .is_file()
+            {
+                return Err(StorageError::IoError(format!(
+                    "usage ledger entry is not a regular file: {}",
+                    path.display()
+                )));
+            }
+            out.extend(Self::read_path(&path, since_unix_ms, mode).await?);
         }
         Ok(out)
     }
@@ -114,14 +157,25 @@ impl UsageLedgerPort for FileUsageLedger {
             .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
 
-        Self::read_path(&path).await
+        Self::read_path(&path, i64::MIN, LedgerReadMode::Lenient).await
     }
 
-    async fn read_since(&self, since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+    async fn read_since(
+        &self,
+        since_unix_ms: i64,
+        mode: LedgerReadMode,
+    ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        if let LedgerReadMode::Strict { end_unix_ms } = mode
+            && end_unix_ms <= since_unix_ms
+        {
+            return Err(StorageError::Other(
+                "usage ledger: strict window end must be after its start".into(),
+            ));
+        }
         let dir = crate::infrastructure::paths::usage_dir()
             .await
             .map_err(|e| StorageError::IoError(e.to_string()));
-        Self::read_since_in_dir(dir, since_unix_ms).await
+        Self::read_since_in_dir(dir, since_unix_ms, mode).await
     }
 }
 
@@ -159,6 +213,7 @@ mod tests {
                 cache_read_tokens: None,
                 reasoning_tokens: None,
             },
+            provenance: None,
         };
 
         let entry2 = UsageLedgerEntry {
@@ -178,6 +233,7 @@ mod tests {
                 cache_read_tokens: Some(10_000),
                 reasoning_tokens: None,
             },
+            provenance: None,
         };
 
         ledger.append(entry1.clone()).await.expect("append 1");
@@ -244,6 +300,7 @@ mod tests {
                 cache_read_tokens: None,
                 reasoning_tokens: None,
             },
+            provenance: None,
         }
     }
 
@@ -251,17 +308,21 @@ mod tests {
     async fn read_since_handles_resolution_missing_directory_and_corrupt_lines() {
         let unresolved = Err(StorageError::IoError("unresolvable usage directory".into()));
         assert!(
-            FileUsageLedger::read_since_in_dir(unresolved, 0)
+            FileUsageLedger::read_since_in_dir(unresolved, 0, LedgerReadMode::Lenient)
                 .await
                 .is_err()
         );
 
         let temp = tempfile::tempdir().unwrap();
         assert!(
-            FileUsageLedger::read_since_in_dir(Ok(temp.path().join("missing")), 0)
-                .await
-                .unwrap()
-                .is_empty()
+            FileUsageLedger::read_since_in_dir(
+                Ok(temp.path().join("missing")),
+                0,
+                LedgerReadMode::Lenient,
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
 
         let old = make_entry("s", 10, "model");
@@ -274,11 +335,151 @@ mod tests {
         tokio::fs::write(temp.path().join("s.jsonl"), contents)
             .await
             .unwrap();
-        let rows = FileUsageLedger::read_since_in_dir(Ok(temp.path().to_path_buf()), 20)
-            .await
-            .unwrap();
+        let rows = FileUsageLedger::read_since_in_dir(
+            Ok(temp.path().to_path_buf()),
+            20,
+            LedgerReadMode::Lenient,
+        )
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].timestamp_ms, 20);
+    }
+
+    #[tokio::test]
+    async fn strict_read_only_excludes_corrupt_rows_with_proven_outside_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let current = serde_json::to_string(&make_entry("s", 20, "model")).unwrap();
+        let positional = r#"[20,"s","conv-1","anthropic","model","flagship","edit","none",{"tokensIn":100,"tokensOut":50,"parentCtx":0},"observed"]"#;
+        for (additional, accepted) in [
+            (r#"{"timestampMs":19}"#, true),
+            (r#"{"timestampMs":20}"#, false),
+            (r#"{"timestampMs":29}"#, false),
+            (r#"{"timestampMs":30}"#, true),
+            (r#"{"timestampMs":19,"timestampMs":21}"#, false),
+            (r#"{"timestampMs":19,"timestampMs":19}"#, false),
+            (r#"{"timestampMs":30,"\u0074imestampMs":31}"#, false),
+            (r#"{"timestampMs":"19"}"#, false),
+            (r#"{"timestampMs":30.0}"#, false),
+            (r#"{"usage":{"timestampMs":19}}"#, false),
+            (r#"{"timestampMs":30,"usage":}"#, false),
+            (r#"{"timestampMs":30} {}"#, false),
+            ("[19]", false),
+            ("[30]", false),
+            (positional, false),
+            ("not json", false),
+        ] {
+            tokio::fs::write(&path, format!("{current}\n{additional}\n"))
+                .await
+                .unwrap();
+            let result = FileUsageLedger::read_since_in_dir(
+                Ok(dir.path().to_path_buf()),
+                20,
+                LedgerReadMode::Strict { end_unix_ms: 30 },
+            )
+            .await;
+            if accepted {
+                let rows = result.unwrap_or_else(|err| panic!("{additional}: {err}"));
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].timestamp_ms, 20);
+            } else {
+                assert!(
+                    matches!(result, Err(StorageError::SerializationError(_))),
+                    "{additional}: {result:?}",
+                );
+            }
+        }
+
+        // The full positional row was readable before strict object validation.
+        tokio::fs::write(&path, positional).await.unwrap();
+        let rows = FileUsageLedger::read_since_in_dir(
+            Ok(dir.path().to_path_buf()),
+            20,
+            LedgerReadMode::Lenient,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].timestamp_ms, 20);
+    }
+
+    #[tokio::test]
+    async fn strict_read_uses_half_open_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut contents = String::new();
+        for timestamp in [19, 20, 29, 30, 31] {
+            contents
+                .push_str(&serde_json::to_string(&make_entry("s", timestamp, "model")).unwrap());
+            contents.push('\n');
+        }
+        tokio::fs::write(dir.path().join("s.jsonl"), contents)
+            .await
+            .unwrap();
+        let rows = FileUsageLedger::read_since_in_dir(
+            Ok(dir.path().to_path_buf()),
+            20,
+            LedgerReadMode::Strict { end_unix_ms: 30 },
+        )
+        .await
+        .unwrap();
+        let timestamps: Vec<_> = rows.into_iter().map(|row| row.timestamp_ms).collect();
+        assert_eq!(timestamps, [20, 29]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(rustain_data_dir)]
+    async fn strict_read_rejects_invalid_window_before_resolving_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("uncreated");
+        let _env = data_dir_guard(&root);
+        let ledger = FileUsageLedger::new();
+
+        for end_unix_ms in [20, 19] {
+            assert!(matches!(
+                ledger
+                    .read_since(20, LedgerReadMode::Strict { end_unix_ms })
+                    .await,
+                Err(StorageError::Other(_)),
+            ));
+        }
+        assert!(
+            !root.exists(),
+            "invalid windows must not create directories"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(rustain_data_dir)]
+    async fn read_since_lenient_accepts_legacy_and_observed_rows() {
+        use crate::domain::models::usage::UsageProvenance;
+
+        let dir = tempfile::tempdir().unwrap();
+        let _env = data_dir_guard(dir.path());
+        let ledger = FileUsageLedger::new();
+        let path = crate::infrastructure::paths::usage_ledger_path("s")
+            .await
+            .unwrap();
+        let legacy = r#"{"timestampMs":20,"sessionId":"s","conversationId":"conv-1","providerId":"anthropic","model":"legacy","tier":"flagship","stepKind":"edit","escalationReason":"none","usage":{"tokensIn":100,"tokensOut":50,"parentCtx":0}}"#;
+        tokio::fs::write(path, format!("{legacy}\n")).await.unwrap();
+
+        let mut observed = make_entry("s", 21, "current");
+        observed.provenance = Some(UsageProvenance::Observed);
+        observed.usage.cache_read_tokens = Some(2);
+        ledger.append(observed).await.unwrap();
+
+        let rows = ledger
+            .read_since(20, LedgerReadMode::Lenient)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].model, "legacy");
+        assert_eq!(rows[0].usage.tokens_in, 100);
+        assert_eq!(rows[0].usage.cache_read_tokens, None);
+        assert_eq!(rows[0].provenance, None);
+        assert_eq!(rows[1].model, "current");
+        assert_eq!(rows[1].usage.cache_read_tokens, Some(2));
+        assert_eq!(rows[1].provenance, Some(UsageProvenance::Observed));
     }
 
     #[tokio::test]
@@ -344,14 +545,20 @@ mod tests {
             .expect("append b1");
 
         // since 2000 → 2 entries (sess-a@3000 + sess-b@2000)
-        let mut got = ledger.read_since(2000).await.expect("read_since 2000");
+        let mut got = ledger
+            .read_since(2000, LedgerReadMode::Lenient)
+            .await
+            .expect("read_since 2000");
         got.sort_by_key(|e| e.timestamp_ms);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].timestamp_ms, 2000);
         assert_eq!(got[1].timestamp_ms, 3000);
 
         // since 5000 → empty
-        let none = ledger.read_since(5000).await.expect("read_since 5000");
+        let none = ledger
+            .read_since(5000, LedgerReadMode::Lenient)
+            .await
+            .expect("read_since 5000");
         assert!(none.is_empty());
 
         match original {

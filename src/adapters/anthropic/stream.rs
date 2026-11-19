@@ -4,7 +4,7 @@
 use crate::domain::models::{StopReason, StreamChunk, UsageInfo};
 
 use super::sse::SseFrame;
-use super::types::{AnthropicEvent, ContentBlockInfo, DeltaType};
+use super::types::{AnthropicEvent, ContentBlockInfo, DeltaType, InputUsage};
 
 /// Internal state for accumulating tool call data across multiple SSE events.
 struct ToolAccumulator {
@@ -22,13 +22,10 @@ pub struct StreamTransformer {
     /// Active content blocks indexed by their block index.
     /// Tracks tool accumulators for tool_use blocks.
     active_tools: std::collections::HashMap<usize, ToolAccumulator>,
-    /// Cumulative input tokens from message_start.
-    input_tokens: u32,
-    /// Cumulative output tokens from message_delta.
-    output_tokens: u32,
-    /// Cache tokens from message_start.
-    cache_creation_input_tokens: Option<u32>,
-    cache_read_input_tokens: Option<u32>,
+    /// Observed input and cache counts from message_start.
+    input_usage: Option<InputUsage>,
+    /// Observed cumulative output count from message_delta, not message_start.
+    output_tokens: Option<u32>,
     /// Stop reason extracted from message_delta (used at message_stop).
     pending_stop_reason: Option<StopReason>,
     claude_code: bool,
@@ -44,10 +41,8 @@ impl StreamTransformer {
     pub fn new() -> Self {
         Self {
             active_tools: std::collections::HashMap::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
+            input_usage: None,
+            output_tokens: None,
             pending_stop_reason: None,
             claude_code: false,
         }
@@ -57,6 +52,21 @@ impl StreamTransformer {
         Self {
             claude_code,
             ..Self::new()
+        }
+    }
+
+    fn usage_snapshot(&self, output_tokens: Option<u32>) -> StreamChunk {
+        let input = self.input_usage.as_ref();
+        StreamChunk::Usage {
+            usage: UsageInfo {
+                input_tokens: input.map_or(0, |u| u.input_tokens),
+                output_tokens: output_tokens.unwrap_or(0),
+                cache_creation_input_tokens: input.and_then(|u| u.cache_creation_input_tokens),
+                cache_read_input_tokens: input.and_then(|u| u.cache_read_input_tokens),
+                reasoning_tokens: None,
+                counters_observed: input.is_some() && output_tokens.is_some(),
+            },
+            session_id: None,
         }
     }
 
@@ -74,19 +84,10 @@ impl StreamTransformer {
         match event {
             AnthropicEvent::MessageStart { message } => {
                 if let Some(usage) = message.usage {
-                    self.input_tokens = usage.input_tokens;
-                    self.cache_creation_input_tokens = usage.cache_creation_input_tokens;
-                    self.cache_read_input_tokens = usage.cache_read_input_tokens;
-                    return vec![StreamChunk::Usage {
-                        usage: UsageInfo {
-                            input_tokens: self.input_tokens,
-                            output_tokens: 0,
-                            cache_creation_input_tokens: self.cache_creation_input_tokens,
-                            cache_read_input_tokens: self.cache_read_input_tokens,
-                            reasoning_tokens: None,
-                        },
-                        session_id: None,
-                    }];
+                    self.input_usage = Some(usage);
+                    // Keep the initial display update, but the output count
+                    // at message_start is provisional even if it is present.
+                    return vec![self.usage_snapshot(None)];
                 }
                 vec![]
             }
@@ -155,7 +156,7 @@ impl StreamTransformer {
 
             AnthropicEvent::MessageDelta { delta, usage } => {
                 if let Some(output_usage) = usage {
-                    self.output_tokens = output_usage.output_tokens;
+                    self.output_tokens = Some(output_usage.output_tokens);
                 }
                 if let Some(reason) = delta.stop_reason.as_deref() {
                     self.pending_stop_reason = Some(match reason {
@@ -168,17 +169,7 @@ impl StreamTransformer {
                         }
                     });
                 }
-                // Emit updated usage
-                vec![StreamChunk::Usage {
-                    usage: UsageInfo {
-                        input_tokens: self.input_tokens,
-                        output_tokens: self.output_tokens,
-                        cache_creation_input_tokens: self.cache_creation_input_tokens,
-                        cache_read_input_tokens: self.cache_read_input_tokens,
-                        reasoning_tokens: None,
-                    },
-                    session_id: None,
-                }]
+                vec![self.usage_snapshot(self.output_tokens)]
             }
 
             AnthropicEvent::MessageStop {} => {
@@ -285,7 +276,10 @@ mod tests {
         ));
         assert_eq!(chunks.len(), 1);
         match &chunks[0] {
-            StreamChunk::Usage { usage, .. } => assert_eq!(usage.input_tokens, 100),
+            StreamChunk::Usage { usage, .. } => {
+                assert_eq!(usage.input_tokens, 100);
+                assert!(!usage.counters_observed);
+            }
             _ => panic!("Expected Usage chunk"),
         }
     }
@@ -301,7 +295,11 @@ mod tests {
         ));
         assert_eq!(c1.len(), 1); // Usage update
         match &c1[0] {
-            StreamChunk::Usage { usage, .. } => assert_eq!(usage.output_tokens, 42),
+            StreamChunk::Usage { usage, .. } => {
+                assert_eq!(usage.input_tokens, 0);
+                assert_eq!(usage.output_tokens, 42);
+                assert!(!usage.counters_observed);
+            }
             _ => panic!("Expected Usage chunk"),
         }
 
@@ -313,6 +311,43 @@ mod tests {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             _ => panic!("Expected TurnComplete"),
+        }
+    }
+
+    #[test]
+    fn usage_observation_requires_both_a_start_input_and_a_delta_output() {
+        // Native and profiled Messages clients share this transformer.
+        for claude_code in [false, true] {
+            let mut t = StreamTransformer::with_profile(claude_code);
+            for (event, data, observed) in [
+                (
+                    "message_start",
+                    r#"{"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":1}}}"#,
+                    false,
+                ),
+                (
+                    "message_delta",
+                    r#"{"type":"message_delta","delta":{}}"#,
+                    false,
+                ),
+                (
+                    "message_delta",
+                    r#"{"type":"message_delta","delta":{},"usage":{"output_tokens":0}}"#,
+                    true,
+                ),
+                (
+                    "message_delta",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+                    true,
+                ),
+            ] {
+                let chunks = t.transform(&frame(event, data));
+                let [StreamChunk::Usage { usage, .. }] = chunks.as_slice() else {
+                    panic!("expected one usage chunk, got {chunks:?}");
+                };
+                assert_eq!((usage.input_tokens, usage.output_tokens), (0, 0));
+                assert_eq!(usage.counters_observed, observed, "{data}");
+            }
         }
     }
 
@@ -398,6 +433,7 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, Some(1408));
         assert_eq!(usage.cache_creation_input_tokens, Some(2000));
         assert_eq!(usage.reasoning_tokens, None);
+        assert!(usage.counters_observed);
         let p = pricing("sonnet", 3.00, 15.00, 0.30, Some(3.75));
         assert_usd(cost_of(usage, "sonnet", &p), 0.0084954, "anthropic");
     }

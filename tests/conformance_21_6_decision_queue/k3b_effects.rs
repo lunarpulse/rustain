@@ -248,6 +248,7 @@ fn k3b_recovery_new_session_and_continue_each_decide_once() {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
                 reasoning_tokens: None,
+                counters_observed: false,
             });
             conversation.last_response_at = Some(5);
             start_new_session(&mut conversation, &mut state);
