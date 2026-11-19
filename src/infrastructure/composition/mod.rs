@@ -743,6 +743,11 @@ pub fn build_channels(
         "terminal" => Ok(Arc::new(NoOpChannel)),
         #[cfg(feature = "telegram")]
         "telegram" => {
+            if ctx.channel_turn_tx.is_none()
+                && crate::domain::services::adapter_catalog::AdapterCatalog::is_daemon_only(PortDimension::Channels, name)
+            {
+                return Ok(Arc::new(NoOpChannel));
+            }
             use crate::adapters::channel::telegram::TelegramChannelAdapter;
             let conf = config.ok_or_else(|| AdapterCompositionError::MissingComposeContext {
                 port: PortDimension::Channels,
@@ -822,24 +827,14 @@ pub fn build_scheduler(
 ) -> Result<Arc<dyn SchedulerPort>, AdapterCompositionError> {
     match name {
         "none" => Ok(Arc::new(NoOpScheduler)),
-        // ⚠ Story 19.12 A19 — this used to be a `#[cfg(feature = "cron")]` /
-        // `#[cfg(not(...))]` pair whose two arms were BYTE-IDENTICAL
-        // `NoOpScheduler`. A `#[cfg]` split whose branches are the same code is
-        // either dead or a lie; here it was a lie, and it hid the real state:
-        // a profile-composed `cron` scheduler is UNWIRED in every build.
-        //
-        // In a DEFAULT build the profile never reaches here — `profile_loader`
-        // refuses to load it with a remediation command and exit 2
-        // (`profile_loader.rs:249-258`), and the wizard warns at selection time.
-        // With `--features cron` compiled the loader passes and composition
-        // substitutes nothing, silently. The real `CronSchedulerAdapter` (one
-        // production caller: `daemon/mod.rs:506`) runs only under the daemon.
-        //
-        // ⛔ Making the loader refuse `cron` regardless of the compiled feature
-        // was considered and NOT taken: it breaks `--features cron` builds and
-        // asserts a product judgement that belongs to whoever owns the scheduler
-        // port. Recorded as DF-19-12-PROFILE-CRON-UNWIRED.
-        "cron" => Ok(Arc::new(NoOpScheduler)),
+        // The daemon owns the real cron loop; other surfaces use the no-op and a notice.
+        name if crate::domain::services::adapter_catalog::AdapterCatalog::is_daemon_only(
+            PortDimension::Scheduler,
+            name,
+        ) =>
+        {
+            Ok(Arc::new(NoOpScheduler))
+        }
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Scheduler,
             name: other.to_string(),
@@ -2596,6 +2591,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "telegram"))]
     fn test_build_channels_telegram_missing_context() {
         let ctx = test_compose_ctx();
         let result = build_channels("telegram", None, &ctx);
@@ -2635,7 +2631,11 @@ allowed_chat_ids = [123456789]
 "#
         .parse()
         .unwrap();
-        assert!(build_channels("telegram", Some(&config), &ctx).is_ok());
+        let channel =
+            build_channels("telegram", Some(&config), &ctx).expect("daemon channel composes");
+        let health = channel.health_snapshot();
+        assert_eq!(health.level, crate::domain::models::HealthLevel::Degraded);
+        assert_eq!(health.metric, "connecting");
     }
 
     #[test]
@@ -2696,13 +2696,14 @@ allowed_chat_ids = []
     }
 
     #[test]
-    #[cfg(not(feature = "cron"))]
-    fn test_build_scheduler_cron_feature_off_fallback() {
+    fn test_build_scheduler_cron_falls_back_to_noop() {
         let ctx = test_compose_ctx();
-        let result = build_scheduler("cron", None, &ctx);
-        assert!(
-            result.is_ok(),
-            "cron without feature should silently fall back to NoOpScheduler"
+        let scheduler = build_scheduler("cron", None, &ctx).expect("local scheduler composes");
+        let health = scheduler.health_snapshot();
+        let noop = NoOpScheduler.health_snapshot();
+        assert_eq!(
+            (health.level, health.metric, health.suggested_action),
+            (noop.level, noop.metric, noop.suggested_action)
         );
     }
 
@@ -2778,5 +2779,89 @@ allowed_chat_ids = []
         // the daemon's non-composite toolset keeps its builtin tools.
         let got = daemon_mcp_tools("builtin-only", vec![mcp_spec("a")], false);
         assert!(got.include_builtin);
+    }
+    #[cfg(all(feature = "telegram", feature = "cron"))]
+    #[tokio::test]
+    async fn c2b_daemon_only_profile_composes_as_noops_outside_daemon() {
+        use crate::domain::models::AdapterRef;
+        let workspace = tempfile::Builder::new()
+            .prefix("c-2b-compose-")
+            .tempdir()
+            .unwrap();
+        let mut ctx = test_compose_ctx();
+        ctx.workspace_path = workspace.path().to_path_buf();
+        let mut selection = ProfileSelection::default();
+        for (port, name) in [
+            (PortDimension::Persona, "minimal"),
+            (PortDimension::Memory, "noop"),
+            (PortDimension::Session, "basic"),
+            (PortDimension::Tools, "builtin-only"),
+            (PortDimension::Channels, "telegram"),
+            (PortDimension::Scheduler, "cron"),
+            (PortDimension::Context, "default"),
+        ] {
+            selection.dimensions.insert(
+                port,
+                AdapterRef {
+                    adapter: name.into(),
+                    _config: None,
+                },
+            );
+        }
+        selection
+            .dimensions
+            .get_mut(&PortDimension::Channels)
+            .unwrap()
+            ._config = Some("allowed_chat_ids = [123]".parse().unwrap());
+        let core =
+            AgentCore::compose("c2b", &selection, &ctx).expect("daemon-only adapters become noops");
+        let channel = core.channels.load().health_snapshot();
+        let expected_channel = NoOpChannel.health_snapshot();
+        assert_eq!(
+            (channel.level, channel.metric, channel.suggested_action),
+            (
+                expected_channel.level,
+                expected_channel.metric,
+                expected_channel.suggested_action
+            )
+        );
+        let scheduler = core.scheduler.load().health_snapshot();
+        let expected_scheduler = NoOpScheduler.health_snapshot();
+        assert_eq!(
+            (
+                scheduler.level,
+                scheduler.metric,
+                scheduler.suggested_action
+            ),
+            (
+                expected_scheduler.level,
+                expected_scheduler.metric,
+                expected_scheduler.suggested_action
+            )
+        );
+        use crate::domain::services::adapter_catalog::AdapterCatalog;
+        assert_eq!(
+            AdapterCatalog::daemon_only_notice("c2b", &selection).as_deref(),
+            Some(
+                "Profile 'c2b' uses daemon-only adapters (channels = telegram, scheduler = cron); they run under 'rustain daemon start'. This session uses terminal and none."
+            )
+        );
+        selection
+            .dimensions
+            .get_mut(&PortDimension::Channels)
+            .unwrap()
+            .adapter = "terminal".into();
+        assert_eq!(
+            AdapterCatalog::daemon_only_notice("c2b", &selection).as_deref(),
+            Some(
+                "Profile 'c2b' uses daemon-only adapters (scheduler = cron); they run under 'rustain daemon start'. This session uses terminal and none."
+            )
+        );
+        selection
+            .dimensions
+            .get_mut(&PortDimension::Scheduler)
+            .unwrap()
+            .adapter = "none".into();
+        assert_eq!(AdapterCatalog::daemon_only_notice("c2b", &selection), None);
     }
 }

@@ -13,16 +13,20 @@ use crate::domain::models::{
     ProviderReplayItem, ResponseSpanBuilder, ToolCallInfo, ToolResultInfo, WriteDiffState,
 };
 
-/// The open provider response of the operator turn. `text` is the channel
-/// reply's prose fold (tool lines included) and nothing else reads it; the
-/// span, calls and replay items are the response's own record. Replay never
-/// enters `text`, the channel response or the observer stream. `committed`
-/// holds the ids of the messages this operator turn has committed so far: a
-/// later result attaches only to their calls, never to an earlier turn's or a
-/// peer row's.
+use crate::domain::services::turn_reply::TurnReplyFold;
+
+pub(super) const CHANNEL_TURN_EMPTY_REPLY: &str = "(The agent finished without a text reply.)";
+pub(super) const CHANNEL_TURN_INCOMPLETE_REPLY: &str =
+    "(The agent stopped before finishing this reply.)";
+
+pub(super) struct PendingChannelReply {
+    pub tx: tokio::sync::oneshot::Sender<String>,
+    pub fold: TurnReplyFold,
+}
+
+/// The current provider response and the ids committed earlier in this turn.
 #[derive(Default)]
 pub(super) struct AssistantTurnBuffer {
-    text: String,
     span: ResponseSpanBuilder,
     calls: Vec<ToolCallInfo>,
     replay: Vec<ProviderReplayItem>,
@@ -31,16 +35,13 @@ pub(super) struct AssistantTurnBuffer {
 
 impl AssistantTurnBuffer {
     fn clear(&mut self) {
-        self.text.clear();
         self.span = ResponseSpanBuilder::default();
         self.calls.clear();
         self.replay.clear();
     }
 
-    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
-        self.text.is_empty()
-            && self.span.is_empty()
+        self.span.is_empty()
             && self.calls.is_empty()
             && self.replay.is_empty()
             && self.committed.is_empty()
@@ -62,6 +63,38 @@ impl AssistantTurnBuffer {
 }
 
 impl AttachServer {
+    /// Drain the events sent before the driver joined, then settle this turn.
+    pub(super) async fn finish_operator_fence(
+        &self,
+        domain_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+        turn: &mut AssistantTurnBuffer,
+    ) {
+        let queued = domain_rx.len();
+        for _ in 0..queued {
+            if let Some(event) = domain_rx.recv().await {
+                self.handle_bus_event(&event, turn).await;
+            }
+        }
+        if !turn.is_empty() {
+            self.fold_operator_chunk(
+                &StreamChunk::TurnComplete {
+                    stop_reason: StopReason::Cancelled,
+                },
+                turn,
+            )
+            .await;
+        }
+        if let Some(reply) = self.pending_channel_response_tx.lock().await.take() {
+            let text = reply.fold.into_string();
+            let result = if text.is_empty() {
+                CHANNEL_TURN_FAILED_REPLY.to_owned()
+            } else {
+                format!("{text}\n\n{CHANNEL_TURN_INCOMPLETE_REPLY}")
+            };
+            let _ = reply.tx.send(result);
+        }
+    }
+
     /// Fold one operator provider chunk into the open turn. Returns `true` for an
     /// operator-private chunk, which is retained here and never fanned out.
     pub(super) async fn fold_operator_chunk(
@@ -69,6 +102,9 @@ impl AttachServer {
         chunk: &StreamChunk,
         turn: &mut AssistantTurnBuffer,
     ) -> bool {
+        if let Some(reply) = self.pending_channel_response_tx.lock().await.as_mut() {
+            reply.fold.push(chunk);
+        }
         if let StreamChunk::ProviderReplay { item } = chunk {
             self.operator_turn_active.store(true, Ordering::Release);
             turn.replay.push(item.clone());
@@ -83,7 +119,6 @@ impl AttachServer {
         match chunk {
             StreamChunk::Text { content, .. } => {
                 self.operator_turn_active.store(true, Ordering::Release);
-                turn.text.push_str(content);
                 turn.span.text(content);
             }
             StreamChunk::Thinking { content, .. } => {
@@ -100,13 +135,9 @@ impl AttachServer {
                     // stays as unanswered audit evidence.
                     self.retain_interrupted_proposals(turn).await;
                     turn.clear();
-                    // The fold is complete: a driver waiting on this turn's
-                    // terminal must not time out because it was cancelled.
-                    self.turn_complete.notify_waiters();
                 } else {
                     self.commit_assistant_turn(turn, stop_reason).await;
                     turn.clear();
-                    self.turn_complete.notify_waiters();
                 }
                 if *stop_reason != StopReason::ToolUse {
                     // The operator turn is over: its results have all arrived.
@@ -125,8 +156,6 @@ impl AttachServer {
                 }
             }
             StreamChunk::ToolUse { id, name, input } => {
-                turn.text
-                    .push_str(&format!("\n[tool use: {name} (id: {id})]\n"));
                 turn.call(id, name, input);
                 self.operator_turn_active.store(true, Ordering::Release);
             }
@@ -138,7 +167,6 @@ impl AttachServer {
                 images,
                 ..
             } => {
-                turn.text.push_str(&format!("[tool result: {content}]\n"));
                 self.attach_tool_result(turn, id, content, *is_error, diff, images)
                     .await;
                 self.operator_turn_active.store(true, Ordering::Release);
@@ -246,10 +274,7 @@ impl AttachServer {
         }
     }
 
-    /// Append the open response as one assistant message (origin-tagged) and
-    /// persist it (AC4). Replay items become operator-private content blocks,
-    /// so the next turn's `message_builder` replays them, also after a daemon
-    /// restart. The channel response stays the first non-empty prose fold.
+    /// Commit one provider response without merging it with other responses.
     async fn commit_assistant_turn(
         &self,
         turn: &mut AssistantTurnBuffer,
@@ -292,11 +317,15 @@ impl AttachServer {
                 tracing::warn!(error = %e, "daemon: persisting conversation after turn failed");
             }
         }
-        if turn.text.is_empty() {
-            return;
-        }
-        if let Some(tx) = self.pending_channel_response_tx.lock().await.take() {
-            let _ = tx.send(turn.text.clone());
+        if matches!(stop_reason, StopReason::EndTurn | StopReason::MaxTokens)
+            && let Some(reply) = self.pending_channel_response_tx.lock().await.take()
+        {
+            let text = reply.fold.into_string();
+            let _ = reply.tx.send(if text.is_empty() {
+                CHANNEL_TURN_EMPTY_REPLY.to_owned()
+            } else {
+                text
+            });
         }
     }
 }
@@ -383,15 +412,16 @@ mod tests {
             .collect()
     }
 
-    /// Story 20.1d4a T2: one message per response, calls by provider id, the
-    /// results saved when they arrive, an empty-text response kept, and the
-    /// channel reply equal to the first response's prose fold.
+    /// Each provider response remains separate while the reply spans the turn.
     #[tokio::test]
     async fn each_response_commits_its_own_message_and_results_are_saved_on_arrival() {
         let tmp = tempfile::tempdir().unwrap();
         let (server, storage) = server(tmp.path());
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        *server.pending_channel_response_tx.lock().await = Some(reply_tx);
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        *server.pending_channel_response_tx.lock().await = Some(PendingChannelReply {
+            tx: reply_tx,
+            fold: TurnReplyFold::default(),
+        });
         let image = ImageAttachment {
             media_type: "image/png".into(),
             data: "UE5H".into(),
@@ -415,10 +445,10 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(
-            reply_rx.await.unwrap(),
-            "V\n[tool use: img (id: A)]\n\n[tool use: echo (id: B)]\n"
-        );
+        assert!(matches!(
+            reply_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
         let saved = storage.load_conversation("buffer").await.unwrap().unwrap();
         assert_eq!(saved.messages.len(), 1);
         assert_eq!(
@@ -439,6 +469,10 @@ mod tests {
             ],
         )
         .await;
+        assert_eq!(
+            reply_rx.await.unwrap(),
+            "V\n[tool use: img (id: A)]\n\n[tool use: echo (id: B)]\n\n[tool use: echo (id: C)]\ndone"
+        );
         assert!(turn.is_empty());
         let conversation = server.conversation.lock().await;
         let rows = &conversation.messages;
@@ -619,6 +653,11 @@ mod tests {
     async fn the_proposal_call_joins_its_own_response_and_stays_private() {
         let tmp = tempfile::tempdir().unwrap();
         let (server, _storage) = server(tmp.path());
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        *server.pending_channel_response_tx.lock().await = Some(PendingChannelReply {
+            tx: reply_tx,
+            fold: TurnReplyFold::default(),
+        });
         let mut turn = AssistantTurnBuffer::default();
         let proposal = tool_use("P", team_proposal::TEAM_PROPOSAL_TOOL_NAME);
         assert!(
@@ -664,6 +703,17 @@ mod tests {
             !serde_json::to_string(&public)
                 .unwrap()
                 .contains("proposal shown")
+        );
+        drop(conversation);
+        fold(
+            &server,
+            &mut turn,
+            vec![text("visible"), complete(StopReason::EndTurn)],
+        )
+        .await;
+        assert_eq!(
+            reply_rx.await.unwrap(),
+            "\n[tool use: echo (id: A)]\nvisible"
         );
     }
 }

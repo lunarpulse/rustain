@@ -17,6 +17,9 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         chunk: StreamChunk,
     },
+    /// The runtime observed EOF without a terminal chunk or provider error.
+    /// Internal to a cron job's event channel; never decoded from provider data.
+    CronStreamDisconnected,
     /// Internal local-TUI ingress. Never serialized or carried over daemon/ACP.
     /// The originating submission captures this identity before spawning.
     LocalProviderChunk {

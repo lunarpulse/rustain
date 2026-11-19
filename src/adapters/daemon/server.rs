@@ -55,7 +55,8 @@ use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntime
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 mod assistant_turn;
-use assistant_turn::AssistantTurnBuffer;
+use assistant_turn::{AssistantTurnBuffer, PendingChannelReply};
+mod cron_completion;
 mod frame_decode;
 mod inbound_turn;
 use inbound_turn::{InboundTurnContext, spawn_turn_collector};
@@ -1307,9 +1308,10 @@ pub struct AttachServer {
     last_writer_conn_id: AtomicU64,
     approval_gate: Arc<ApprovalGate>,
     turn_serial: Arc<Mutex<()>>,
-    turn_complete: Arc<Notify>,
-    /// A private fence for peer display persistence, separate from the public
-    /// assistant-turn completion signal.
+    fence_tx: Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>,
+    #[cfg(test)]
+    fence_enqueued: Semaphore,
+    /// A private fence for peer display persistence.
     peer_turn_closed: Arc<Notify>,
     /// Story 12.3 — current turn origin read by `commit_assistant_turn`.
     /// tokio::sync — locks=4 held.
@@ -1317,7 +1319,7 @@ pub struct AttachServer {
     peer_assistant_buffers: Mutex<std::collections::HashMap<Arc<AgentId>, PeerAssistantBuffer>>,
     /// Story 12.3 — response route for the current channel-originated turn.
     /// tokio::sync — locks=4 held.
-    pending_channel_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    pending_channel_response_tx: Arc<Mutex<Option<PendingChannelReply>>>,
     /// Story 12.2d AC2/AC6 — retained consolidation proposals keyed by the marker's
     /// `queued_at_unix` (NOT `daily_log_ref`). Reused on re-attach (G7), evicted on
     /// new marker or resolve (G8). tokio::sync per locks=4 discipline (AC7).
@@ -1921,7 +1923,9 @@ impl AttachServer {
             last_writer_conn_id: AtomicU64::new(0),
             approval_gate: Arc::new(ApprovalGate::default()),
             turn_serial: Arc::new(Mutex::new(())),
-            turn_complete: Arc::new(Notify::new()),
+            fence_tx: Mutex::new(None),
+            #[cfg(test)]
+            fence_enqueued: Semaphore::new(0),
             peer_turn_closed: Arc::new(Notify::new()),
             retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
@@ -2052,22 +2056,24 @@ impl AttachServer {
                 "failed to settle interrupted peer drafts; serving them unsettled"
             );
         }
-        // The single forwarder task: fold → fan out (drains the one mpsc
-        // `domain_rx`; connections do NOT each subscribe). Channel turns enter
-        // this same forwarder so their response callback is resolved by the same
-        // assistant commit path as socket turns.
-        let fwd = self.clone();
-        let fwd_shutdown = shutdown.clone();
-        let forwarder = tokio::spawn(async move {
+        // Fold → fan out from the one bus receiver. Channel turns use the same
+        // forwarder so their reply is resolved by the assistant commit path.
+        let fwd = &self;
+        let (fence_tx, mut fence_rx) = mpsc::unbounded_channel();
+        *self.fence_tx.lock().await = Some(fence_tx);
+        let forwarder = async move {
             let mut assistant_buf = AssistantTurnBuffer::default();
             let mut channel_rx = channel_rx;
             let mut cron_completion_rx = cron_completion_rx;
             loop {
                 tokio::select! {
-                    _ = fwd_shutdown.cancelled() => break,
                     maybe = domain_rx.recv() => {
                         let Some(event) = maybe else { break };
                         fwd.handle_bus_event(&event, &mut assistant_buf).await;
+                    }
+                    Some(ack) = fence_rx.recv() => {
+                        fwd.finish_operator_fence(&mut domain_rx, &mut assistant_buf).await;
+                        let _ = ack.send(());
                     }
                     maybe = async {
                         match &mut channel_rx {
@@ -2096,19 +2102,28 @@ impl AttachServer {
                     }
                 }
             }
-        });
+        };
 
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                accepted = listener.accept() => match accepted {
+        let accept = async {
+            loop {
+                match listener.accept().await {
                     Ok((stream, _addr)) => {
                         let srv = self.clone();
-                        tokio::spawn(async move { srv.handle_connection(stream).await; });
+                        tokio::spawn(async move {
+                            srv.handle_connection(stream).await;
+                        });
                     }
                     Err(e) => tracing::warn!(error = %e, "daemon attach accept failed"),
-                },
+                }
             }
+        };
+        // Keep the forwarder in this task. Cancellation (even during a save)
+        // drops its conversation guard and fence receiver before cleanup; an
+        // abort of this task does the same before its join handle resolves.
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {}
+            _ = async { tokio::join!(accept, forwarder); } => {}
         }
 
         let tasks = {
@@ -2122,7 +2137,6 @@ impl AttachServer {
         }
         self.team_proposals.shutdown().await;
         self.approval_gate.shutdown(&self.registry).await;
-        forwarder.abort();
     }
     async fn surface_queued_interactions(
         &self,
@@ -2254,38 +2268,6 @@ impl AttachServer {
             self.fanout(DaemonFrame::Event(raw)).await;
         }
     }
-
-    #[cfg(feature = "cron")]
-    async fn commit_cron_completion(&self, completion: CronCompletion) {
-        let text = format!("[cron: {}] {}", completion.job_name, completion.result_text);
-        let mut conv = self.conversation.lock().await;
-        conv.messages.push(ChatMessage {
-            id: generate_message_id(),
-            role: MessageRole::Assistant,
-            content: text,
-            content_blocks: vec![],
-            tool_calls: vec![],
-            created_at: crate::domain::models::session_meta::now_unix(),
-            token_count: None,
-            stop_reason: Some(StopReason::EndTurn),
-            synthetic: false,
-            images: vec![],
-            origin: ChannelKind::Cron,
-            authorship: crate::domain::models::Authorship::HumanWritten,
-            send_authorization: crate::domain::models::SendAuthorization::Unknown,
-            retracted_at_ms: None,
-            history_source: Default::default(),
-        });
-        let now = crate::domain::models::session_meta::now_unix();
-        conv.updated_at = now;
-        conv.last_response_at = Some(now);
-        if let Err(e) = self.core.storage.save_conversation(&conv).await {
-            tracing::warn!(error = %e, "daemon: persisting cron completion failed");
-        }
-    }
-
-    #[cfg(not(feature = "cron"))]
-    async fn commit_cron_completion(&self, _completion: CronCompletion) {}
 
     async fn fanout(&self, frame: DaemonFrame) {
         let dead = {
@@ -14211,33 +14193,6 @@ mod tests {
         assert_eq!(persisted.messages[0].content, rows[0].content);
     }
 
-    #[tokio::test]
-    async fn peer_turn_completion_does_not_wake_operator_completion_waiters() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (core, _storage) = mock_core(tmp.path(), vec![]);
-        let conversation = Arc::new(Mutex::new(Conversation::default()));
-        let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
-        let server = AttachServer::new(core, conversation, domain_tx);
-        let node = Arc::new(AgentId::new());
-        let operator_complete = server.turn_complete.notified();
-        tokio::pin!(operator_complete);
-        operator_complete.as_mut().enable();
-
-        server
-            .collect_peer_chunk(
-                &node,
-                &StreamChunk::TurnComplete {
-                    stop_reason: StopReason::Cancelled,
-                },
-            )
-            .await;
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), operator_complete)
-                .await
-                .is_err()
-        );
-    }
     /// K02b is intentionally isolated: no Unix/TCP socket or paused live I/O.
     /// The existing coordinator gate is a counting front-door double; the
     /// explicit decision still enters the actual daemon frame dispatcher.

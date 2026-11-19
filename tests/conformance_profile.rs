@@ -107,18 +107,12 @@ fn test_personal_assistant_preview_fallback_applied() {
     let loader = ProfileLoader::new(&catalog, &source);
     let resolved = loader.load("personal-assistant").unwrap();
 
-    if !cfg!(feature = "telegram") {
-        assert_eq!(
-            resolved.selection.dimensions[&PortDimension::Channels].adapter,
-            "terminal",
-            "personal-assistant should fall back to 'terminal' for channels when telegram feature is off"
-        );
-    }
-    if !cfg!(feature = "cron") {
-        assert_eq!(
-            resolved.selection.dimensions[&PortDimension::Scheduler].adapter,
-            "none",
-            "personal-assistant should fall back to 'none' for scheduler when cron feature is off"
-        );
-    }
+    assert_eq!(
+        resolved.selection.dimensions[&PortDimension::Channels].adapter,
+        "terminal"
+    );
+    assert_eq!(
+        resolved.selection.dimensions[&PortDimension::Scheduler].adapter,
+        "none"
+    );
 }

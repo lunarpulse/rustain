@@ -250,9 +250,11 @@ The checked-in templates the generator embeds (`include_str!`) live in
 
 ## Telegram channel setup (Story 12.3)
 
-Telegram is a **daemon-only** channel adapter. The local TUI continues to use the
-`terminal` channel; Telegram messages enter through the headless daemon and appear in
-attached scrollback with the `[telegram]` prefix.
+Telegram is a **daemon-only** channel adapter. Outside the daemon the local session
+uses `terminal` and shows a notice; Telegram messages enter through the daemon and
+appear in attached scrollback with the `[telegram]` prefix. Explicitly selected
+Telegram configuration that cannot be composed makes daemon startup fail before
+the PID file is written.
 
 1. Create a bot with Telegram's **BotFather** and copy the bot token.
 2. Add a channel adapter to the active profile:
@@ -275,7 +277,7 @@ attached scrollback with the `[telegram]` prefix.
    The profile still needs `[channels] adapter = "telegram"` and
    `allowed_chat_ids = [...]`; the environment variable only overrides `bot_token`.
 
-Build/install with the feature enabled:
+Release assets from the next tag carry Telegram; source builds must enable it:
 
 ```sh
 cargo install --path . --features telegram
@@ -285,14 +287,16 @@ Only `allowed_chat_ids` are accepted. Unknown chats are ignored. Non-text Telegr
 messages receive a short "Text messages only for now" reply; media support is a future
 adapter extension.
 
+Replies include the whole turn's text and public tool-use labels, but never tool
+results. An unfinished turn is identified in the reply. Telegram turns are refused
+at the daily budget; see [budget configuration](configuration.md).
+
 ## Cron scheduler setup (Story 12.4)
 
-Cron is a **daemon-only** scheduler adapter behind `--features cron`. The local TUI
-continues to use `[scheduler] adapter = "none"`; the daemon can run scheduled jobs
-and surfaces completed results to attached clients with `[cron]` origin plus an
-inline `[cron: job-name]` label.
-
-Build/install with the feature enabled:
+Cron is a **daemon-only** scheduler. Outside the daemon the local session uses
+`none` and shows a notice. The daemon surfaces completed results to attached clients
+with `[cron]` origin and an inline `[cron: job-name]` label. Release assets from
+the next tag carry cron; source builds must enable it:
 
 ```sh
 cargo install --path . --features cron
@@ -314,6 +318,7 @@ name = "morning-briefing"
 schedule = "0 9 * * *" # 09:00 every day, five-field cron, 0=Sunday
 prompt = "Summarize yesterday's commits and today's calendar"
 forward = true          # optional: forward result to the loaded channel
+timeout_secs = 600      # optional; 1..3600, default 600 seconds
 
 [[jobs]]
 name = "hourly-healthcheck"
@@ -323,7 +328,8 @@ prompt = "Run the project health checks and report failures"
 ```
 
 Missing or malformed `cron.toml` does not crash the daemon; it logs and runs with
-zero scheduled jobs. Invalid job schedules are skipped individually.
+zero scheduled jobs. Invalid job schedules or timeouts are skipped individually.
+Other scheduler composition errors fail daemon startup before the PID file.
 
 Reload after editing `cron.toml`:
 
@@ -331,10 +337,22 @@ Reload after editing `cron.toml`:
 kill -HUP $(cat <workspace>/.rustain/daemon.pid)
 ```
 
-`rustain daemon status` shows configured jobs and their next local run when the
-cron feature is compiled. `forward = true` is best-effort and uses the loaded
-channel adapter's default destination (for example, Telegram's first allowed chat);
-without a channel, results are still persisted and visible on attach.
+`forward = true` is best-effort and uses the loaded channel adapter's default
+destination (for example, Telegram's first allowed chat); without a channel,
+results are still persisted and visible on attach. Completed results include all
+response text and public tool-use labels, not tool results. Timeouts and failures
+produce visible `[cron: ...]` markers with any partial reply. Provider, runtime
+and ledger error details are logged locally rather than included in those
+markers. Daemon shutdown signals cron immediately, stops admission of new jobs,
+keeps its own five-second grace, and saves a shutdown marker without forwarding.
+Cron turns already admitted before the shutdown signal follow the existing
+cancellation and teardown path.
+
+Cron and Telegram refuse new unattended turns when today's configured daily
+budget is reached, or when a configured limit cannot be checked because the usage
+ledger is unreadable. Existing turns finish. Corrupt individual ledger lines are
+logged and skipped; one torn line may therefore omit one call's spend. With no
+daily limit, this check is disabled.
 
 ## Attach & turn runtime (Story 12.2b)
 

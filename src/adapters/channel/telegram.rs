@@ -71,6 +71,18 @@ impl TelegramChannelAdapter {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_api_url_for_test(
+        token: String,
+        allowed_chat_ids: Vec<i64>,
+        turn_tx: mpsc::UnboundedSender<ChannelTurnRequest>,
+        api_url: reqwest::Url,
+    ) -> Result<Self, AdapterCompositionError> {
+        let mut adapter = Self::new(token, allowed_chat_ids, turn_tx)?;
+        adapter.bot = adapter.bot.set_api_url(api_url);
+        Ok(adapter)
+    }
+
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
     }

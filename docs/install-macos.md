@@ -162,7 +162,7 @@ the Xcode Command Line Tools and rustup. Run it in a terminal where `VERSION`
 is set as in step 2:
 
 ```sh
-cargo install --locked --git https://github.com/lunarpulse/rustain --tag "v${VERSION}" rustain --bin rustain --features self-update,relay-server,a2a,p2p
+cargo install --locked --git https://github.com/lunarpulse/rustain --tag "v${VERSION}" rustain --bin rustain --features self-update,relay-server,a2a,p2p,telegram,cron
 ```
 
 `--features` adds to the default features, so this is the release feature set;

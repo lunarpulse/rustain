@@ -106,6 +106,22 @@ jobs:
       - name: Test with skills-validation feature (lib only)
         run: cargo test --lib --features skills-validation
 
+  telegram-cron:
+    name: Telegram + Cron Features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Telegram and cron tests
+        run: |
+          set -o pipefail
+          cargo test --locked --features telegram,cron --lib --test daemon --test profile --no-fail-fast 2>&1 | tee test-output.log
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py test-output.log
+
   a2a:
     name: A2A Feature
     runs-on: ubuntu-latest
@@ -288,8 +304,8 @@ jobs:
       - name: Run macOS daemon lib tests
         if: steps.filter.outputs.daemon-paths == 'true' || github.event_name == 'push'
         run: |
-          cargo test --lib adapters::daemon::pidfile
-          cargo test --lib adapters::daemon::procargs
+          cargo test --features telegram,cron --lib adapters::daemon::pidfile
+          cargo test --features telegram,cron --lib adapters::daemon::procargs
 
       # tests/daemon_crash_recovery.rs is a module of the `daemon` area binary;
       # the filter keeps this job to that module's non-ignored tests.
@@ -426,8 +442,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
-      - name: Build four-feature release capture binary
-        run: cargo build --release --features self-update,relay-server,a2a,p2p
+      - name: Build shipped release set capture binary
+        run: cargo build --release --features self-update,relay-server,a2a,p2p,telegram,cron
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -521,15 +537,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
-      - name: Build four-feature release capture binary
-        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p
+      - name: Build shipped release set capture binary
+        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron
       - name: Size ratchet
         run: .github/scripts/release-size-guard.sh target/release/rustain
       - name: Single TLS stack (rustls + ring)
         shell: bash
         # `shell: bash` runs with `-eo pipefail`, so a failing `cargo tree` fails the step.
         run: |
-          for features in '' self-update,relay-server,a2a,p2p; do
+          for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do
             args=()
             if [ -n "$features" ]; then args=(--features "$features"); fi
             cargo tree --locked -e normal --prefix none --format '{p}' "${args[@]}" \

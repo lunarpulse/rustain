@@ -334,8 +334,7 @@ async fn anthropic_daemon(restart: bool) -> (Vec<String>, String) {
         },
         "first.sock",
     );
-    // The reply leaves at the first response's commit; an observer sees the
-    // whole channel turn end.
+    // The reply and the observer both see the complete channel turn.
     let (mut observer, _) = attach(&daemon.socket, ConnectionTier::TrustedLocal, true).await;
     let reply = daemon.channel_turn("first").await;
     until_end_turn(&mut observer).await;
@@ -357,14 +356,14 @@ async fn anthropic_daemon(restart: bool) -> (Vec<String>, String) {
 
 /// AC3 / K3 (Anthropic): structured `tool_use`/`tool_result` with the
 /// provider's ids after a restart, equal to the no-restart control; the channel
-/// reply is today's first-response prose fold.
+/// reply contains all public responses but no tool results.
 #[tokio::test]
 #[serial]
 async fn k3_anthropic_daemon_restart_reproduces_the_in_turn_history() {
     let (posts, reply) = anthropic_daemon(true).await;
     assert_eq!(
         reply,
-        "V\n[tool use: fixture_image (id: toolu_A)]\n\n[tool use: fixture_echo (id: toolu_B)]\n"
+        "V\n[tool use: fixture_image (id: toolu_A)]\n\n[tool use: fixture_echo (id: toolu_B)]\n\n[tool use: fixture_echo (id: toolu_C)]\ndone"
     );
     let in_turn: Vec<Value> = serde_json::from_str(raw_array(&posts[2], "messages")).unwrap();
     let ids: Vec<_> = in_turn

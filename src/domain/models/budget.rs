@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 /// Daily budget configuration.
 ///
 /// When `Some(limit)`, the runtime tracks cumulative cost across the current
-/// calendar day (local TZ) and surfaces yellow (≥80%) / red (≥100%) warnings.
-/// The advisory NEVER blocks sending a turn — see AC5 in story 7.5.
+/// calendar day (local TZ). The TUI surfaces warnings; unattended cron and
+/// channel turns are refused at the limit.
 ///
 /// **Serialization:** snake_case canonical (matches TOML idiom + user configs).
 /// The prior `rename_all = "camelCase"` + alias dual-form support was dropped

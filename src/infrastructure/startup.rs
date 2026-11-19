@@ -2978,11 +2978,11 @@ pub fn spawn_periodic_catalog_refresh(
     })
 }
 
-/// The startup notice for a profile that only partly loads.
+/// The startup notice explaining the preview profile's fallbacks.
 #[must_use]
 pub fn preview_profile_notice(profile_name: &str) -> String {
     format!(
-        "Profile '{profile_name} (preview)' partially loaded: the telegram and cron adapters are not available yet"
+        "Profile '{profile_name} (preview)': preview mode uses the terminal channel instead of Telegram and does not run cron jobs."
     )
 }
 

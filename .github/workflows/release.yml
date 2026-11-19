@@ -66,13 +66,11 @@ jobs:
         # 24,935,304 B, a delta of 3,102,464 B (2.96 MiB) — inside NFR53's 5 MB
         # per-feature bound, which is what decided it.
         #
-        # Story 19.5 adds `a2a,p2p` so published assets contain the federation
-        # features proved by gates 18 and 19. Measured 2026-08-30 on x86_64-linux:
-        # all four release-only features produce 34,263,656 B (32.68 MiB), within
-        # NFR9's amended 35 MiB / 36,700,160-byte guard below.
+        # The shipped set also includes daemon-only Telegram and cron. Their
+        # measured Linux sizes and the NFR9 fit decision are in RELEASING.md.
         run: |
           set -o pipefail
-          cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p 2>&1 | tee build-output.log
+          cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron 2>&1 | tee build-output.log
 
       # Job logs are not public; the first compiler error becomes an annotation.
       - name: Annotate build failure
@@ -93,19 +91,16 @@ jobs:
         shell: bash
         run: .github/scripts/release-smoke.sh "${ASSET}"
 
-      # NFR9 bound AMENDED 2026-08-31 by Story 9.9 (owner ruling,
-      # measurement-driven): 36,700,160 → 39,845,888. The Streamable HTTP
-      # client transport measured 38,154,880 B on the shipped feature set, of
-      # which the TLS backend alone is 2,740,848 B. See prd.md NFR9 for the
-      # four measured rows and why the ceiling moved instead of the capability.
-      - name: Size guard (≤ 38 MiB)
+      # C-2b's measured six-feature release exceeded the 38 MiB fit threshold;
+      # the owner-approved D-25 rule therefore applies the 40 MiB ceiling.
+      - name: Size guard (≤ 40 MiB)
         shell: bash
         run: |
           SIZE=$(stat -c%s "${ASSET}" 2>/dev/null || stat -f%z "${ASSET}")
           SIZE_MIB=$((SIZE / 1024 / 1024))
           echo "Binary size: ${SIZE_MIB} MiB (${SIZE} bytes)"
-          if [ "$SIZE" -gt "39845888" ]; then
-            echo "ERROR: ${{ matrix.target }} binary exceeds 38 MiB limit (NFR9)"
+          if [ "$SIZE" -gt "41943040" ]; then
+            echo "ERROR: ${{ matrix.target }} binary exceeds 40 MiB limit (NFR9)"
             exit 1
           fi
 

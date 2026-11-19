@@ -460,7 +460,7 @@ async fn k5_markers_reach_only_the_session_store_on_every_daemon_path() {
         "Peer tier: persisted inputs withheld: {calls:?}"
     );
 
-    // The channel reply of an image turn: its first response's prose fold.
+    // The channel reply of an image turn includes public responses only.
     let reply = daemon.channel_turn("via channel").await;
     assert!(
         reply.starts_with("V\n[tool use: fixture_image (id: "),

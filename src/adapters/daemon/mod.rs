@@ -310,6 +310,28 @@ async fn run_daemon_start(
     }
 }
 
+#[cfg(all(unix, feature = "cron"))]
+async fn compose_cron_scheduler(
+    path: PathBuf,
+    core: std::sync::Arc<runtime::DaemonCore>,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<
+        crate::adapters::scheduler::cron::CronCompletion,
+    >,
+    channel: std::sync::Arc<dyn crate::domain::ports::ChannelPort>,
+) -> anyhow::Result<std::sync::Arc<dyn crate::domain::ports::SchedulerPort>> {
+    let storage = core.storage.clone();
+    let adapter = crate::adapters::scheduler::cron::CronSchedulerAdapter::load(
+        path,
+        core,
+        completion_tx,
+        channel,
+        storage,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("composing daemon scheduler: {e}"))?;
+    Ok(std::sync::Arc::new(adapter))
+}
+
 /// The daemon body (the `__run` re-exec target and `start --foreground`): compose
 /// the headless memory sink, bind the socket, write the PID file (the readiness
 /// marker), and run the lifecycle loop until a shutdown signal.
@@ -533,10 +555,7 @@ async fn run_daemon_foreground(
             true,
         );
         crate::infrastructure::composition::build_channels(chan_name, chan_config, &chan_ctx)
-            .unwrap_or_else(|e| {
-                tracing::warn!(adapter = chan_name, error = %e, "daemon: channel adapter composition failed; using terminal noop channel");
-                std::sync::Arc::new(crate::adapters::noop::NoOpChannel)
-            })
+            .map_err(|e| anyhow::anyhow!("composing daemon channel: {e}"))?
     };
 
     #[cfg(feature = "cron")]
@@ -554,22 +573,8 @@ async fn run_daemon_foreground(
             if sched_name == "cron" {
                 let cron_path = crate::adapters::scheduler::cron::cron_toml_path()
                     .unwrap_or_else(|_| std::path::PathBuf::from("cron.toml"));
-                match crate::adapters::scheduler::cron::CronSchedulerAdapter::load(
-                    cron_path,
-                    core.clone(),
-                    cron_completion_tx,
-                    channel.clone(),
-                    core.storage.clone(),
-                )
-                .await
-                {
-                    Ok(adapter) => std::sync::Arc::new(adapter)
-                        as std::sync::Arc<dyn crate::domain::ports::SchedulerPort>,
-                    Err(e) => {
-                        tracing::warn!(adapter = sched_name, error = %e, "daemon: cron scheduler composition failed; using noop scheduler");
-                        std::sync::Arc::new(crate::adapters::noop::NoOpScheduler)
-                    }
-                }
+                compose_cron_scheduler(cron_path, core.clone(), cron_completion_tx, channel.clone())
+                    .await?
             } else {
                 std::sync::Arc::new(crate::adapters::noop::NoOpScheduler)
             }
@@ -1909,4 +1914,53 @@ async fn load_or_new_conversation(
         tracing::warn!(error = %e, "daemon: persisting fresh conversation failed");
     }
     conv
+}
+
+#[cfg(all(test, unix, feature = "cron"))]
+mod c2b_scheduler_tests {
+    use super::*;
+    use crate::adapters::noop::{NoOpChannel, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpStorage};
+    use crate::domain::errors::AdapterCompositionError;
+    use crate::domain::models::PortDimension;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn failed_runtime_factory_refuses_daemon_scheduler() {
+        let dir = tempfile::Builder::new()
+            .prefix("c-2b-scheduler-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let core = Arc::new(runtime::DaemonCore::new(
+            dir.path().to_path_buf(),
+            Arc::new(arc_swap::ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            Arc::new(NoOpStorage),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(|| {
+                Err(AdapterCompositionError::UnknownAdapter {
+                    port: PortDimension::Tools,
+                    name: "broken".into(),
+                    available: vec![],
+                })
+            }),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = match compose_cron_scheduler(
+            dir.path().join("cron.toml"),
+            core,
+            tx,
+            Arc::new(NoOpChannel),
+        )
+        .await
+        {
+            Ok(_) => panic!("scheduler must refuse a failed runtime factory"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("composing daemon scheduler:"),
+            "{error}"
+        );
+    }
 }

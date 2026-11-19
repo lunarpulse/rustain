@@ -28,12 +28,21 @@ const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 enum Step {
     /// Answer `text` and end the turn.
     Text(&'static str),
+    Billable,
     /// Ask for the held `Glob` tool.
     Tool,
     /// Ask for a `Bash` tool that requires operator approval.
     ApprovalTool,
     /// Stream `partial`, then hang until released.
     HeldStream,
+    /// End without a response terminal.
+    Disconnect,
+    /// Complete without text.
+    Empty,
+    /// A response containing an operator-private proposal.
+    Private,
+    /// Fail before a stream is created.
+    Fail,
 }
 
 /// Barriers shared by the provider, the tool and the test.
@@ -100,6 +109,11 @@ impl StreamingProvider for HeldProvider {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.probes.stream_calls.fetch_add(1, Ordering::SeqCst);
         let step = self.script[call.min(self.script.len() - 1)];
+        if matches!(step, Step::Fail) {
+            return Err(ProviderError::ConnectionFailed(
+                "c2b fixture failure".into(),
+            ));
+        }
         Ok(match step {
             Step::Text(text) => futures::stream::iter(vec![
                 StreamChunk::Text {
@@ -111,6 +125,55 @@ impl StreamingProvider for HeldProvider {
                 },
             ])
             .boxed(),
+            Step::Billable => {
+                self.probes.entered.add_permits(1);
+                self.probes.release.acquire().await.unwrap().forget();
+                futures::stream::iter(vec![
+                    StreamChunk::Text {
+                        content: "C2bBudgetChannel normal reply".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::Usage {
+                        usage: crate::domain::models::usage::UsageInfo {
+                            input_tokens: 10_000,
+                            output_tokens: 0,
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
+                            reasoning_tokens: None,
+                        },
+                        session_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed()
+            }
+            Step::Disconnect => futures::stream::iter(vec![StreamChunk::Text {
+                content: "partial".into(),
+                parent_tool_use_id: None,
+            }])
+            .boxed(),
+            Step::Empty => futures::stream::iter(vec![StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            }])
+            .boxed(),
+            Step::Private => futures::stream::iter(vec![
+                StreamChunk::Text {
+                    content: "visible".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::ToolUse {
+                    id: "private-proposal".into(),
+                    name: crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME.into(),
+                    input: serde_json::json!({"secret": "private"}),
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed(),
+            Step::Fail => unreachable!(),
             Step::Tool | Step::ApprovalTool => futures::stream::iter(vec![
                 StreamChunk::ToolUse {
                     id: format!("held-{call}"),
@@ -280,6 +343,7 @@ struct Rig {
     socket: std::path::PathBuf,
     storage: Arc<dyn StoragePort>,
     probes: Probes,
+    channel_tx: mpsc::UnboundedSender<ChannelTurnRequest>,
     shutdown: CancellationToken,
     run: tokio::task::JoinHandle<()>,
     _bus: EventBus,
@@ -304,6 +368,7 @@ impl Rig {
             ..Default::default()
         }));
         let (bus, domain_rx) = EventBus::new(64);
+        let (channel_tx, channel_rx) = mpsc::unbounded_channel();
         let socket = workspace.path().join("interrupt.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
@@ -311,13 +376,18 @@ impl Rig {
         let run = {
             let server = server.clone();
             let shutdown = shutdown.clone();
-            tokio::spawn(async move { server.run(listener, domain_rx, None, None, shutdown).await })
+            tokio::spawn(async move {
+                server
+                    .run(listener, domain_rx, Some(channel_rx), None, shutdown)
+                    .await
+            })
         };
         Self {
             server,
             socket,
             storage,
             probes,
+            channel_tx,
             shutdown,
             run,
             _bus: bus,
@@ -1557,6 +1627,1138 @@ async fn story21_2_interrupted_turn_leaves_the_queued_turn_its_own_fold_and_comm
         })
         .await
         .unwrap_or_else(|_| panic!("round {round}: the queued answer was never committed"));
+        rig.finish().await;
+    }
+}
+
+struct C2bReplyProvider {
+    calls: AtomicUsize,
+    disconnect: bool,
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for C2bReplyProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+        use futures::StreamExt;
+        let chunks = match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => vec![
+                StreamChunk::Text {
+                    content: "Checking.".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::ToolUse {
+                    id: "t1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "fixture.txt"}),
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            1 if self.disconnect => vec![],
+            1 => vec![
+                StreamChunk::Text {
+                    content: "Answer: 42".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            n => panic!("unexpected provider call {n}"),
+        };
+        Ok(futures::stream::iter(chunks).boxed())
+    }
+
+    async fn abort(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    fn provider_id(&self) -> String {
+        "c2b-reply".into()
+    }
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        vec![]
+    }
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        Ok(crate::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+}
+
+struct C2bReadFile;
+
+#[async_trait::async_trait]
+impl ToolSetPort for C2bReadFile {
+    fn available_tools(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "read_file".into(),
+            description: "Return the fixture result".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            parallel_safe: true,
+        }]
+    }
+
+    async fn execute(
+        &self,
+        tool_name: &str,
+        _input: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        assert_eq!(tool_name, "read_file");
+        Ok(ToolResult {
+            tool_use_id: "t1".into(),
+            content: "SECRET-RESULT-C2B".into(),
+            is_error: false,
+            images: vec![],
+        })
+    }
+}
+
+async fn c2b_channel_tool_turn_case(disconnect: bool) {
+    let workspace = tempfile::Builder::new()
+        .prefix("c-2b-channel-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let ws = workspace.path().to_path_buf();
+    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        crate::infrastructure::paths::sessions_dir(&ws),
+        ws.clone(),
+    ));
+    // `read_file` is an unknown (elevated) name to the permission chain.
+    // Yolo lets the fixture reach the real tool scheduler without an operator.
+    let security = crate::adapters::security_adapter::SecurityAdapter::new(ws.clone());
+    crate::domain::ports::SecurityPort::set_mode(
+        &security,
+        crate::domain::models::PermissionMode::Yolo,
+    );
+    let security: Arc<dyn crate::domain::ports::SecurityPort> = Arc::new(security);
+    let factory_security = security.clone();
+    let provider = Arc::new(C2bReplyProvider {
+        calls: AtomicUsize::new(0),
+        disconnect,
+    });
+    let factory_provider = provider.clone();
+    let factory_storage = storage.clone();
+    let factory_ws = ws.clone();
+    let core = Arc::new(DaemonCore::new(
+        ws.clone(),
+        Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+        Arc::new(NoOpMemory),
+        storage.clone(),
+        security,
+        Arc::new(NoOpPersona),
+        Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+        Box::new(move || {
+            let mut runtime = Arc::try_unwrap(mock_runtime(
+                factory_provider.clone(),
+                factory_storage.clone(),
+                &factory_ws,
+            ))
+            .ok()
+            .expect("new unshared runtime");
+            let tools: Arc<dyn ToolSetPort> = Arc::new(C2bReadFile);
+            runtime.security = factory_security.clone();
+            runtime.tool_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+                runtime.security.clone(),
+                tools.clone(),
+                runtime.approval.clone(),
+                64,
+            );
+            runtime.tools = tools;
+            Ok(Arc::new(runtime))
+        }),
+    ));
+    let conversation = Arc::new(Mutex::new(Conversation {
+        id: "c2b-channel".into(),
+        ..Default::default()
+    }));
+    let (bus, domain_rx) = EventBus::new(64);
+    let (channel_tx, channel_rx) = mpsc::unbounded_channel();
+    let listener = UnixListener::bind(ws.join("c2b-channel.sock")).unwrap();
+    let server = AttachServer::new(core, conversation.clone(), bus.domain_tx.clone());
+    let shutdown = CancellationToken::new();
+    let run = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            server
+                .run(listener, domain_rx, Some(channel_rx), None, shutdown)
+                .await
+        })
+    };
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    channel_tx
+        .send(ChannelTurnRequest {
+            text: "What is the answer?".into(),
+            origin: ChannelKind::Telegram,
+            response_tx,
+        })
+        .unwrap();
+    let response = tokio::time::timeout(DEADLINE, response_rx)
+        .await
+        .expect("channel reply timed out")
+        .expect("channel reply sender dropped");
+    assert_eq!(
+        response,
+        if disconnect {
+            "Checking.\n[tool use: read_file (id: t1)]\n\n\n(The agent stopped before finishing this reply.)"
+        } else {
+            "Checking.\n[tool use: read_file (id: t1)]\nAnswer: 42"
+        }
+    );
+    assert!(!response.contains("SECRET-RESULT-C2B"));
+    assert!(!response.contains("[tool result"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+    // A completed reply is also a fence for the forwarder's final commit.
+    let conv = conversation.lock().await;
+    let assistants: Vec<_> = conv
+        .messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Assistant)
+        .collect();
+    assert_eq!(assistants.len(), if disconnect { 1 } else { 2 });
+    assert_eq!(assistants[0].content, "Checking.");
+    assert_eq!(assistants[0].stop_reason, Some(StopReason::ToolUse));
+    assert_eq!(assistants[0].tool_calls.len(), 1);
+    assert_eq!(assistants[0].tool_calls[0].wire_id(), "t1");
+    assert_eq!(assistants[0].tool_calls[0].name, "read_file");
+    assert_eq!(
+        assistants[0].tool_calls[0].result.as_ref().unwrap().content,
+        "SECRET-RESULT-C2B"
+    );
+    if !disconnect {
+        assert_eq!(assistants[1].content, "Answer: 42");
+        assert_eq!(assistants[1].stop_reason, Some(StopReason::EndTurn));
+        assert!(assistants[1].tool_calls.is_empty());
+    }
+    drop(conv);
+    shutdown.cancel();
+    tokio::time::timeout(DEADLINE, run)
+        .await
+        .expect("server shutdown timed out")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c2b_channel_returns_whole_tool_turn_without_tool_result() {
+    c2b_channel_tool_turn_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c2b_channel_second_response_disconnect_returns_whole_partial_reply() {
+    c2b_channel_tool_turn_case(true).await;
+}
+mod c2b_budget_channel {
+    use super::*;
+    use crate::domain::errors::StorageError;
+    use crate::domain::models::pricing::PricingConfig;
+    use crate::domain::models::usage::{TokenUsage, UsageLedgerEntry};
+    use crate::domain::models::{EscalationReason, ModelTier};
+    use crate::domain::ports::UsageLedgerPort;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    struct C2bBudgetChannelLedger {
+        rows: tokio::sync::Mutex<Vec<UsageLedgerEntry>>,
+        unreadable: bool,
+        last_since: AtomicI64,
+    }
+
+    #[async_trait::async_trait]
+    impl UsageLedgerPort for C2bBudgetChannelLedger {
+        async fn append(&self, entry: UsageLedgerEntry) -> Result<(), StorageError> {
+            self.rows.lock().await.push(entry);
+            Ok(())
+        }
+
+        async fn read_session(
+            &self,
+            session_id: &str,
+        ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .await
+                .iter()
+                .filter(|row| row.session_id == session_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn read_since(
+            &self,
+            since_unix_ms: i64,
+        ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+            self.last_since.store(since_unix_ms, Ordering::SeqCst);
+            if self.unreadable {
+                return Err(StorageError::Other(
+                    "C2bBudgetChannel ledger unavailable".into(),
+                ));
+            }
+            Ok(self
+                .rows
+                .lock()
+                .await
+                .iter()
+                .filter(|row| row.timestamp_ms >= since_unix_ms)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn c2b_budget_channel_row(timestamp_ms: i64, tokens_in: u32) -> UsageLedgerEntry {
+        UsageLedgerEntry {
+            timestamp_ms,
+            session_id: "C2bBudgetChannel-session".into(),
+            conversation_id: "C2bBudgetChannel-conversation".into(),
+            provider_id: "C2bBudgetChannel-provider".into(),
+            model: "C2bBudgetChannel-model".into(),
+            tier: ModelTier::Flagship,
+            step_kind: None,
+            escalation_reason: EscalationReason::None,
+            usage: TokenUsage {
+                tokens_in,
+                tokens_out: 0,
+                parent_ctx: 0,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+            },
+        }
+    }
+
+    async fn c2b_budget_channel_case(
+        limit: Option<f64>,
+        unreadable: bool,
+        today_tokens: u32,
+        yesterday_tokens: u32,
+        expected: &str,
+        expected_calls: usize,
+    ) {
+        c2b_budget_channel_case_inner(
+            limit,
+            unreadable,
+            today_tokens,
+            yesterday_tokens,
+            expected,
+            expected_calls,
+            false,
+        )
+        .await;
+    }
+
+    async fn c2b_budget_channel_case_inner(
+        limit: Option<f64>,
+        unreadable: bool,
+        today_tokens: u32,
+        yesterday_tokens: u32,
+        expected: &str,
+        expected_calls: usize,
+        crossing: bool,
+    ) {
+        let workspace = tempfile::Builder::new()
+            .prefix("c-2b-budget-channel-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let day_start = crate::infrastructure::clock_util::today_start_unix_ms();
+        let ledger = Arc::new(C2bBudgetChannelLedger {
+            rows: tokio::sync::Mutex::new(vec![
+                c2b_budget_channel_row(day_start, today_tokens),
+                c2b_budget_channel_row(day_start - 1, yesterday_tokens),
+            ]),
+            unreadable,
+            last_since: AtomicI64::new(-1),
+        });
+        let probes = Probes::new();
+        let provider = Arc::new(HeldProvider {
+            calls: AtomicUsize::new(0),
+            script: vec![if crossing {
+                Step::Billable
+            } else {
+                Step::Text("C2bBudgetChannel normal reply")
+            }],
+            probes: probes.clone(),
+        });
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(workspace.path()),
+            workspace.path().to_path_buf(),
+        ));
+        let mut config = AppConfig::default();
+        config.model = "C2bBudgetChannel-model".into();
+        config.budget.daily_limit_usd = limit;
+        config.pricing.insert(
+            "C2bBudgetChannel-model".into(),
+            PricingConfig {
+                input_per_million: 1.0,
+                output_per_million: 1.0,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        let config = Arc::new(ArcSwap::from_pointee(config));
+        let ws = workspace.path().to_path_buf();
+        let factory_storage = storage.clone();
+        let factory_config = config.clone();
+        let factory_ledger = ledger.clone();
+        let core = Arc::new(DaemonCore::new(
+            ws.clone(),
+            config,
+            Arc::new(NoOpMemory),
+            storage.clone(),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(move || {
+                let mut runtime =
+                    Arc::try_unwrap(mock_runtime(provider.clone(), factory_storage.clone(), &ws))
+                        .ok()
+                        .expect("new unshared runtime");
+                runtime.app_config = factory_config.clone();
+                runtime.usage_ledger = factory_ledger.clone();
+                Ok(Arc::new(runtime))
+            }),
+        ));
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "C2bBudgetChannel-conversation".into(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let (channel_tx, channel_rx) = mpsc::unbounded_channel::<ChannelTurnRequest>();
+        let listener =
+            UnixListener::bind(workspace.path().join("c2b-budget-channel.sock")).unwrap();
+        let server = AttachServer::new(core, conversation.clone(), bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                server
+                    .run(listener, domain_rx, Some(channel_rx), None, shutdown)
+                    .await
+            }
+        });
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        channel_tx
+            .send(ChannelTurnRequest {
+                text: "C2bBudgetChannel request".into(),
+                origin: ChannelKind::Telegram,
+                response_tx,
+            })
+            .unwrap();
+        if crossing {
+            probes.held_point_reached().await;
+        }
+        let second = if crossing {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            channel_tx
+                .send(ChannelTurnRequest {
+                    text: "second request".into(),
+                    origin: ChannelKind::Telegram,
+                    response_tx: tx,
+                })
+                .unwrap();
+            Some(rx)
+        } else {
+            None
+        };
+        if crossing {
+            probes.release.add_permits(1);
+        }
+        let reply = tokio::time::timeout(DEADLINE, response_rx)
+            .await
+            .expect("channel reply timed out")
+            .expect("channel response sender dropped");
+        assert_eq!(reply, expected);
+        if let Some(second) = second {
+            let reply = tokio::time::timeout(DEADLINE, second)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                reply,
+                "Daily budget of $1.00 reached ($1.00 spent today). Raise [budget] daily_limit_usd or wait until tomorrow."
+            );
+            assert!(
+                ledger
+                    .rows
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|row| row.usage.tokens_in == 10_000)
+            );
+        }
+        assert_eq!(probes.stream_calls.load(Ordering::SeqCst), expected_calls);
+        if expected_calls == 0 {
+            assert!(
+                conversation.lock().await.messages.is_empty(),
+                "refusal must not append a user or assistant message"
+            );
+            assert_eq!(ledger.last_since.load(Ordering::SeqCst), day_start);
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn c2b_budget_channel_equal_and_above_limit_refused() {
+        c2b_budget_channel_case(Some(1.0), false, 1_000_000, 0,
+            "Daily budget of $1.00 reached ($1.00 spent today). Raise [budget] daily_limit_usd or wait until tomorrow.", 0).await;
+        c2b_budget_channel_case(Some(1.0), false, 1_500_000, 0,
+            "Daily budget of $1.00 reached ($1.50 spent today). Raise [budget] daily_limit_usd or wait until tomorrow.", 0).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn c2b_budget_channel_unreadable_ledger_refused() {
+        c2b_budget_channel_case(
+            Some(1.0),
+            true,
+            0,
+            0,
+            "Daily budget cannot be checked: usage ledger unreadable.",
+            0,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn c2b_budget_channel_below_limit_and_yesterday_are_allowed() {
+        c2b_budget_channel_case(
+            Some(1.0),
+            false,
+            990_000,
+            50_000_000,
+            "C2bBudgetChannel normal reply",
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn c2b_budget_channel_unset_limit_allows_unreadable_ledger() {
+        c2b_budget_channel_case(
+            None,
+            true,
+            50_000_000,
+            0,
+            "C2bBudgetChannel normal reply",
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_message_sees_previous_turns_ledger_row() {
+        c2b_budget_channel_case_inner(
+            Some(1.0),
+            false,
+            990_000,
+            0,
+            "C2bBudgetChannel normal reply",
+            1,
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_completion_does_not_settle_an_active_channel_turn() {
+    let rig = Rig::start(vec![Step::HeldStream]).await;
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let server = rig.server.clone();
+    let task = tokio::spawn(async move {
+        server
+            .drive_channel_turn(ChannelTurnRequest {
+                text: "operator".into(),
+                origin: ChannelKind::Telegram,
+                response_tx: tx,
+            })
+            .await;
+    });
+    rig.probes.held_point_reached().await;
+    rig.server
+        .collect_peer_chunk(
+            &Arc::new(AgentId::new()),
+            &StreamChunk::TurnComplete {
+                stop_reason: StopReason::Cancelled,
+            },
+        )
+        .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(!task.is_finished());
+    rig.probes.release.add_permits(1);
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, rx).await.unwrap().unwrap(),
+        "partial"
+    );
+    task.await.unwrap();
+    rig.finish().await;
+}
+#[cfg(feature = "telegram")]
+mod c2b_telegram_wire {
+    use super::*;
+    use crate::adapters::channel::telegram::TelegramChannelAdapter;
+    use crate::domain::ports::ChannelPort;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    const ALLOWED: i64 = 101;
+    const DENIED: i64 = 202;
+    const EXPECTED: &str = "Checking.\n[tool use: read_file (id: t1)]\nAnswer: 42";
+
+    // A second getUpdates proves the first update was fully processed, including
+    // the awaited sendMessage for an allowed chat. No time-based negative check.
+    async fn case(inbound_chat: i64, expected_provider_calls: usize) {
+        let api = MockServer::start().await;
+        let polls = Arc::new(AtomicUsize::new(0));
+        let processed = Arc::new(Semaphore::new(0));
+        let responder_polls = polls.clone();
+        let responder_processed = processed.clone();
+        Mock::given(method("POST"))
+            .and(path("/bottesttoken/GetUpdates"))
+            .respond_with(move |_: &Request| {
+                let count = responder_polls.fetch_add(1, Ordering::SeqCst);
+                let result = if count == 0 {
+                    serde_json::json!([{
+                        "update_id": 1,
+                        "message": {
+                            "message_id": 10,
+                            "date": 1,
+                            "chat": {"id": inbound_chat, "type": "private", "first_name": "Fixture"},
+                            "text": "What is the answer?"
+                        }
+                    }])
+                } else {
+                    responder_processed.add_permits(1);
+                    serde_json::json!([])
+                };
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": result}))
+            })
+            .mount(&api).await;
+        Mock::given(method("POST"))
+            .and(path("/bottesttoken/SendMessage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {"message_id": 11, "date": 1,
+                    "chat": {"id": ALLOWED, "type": "private", "first_name": "Fixture"},
+                    "text": EXPECTED}
+            })))
+            .mount(&api)
+            .await;
+
+        let workspace = tempfile::Builder::new()
+            .prefix("c-2b-telegram-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ws = workspace.path().to_path_buf();
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(&ws),
+            ws.clone(),
+        ));
+        let security = crate::adapters::security_adapter::SecurityAdapter::new(ws.clone());
+        crate::domain::ports::SecurityPort::set_mode(
+            &security,
+            crate::domain::models::PermissionMode::Yolo,
+        );
+        let security: Arc<dyn crate::domain::ports::SecurityPort> = Arc::new(security);
+        let factory_security = security.clone();
+        let provider = Arc::new(C2bReplyProvider {
+            calls: AtomicUsize::new(0),
+            disconnect: false,
+        });
+        let factory_provider = provider.clone();
+        let factory_storage = storage.clone();
+        let factory_ws = ws.clone();
+        let core = Arc::new(DaemonCore::new(
+            ws.clone(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage,
+            security,
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(move || {
+                let mut runtime = Arc::try_unwrap(mock_runtime(
+                    factory_provider.clone(),
+                    factory_storage.clone(),
+                    &factory_ws,
+                ))
+                .ok()
+                .expect("new unshared runtime");
+                let tools: Arc<dyn ToolSetPort> = Arc::new(C2bReadFile);
+                runtime.security = factory_security.clone();
+                runtime.tool_scheduler =
+                    crate::domain::services::tool_scheduler::ToolScheduler::new(
+                        runtime.security.clone(),
+                        tools.clone(),
+                        runtime.approval.clone(),
+                        64,
+                    );
+                runtime.tools = tools;
+                Ok(Arc::new(runtime))
+            }),
+        ));
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "c2b-telegram-wire".into(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let (channel_tx, channel_rx) = mpsc::unbounded_channel();
+        let listener = UnixListener::bind(ws.join("c2b-telegram.sock")).unwrap();
+        let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                server
+                    .run(listener, domain_rx, Some(channel_rx), None, shutdown)
+                    .await
+            }
+        });
+        let telegram = TelegramChannelAdapter::new_with_api_url_for_test(
+            "testtoken".into(),
+            vec![ALLOWED],
+            channel_tx,
+            api.uri().parse().unwrap(),
+        )
+        .unwrap();
+        telegram.start_loop().await.unwrap();
+        if tokio::time::timeout(DEADLINE, processed.acquire())
+            .await
+            .is_err()
+        {
+            panic!(
+                "adapter did not finish processing; requests: {:?}",
+                api.received_requests().await
+            );
+        }
+        telegram.shutdown_loop().await.unwrap();
+        shutdown.cancel();
+        tokio::time::timeout(DEADLINE, run)
+            .await
+            .expect("daemon shutdown timed out")
+            .unwrap();
+
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            expected_provider_calls
+        );
+        let requests = api.received_requests().await.unwrap();
+        let sends: Vec<_> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/bottesttoken/SendMessage")
+            .collect();
+        if inbound_chat == ALLOWED {
+            assert_eq!(sends.len(), 1, "exactly one whole-turn message");
+            let body: serde_json::Value = serde_json::from_slice(&sends[0].body).unwrap();
+            assert_eq!(body["chat_id"], ALLOWED);
+            assert_eq!(body["text"], EXPECTED);
+            assert!(!body["text"].as_str().unwrap().contains("SECRET-RESULT-C2B"));
+            assert!(!body["text"].as_str().unwrap().contains("[tool result"));
+        } else {
+            assert!(sends.is_empty(), "denied chat must not receive a message");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn allowed_chat_receives_one_whole_tool_turn() {
+        case(ALLOWED, 2).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn denied_chat_never_reaches_provider_or_receives_a_message() {
+        case(DENIED, 0).await;
+    }
+}
+
+struct C2bFenceProvider {
+    first: C2bReplyProvider,
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for C2bFenceProvider {
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        options: CompletionOptions,
+    ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+        use futures::StreamExt;
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 | 1 => self.first.stream_completion(messages, options).await,
+            2 => Ok(futures::stream::iter(vec![
+                StreamChunk::Text {
+                    content: "second reply".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed()),
+            n => panic!("unexpected provider call {n}"),
+        }
+    }
+    async fn abort(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    fn provider_id(&self) -> String {
+        "c2b-fence".into()
+    }
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        vec![]
+    }
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        Ok(crate::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+}
+
+struct C2bFenceLedger {
+    appends: AtomicUsize,
+    final_append: tokio::sync::Semaphore,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::UsageLedgerPort for C2bFenceLedger {
+    async fn append(
+        &self,
+        _: crate::domain::models::usage::UsageLedgerEntry,
+    ) -> Result<(), crate::domain::errors::StorageError> {
+        if self.appends.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.final_append.add_permits(1);
+        }
+        Ok(())
+    }
+    async fn read_session(
+        &self,
+        _: &str,
+    ) -> Result<
+        Vec<crate::domain::models::usage::UsageLedgerEntry>,
+        crate::domain::errors::StorageError,
+    > {
+        Ok(vec![])
+    }
+    async fn read_since(
+        &self,
+        _: i64,
+    ) -> Result<
+        Vec<crate::domain::models::usage::UsageLedgerEntry>,
+        crate::domain::errors::StorageError,
+    > {
+        Ok(vec![])
+    }
+}
+
+struct C2bParkFinalSave {
+    inner: Arc<dyn StoragePort>,
+    entered: tokio::sync::Semaphore,
+    parked: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Semaphore,
+}
+
+#[async_trait::async_trait]
+impl StoragePort for C2bParkFinalSave {
+    async fn read_snapshot(
+        &self,
+        id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        path: &std::path::Path,
+    ) -> Result<Option<Vec<u8>>, crate::domain::errors::StorageError> {
+        self.inner.read_snapshot(id, checkpoint, path).await
+    }
+    async fn save_conversation(
+        &self,
+        conversation: &Conversation,
+    ) -> Result<(), crate::domain::errors::StorageError> {
+        if conversation
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Assistant && m.content == "Answer: 42")
+            && !self.parked.swap(true, Ordering::SeqCst)
+        {
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+        }
+        self.inner.save_conversation(conversation).await
+    }
+    async fn load_conversation(
+        &self,
+        id: &str,
+    ) -> Result<Option<Conversation>, crate::domain::errors::StorageError> {
+        self.inner.load_conversation(id).await
+    }
+    async fn list_conversations(
+        &self,
+    ) -> Result<Vec<crate::domain::models::ConversationSummary>, crate::domain::errors::StorageError>
+    {
+        self.inner.list_conversations().await
+    }
+}
+
+struct C2bFenceRig {
+    server: Arc<AttachServer>,
+    provider: Arc<C2bFenceProvider>,
+    storage: Arc<C2bParkFinalSave>,
+    channel: mpsc::UnboundedSender<ChannelTurnRequest>,
+    shutdown: CancellationToken,
+    run: tokio::task::JoinHandle<()>,
+    _bus: EventBus,
+    _workspace: tempfile::TempDir,
+}
+
+impl C2bFenceRig {
+    async fn start() -> Self {
+        let workspace = tempfile::Builder::new()
+            .prefix("c-2b-fence-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ws = workspace.path().to_path_buf();
+        let inner: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(&ws),
+            ws.clone(),
+        ));
+        let storage = Arc::new(C2bParkFinalSave {
+            inner,
+            parked: std::sync::atomic::AtomicBool::new(false),
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let ledger = Arc::new(C2bFenceLedger {
+            appends: AtomicUsize::new(0),
+            final_append: tokio::sync::Semaphore::new(0),
+        });
+        let provider = Arc::new(C2bFenceProvider {
+            first: C2bReplyProvider {
+                calls: AtomicUsize::new(0),
+                disconnect: false,
+            },
+            calls: AtomicUsize::new(0),
+        });
+        let security = crate::adapters::security_adapter::SecurityAdapter::new(ws.clone());
+        crate::domain::ports::SecurityPort::set_mode(
+            &security,
+            crate::domain::models::PermissionMode::Yolo,
+        );
+        let security: Arc<dyn crate::domain::ports::SecurityPort> = Arc::new(security);
+        let factory_security = security.clone();
+        let factory_provider = provider.clone();
+        let factory_storage = storage.clone();
+        let factory_ledger = ledger.clone();
+        let factory_ws = ws.clone();
+        let core = Arc::new(DaemonCore::new(
+            ws.clone(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage.clone(),
+            security,
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(move || {
+                let mut runtime = Arc::try_unwrap(mock_runtime(
+                    factory_provider.clone(),
+                    factory_storage.clone(),
+                    &factory_ws,
+                ))
+                .ok()
+                .expect("new unshared runtime");
+                let tools: Arc<dyn ToolSetPort> = Arc::new(C2bReadFile);
+                runtime.security = factory_security.clone();
+                runtime.tool_scheduler =
+                    crate::domain::services::tool_scheduler::ToolScheduler::new(
+                        runtime.security.clone(),
+                        tools.clone(),
+                        runtime.approval.clone(),
+                        64,
+                    );
+                runtime.tools = tools;
+                runtime.usage_ledger = factory_ledger.clone();
+                Ok(Arc::new(runtime))
+            }),
+        ));
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "c2b-fence".into(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let (channel, channel_rx) = mpsc::unbounded_channel();
+        let listener = UnixListener::bind(ws.join("fence.sock")).unwrap();
+        let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let run = {
+            let server = server.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                server
+                    .run(listener, domain_rx, Some(channel_rx), None, shutdown)
+                    .await
+            })
+        };
+        Self {
+            server,
+            provider,
+            storage,
+            channel,
+            shutdown,
+            run,
+            _bus: bus,
+            _workspace: workspace,
+        }
+    }
+
+    fn request(&self, text: &str) -> tokio::sync::oneshot::Receiver<String> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        self.channel
+            .send(ChannelTurnRequest {
+                text: text.into(),
+                origin: ChannelKind::Telegram,
+                response_tx,
+            })
+            .unwrap();
+        response_rx
+    }
+
+    async fn final_commit_parked(&self) {
+        self.storage.entered.acquire().await.unwrap().forget();
+        self.server.fence_enqueued.acquire().await.unwrap().forget();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn c2b_fence_waits_without_timeout_and_serializes_channel_turns() {
+    let rig = C2bFenceRig::start().await;
+    let mut first = rig.request("first");
+    rig.final_commit_parked().await;
+    let mut second = rig.request("second");
+    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        first.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        second.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        rig.provider.calls.load(Ordering::SeqCst),
+        2,
+        "queued turn started before the fence"
+    );
+
+    rig.storage.release.add_permits(1);
+    assert_eq!(
+        first.await.unwrap(),
+        "Checking.\n[tool use: read_file (id: t1)]\nAnswer: 42"
+    );
+    assert_eq!(second.await.unwrap(), "second reply");
+    assert_eq!(rig.provider.calls.load(Ordering::SeqCst), 3);
+    rig.shutdown.cancel();
+    rig.run.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn c2b_fence_shutdown_resolves_pending_channel_with_fallback() {
+    let rig = C2bFenceRig::start().await;
+    let first = rig.request("first");
+    rig.final_commit_parked().await;
+    rig.shutdown.cancel();
+    rig.run.await.unwrap();
+    assert_eq!(first.await.unwrap(), CHANNEL_TURN_FAILED_REPLY);
+}
+
+#[tokio::test]
+async fn c2b_fence_lifecycle_abort_releases_conversation_and_resolves_reply() {
+    use crate::adapters::daemon::lifecycle::{DaemonRuntime, graceful_shutdown};
+    use crate::adapters::noop::{NoOpChannel, NoOpScheduler, NoopRecallProvider};
+
+    let rig = C2bFenceRig::start().await;
+    let mut first = rig.request("first");
+    tokio::time::timeout(DEADLINE, rig.final_commit_parked())
+        .await
+        .expect("final save and fence did not park");
+    assert!(rig.server.conversation.try_lock().is_err());
+    assert!(rig.server.turn_serial.try_lock().is_err());
+    assert!(matches!(
+        first.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let workspace = rig._workspace.path().to_path_buf();
+    let rt = DaemonRuntime {
+        config: AppConfig::default(),
+        memory: Arc::new(NoOpMemory),
+        recall: Arc::new(NoopRecallProvider),
+        pid_path: workspace.join("daemon.pid"),
+        socket_path: workspace.join("fence.sock"),
+        workspace,
+        server: rig.server.clone(),
+        channel: Arc::new(NoOpChannel),
+        scheduler: Arc::new(NoOpScheduler),
+        domain_rx: None,
+        channel_turn_rx: None,
+        #[cfg(feature = "cron")]
+        cron_completion_rx: None,
+        conversation: rig.server.conversation.clone(),
+        core: rig.server.core.clone(),
+    };
+
+    // Run the production cancel/abort/join and shutdown snapshot without
+    // releasing the save. The snapshot must not wait on a detached forwarder.
+    tokio::time::timeout(DEADLINE, graceful_shutdown(&rt, rig.shutdown, rig.run))
+        .await
+        .expect("lifecycle shutdown blocked on the parked save");
+    assert!(rt.conversation.try_lock().is_ok());
+    assert!(!rt.socket_path.exists());
+    assert_eq!(first.try_recv().unwrap(), CHANNEL_TURN_FAILED_REPLY);
+    let _turn_guard = tokio::time::timeout(DEADLINE, rig.server.turn_serial.lock())
+        .await
+        .expect("closing the fence did not release the serialized turn");
+}
+
+#[tokio::test]
+async fn channel_empty_failed_and_incomplete_turns_are_distinct() {
+    for (step, expected) in [
+        (Step::Empty, "(The agent finished without a text reply.)"),
+        (Step::Private, "visible"),
+        (Step::Fail, CHANNEL_TURN_FAILED_REPLY),
+        (
+            Step::Disconnect,
+            "partial\n\n(The agent stopped before finishing this reply.)",
+        ),
+    ] {
+        let rig = Rig::start(vec![step]).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        rig.channel_tx
+            .send(ChannelTurnRequest {
+                text: "request".into(),
+                origin: ChannelKind::Telegram,
+                response_tx: tx,
+            })
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(DEADLINE, rx).await.unwrap().unwrap(),
+            expected
+        );
         rig.finish().await;
     }
 }

@@ -620,6 +620,18 @@ impl DaemonTurnRuntime {
         let usage_ledger = self.usage_ledger.clone();
 
         tokio::spawn(async move {
+            // Admit cron work on the producer's first poll, even without MCP:
+            // the common turn loop does not check cancellation before its first request.
+            if matches!(&turn_origin, TurnOrigin::Cron) && turn_cancel.is_cancelled() {
+                let _ = domain_tx.send(AppEvent::ProviderChunk {
+                    conversation_id: conversation_id.clone(),
+                    chunk: StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled,
+                    },
+                });
+                return;
+            }
+
             let mut options = options;
             if !settle_mcp_before_tools(&tools, &domain_tx, &conversation_id, &turn_cancel).await {
                 return;
@@ -957,6 +969,66 @@ mod tests {
         assert_eq!(conversation.messages.len(), 1);
         assert_eq!(conversation.messages[0].origin, ChannelKind::Telegram);
     }
+
+    #[tokio::test]
+    async fn pre_cancelled_builtin_only_cron_turn_makes_no_provider_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rt = noop_runtime(tmp.path().to_path_buf());
+        let provider = Arc::new(crate::adapters::noop::RecordingProvider::default());
+        {
+            let rt = Arc::get_mut(&mut rt).unwrap();
+            rt.provider = provider.clone();
+            rt.tools = Arc::new(crate::adapters::toolset_adapter::ToolSetAdapter::new(
+                rt.workspace.clone(),
+                rt.storage.clone(),
+                Arc::new(ArcSwap::from_pointee(
+                    Arc::new(crate::adapters::sandbox::NoOpSandbox)
+                        as Arc<dyn crate::domain::ports::SandboxManager>,
+                )),
+                Arc::new(tokio::sync::RwLock::new(
+                    crate::domain::models::sandbox::SandboxPolicy::Permissive,
+                )),
+            ));
+            rt.tool_scheduler = ToolScheduler::new(
+                rt.security.clone(),
+                rt.tools.clone(),
+                rt.approval.clone(),
+                16,
+            );
+        }
+        let mut conversation = Conversation {
+            id: "cron-pre-cancelled".into(),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let producer = rt
+            .drive_turn(
+                "run the cron job".into(),
+                ChannelKind::Cron,
+                &mut conversation,
+                &tx,
+                TurnOrigin::Cron,
+                cancel,
+            )
+            .await;
+        producer.await.unwrap();
+
+        assert!(provider.requests.lock().await.is_empty());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AppEvent::ProviderChunk {
+                conversation_id,
+                chunk: StreamChunk::TurnComplete {
+                    stop_reason: StopReason::Cancelled,
+                },
+            } if conversation_id == conversation.id
+        ));
+        assert!(rx.try_recv().is_err(), "exactly one Cancelled terminal");
+    }
+
     #[tokio::test]
     async fn ensure_runtime_returns_the_same_instance() {
         let core = noop_core();

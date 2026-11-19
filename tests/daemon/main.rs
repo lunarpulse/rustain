@@ -27,3 +27,6 @@ mod daemon_crash_recovery;
 
 #[path = "../daemon_lifecycle.rs"]
 mod daemon_lifecycle;
+
+#[path = "../conformance_c2b_release_features.rs"]
+mod conformance_c2b_release_features;

@@ -810,6 +810,17 @@ pub async fn run(
         }
     }
 
+    // Install this notice immediately before the first draw; queued startup
+    // events are consumed only after that draw.
+    if let Some(profile) = app_state.profile_resolver.load().resolve_active() {
+        system_notice::apply_daemon_only_startup(
+            &mut state,
+            &profile.name,
+            &profile.selection,
+            &conversation.id,
+        );
+    }
+
     // Render first frame immediately
     let _ctx_window = active_context_window(&app_state, &router, &state, config);
     state.active_context_window = _ctx_window;

@@ -108,12 +108,13 @@ The daily limit counts the recorded, priced turn calls of every rustain process
 that shares the data directory: the TUI, `rustain ask`, ACP sessions, and the
 daemon, including cron, channel and peer turns. Each call is recorded in
 `<data dir>/usage/<session>.jsonl` (counts, model and ids, never message text).
-A model with no price adds nothing to the sum. Alerts appear in the TUI;
-headless runs are counted but not stopped by the limit. Memory consolidation,
-compaction, title generation, subagent calls and interrupted calls are not yet
-recorded. A failed write is logged, not retried. Lines are appended without a
-lock, so a short write or a network filesystem can tear a line, which readers
-then skip.
+A model with no price adds nothing to the sum. The TUI shows alerts; cron and
+Telegram refuse new turns at or above the limit, and fail closed if the ledger
+cannot be read. Peer turns, attached operator turns and `ask` are not stopped,
+and a turn already running is not interrupted. Memory consolidation, compaction,
+title generation, subagent calls and interrupted calls are not yet recorded.
+A failed write is logged, not retried. Corrupt individual lines are logged and
+skipped, so one torn line can omit one call's spend.
 
 ### Workspace TOML (override with `--config-file`)
 

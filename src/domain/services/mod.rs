@@ -3,6 +3,7 @@ pub mod adapter_overlay;
 pub mod approval_presentation;
 pub mod approval_runtime;
 pub mod authority_ledger;
+pub mod budget_gate;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;
 pub mod command_normalize;
@@ -62,6 +63,7 @@ pub mod topic;
 pub use plan_runtime::{PlanRuntime, PlanRuntimeState, TaskTurnOutcome, format_task_prompt};
 pub mod turn_grouping;
 pub mod turn_queue;
+pub mod turn_reply;
 
 pub mod recipient_thread_bounds;
 pub mod relative_time;

@@ -822,18 +822,14 @@ adapter = "daily"
         let source = TestProfileSource::new(vec![("test-preview", toml)]);
         let loader = make_loader(&source);
         let resolved = loader.load("test-preview").unwrap();
-        if !cfg!(feature = "telegram") {
-            assert_eq!(
-                resolved.selection.dimensions[&PortDimension::Channels].adapter,
-                "terminal"
-            );
-        }
-        if !cfg!(feature = "cron") {
-            assert_eq!(
-                resolved.selection.dimensions[&PortDimension::Scheduler].adapter,
-                "none"
-            );
-        }
+        assert_eq!(
+            resolved.selection.dimensions[&PortDimension::Channels].adapter,
+            "terminal"
+        );
+        assert_eq!(
+            resolved.selection.dimensions[&PortDimension::Scheduler].adapter,
+            "none"
+        );
     }
 
     #[test]
@@ -856,7 +852,13 @@ adapter = "default"
 "#;
         let source = TestProfileSource::new(vec![("no-preview", toml)]);
         let loader = make_loader(&source);
-        if !cfg!(feature = "telegram") {
+        if cfg!(feature = "telegram") {
+            let resolved = loader.load("no-preview").unwrap();
+            assert_eq!(
+                resolved.selection.dimensions[&PortDimension::Channels].adapter,
+                "telegram"
+            );
+        } else {
             let err = loader.load("no-preview").unwrap_err();
             assert!(matches!(err, ProfileError::AdapterFeatureGated { .. }));
         }

@@ -74,9 +74,9 @@ can do** (tools, skills, protocols).
   (tools), A2A (agent-to-agent delegation). All governed by one unified
   permission system.
 - **Profiles are TOML files, not code.** `coding` is the default. Switch to
-  `personal-assistant` and the same binary gains daily-log memory, a Telegram
-  channel, and a cron scheduler. Create your own profile — no compilation
-  required.
+  `personal-assistant` for daily-log memory; its preview uses terminal and no
+  scheduler. A custom non-preview profile can select daemon-only Telegram and
+  cron. See [daemon setup](docs/daemon.md#telegram-channel-setup-story-123).
 - **Runtime swapping** lets you change identity mid-session. Hot swap (instant:
   persona, tools, context), warm swap (brief pause: memory, session), cold swap
   (agent loop restart: channels, scheduler). The TUI stays responsive throughout.
@@ -157,8 +157,9 @@ rustain daemon status      # check daemon state
 rustain daemon stop        # shut down
 ```
 
-Daemon mode enables always-on channels (Telegram, scheduled tasks) that persist
-across TUI sessions. Systemd and launchd service templates are in `dist/`.
+Daemon mode enables always-on channels and scheduled tasks across TUI sessions.
+Telegram and cron ship in release assets from the next tag. Systemd and launchd
+service templates are in `dist/`.
 
 **Authentication** (credential management):
 
@@ -250,12 +251,15 @@ cargo fmt                  # format
 
 # Feature-gated builds
 cargo build --no-default-features --features anthropic     # minimal
-cargo build --features telegram                            # with Telegram channel
+cargo build --features telegram,cron                       # daemon channel and scheduler
 cargo build --features vector-search                       # with local embeddings
 cargo build --features a2a,p2p                             # federation from source
 ```
 
 A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** — source builds need `--features a2a,p2p`. `rustain --version` lists the protocols and features compiled into the binary. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
+Release assets from the next tag also include `telegram,cron`; source builds
+must enable them. Both adapters run under the daemon; local sessions use no-ops
+with a notice.
 
 ### TUI peer-send quick start
 
@@ -479,7 +483,7 @@ Three built-in profiles ship with the binary:
 |---|---|---|---|---|---|
 | **base** | minimal | project-scoped | local | TUI only | none |
 | **coding** | coding agent | project-scoped + long-term | local | TUI only | none |
-| **personal-assistant** | assistant | daily-log + long-term | daemon | Telegram | cron |
+| **personal-assistant** (preview) | assistant | daily-log | local | terminal | none |
 
 Switch at runtime via the TUI or CLI. Custom profiles are TOML files in
 `~/.rustain/profiles/` or `.rustain/profiles/`.
@@ -533,7 +537,7 @@ on v0.4.0: no new feature, only the fixes in the roadmap row below.
 | **v1.5 (early phase)** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18); release assets carry `a2a,p2p` from `v0.2.0` |
 | **v0.4.0** | OAuth sign-in (Epic 20), federation features in release assets, TUI layered modals (Epic 21) | Shipped |
 | **v0.4.1** | Patch: `--version` prints the real features and protocol versions; the OpenAI-compatible stream decoder accepts GitHub Copilot Chat chunks without an `object` field and reports empty, error and non-stream replies; clearer Copilot login and model-refusal messages; macOS install guide; TUI test-suite refinement | Current release |
-| **v0.5.0** | Completion lane: `cron` and `telegram` release features, Slack channel, persona loader, daemon MCP | Planned |
+| **v0.5.0** | Completion lane: Telegram and cron in release features, Slack channel, persona loader, daemon MCP | Planned |
 | **v1.0** | Hardening: containment and cost control | Planned |
 | **v2.0** | Dynamic adapter loading, community hub | Planned |
 

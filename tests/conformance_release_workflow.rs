@@ -8,18 +8,11 @@
 const WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 /// The build command, matched as a line prefix: the step tees its output for
 /// the failure annotation, which must not loosen the feature-list pin.
-const RELEASE_BUILD: &str = "cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p ";
-/// NFR9's byte bound. ⚑ AMENDED 2026-08-31 by Story 9.9 (owner ruling,
-/// measurement-driven): 36,700,160 → 39,845,888. The Streamable HTTP client
-/// transport measured 38,154,880 B on the shipped feature set — the transport
-/// itself is 1,152,296 B and would have fit; the TLS backend that makes
-/// `https://` MCP URLs work is the other 2,740,848 B. ⛔ This constant is the
-/// ratchet: move it only with a fresh BYTE measurement recorded in `prd.md`
-/// NFR9 — never with a crate count, which is precisely the inference Story
-/// 9.9's own ruling A3 got wrong (the crates were in the tree but LTO-stripped
-/// until something called them).
-const NFR9_BOUND_BYTES: &str = "39845888";
-const SIZE_GUARD: &str = "if [ \"$SIZE\" -gt \"39845888\" ]; then";
+const RELEASE_BUILD: &str = "cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron ";
+/// NFR9's 40 MiB byte bound follows the C-2b measured fit test and D-25.
+/// Recalibrate only with a fresh byte measurement and the owner-approved rule.
+const NFR9_BOUND_BYTES: &str = "41943040";
+const SIZE_GUARD: &str = "if [ \"$SIZE\" -gt \"41943040\" ]; then";
 const SMOKE_STEP: &str = "      - name: Smoke required release features\n        if: matrix.target == 'x86_64-unknown-linux-gnu'\n        shell: bash\n        run: .github/scripts/release-smoke.sh \"${ASSET}\"\n";
 const SMOKE_SCRIPT: &str = ".github/scripts/release-smoke.sh";
 
@@ -29,7 +22,7 @@ fn release_build_ships_a2a_and_p2p_with_the_measured_size_bound() {
         WORKFLOW
             .lines()
             .any(|line| line.trim_start().starts_with(RELEASE_BUILD)),
-        "release build must name self-update, relay-server, a2a, and p2p explicitly"
+        "release build must name the shipped six-feature set explicitly"
     );
     assert_eq!(
         WORKFLOW.matches(NFR9_BOUND_BYTES).count(),
@@ -227,7 +220,7 @@ const STUB_PROTOCOLS: &str = "protocols: agent-skills, acp 1, mcp 2025-11-25, a2
 #[cfg(unix)]
 fn stub_block(features: &str, protocols: &str) -> String {
     format!(
-        "rustain 9.9.9 (stub)\nbuild: x\ncommit: y\nrustc: 1.0.0\n{protocols}\nfeatures: {features}\nnot built: cron"
+        "rustain 9.9.9 (stub)\nbuild: x\ncommit: y\nrustc: 1.0.0\n{protocols}\nfeatures: {features}\nnot built: gmail"
     )
 }
 
@@ -238,7 +231,7 @@ fn stub_block(features: &str, protocols: &str) -> String {
 #[cfg(unix)]
 fn k9b_smoke_checks_version_before_starting_a_server() {
     let (code, stderr, calls) = run_smoke_against_stub(&stub_block(
-        "a2a, mcp, relay-server, self-update",
+        "a2a, cron, mcp, relay-server, self-update, telegram",
         STUB_PROTOCOLS,
     ));
     assert_eq!(code, Some(1), "stderr: {stderr}");
@@ -253,7 +246,7 @@ fn k9b_smoke_checks_version_before_starting_a_server() {
     );
 
     let (code, stderr, calls) = run_smoke_against_stub(&stub_block(
-        "a2a, mcp, p2p, relay-server, self-update",
+        "a2a, cron, mcp, p2p, relay-server, self-update, telegram",
         "protocols: agent-skills, acp 1, mcp 2025-11-25, a2a not built",
     ));
     assert_eq!(code, Some(1), "stderr: {stderr}");
@@ -263,7 +256,7 @@ fn k9b_smoke_checks_version_before_starting_a_server() {
     // Positive control: a complete block crosses the check and the script launches
     // the server (which the stub then fails to be; that later failure is not asserted).
     let (_, _, calls) = run_smoke_against_stub(&stub_block(
-        "a2a, mcp, p2p, relay-server, self-update",
+        "a2a, cron, mcp, p2p, relay-server, self-update, telegram",
         STUB_PROTOCOLS,
     ));
     assert_eq!(calls.first().map(String::as_str), Some("--version"));
@@ -476,6 +469,7 @@ fn k1_tls_dependencies_select_only_ring_and_preserve_native_trust() {
         ),
         ("rustls", &["ring", "std", "tls12", "logging"][..]),
         ("tokio-rustls", &["ring", "tls12", "logging"][..]),
+        ("teloxide", &["macros", "rustls-native-roots"][..]),
         (
             "rmcp",
             &[
@@ -630,7 +624,7 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
     assert!(WORKFLOW.contains(RELEASE_RATCHET));
     assert!(
         WORKFLOW
-            .find("      - name: Size guard (≤ 38 MiB)")
+            .find("      - name: Size guard (≤ 40 MiB)")
             .unwrap()
             < WORKFLOW.find(RELEASE_RATCHET).unwrap()
     );
@@ -643,7 +637,7 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
         .split_once("  tui-conflict-flag:\n")
         .expect("capture job")
         .1;
-    const BUILD_AND_GUARD: &str = "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p\n      - name: Size ratchet\n        run: .github/scripts/release-size-guard.sh target/release/rustain\n";
+    const BUILD_AND_GUARD: &str = "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron\n      - name: Size ratchet\n        run: .github/scripts/release-size-guard.sh target/release/rustain\n";
     assert!(capture.contains(BUILD_AND_GUARD));
     assert_eq!(
         capture.matches("cargo build ").count(),
@@ -652,7 +646,9 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
     );
     assert!(capture.contains("      - name: Single TLS stack (rustls + ring)\n"));
     assert!(capture.contains("cargo tree --locked -e normal --prefix none --format '{p}'"));
-    assert!(capture.contains("for features in '' self-update,relay-server,a2a,p2p; do"));
+    assert!(
+        capture.contains("for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do")
+    );
     assert!(capture.contains("| .github/scripts/single-tls-stack.sh \"${features:-default}\"\n"));
     assert!(
         capture.find(BUILD_AND_GUARD).unwrap()
@@ -679,4 +675,131 @@ fn k10_release_publishes_the_install_script_in_the_signed_manifest() {
         1,
         "one manifest command"
     );
+}
+#[test]
+fn k11_every_release_composition_site_names_the_shipped_set() {
+    use std::collections::BTreeSet;
+
+    fn value<'a>(text: &'a str, anchor: &str, delimiter: &str) -> &'a str {
+        let line = text
+            .lines()
+            .find(|line| line.contains(anchor))
+            .unwrap_or_else(|| panic!("missing release composition anchor: {anchor}"));
+        line.split_once(delimiter)
+            .unwrap_or_else(|| panic!("missing feature delimiter at {anchor}"))
+            .1
+            .split_whitespace()
+            .next()
+            .expect("feature value")
+            .trim_matches('"')
+    }
+    fn set(value: &str) -> BTreeSet<&str> {
+        value.split(',').collect()
+    }
+    fn mismatch<'a>(
+        sites: &[(&'a str, BTreeSet<&str>)],
+        expected: &BTreeSet<&str>,
+    ) -> Vec<&'a str> {
+        sites
+            .iter()
+            .filter_map(|(name, actual)| (actual != expected).then_some(*name))
+            .collect()
+    }
+
+    let ci = include_str!("../.github/workflows/ci.yml");
+    let smoke = include_str!("../.github/scripts/release-smoke.sh");
+    let install = include_str!("../docs/install-macos.md");
+    let manual = include_str!("../RELEASING.md");
+    let release = set(value(
+        WORKFLOW,
+        "cargo build --release --target ${{ matrix.target }} --features",
+        "--features ",
+    ));
+    let act1 = ci
+        .split_once("  tui-act1:")
+        .expect("tui-act1 job")
+        .1
+        .split_once("  tui-conflict-flag:")
+        .expect("tui-conflict-flag job")
+        .0;
+    let conflict = ci
+        .split_once("  tui-conflict-flag:")
+        .expect("tui-conflict-flag job")
+        .1;
+    let smoke_features = smoke
+        .lines()
+        .find_map(|line| line.strip_prefix("REQUIRED_FEATURES=\""))
+        .and_then(|line| line.strip_suffix('"'))
+        .expect("REQUIRED_FEATURES anchor")
+        .split_whitespace()
+        .collect();
+    let tls = ci
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("for features in '' "))
+        .and_then(|line| line.strip_suffix("; do"))
+        .expect("TLS loop anchor");
+    let sites = vec![
+        ("release.yml", release.clone()),
+        (
+            "tui-act1",
+            set(value(
+                act1,
+                "cargo build --release --features",
+                "--features ",
+            )),
+        ),
+        (
+            "tui-conflict-flag",
+            set(value(
+                conflict,
+                "cargo build --locked --release --features",
+                "--features ",
+            )),
+        ),
+        ("TLS loop", set(tls)),
+        ("release-smoke.sh", smoke_features),
+        (
+            "install-macos.md",
+            set(value(
+                install,
+                "cargo install --locked --git",
+                "--features ",
+            )),
+        ),
+        (
+            "RELEASING.md",
+            set(value(
+                manual,
+                "cargo build --release --target \"$TARGET\"",
+                "--features ",
+            )),
+        ),
+    ];
+    let absolute: BTreeSet<_> = [
+        "self-update",
+        "relay-server",
+        "a2a",
+        "p2p",
+        "telegram",
+        "cron",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        release, absolute,
+        "release build differs from the shipped set"
+    );
+    assert_eq!(mismatch(&sites, &release), Vec::<&str>::new());
+    let altered = act1.replace(
+        "cargo build --release --features self-update,relay-server,a2a,p2p,telegram,cron",
+        "cargo build --release --features self-update,relay-server,a2a,p2p,telegram",
+    );
+    assert_ne!(altered, act1, "drift fixture must change the build line");
+    let mut altered_sites = sites.clone();
+    altered_sites[1].1 = set(value(
+        &altered,
+        "cargo build --release --features",
+        "--features ",
+    ));
+    assert_eq!(mismatch(&altered_sites, &release), vec!["tui-act1"]);
 }

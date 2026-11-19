@@ -328,12 +328,17 @@ pub async fn run_turn(
                 if !received_turn_complete {
                     tracing::warn!("Provider stream ended without TurnComplete — synthesizing end");
                     if !forwarded_error {
-                        let _ = event_tx.send(AppEvent::ProviderChunk {
-                            conversation_id: conversation_id.clone(),
-                            chunk: StreamChunk::Error {
-                                content: "Stream disconnected unexpectedly".to_string(),
-                            },
-                        });
+                        let event = if matches!(&turn_origin, TurnOrigin::Cron) {
+                            AppEvent::CronStreamDisconnected
+                        } else {
+                            AppEvent::ProviderChunk {
+                                conversation_id: conversation_id.clone(),
+                                chunk: StreamChunk::Error {
+                                    content: "Stream disconnected unexpectedly".to_string(),
+                                },
+                            }
+                        };
+                        let _ = event_tx.send(event);
                     }
                     let _ = event_tx.send(AppEvent::ProviderChunk {
                         conversation_id: conversation_id.clone(),

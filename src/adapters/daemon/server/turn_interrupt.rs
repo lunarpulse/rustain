@@ -360,7 +360,11 @@ impl AttachServer {
         cancel: CancellationToken,
     ) -> Result<(), String> {
         *self.active_channel_origin.lock().await = origin;
-        *self.pending_channel_response_tx.lock().await = response_tx;
+        *self.pending_channel_response_tx.lock().await =
+            response_tx.map(|tx| PendingChannelReply {
+                tx,
+                fold: crate::domain::services::turn_reply::TurnReplyFold::default(),
+            });
         self.operator_turn_active.store(true, Ordering::Release);
 
         let rt = match self.core.ensure_runtime().await {
@@ -371,9 +375,31 @@ impl AttachServer {
                 return Err(e.to_string());
             }
         };
+        if matches!(turn_origin, TurnOrigin::Channel) {
+            let config = rt.app_config.load_full();
+            if config.budget.daily_limit_usd.is_some_and(f64::is_finite) {
+                let refusal = match rt.usage_ledger.read_since(
+                    crate::infrastructure::clock_util::today_start_unix_ms(),
+                ).await {
+                    Ok(entries) => crate::domain::services::budget_gate::daily_budget_stop(&entries, &config)
+                        .map(|stop| format!(
+                            "Daily budget of ${:.2} reached (${:.2} spent today). Raise [budget] daily_limit_usd or wait until tomorrow.",
+                            stop.limit_usd, stop.spent_usd
+                        )),
+                    Err(error) => {
+                        tracing::warn!(%error, "daemon: channel usage ledger unreadable");
+                        Some("Daily budget cannot be checked: usage ledger unreadable.".to_string())
+                    }
+                };
+                if let Some(refusal) = refusal {
+                    self.resolve_pending_channel_response(&refusal).await;
+                    self.settle_turn_state().await;
+                    return Ok(());
+                }
+            }
+        }
         self.ensure_approval_gate(rt.approval.clone()).await;
 
-        let turn_complete = self.turn_complete.notified();
         let mut handle = {
             let mut conv = self.conversation.lock().await;
             rt.drive_turn(
@@ -399,16 +425,7 @@ impl AttachServer {
                 let joined = (&mut handle).await;
                 if joined.as_ref().is_err_and(tokio::task::JoinError::is_cancelled) {
                     self.close_interrupted_turn().await;
-                    // Like the normal path: wait for the forwarder to fold THIS
-                    // turn's terminal before settling, so its `notify_waiters()`
-                    // cannot land on the next queued turn's fold wait.
-                    let folded =
-                        tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
-                    if folded.is_err() {
-                        tracing::warn!(
-                            "daemon turn was interrupted but its terminal was not folded before timeout"
-                        );
-                    }
+                    self.await_operator_fence().await;
                     self.settle_turn_state().await;
                     return Ok(());
                 }
@@ -416,19 +433,31 @@ impl AttachServer {
             }
             joined = &mut handle => joined,
         };
+        self.await_operator_fence().await;
         if let Err(e) = joined {
             tracing::warn!(error = ?e, "daemon turn task failed");
             self.settle_turn_state().await;
             return Err(e.to_string());
         }
-        let folded = tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
-        if folded.is_err() {
-            tracing::warn!(
-                "daemon turn completed but assistant commit was not observed before timeout"
-            );
-        }
         self.settle_turn_state().await;
         Ok(())
+    }
+
+    async fn await_operator_fence(&self) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sent = self
+            .fence_tx
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|sender| sender.send(tx).is_ok());
+        #[cfg(test)]
+        if sent {
+            self.fence_enqueued.add_permits(1);
+        }
+        if !sent || rx.await.is_err() {
+            self.fail_pending_channel_response().await;
+        }
     }
 
     /// The abort dropped `run_turn` before it could emit a terminal chunk.
@@ -448,15 +477,19 @@ impl AttachServer {
 
     /// The per-turn daemon state every exit path resets.
     async fn settle_turn_state(&self) {
-        self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
-            .await;
+        self.fail_pending_channel_response().await;
         self.operator_turn_active.store(false, Ordering::Release);
         *self.active_channel_origin.lock().await = ChannelKind::Terminal;
     }
 
+    pub(in crate::adapters::daemon) async fn fail_pending_channel_response(&self) {
+        self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
+            .await;
+    }
+
     pub(super) async fn resolve_pending_channel_response(&self, fallback: &str) {
-        if let Some(tx) = self.pending_channel_response_tx.lock().await.take() {
-            let _ = tx.send(fallback.to_string());
+        if let Some(reply) = self.pending_channel_response_tx.lock().await.take() {
+            let _ = reply.tx.send(fallback.to_string());
         }
     }
 }

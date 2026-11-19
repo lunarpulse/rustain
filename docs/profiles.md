@@ -40,12 +40,14 @@ extends = base
 preview = true
 persona   = personal-assistant  # embedded assistant persona (plan the day, tasks, notes); a persona file replaces it
 memory    = daily-log          # append-only daily-log memory (date-indexed)
-channels  = telegram           # feature-gated; falls back to terminal
-scheduler = cron               # feature-gated; falls back to none
+channels  = telegram           # preview rewrites to terminal
+scheduler = cron               # preview rewrites to none
 context   = daily              # alias of `default` — memory + project-context injection
 ```
-**Preview status:** Telegram and cron adapters are not available yet.
-The profile loads gracefully with terminal and none as fallbacks.
+**Preview status:** This built-in profile always uses terminal and none, even
+when Telegram and cron are compiled. Select them in your own non-preview profile
+to run them under the daemon; local sessions use no-ops with a notice. See
+[daemon setup](daemon.md#telegram-channel-setup-story-123).
 
 ## Profile Resolution Order
 

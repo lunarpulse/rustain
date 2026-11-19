@@ -292,9 +292,7 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
         }
     }
 
-    server_shutdown.cancel();
-    server_handle.abort();
-    graceful_shutdown(&rt).await;
+    graceful_shutdown(&rt, server_shutdown, server_handle).await;
     Ok(())
 }
 
@@ -302,18 +300,27 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
 /// 5 s `daemon stop` budget, next to the 3 s boundary flush.
 const DAEMON_MCP_REAP_BOUND: Duration = Duration::from_secs(3);
 
-/// Graceful shutdown (AC-12-1a-3, NFR48 < 5s). Emits the `Shutdown` boundary
-/// through the single seam, then removes the PID file + socket. Each potentially
-/// blocking step is wrapped in a per-step `tokio::time::timeout` (mirroring the
-/// 2s-per-step pattern at `event_loop.rs:7965-8005`) so the total stays bounded;
-/// on overrun we log and proceed to exit rather than hang.
-async fn graceful_shutdown(rt: &DaemonRuntime) {
+/// Stop the attach server before snapshotting the conversation for the
+/// `Shutdown` boundary, then remove the PID file and socket (AC-12-1a-3).
+pub(super) async fn graceful_shutdown(
+    rt: &DaemonRuntime,
+    server_shutdown: tokio_util::sync::CancellationToken,
+    server_handle: tokio::task::JoinHandle<()>,
+) {
+    // Signal cron before dropping the forwarder's completion receiver.
+    rt.scheduler.request_shutdown();
     tracing::info!("daemon graceful shutdown begin");
 
-    // Boundary emit (drain + flush) — capped so a stuck flush can't blow NFR48 —
-    // runs CONCURRENTLY with the MCP reap (Story C-3 AD-11): each is bounded to
-    // 3 s on its own, so the worst case adds no wall time to today's flush, and
-    // every MCP child has been closed or sent SIGKILL before the PID file goes.
+    server_shutdown.cancel();
+    server_handle.abort();
+    // Wait for the scoped forwarder to drop any in-flight conversation guard
+    // and fence acknowledgement before the boundary takes its snapshot.
+    let _ = server_handle.await;
+    // Deliver the fallback even if the driver has not yet observed the closed
+    // fence and the channel adapter is about to shut down.
+    rt.server.fail_pending_channel_response().await;
+
+    // Run the bounded boundary flush and MCP reap alongside scheduler teardown.
     let transcript = { rt.conversation.lock().await.messages.clone() };
     let flush = async {
         if tokio::time::timeout(
@@ -332,12 +339,18 @@ async fn graceful_shutdown(rt: &DaemonRuntime) {
             tracing::warn!("daemon shutdown: boundary flush timed out (>3s), proceeding to exit");
         }
     };
-    tokio::join!(flush, rt.core.shutdown_mcp(DAEMON_MCP_REAP_BOUND));
+    let stop_scheduler = async {
+        if let Err(e) = rt.scheduler.shutdown_loop().await {
+            tracing::warn!(error = %e, "daemon: scheduler adapter shutdown_loop failed");
+        }
+    };
+    tokio::join!(
+        flush,
+        rt.core.shutdown_mcp(DAEMON_MCP_REAP_BOUND),
+        stop_scheduler
+    );
 
-    // Stop cold-tier loops before removing runtime files.
-    if let Err(e) = rt.scheduler.shutdown_loop().await {
-        tracing::warn!(error = %e, "daemon: scheduler adapter shutdown_loop failed");
-    }
+    // Keep the channel open through pending reply fallback and scheduler teardown.
     if let Err(e) = rt.channel.shutdown_loop().await {
         tracing::warn!(error = %e, "daemon: channel adapter shutdown_loop failed");
     }
@@ -353,6 +366,7 @@ mod tests {
     use crate::domain::errors::{MemoryError, TransitionError};
     use crate::domain::models::{ChatMessage, MemoryEntry, TransitionState};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
 
     /// Recording memory adapter — counts the sink calls so we can prove all three
     /// triggers reach ONE shared path (AC-12-1a-7) and each drives the AC3
@@ -414,6 +428,131 @@ mod tests {
                 .fetch_max(transcript.len(), Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct ShutdownProbe {
+        requested: CancellationToken,
+        boundary_entered: CancellationToken,
+        release_boundary: CancellationToken,
+        scheduler_stopped: CancellationToken,
+        channel_stopped: CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerPort for ShutdownProbe {
+        fn request_shutdown(&self) {
+            self.requested.cancel();
+        }
+
+        async fn shutdown_loop(&self) -> Result<(), TransitionError> {
+            self.boundary_entered.cancelled().await;
+            self.scheduler_stopped.cancel();
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RecallProviderPort for ShutdownProbe {
+        async fn on_session_end(
+            &self,
+            _transcript: &[ChatMessage],
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.boundary_entered.cancel();
+            self.release_boundary.cancelled().await;
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelPort for ShutdownProbe {
+        async fn shutdown_loop(&self) -> Result<(), TransitionError> {
+            self.channel_stopped.cancel();
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_shutdown_stops_scheduler_while_boundary_is_parked() {
+        use crate::adapters::daemon::{runtime::DaemonCore, server::AttachServer};
+        use crate::adapters::noop::{NoOpPersona, NoOpSecurity, NoOpStorage};
+        use crate::domain::models::Conversation;
+        use tokio::sync::{Mutex, mpsc};
+
+        let ws = tempfile::tempdir().unwrap();
+        let workspace = ws.path().to_path_buf();
+        let memory = Arc::new(RecordingMemory::default());
+        let config = AppConfig::default();
+        let core = Arc::new(DaemonCore::new(
+            workspace.clone(),
+            Arc::new(arc_swap::ArcSwap::from_pointee(config.clone())),
+            memory.clone(),
+            Arc::new(NoOpStorage),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(|| panic!("shutdown must not initialize a turn runtime")),
+        ));
+        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let (domain_tx, domain_rx) = mpsc::unbounded_channel();
+        let server = AttachServer::new(core.clone(), conversation.clone(), domain_tx);
+        let probe = Arc::new(ShutdownProbe::default());
+        let rt = DaemonRuntime {
+            config,
+            memory,
+            recall: probe.clone(),
+            pid_path: workspace.join("daemon.pid"),
+            socket_path: workspace.join("daemon.sock"),
+            workspace,
+            server: server.clone(),
+            channel: probe.clone(),
+            scheduler: probe.clone(),
+            domain_rx: None,
+            channel_turn_rx: None,
+            #[cfg(feature = "cron")]
+            cron_completion_rx: None,
+            conversation,
+            core,
+        };
+        let listener = socket::bind(&rt.socket_path).unwrap();
+        let server_shutdown = CancellationToken::new();
+        let server_handle = tokio::spawn({
+            let server_shutdown = server_shutdown.clone();
+            async move {
+                server
+                    .run(listener, domain_rx, None, None, server_shutdown)
+                    .await;
+            }
+        });
+
+        // The snapshot cannot start yet, but the shutdown request is synchronous.
+        let guard = rt.conversation.lock().await;
+        let shutdown = graceful_shutdown(&rt, server_shutdown, server_handle);
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        assert!(probe.requested.is_cancelled());
+        assert!(!probe.boundary_entered.is_cancelled());
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(shutdown, async {
+                probe.scheduler_stopped.cancelled().await;
+                assert!(!probe.channel_stopped.is_cancelled());
+                assert!(rt.socket_path.exists());
+                probe.release_boundary.cancel();
+            });
+        })
+        .await
+        .expect("scheduler teardown must finish without releasing the boundary first");
+
+        assert!(probe.channel_stopped.is_cancelled());
+        assert!(!rt.socket_path.exists());
+        assert_eq!(
+            session_queue::read_consolidation_due(ws.path())
+                .expect("the parked boundary completed after release")
+                .boundary,
+            "shutdown"
+        );
     }
 
     #[tokio::test]

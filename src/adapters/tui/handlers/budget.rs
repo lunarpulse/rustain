@@ -17,7 +17,7 @@ use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, Decisio
 use crate::adapters::tui::state::{DailyBudgetState, TuiState};
 use crate::domain::models::AppConfig;
 use crate::domain::ports::{ProviderInfoPort, UsageLedgerPort};
-use crate::domain::services::cost_calculator;
+use crate::domain::services::budget_gate;
 
 use super::HandlerOutcome;
 
@@ -82,7 +82,7 @@ pub(crate) async fn recompute_daily_budget(
     let limit = config.budget.daily_limit_usd?;
     let since = info.today_start_unix_ms();
     let entries = usage_ledger.read_since(since).await.unwrap_or_default();
-    let spent = cost_calculator::cumulative_cost(&entries, &config.pricing);
+    let spent = budget_gate::daily_spend(&entries, config);
     Some(DailyBudgetState {
         spent_today_usd: spent,
         limit_usd: limit,

@@ -148,10 +148,10 @@ fn sandbox_adapter_errors_say_what_is_accepted() {
 }
 
 #[test]
-fn the_preview_profile_notice_names_what_did_not_load() {
+fn the_preview_profile_notice_names_the_fallbacks() {
     assert_eq!(
         preview_profile_notice("personal"),
-        "Profile 'personal (preview)' partially loaded: the telegram and cron adapters are not available yet"
+        "Profile 'personal (preview)': preview mode uses the terminal channel instead of Telegram and does not run cron jobs."
     );
 }
 

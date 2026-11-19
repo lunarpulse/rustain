@@ -22,6 +22,26 @@ use crate::domain::models::{
 };
 use crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle;
 
+/// Put the active profile's daemon-only warning in the first local TUI frame.
+pub(crate) fn apply_daemon_only_startup(
+    state: &mut TuiState,
+    name: &str,
+    selection: &crate::domain::models::ProfileSelection,
+    conversation_id: &str,
+) {
+    if let Some(message) =
+        crate::domain::services::adapter_catalog::AdapterCatalog::daemon_only_notice(
+            name, selection,
+        )
+    {
+        notify_draft(
+            state,
+            NoticeDraft::new(NoticeSource::System, NoticeSeverity::Warning, message)
+                .conversation(conversation_id.to_owned()),
+        );
+    }
+}
+
 /// Apply a notice addressed to the ACTIVE conversation (or a global one).
 pub(crate) fn apply_active_notice(
     state: &mut TuiState,
@@ -134,6 +154,61 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn daemon_only_startup_notice_is_painted_in_the_first_frame() {
+        use crate::domain::models::{AdapterRef, PortDimension, ProfileSelection};
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+        let mut selection = ProfileSelection::default();
+        for (port, name) in [
+            (PortDimension::Channels, "telegram"),
+            (PortDimension::Scheduler, "cron"),
+        ] {
+            selection.dimensions.insert(
+                port,
+                AdapterRef {
+                    adapter: name.into(),
+                    _config: None,
+                },
+            );
+        }
+        let mut state = TuiState::new(80, 24);
+        apply_daemon_only_startup(&mut state, "c2b", &selection, "conversation");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let facts = crate::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some("conversation".into()),
+            ..Default::default()
+        };
+        terminal
+            .draw(|frame| {
+                crate::adapters::tui::widgets::toast_layer::render(
+                    frame,
+                    Rect::new(0, 0, 80, 20),
+                    &state.notifications,
+                    &state.theme,
+                    &facts,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..24)
+            .flat_map(|y| (0..80).map(move |x| buffer.cell((x, y)).unwrap().symbol()))
+            .collect();
+        assert!(
+            screen.contains("Profile 'c2b' uses daemon-only adapters"),
+            "{screen:?}"
+        );
+
+        let mut ordinary = TuiState::new(80, 24);
+        apply_daemon_only_startup(
+            &mut ordinary,
+            "base",
+            &ProfileSelection::default(),
+            "conversation",
+        );
+        assert_eq!(ordinary.notifications.visible().count(), 0);
+    }
 
     struct Fixture {
         state: TuiState,

@@ -16,6 +16,8 @@ pub struct CronJob {
     pub prompt: String,
     #[serde(default)]
     pub forward: bool,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[cfg(test)]
@@ -39,5 +41,15 @@ mod tests {
         assert_eq!(parsed.jobs[0].schedule, "0 9 * * *");
         assert_eq!(parsed.jobs[0].prompt, "Brief me");
         assert!(!parsed.jobs[0].forward);
+        assert_eq!(parsed.jobs[0].timeout_secs, None);
+    }
+
+    #[test]
+    fn cron_config_deserializes_timeout() {
+        let parsed: CronConfig = toml::from_str(
+            "[[jobs]]\nname='job'\nschedule='* * * * *'\nprompt='hello'\ntimeout_secs=2\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.jobs[0].timeout_secs, Some(2));
     }
 }

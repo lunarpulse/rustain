@@ -36,21 +36,17 @@ Developer ID signing and notarization are a deferred decision: the owner deferre
 
 ## Federation Features in Published Assets
 
-A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5; verify with `git show v0.1.3:.github/workflows/release.yml` against `git show v0.2.0:.github/workflows/release.yml`); source builds need `--features a2a,p2p`. Automated and manual release builds must also include `self-update` and `relay-server`; the authoritative release feature set is `self-update,relay-server,a2a,p2p`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram and cron are included in release assets from the next tag; source builds require their features. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron`.
 
 ⛔ **After cutting a tag:** name the actual version at the four federation-feature doc sites — this file, `README.md`, `docs/a2a.md`, `docs/p2p.md`. They state the boundary they can prove (`v0.1.3` and earlier do not carry the features) because the next tag is not derivable from the tree; the tagger is the first person who knows it.
 
-The release pipeline asserts each published binary is **≤ 38 MiB (39,845,888 bytes)** (NFR9 as amended by measurement; `tests/conformance_release_workflow.rs` pins the number). The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
+The release pipeline asserts each published binary is **≤ 40 MiB (41,943,040 bytes)** (NFR9, amended by the C-2b measurement). The size check lives in CI, not runtime. The release profile uses LTO, stripping, one codegen unit and abort-on-panic to minimize size.
 
-Linux also runs `.github/scripts/release-size-guard.sh` on the already-built release and 19.21h capture binaries. The locked four-feature release on Linux with rustc 1.98.1 and mold measured **34,441,680 B** at `f5333224` and **36,700,776 B** at Lane B `64a718db`, a **2,259,096 B** increase. The unchanged NFR9 ceiling is **39,845,888 B**. Lane B (epic 20, auth) consumed **2,818,048 B** of the C-2 reserve; the remaining **2,555,904 B** reserve yields a **37,289,984 B** ratchet, leaving **589,208 B** above the measured binary. Lower `RESERVED_HEADROOM_BYTES` only in a reviewed change with a measured size table; C-2 also consumes it when adding `telegram,cron`. macOS retains only the NFR9 ceiling until measured.
-
-Epic 21 (TUI layered modals, 21-1 to 21-13) grew the locked four-feature Linux release to **37,339,664 B** at 21-13 (**37,017,904 B** at 21-3), **+638,888 B** over Lane B and **49,680 B** over the Lane B ratchet. By owner decision of 2026-11-07 the reserve was lowered by 1 MiB for the rest of Epic 21: `RESERVED_HEADROOM_BYTES` **2,555,904 B -> 1,507,328 B**, a **38,338,560 B** ratchet that leaves **998,896 B** above the 21-13 binary. Re-measure at each later Epic 21 story; the remaining reserve still belongs to C-2 (`telegram,cron`).
-
-The last measured four-feature Linux release is **37,869,400 B** at `c919eea7` (the v0.4.1 stack tip, `ci-parity` gate; 37,838,712 B at v0.4.0 with the same measurement), which leaves **469,160 B** below the 38,338,560 B ratchet (arithmetic: 38,338,560 − 37,869,400); the NFR9 ceiling stays 39,845,888 B. A release that pushes the Linux binary above the ratchet fails at "Size ratchet" and needs an owner-reviewed ratchet change, not a tag retry.
+At base `1943331f`, locked Linux release measurements were: four features 38,012,720 B; adding Telegram 39,234,072 B (+1,221,352); adding cron 38,165,896 B (+153,176); both 39,386,672 B (+1,373,952). The six-feature size exceeded the 38 MiB fit threshold of 39,321,600 B, triggering the 40 MiB ceiling. The Linux ratchet reserves 1,966,080 B and limits the binary to 39,976,960 B, 590,288 B above that measurement. The gate measures the landed build; a ratchet failure requires a reviewed recalibration, not a tag retry. macOS retains only the NFR9 ceiling.
 
 The workspace crate stays at `opt-level = 3`; cold dependencies use `z`. The reviewed hot list in `Cargo.toml` keeps level 3 for non-generic work per rendered frame, streamed chunk, TLS record/bulk byte, regex/glob match or signed message. Startup, CLI/config, connection setup and QUIC control are cold; generic monomorphizations in rustain keep its level.
 
-Default and four-feature builds use one TLS stack, **rustls + ring**, with no `libssl`/`libcrypto` runtime dependency. Unanchored reqwest 0.12 clients use native roots; MCP retains its platform verifier. The shared provider is installed at startup and at library TLS entry points. Anchored A2A remains operator-anchor-only.
+Default and shipped-release-set builds use one TLS stack, **rustls + ring**, with no `libssl`/`libcrypto` runtime dependency. Unanchored reqwest 0.12 clients, including Telegram, use native OS roots; MCP retains its platform verifier. Anchored A2A remains operator-anchor-only. The single-stack check runs on both trees.
 
 ## Signing Scheme: minisign
 
@@ -59,7 +55,7 @@ We use [minisign](https://jedisct1.github.io/minisign/) (Ed25519, prehashed `ED`
 **Why minisign over cosign/Sigstore/GPG:**
 - Pure-Rust verify-only client (`minisign-verify`) — tiny, no network at verify time
 - Ed25519, trivial in GitHub Actions
-- Keeps signing overhead small. The four-feature release fits NFR9's 38 MiB bound; NFR53's < 5 MB per-feature aspiration is currently exceeded by `p2p` and remains owned by `DF-18-7-COMPOSABILITY-REMAINDER`.
+- Keeps signing overhead small. The shipped release is checked against NFR9's 40 MiB bound; NFR53's < 5 MB per-feature aspiration is currently exceeded by `p2p` and remains owned by `DF-18-7-COMPOSABILITY-REMAINDER`.
 - Trade-off accepted: long-lived secret key managed via protected-environment custody + rotation ladder, rather than PKI complexity
 
 ### Trust Model
@@ -144,8 +140,8 @@ When rotating the signing key:
 3. Push an annotated tag: `git tag -a v0.4.1 -m "rustain v0.4.1" && git push origin v0.4.1`
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
-   - Smokes the required release features on the Linux binary (`.github/scripts/release-smoke.sh`): first checks that `--version` lists the four release features and no unbuilt protocol, then that the served AgentCard agrees with it
-   - Size guard asserts ≤ 38 MiB / 39,845,888 bytes; Linux additionally enforces the reserved-headroom ratchet (`.github/scripts/release-size-guard.sh`)
+   - Smokes all six required release features on the Linux binary (`.github/scripts/release-smoke.sh`), then checks the served AgentCard
+   - Size guard asserts ≤ 40 MiB / 41,943,040 bytes; Linux additionally enforces the reserved-headroom ratchet (`.github/scripts/release-size-guard.sh`)
    - Computes the asset-coverage disclosure (expected targets minus present) for the release body
    - Fails the release if the P0 Linux artifact is missing
    - Stages `dist/install.sh` as `install.sh`, failing if its `DEFAULT_VERSION=` is not the tag's version
@@ -167,7 +163,7 @@ VERSION="0.4.1"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary
-cargo build --release --target "$TARGET" --features self-update,relay-server,a2a,p2p
+cargo build --release --target "$TARGET" --features self-update,relay-server,a2a,p2p,telegram,cron
 
 # 4. Stage asset
 ASSET="rustain-${VERSION}-${TARGET}"
@@ -178,8 +174,8 @@ if [ "$TARGET" = "x86_64-unknown-linux-gnu" ]; then
     .github/scripts/release-size-guard.sh "$ASSET"
 else
     SIZE=$(stat -f%z "$ASSET")
-    if [ "$SIZE" -gt "39845888" ]; then
-        echo "ERROR: ${TARGET} binary exceeds 38 MiB limit (NFR9)"
+    if [ "$SIZE" -gt "41943040" ]; then
+        echo "ERROR: ${TARGET} binary exceeds 40 MiB limit (NFR9)"
         exit 1
     fi
 fi
@@ -199,7 +195,7 @@ minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY"
 #    (Use GitHub web UI or gh CLI: gh release create "v${VERSION}" ...)
 ```
 
-For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; step 5 checks only the 38 MiB NFR9 ceiling, not the Linux reserved-headroom ratchet. Minimal/no-default builds, relay-role measurements and the NFR53 amendment remain in `DF-18-7-COMPOSABILITY-REMAINDER`.
+For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; step 5 checks only the 40 MiB NFR9 ceiling, not the Linux reserved-headroom ratchet. Minimal/no-default builds, relay-role measurements and the NFR53 amendment remain in `DF-18-7-COMPOSABILITY-REMAINDER`.
 
 ## One-Time Setup (done for v0.1.0)
 
@@ -212,7 +208,7 @@ For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; st
 ## Per-Release Checklist
 
 - [ ] Confirm the `release` environment, its required reviewers and both secrets still exist, and `main` branch protection is unchanged
-- [ ] Bump `Cargo.toml` and `Cargo.lock`, update the README status line and roadmap, the `VERSION=` line in `docs/install-macos.md` and the `DEFAULT_VERSION=` line in `dist/install.sh`, and re-measure the four-feature Linux release against the size ratchet
+- [ ] Bump `Cargo.toml` and `Cargo.lock`, update the README status line and roadmap, the `VERSION=` line in `docs/install-macos.md` and the `DEFAULT_VERSION=` line in `dist/install.sh`, and re-measure the shipped Linux release against the size ratchet
 - [ ] Push the annotated tag for the new version to trigger `release.yml`, then approve the `release` deployment
 - [ ] Verify assets published: binary per target, `install.sh`, `SHA256SUMS`, `SHA256SUMS.minisig`
 - [ ] Verify the signature against the pinned key from the Key Inventory (`PROD_KEY_1`): `minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF`

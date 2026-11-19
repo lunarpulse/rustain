@@ -32,6 +32,40 @@ impl AdapterDescriptor {
 pub struct AdapterCatalog;
 
 impl AdapterCatalog {
+    /// Adapters whose loops require the daemon's runtime and channel plumbing.
+    pub fn is_daemon_only(port: PortDimension, name: &str) -> bool {
+        matches!(
+            (port, name),
+            (PortDimension::Channels, "telegram") | (PortDimension::Scheduler, "cron")
+        )
+    }
+
+    /// Explain which selected adapters this non-daemon session cannot run.
+    pub fn daemon_only_notice(
+        name: &str,
+        selection: &crate::domain::models::ProfileSelection,
+    ) -> Option<String> {
+        let selected: Vec<_> = [
+            (PortDimension::Channels, "channels"),
+            (PortDimension::Scheduler, "scheduler"),
+        ]
+        .into_iter()
+        .filter_map(|(port, label)| {
+            let adapter = selection.dimensions.get(&port)?;
+            Self::is_daemon_only(port, &adapter.adapter)
+                .then(|| format!("{label} = {}", adapter.adapter))
+        })
+        .collect();
+        if selected.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Profile '{name}' uses daemon-only adapters ({}); they run under 'rustain daemon start'. This session uses terminal and none.",
+                selected.join(", ")
+            ))
+        }
+    }
+
     /// Returns the list of known adapter names for a given port dimension.
     pub fn known_for(port: PortDimension) -> Vec<&'static str> {
         catalog_for(port).iter().map(|d| d.name).collect()

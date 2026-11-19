@@ -460,6 +460,95 @@ mod a2a_conformance {
             unexecuted.join("\n")
         );
     }
+    fn has_unfiltered_telegram_cron_lane(ci: &str) -> bool {
+        ci.lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let command = line.strip_prefix("run:").map_or(line, str::trim_start);
+                command.strip_prefix("cargo test ")
+            })
+            .any(|tail| {
+                let command = tail
+                    .split(" 2>")
+                    .next()
+                    .unwrap_or_default()
+                    .split('|')
+                    .next()
+                    .unwrap_or_default();
+                let words: Vec<_> = command.split_whitespace().collect();
+                let mut features = std::collections::BTreeSet::new();
+                let mut targets = std::collections::BTreeSet::new();
+                let mut lib = false;
+                let mut i = 0;
+                while i < words.len() {
+                    match words[i] {
+                        "--features" => {
+                            i += 1;
+                            let Some(list) = words.get(i) else {
+                                return false;
+                            };
+                            features.extend(list.trim_matches('"').split(','));
+                        }
+                        "--test" => {
+                            i += 1;
+                            let Some(target) = words.get(i) else {
+                                return false;
+                            };
+                            targets.insert(*target);
+                        }
+                        "--" => {
+                            if words[i + 1..]
+                                .iter()
+                                .any(|arg| !matches!(*arg, "--nocapture" | "--include-ignored"))
+                            {
+                                return false;
+                            }
+                            break;
+                        }
+                        "--lib" => lib = true,
+                        "--locked" | "--no-fail-fast" => {}
+                        _ => return false,
+                    }
+                    i += 1;
+                }
+                lib && features.contains("telegram")
+                    && features.contains("cron")
+                    && targets.contains("daemon")
+                    && targets.contains("profile")
+            })
+    }
+
+    #[test]
+    fn ci_runs_all_telegram_cron_library_and_area_tests_unfiltered() {
+        let good = "cargo test --locked --features telegram,cron --lib --test daemon --test profile --no-fail-fast";
+        assert!(has_unfiltered_telegram_cron_lane(good));
+        assert!(has_unfiltered_telegram_cron_lane(&format!(
+            "run: |\n  {good} -- --nocapture --include-ignored 2>&1 | tee test-output.log"
+        )));
+        for bad in [
+            "cargo test --features telegram,cron --test daemon --test profile",
+            "cargo test --features telegram,cron --lib --test daemon --test profile conformance_c2b",
+            "cargo test --features telegram,cron --lib --test daemon --test profile -- conformance_c2b",
+            "cargo test --features telegram,cron --lib --test daemon --test profile -- --exact x",
+            "cargo test --features telegram,cron --lib --test daemon --test profile -- --ignored",
+        ] {
+            assert!(!has_unfiltered_telegram_cron_lane(bad), "{bad}");
+        }
+        for commented in [
+            format!("# run: {good}"),
+            format!("run: |\n  # {good}"),
+            format!("run: |\n  echo skipped # {good}"),
+        ] {
+            assert!(
+                !has_unfiltered_telegram_cron_lane(&commented),
+                "{commented}"
+            );
+        }
+        assert!(
+            has_unfiltered_telegram_cron_lane(include_str!("../../../.github/workflows/ci.yml")),
+            "CI must execute the unfiltered telegram+cron lib, daemon, and profile tests"
+        );
+    }
 
     /// Story 18.1b — the zero-mutation ratchet (AC2b) and the card-signing
     /// counter (AC7b) are both `#[cfg(any(test, feature = "test-instrumentation"))]`.

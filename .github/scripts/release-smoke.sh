@@ -28,7 +28,7 @@ fi
 # fix-1: the asset must say what it carries. Pinned to release.yml's `--features`
 # list by tests/conformance_release_workflow.rs. Runs before a port is chosen or a
 # server is started.
-REQUIRED_FEATURES="a2a p2p relay-server self-update"
+REQUIRED_FEATURES="a2a cron p2p relay-server self-update telegram"
 VERSION_TEXT=$("$BIN" --version) || {
   echo "release smoke: $BIN --version failed" >&2
   exit 1

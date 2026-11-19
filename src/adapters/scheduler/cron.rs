@@ -17,20 +17,27 @@ use croner::Cron;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::adapters::daemon::runtime::DaemonCore;
 use crate::domain::errors::TransitionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    ChannelKind, ChatMessage, Conversation, CronConfig, CronJob, HealthSummary, MessageRole,
-    StopReason, StreamChunk, TurnOrigin, generate_message_id,
+    ChannelKind, ChatMessage, ContentBlockType, Conversation, CronConfig, CronJob, HealthSummary,
+    MessageRole, ProviderReplayItem, ResponseSpanBuilder, StopReason, StreamChunk, ToolCallInfo,
+    ToolResultInfo, TurnOrigin, generate_message_id,
 };
 use crate::domain::ports::{ChannelPort, SchedulerPort, StoragePort};
+use crate::domain::services::{
+    budget_gate::{BudgetStop, daily_budget_stop},
+    turn_reply::TurnReplyFold,
+};
 
 const HEALTH_OK: u8 = 0;
 const HEALTH_DEGRADED: u8 = 1;
 const HEALTH_OFFLINE: u8 = 2;
-const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_CONCURRENCY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -45,6 +52,7 @@ pub struct ScheduledJob {
     pub cron: Cron,
     pub prompt: String,
     pub forward: bool,
+    pub timeout_secs: Option<u64>,
 }
 
 pub struct CronSchedulerAdapter {
@@ -79,9 +87,10 @@ impl CronSchedulerAdapter {
     ) -> anyhow::Result<Self> {
         let jobs = load_jobs(&cron_toml_path).await;
         // Pre-warm the OnceCell runtime once before concurrent first-fires.
-        core.ensure_runtime()
-            .await
-            .map_err(|e| anyhow::anyhow!("cron scheduler runtime pre-warm failed: {e}"))?;
+        core.ensure_runtime().await.map_err(|error| {
+            tracing::warn!(%error, "cron: pre-warming runtime failed");
+            anyhow::anyhow!("cron scheduler runtime pre-warm failed")
+        })?;
         Ok(Self::new_loaded(
             cron_toml_path,
             jobs,
@@ -173,10 +182,14 @@ impl SchedulerPort for CronSchedulerAdapter {
         CronSchedulerAdapter::reload(self).await
     }
 
-    async fn shutdown_loop(&self) -> Result<(), TransitionError> {
+    fn request_shutdown(&self) {
         self.shutdown.cancel();
-        // Shared deadline: bound total shutdown to job_timeout regardless of inflight count (NFR48).
-        let deadline = tokio::time::sleep(self.job_timeout);
+    }
+
+    async fn shutdown_loop(&self) -> Result<(), TransitionError> {
+        self.request_shutdown();
+        // One shared deadline bounds shutdown independently of job timeouts.
+        let deadline = tokio::time::sleep(SHUTDOWN_GRACE);
         tokio::pin!(deadline);
         if let Some(mut handle) = self.handle.lock().await.take() {
             tokio::select! {
@@ -216,7 +229,7 @@ struct LoopState {
 
 async fn run_scheduler_loop(state: LoopState) {
     state.health.store(HEALTH_OK, Ordering::SeqCst);
-    loop {
+    while !state.shutdown.is_cancelled() {
         // Reap finished inflight handles to prevent unbounded growth.
         {
             let mut inflight = state.inflight.lock().await;
@@ -237,6 +250,7 @@ async fn run_scheduler_loop(state: LoopState) {
 
         let Some(next) = min_next else {
             tokio::select! {
+                biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = state.reload_notify.notified() => continue,
             }
@@ -247,12 +261,18 @@ async fn run_scheduler_loop(state: LoopState) {
             .to_std()
             .unwrap_or(Duration::ZERO);
         tokio::select! {
+            biased;
             _ = state.shutdown.cancelled() => break,
             _ = state.reload_notify.notified() => continue,
             _ = tokio::time::sleep(delay) => {
                 let fire_at = next.timestamp();
-                for job in snapshot.iter().filter(|job| job.cron.is_time_matching(&next).unwrap_or(false)) {
-                    maybe_spawn_job(&state, job.clone(), fire_at).await;
+                for job in snapshot.iter() {
+                    if state.shutdown.is_cancelled() {
+                        break;
+                    }
+                    if job.cron.is_time_matching(&next).unwrap_or(false) {
+                        maybe_spawn_job(&state, job.clone(), fire_at).await;
+                    }
                 }
             }
         }
@@ -261,22 +281,24 @@ async fn run_scheduler_loop(state: LoopState) {
 }
 
 async fn maybe_spawn_job(state: &LoopState, job: ScheduledJob, fired_at_unix: i64) {
-    {
+    let permit = {
         let mut running = state.running.lock().await;
+        if state.shutdown.is_cancelled() {
+            return;
+        }
         if running.contains(&job.name) {
             tracing::warn!(job = %job.name, "cron: job still running; skipping overlapping fire");
             return;
         }
+        let permit = match state.sem.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!(job = %job.name, "cron: global concurrency cap reached; skipping fire");
+                return;
+            }
+        };
         running.insert(job.name.clone());
-    }
-
-    let permit = match state.sem.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            state.running.lock().await.remove(&job.name);
-            tracing::warn!(job = %job.name, "cron: global concurrency cap reached; skipping fire");
-            return;
-        }
+        permit
     };
 
     let task = CronJobTask {
@@ -308,6 +330,226 @@ struct CronJobTask {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
+#[derive(Default)]
+struct CronRecorder {
+    span: ResponseSpanBuilder,
+    calls: Vec<ToolCallInfo>,
+    replay: Vec<ProviderReplayItem>,
+    committed: Vec<String>,
+}
+
+impl CronRecorder {
+    async fn push(
+        &mut self,
+        chunk: &StreamChunk,
+        conversation: &mut Conversation,
+        storage: &dyn StoragePort,
+    ) {
+        match chunk {
+            StreamChunk::Text { content, .. } => self.span.text(content),
+            StreamChunk::Thinking { content, .. } => self.span.reasoning(content),
+            StreamChunk::ProviderReplay { item } => {
+                self.replay.push(item.clone());
+                self.span.replay();
+            }
+            StreamChunk::ToolUse { id, name, input } => {
+                self.calls.push(ToolCallInfo {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    result: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    status: None,
+                    provider_id: Some(id.clone()),
+                });
+                self.span.call();
+            }
+            StreamChunk::ToolResult {
+                id,
+                content,
+                is_error,
+                diff,
+                images,
+                ..
+            } => {
+                let result = ToolResultInfo {
+                    content: content.clone(),
+                    is_error: *is_error,
+                    diff: diff.clone(),
+                    images: images.clone(),
+                };
+                let unanswered = |call: &&mut ToolCallInfo| {
+                    call.wire_id() == id.as_str() && call.result.is_none()
+                };
+                if let Some(call) = self.calls.iter_mut().rev().find(unanswered) {
+                    call.result = Some(result);
+                } else if let Some(call) = conversation
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .filter(|message| self.committed.contains(&message.id))
+                    .flat_map(|message| message.tool_calls.iter_mut().rev())
+                    .find(unanswered)
+                {
+                    call.result = Some(result);
+                    save_cron_session(conversation, storage).await;
+                }
+            }
+            StreamChunk::TurnComplete { stop_reason } if *stop_reason != StopReason::Cancelled => {
+                if !self.span.is_empty() || !self.calls.is_empty() || !self.replay.is_empty() {
+                    let span = self.span.finish();
+                    let mut blocks = Vec::with_capacity(self.replay.len() + 2);
+                    if let Some(reasoning) = &span.reasoning {
+                        blocks.push(ContentBlockType::Thinking(reasoning.clone()));
+                    }
+                    blocks.extend(self.replay.drain(..).map(ContentBlockType::ProviderReplay));
+                    let content = span.text.clone();
+                    blocks.push(ContentBlockType::ResponseSpan(span));
+                    let id = generate_message_id();
+                    self.committed.push(id.clone());
+                    conversation.messages.push(ChatMessage {
+                        id,
+                        role: MessageRole::Assistant,
+                        content,
+                        content_blocks: blocks,
+                        tool_calls: std::mem::take(&mut self.calls),
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        stop_reason: Some(stop_reason.clone()),
+                        origin: ChannelKind::Cron,
+                        ..Default::default()
+                    });
+                    save_cron_session(conversation, storage).await;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn save_cron_session(conversation: &mut Conversation, storage: &dyn StoragePort) {
+    conversation.updated_at = crate::domain::models::session_meta::now_unix();
+    conversation.last_response_at = Some(conversation.updated_at);
+    if let Err(error) = storage.save_conversation(conversation).await {
+        tracing::warn!(%error, "cron: saving session failed");
+    }
+}
+
+/// Only trusted values belong in a marker: the same text leaves the job
+/// through the session, shared completion, and external notification.
+#[derive(Clone, Copy)]
+enum CronMarker {
+    RuntimeUnavailable,
+    LedgerUnreadable,
+    BudgetReached(BudgetStop),
+    Failed,
+    Disconnected,
+    Timeout(u64),
+    Shutdown,
+}
+
+impl CronMarker {
+    fn with_reply(self, reply: &str) -> String {
+        let mut marker = match self {
+            Self::RuntimeUnavailable => "[cron: failed — runtime unavailable]".to_string(),
+            Self::LedgerUnreadable => "[cron: skipped — usage ledger unreadable]".to_string(),
+            Self::BudgetReached(stop) => format!(
+                "[cron: skipped — daily budget of ${:.2} reached (${:.2} spent today)]",
+                stop.limit_usd, stop.spent_usd
+            ),
+            Self::Failed => "[cron: failed — turn ended without a reply]".to_string(),
+            Self::Disconnected => "[cron: failed — Stream disconnected unexpectedly]".to_string(),
+            Self::Timeout(seconds) => format!("[cron: timed out after {seconds} s]"),
+            Self::Shutdown => "[cron: cancelled by daemon shutdown]".to_string(),
+        };
+        if !reply.is_empty() {
+            marker.push('\n');
+            marker.push_str(reply);
+        }
+        marker
+    }
+}
+
+fn record_cron_marker(conversation: &mut Conversation, content: String) {
+    conversation.messages.push(ChatMessage {
+        id: generate_message_id(),
+        role: MessageRole::Assistant,
+        content,
+        created_at: crate::domain::models::session_meta::now_unix(),
+        stop_reason: Some(StopReason::Cancelled),
+        synthetic: true,
+        origin: ChannelKind::Cron,
+        ..Default::default()
+    });
+}
+
+async fn finish_cron_job(
+    task: &CronJobTask,
+    conversation: &mut Conversation,
+    marker: Option<CronMarker>,
+    reply: String,
+) {
+    let marker = if task.shutdown.is_cancelled() {
+        Some(CronMarker::Shutdown)
+    } else {
+        marker
+    };
+    let marker_index = conversation.messages.len();
+    if let Some(marker) = marker {
+        record_cron_marker(conversation, marker.with_reply(&reply));
+    }
+    save_cron_session(conversation, task.storage.as_ref()).await;
+    let (marker_text, notification) = if task.shutdown.is_cancelled() {
+        (None, None)
+    } else {
+        let marker_text = conversation
+            .messages
+            .get(marker_index)
+            .map(|message| message.content.clone());
+        let notification = task.job.forward.then(|| {
+            let result = marker_text.as_deref().unwrap_or(&reply);
+            format!("[cron: {}] {result}", task.job.name)
+        });
+        (marker_text, notification)
+    };
+    if task.shutdown.is_cancelled() {
+        if !matches!(marker, Some(CronMarker::Shutdown)) {
+            // Shutdown may have begun while the final save was parked. Keep the
+            // partial reply locally, replacing any unpublished terminal marker.
+            let content = CronMarker::Shutdown.with_reply(&reply);
+            if let Some(message) = conversation.messages.get_mut(marker_index) {
+                message.content = content;
+            } else {
+                record_cron_marker(conversation, content);
+            }
+            save_cron_session(conversation, task.storage.as_ref()).await;
+        }
+    } else {
+        if task
+            .completion_tx
+            .send(CronCompletion {
+                job_name: task.job.name.clone(),
+                result_text: marker_text.unwrap_or(reply),
+            })
+            .is_err()
+        {
+            tracing::warn!(job = %task.job.name, "cron: completion dropped — forwarder exited");
+        }
+        if let Some(text) = notification {
+            tokio::select! {
+                biased;
+                _ = task.shutdown.cancelled() => {}
+                result = async { task.channel.notify(&text).await } => {
+                    if let Err(error) = result {
+                        tracing::warn!(job = %task.job.name, %error, "cron: forward failed");
+                    }
+                }
+            }
+        }
+    }
+    task.running.lock().await.remove(&task.job.name);
+}
+
 async fn run_job(task: CronJobTask) {
     let session_id = format!(
         "cron-{}-{}",
@@ -315,16 +557,50 @@ async fn run_job(task: CronJobTask) {
         task.fired_at_unix
     );
     let mut conversation = new_cron_conversation(&session_id, &task.job.name, task.fired_at_unix);
-    let (job_tx, mut job_rx) = mpsc::unbounded_channel();
-    let child_cancel = task.shutdown.child_token();
     let rt = match task.core.ensure_runtime().await {
         Ok(rt) => rt,
-        Err(e) => {
-            tracing::warn!(job = %task.job.name, error = %e, "cron: runtime unavailable; job skipped");
-            task.running.lock().await.remove(&task.job.name);
+        Err(error) => {
+            tracing::warn!(job = %task.job.name, %error, "cron: composing job runtime failed");
+            finish_cron_job(
+                &task,
+                &mut conversation,
+                Some(CronMarker::RuntimeUnavailable),
+                String::new(),
+            )
+            .await;
             return;
         }
     };
+    let config = task.core.config.load_full();
+    if config.budget.daily_limit_usd.is_some_and(f64::is_finite) {
+        let marker = match rt
+            .usage_ledger
+            .read_since(crate::infrastructure::clock_util::today_start_unix_ms())
+            .await
+        {
+            Ok(entries) => daily_budget_stop(&entries, &config).map(CronMarker::BudgetReached),
+            Err(error) => {
+                tracing::warn!(job = %task.job.name, %error, "cron: usage ledger unreadable");
+                Some(CronMarker::LedgerUnreadable)
+            }
+        };
+        if let Some(marker) = marker {
+            finish_cron_job(&task, &mut conversation, Some(marker), String::new()).await;
+            return;
+        }
+    }
+    if task.shutdown.is_cancelled() {
+        finish_cron_job(
+            &task,
+            &mut conversation,
+            Some(CronMarker::Shutdown),
+            String::new(),
+        )
+        .await;
+        return;
+    }
+    let (job_tx, mut job_rx) = mpsc::unbounded_channel();
+    let child_cancel = task.shutdown.child_token();
     let handle = rt
         .drive_turn(
             task.job.prompt.clone(),
@@ -335,125 +611,100 @@ async fn run_job(task: CronJobTask) {
             child_cancel.clone(),
         )
         .await;
-    if let Err(e) = task.storage.save_conversation(&conversation).await {
-        tracing::warn!(job = %task.job.name, error = %e, "cron: saving user message failed");
-    }
-
-    let mut assistant = String::new();
-    let mut stop_reason = StopReason::EndTurn;
-    let mut completed = false;
-    let timeout = tokio::time::sleep(task.job_timeout);
-    tokio::pin!(timeout);
-    loop {
+    drop(job_tx);
+    // A forced abort of this job must not detach the turn it spawned.
+    let mut producer = AbortOnDropHandle::new(handle);
+    let _cancel_on_drop = child_cancel.drop_guard_ref();
+    let duration = task
+        .job
+        .timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(task.job_timeout);
+    let interrupt = async {
         tokio::select! {
-            maybe = job_rx.recv() => {
-                let Some(event) = maybe else { break };
-                if let AppEvent::ProviderChunk { chunk, .. } = event {
-                    match chunk {
-                        StreamChunk::Text { content, .. } => assistant.push_str(&content),
-                        StreamChunk::ToolUse { id, name, .. } => assistant.push_str(&format!("\n[tool use: {name} (id: {id})]\n")),
-                        StreamChunk::ToolResult { content, .. } => assistant.push_str(&format!("[tool result: {content}]\n")),
-                        StreamChunk::TurnComplete { stop_reason: sr } => {
-                            stop_reason = sr;
-                            completed = true;
-                            break;
+            biased;
+            _ = task.shutdown.cancelled() => CronMarker::Shutdown,
+            _ = tokio::time::sleep(duration) => CronMarker::Timeout(duration.as_secs()),
+        }
+    };
+    let mut recorder = CronRecorder::default();
+    let mut reply = TurnReplyFold::default();
+    let mut terminal = None;
+    let mut disconnected = false;
+    let interrupted = {
+        let record = async {
+            if let Err(error) = task.storage.save_conversation(&conversation).await {
+                tracing::warn!(job = %task.job.name, %error, "cron: saving user message failed");
+            }
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = child_cancel.cancelled() => break,
+                    event = job_rx.recv() => event,
+                };
+                match event {
+                    Some(AppEvent::ProviderChunk { chunk, .. }) => {
+                        reply.push(&chunk);
+                        if let StreamChunk::Error { content } = &chunk {
+                            tracing::warn!(job = %task.job.name, %content, "cron: turn stream error");
                         }
-                        StreamChunk::Error { content } => assistant.push_str(&content),
-                        _ => {}
+                        if let StreamChunk::TurnComplete { stop_reason } = &chunk {
+                            if *stop_reason != StopReason::ToolUse {
+                                terminal = Some(stop_reason.clone());
+                            }
+                        }
+                        recorder
+                            .push(&chunk, &mut conversation, task.storage.as_ref())
+                            .await;
                     }
+                    Some(AppEvent::CronStreamDisconnected) => disconnected = true,
+                    Some(AppEvent::SystemNotice {
+                        level: crate::domain::models::NoticeLevel::Error,
+                        message,
+                        ..
+                    }) => {
+                        tracing::warn!(job = %task.job.name, %message, "cron: turn error notice");
+                    }
+                    Some(_) => {}
+                    None => break,
                 }
             }
-            _ = &mut timeout => {
-                child_cancel.cancel();
-                handle.abort();
-                tracing::warn!(job = %task.job.name, "cron: job timed out; aborted");
-                break;
-            }
-            _ = task.shutdown.cancelled() => {
-                child_cancel.cancel();
-                handle.abort();
-                tracing::warn!(job = %task.job.name, "cron: job cancelled by daemon shutdown");
-                break;
-            }
-        }
-    }
-    // Always await the drive_turn handle after abort for defense-in-depth (review patch 4).
-    if !completed {
-        handle.abort();
-    }
-    let _ = handle.await;
+        };
+        tokio::pin!(interrupt, record);
 
-    if completed {
-        conversation.messages.push(ChatMessage {
-            id: generate_message_id(),
-            role: MessageRole::Assistant,
-            content: assistant.clone(),
-            content_blocks: vec![],
-            tool_calls: vec![],
-            created_at: crate::domain::models::session_meta::now_unix(),
-            token_count: None,
-            stop_reason: Some(stop_reason),
-            synthetic: false,
-            images: vec![],
-            origin: ChannelKind::Cron,
-            authorship: crate::domain::models::Authorship::HumanWritten,
-            send_authorization: crate::domain::models::SendAuthorization::Unknown,
-            retracted_at_ms: None,
-            history_source: Default::default(),
-        });
-        conversation.updated_at = crate::domain::models::session_meta::now_unix();
-        conversation.last_response_at = Some(conversation.updated_at);
-        if let Err(e) = task.storage.save_conversation(&conversation).await {
-            tracing::warn!(job = %task.job.name, error = %e, "cron: saving completed session failed");
+        // Race the whole recorder, not just channel receive: a storage write
+        // may park after consuming a chunk while the producer is still active.
+        let mut interrupted = tokio::select! {
+            biased;
+            marker = &mut interrupt => Some(marker),
+            () = &mut record => None,
+        };
+        let recording_pending = interrupted.is_some();
+        if !recording_pending {
+            interrupted = tokio::select! {
+                biased;
+                marker = &mut interrupt => Some(marker),
+                _ = &mut producer => None,
+            };
         }
-    } else {
-        // Timed out or cancelled: persist session with a diagnostic marker (review patch 3).
-        conversation.messages.push(ChatMessage {
-            id: generate_message_id(),
-            role: MessageRole::Assistant,
-            content: if assistant.is_empty() {
-                "[cron: timed out or cancelled — no response]".to_string()
-            } else {
-                format!("[cron: timed out or cancelled — partial]\n{assistant}")
-            },
-            content_blocks: vec![],
-            tool_calls: vec![],
-            created_at: crate::domain::models::session_meta::now_unix(),
-            token_count: None,
-            stop_reason: Some(stop_reason),
-            synthetic: true,
-            images: vec![],
-            origin: ChannelKind::Cron,
-            authorship: crate::domain::models::Authorship::HumanWritten,
-            send_authorization: crate::domain::models::SendAuthorization::Unknown,
-            retracted_at_ms: None,
-            history_source: Default::default(),
-        });
-        conversation.updated_at = crate::domain::models::session_meta::now_unix();
-        conversation.last_response_at = Some(conversation.updated_at);
-        let _ = task.storage.save_conversation(&conversation).await;
-    }
-
-    // Only send completion and forward on successful completion (review patch 3).
-    if completed {
-        if task
-            .completion_tx
-            .send(CronCompletion {
-                job_name: task.job.name.clone(),
-                result_text: assistant.clone(),
-            })
-            .is_err()
-        {
-            tracing::warn!(job = %task.job.name, "cron: completion dropped — forwarder exited");
-        }
-        if task.job.forward {
-            let text = format!("[cron: {}] {}", task.job.name, assistant);
-            if let Err(e) = task.channel.notify(&text).await {
-                tracing::warn!(job = %task.job.name, error = %e, "cron: forward failed");
+        if interrupted.is_some() {
+            child_cancel.cancel();
+            producer.abort();
+            let _ = producer.await;
+            if recording_pending {
+                // Finish the same ordered save before writing the marker.
+                // The cancelled token prevents folding any more chunks.
+                record.await;
             }
         }
-    }
-    task.running.lock().await.remove(&task.job.name);
+        interrupted
+    };
+    let marker = interrupted.or(match terminal {
+        Some(StopReason::EndTurn | StopReason::MaxTokens) => None,
+        _ if disconnected => Some(CronMarker::Disconnected),
+        _ => Some(CronMarker::Failed),
+    });
+    finish_cron_job(&task, &mut conversation, marker, reply.into_string()).await;
 }
 
 fn new_cron_conversation(session_id: &str, job_name: &str, created_at: i64) -> Conversation {
@@ -526,6 +777,16 @@ pub fn parse_jobs(jobs: Vec<CronJob>) -> Vec<ScheduledJob> {
                 tracing::warn!("⚠ Cron job '{}': empty prompt. Skipped.", job.name);
                 return None;
             }
+            if job
+                .timeout_secs
+                .is_some_and(|secs| !(1..=3600).contains(&secs))
+            {
+                tracing::warn!(
+                    "Cron job '{}': timeout_secs must be in 1..=3600. Skipped.",
+                    job.name
+                );
+                return None;
+            }
             if !seen.insert(job.name.clone()) {
                 tracing::warn!("⚠ Cron job '{}': duplicate name. Skipped.", job.name);
                 return None;
@@ -545,6 +806,7 @@ pub fn parse_jobs(jobs: Vec<CronJob>) -> Vec<ScheduledJob> {
                 cron,
                 prompt: job.prompt,
                 forward: job.forward,
+                timeout_secs: job.timeout_secs,
             })
         })
         .collect()
@@ -568,7 +830,7 @@ mod tests {
         NoOpUsageLedger,
     };
     use crate::adapters::toolset_adapter::ToolSetAdapter;
-    use crate::domain::errors::ProviderError;
+    use crate::domain::errors::{ProviderError, StorageError};
     use crate::domain::models::provider::ModelDescriptor;
     use crate::domain::models::{AppConfig, CompletionOptions, MemoryFact, Message, StreamChunk};
     use crate::domain::ports::{
@@ -581,7 +843,7 @@ mod tests {
     use futures::stream::BoxStream;
     use std::collections::HashMap;
     use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
     #[derive(Default)]
     struct RecordingChannel {
@@ -970,26 +1232,66 @@ mod tests {
             crate::infrastructure::paths::sessions_dir(workspace),
             workspace.to_path_buf(),
         ));
+        let core = scripted_core_with_storage(workspace, provider, storage.clone());
+        (core, storage)
+    }
+
+    fn scripted_core_with_storage(
+        workspace: &Path,
+        provider: Arc<dyn StreamingProvider>,
+        storage: Arc<dyn StoragePort>,
+    ) -> Arc<DaemonCore> {
         let ws = workspace.to_path_buf();
         let storage_for_factory = storage.clone();
-        let provider_for_factory = provider.clone();
-        let core = DaemonCore::new(
+        Arc::new(DaemonCore::new(
             workspace.to_path_buf(),
             Arc::new(ArcSwap::from_pointee(AppConfig::default())),
             Arc::new(NoOpMemory),
-            storage.clone(),
+            storage,
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
             Arc::new(crate::adapters::rap::PeerTopicStore::new()),
             Box::new(move || {
                 Ok(scripted_runtime(
-                    provider_for_factory.clone(),
+                    provider.clone(),
                     storage_for_factory.clone(),
                     &ws,
                 ))
             }),
-        );
-        (Arc::new(core), storage)
+        ))
+    }
+
+    // Expose the real filesystem Read tool under the same wire name as AC6.
+    struct C2bReadAlias(Arc<dyn ToolSetPort>);
+
+    #[async_trait::async_trait]
+    impl ToolSetPort for C2bReadAlias {
+        fn available_tools(&self) -> Vec<crate::domain::models::ToolDefinition> {
+            let mut tools = self.0.available_tools();
+            let mut read = tools
+                .iter()
+                .find(|tool| tool.name == "Read")
+                .unwrap()
+                .clone();
+            read.name = "read_file".into();
+            tools.push(read);
+            tools
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            input: serde_json::Value,
+            cancel: CancellationToken,
+        ) -> Result<crate::domain::models::ToolResult, crate::domain::errors::ToolError> {
+            self.0
+                .execute(
+                    if name == "read_file" { "Read" } else { name },
+                    input,
+                    cancel,
+                )
+                .await
+        }
     }
 
     fn scripted_runtime_with_memory_tools(
@@ -998,8 +1300,16 @@ mod tests {
         workspace: &Path,
         memory_slot: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>>,
         memory_write_gate: Arc<tokio::sync::RwLock<()>>,
+        read_file_alias: bool,
     ) -> Arc<DaemonTurnRuntime> {
-        let security: Arc<dyn SecurityPort> = Arc::new(NoOpSecurity);
+        let security: Arc<dyn SecurityPort> = if read_file_alias {
+            let security =
+                crate::adapters::security_adapter::SecurityAdapter::new(workspace.to_path_buf());
+            security.set_mode(crate::domain::models::PermissionMode::Yolo);
+            Arc::new(security)
+        } else {
+            Arc::new(NoOpSecurity)
+        };
         let mut adapter = ToolSetAdapter::new(
             workspace.to_path_buf(),
             storage.clone(),
@@ -1012,7 +1322,11 @@ mod tests {
             )),
         );
         adapter.set_memory(memory_slot, memory_write_gate);
-        let tools: Arc<dyn ToolSetPort> = Arc::new(adapter);
+        let tools: Arc<dyn ToolSetPort> = if read_file_alias {
+            Arc::new(C2bReadAlias(Arc::new(adapter)))
+        } else {
+            Arc::new(adapter)
+        };
         let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
         let tool_scheduler =
             ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 64);
@@ -1050,6 +1364,7 @@ mod tests {
         provider: Arc<dyn StreamingProvider>,
         memory_slot: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>>,
         memory_write_gate: Arc<tokio::sync::RwLock<()>>,
+        read_file_alias: bool,
     ) -> (Arc<DaemonCore>, Arc<dyn StoragePort>) {
         let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
             crate::infrastructure::paths::sessions_dir(workspace),
@@ -1076,6 +1391,7 @@ mod tests {
                     &ws,
                     memory_slot_for_factory.clone(),
                     gate_for_factory.clone(),
+                    read_file_alias,
                 ))
             }),
         );
@@ -1091,12 +1407,14 @@ mod tests {
                 schedule: "0 9 * * *".into(),
                 prompt: "Brief me".into(),
                 forward: true,
+                timeout_secs: None,
             },
             CronJob {
                 name: "hourly".into(),
                 schedule: "0 * * * *".into(),
                 prompt: "Check health".into(),
                 forward: false,
+                timeout_secs: None,
             },
         ]);
         assert_eq!(jobs.len(), 2);
@@ -1120,12 +1438,14 @@ mod tests {
                 schedule: "not cron".into(),
                 prompt: "x".into(),
                 forward: false,
+                timeout_secs: None,
             },
             CronJob {
                 name: "b".into(),
                 schedule: "99 99 99 99 99".into(),
                 prompt: "y".into(),
                 forward: false,
+                timeout_secs: None,
             },
         ]);
         assert!(jobs.is_empty(), "all-invalid schedules → no jobs");
@@ -1353,6 +1673,7 @@ prompt = "nope"
                 cron: Cron::from_str("0 9 * * *").unwrap(),
                 prompt: "alpha".into(),
                 forward: false,
+                timeout_secs: None,
             },
             fired_at_unix: 100,
             core: core.clone(),
@@ -1372,6 +1693,7 @@ prompt = "nope"
                 cron: Cron::from_str("0 9 * * *").unwrap(),
                 prompt: "beta".into(),
                 forward: false,
+                timeout_secs: None,
             },
             fired_at_unix: 101,
             core: core.clone(),
@@ -1457,6 +1779,7 @@ prompt = "nope"
             cron: Cron::from_str("0 9 * * *").unwrap(),
             prompt: "noop".into(),
             forward: false,
+            timeout_secs: None,
         };
         state.running.lock().await.insert("busy".into());
         maybe_spawn_job(&state, running_job, 1).await;
@@ -1469,6 +1792,7 @@ prompt = "nope"
             cron: Cron::from_str("0 9 * * *").unwrap(),
             prompt: "noop".into(),
             forward: false,
+            timeout_secs: None,
         };
         maybe_spawn_job(&state, capped_job, 2).await;
         assert_eq!(state.inflight.lock().await.len(), 0);
@@ -1505,6 +1829,7 @@ prompt = "nope"
                 cron: Cron::from_str("0 9 * * *").unwrap(),
                 prompt: "report".into(),
                 forward: true,
+                timeout_secs: None,
             },
             fired_at_unix: 500,
             core,
@@ -1572,6 +1897,7 @@ prompt = "nope"
                 cron: Cron::from_str("0 9 * * *").unwrap(),
                 prompt: "report".into(),
                 forward: false,
+                timeout_secs: None,
             },
             fired_at_unix: 600,
             core,
@@ -1621,6 +1947,7 @@ prompt = "nope"
             provider,
             memory_slot.clone(),
             memory_write_gate.clone(),
+            false,
         );
         let running = Arc::new(Mutex::new(std::collections::HashSet::new()));
         running.lock().await.insert("job-fact".into());
@@ -1635,6 +1962,7 @@ prompt = "nope"
                 cron: Cron::from_str("0 9 * * *").unwrap(),
                 prompt: "fact".into(),
                 forward: false,
+                timeout_secs: None,
             },
             fired_at_unix: 701,
             core,
@@ -1724,6 +2052,7 @@ prompt = "nope"
             provider,
             memory_slot.clone(),
             memory_write_gate.clone(),
+            false,
         );
 
         let running = Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -1743,6 +2072,7 @@ prompt = "nope"
                     cron: Cron::from_str("0 9 * * *").unwrap(),
                     prompt: (*name).to_string(),
                     forward: false,
+                    timeout_secs: None,
                 },
                 fired_at_unix: 800 + i as i64,
                 core: core.clone(),
@@ -1819,7 +2149,7 @@ prompt = "nope"
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_loop_cancels_inflight_tasks_within_timeout() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
@@ -1839,7 +2169,7 @@ prompt = "nope"
         adapter.inflight.lock().await.push(tokio::spawn(async {
             futures::future::pending::<()>().await
         }));
-        tokio::time::timeout(Duration::from_millis(250), adapter.shutdown_loop())
+        tokio::time::timeout(Duration::from_secs(6), adapter.shutdown_loop())
             .await
             .expect("shutdown bounded")
             .unwrap();
@@ -1910,4 +2240,1502 @@ prompt = "nope"
 
     use chrono::Datelike;
     use chrono::Timelike;
+
+    struct C2bWholeTurnProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for C2bWholeTurnProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            let chunks = if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                vec![
+                    StreamChunk::Text {
+                        content: "Checking.".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::ToolUse {
+                        id: "t1".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({"file_path": "secret.txt"}),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    StreamChunk::Text {
+                        content: "Answer: 42".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(futures::stream::iter(chunks).boxed())
+        }
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "c2b-whole-turn".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: Duration::ZERO,
+            })
+        }
+    }
+
+    struct C2bSlowProvider {
+        started: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for C2bSlowProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            self.started.notify_one();
+            tokio::time::sleep(Duration::from_secs(700)).await;
+            Ok(futures::stream::iter(vec![
+                StreamChunk::Text {
+                    content: "too late".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "c2b-slow".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: Duration::ZERO,
+            })
+        }
+    }
+
+    // Let the real scheduler choose its next wall-clock minute, then advance Tokio's
+    // clock to that deadline. Empty the next snapshot so advancing 600 virtual
+    // seconds cannot cause repeat fires while chrono::Local remains wall-clock based.
+    async fn c2b_fire_one(adapter: &CronSchedulerAdapter) -> String {
+        adapter.start_loop().await.unwrap();
+        let fire_at = loop {
+            if let Some((_, Some(ts))) = adapter.next_runs().await.first() {
+                break *ts;
+            }
+            tokio::task::yield_now().await;
+        };
+        adapter.jobs.store(Arc::new(vec![]));
+        let delay_ms = (fire_at * 1000 - chrono::Local::now().timestamp_millis()).max(0) as u64;
+        tokio::time::advance(Duration::from_millis(delay_ms + 10)).await;
+        format!("cron-briefing-{fire_at}")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_scheduler_persists_and_forwards_the_whole_tool_turn() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::write(tmp.path().join("secret.txt"), "SECRET-RESULT-C2B").unwrap();
+        let provider: Arc<dyn StreamingProvider> = Arc::new(C2bWholeTurnProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let memory: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(NoOpMemory);
+        let (core, storage) = scripted_core_with_memory_tools(
+            tmp.path(),
+            provider,
+            Arc::new(ArcSwap::from_pointee(memory)),
+            Arc::new(tokio::sync::RwLock::new(())),
+            true,
+        );
+        let channel = Arc::new(RecordingChannel::default());
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(
+            &path,
+            "[[jobs]]\nname='briefing'\nschedule='* * * * *'\nprompt='report'\nforward=true\n",
+        )
+        .unwrap();
+        let adapter =
+            CronSchedulerAdapter::load(path, core, completion_tx, channel.clone(), storage.clone())
+                .await
+                .unwrap();
+        let session_id = c2b_fire_one(&adapter).await;
+        let completion = tokio::time::timeout(Duration::from_secs(10), completion_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // Completion precedes channel.notify; wait until this job leaves the running set.
+        while adapter.running.lock().await.contains("briefing") {
+            tokio::task::yield_now().await;
+        }
+        let reply = "Checking.\n[tool use: read_file (id: t1)]\nAnswer: 42";
+        assert_eq!(completion.job_name, "briefing");
+        assert_eq!(completion.result_text, reply);
+        assert_eq!(
+            *channel.sent.lock().await,
+            vec![format!("[cron: briefing] {reply}")]
+        );
+        let session = storage
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[0].content, "report");
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+        assert_eq!(session.messages[1].stop_reason, Some(StopReason::ToolUse));
+        assert_eq!(session.messages[1].tool_calls[0].wire_id(), "t1");
+        let reloaded = storage
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.messages[1].tool_calls[0].id,
+            reloaded.messages[1].tool_calls[0].id
+        );
+        let result = session.messages[1].tool_calls[0].result.as_ref().unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("SECRET-RESULT-C2B"));
+        assert_eq!(session.messages[2].role, MessageRole::Assistant);
+        assert_eq!(session.messages[2].content, "Answer: 42");
+        assert_eq!(session.messages[2].stop_reason, Some(StopReason::EndTurn));
+        let history = crate::domain::services::message_builder::build_api_messages(&session);
+        assert_eq!(history.len(), 4);
+        assert_eq!(
+            history.iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![
+                MessageRole::User,
+                MessageRole::Assistant,
+                MessageRole::User,
+                MessageRole::Assistant
+            ]
+        );
+        assert_eq!(history[1].tool_uses[0].id, "t1");
+        assert_eq!(history[2].tool_results[0].tool_use_id, "t1");
+        assert!(
+            history[2].tool_results[0]
+                .content
+                .contains("SECRET-RESULT-C2B")
+        );
+        assert_eq!(history[3].content, "Answer: 42");
+        adapter.shutdown_loop().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_scheduler_default_timeout_is_ten_minutes_and_is_reported() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let provider: Arc<dyn StreamingProvider> = Arc::new(C2bSlowProvider {
+            started: started.clone(),
+        });
+        let (core, storage) = scripted_core(tmp.path(), provider);
+        let channel = Arc::new(RecordingChannel::default());
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(
+            &path,
+            "[[jobs]]\nname='briefing'\nschedule='* * * * *'\nprompt='report'\nforward=true\n",
+        )
+        .unwrap();
+        let adapter =
+            CronSchedulerAdapter::load(path, core, completion_tx, channel.clone(), storage.clone())
+                .await
+                .unwrap();
+        let session_id = c2b_fire_one(&adapter).await;
+        started.notified().await;
+        // Wait for the user-message save before stepping the job's deadline.
+        while storage
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(599)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            adapter.running.lock().await.contains("briefing"),
+            "job must remain live until 600 seconds"
+        );
+        assert!(
+            completion_rx.try_recv().is_err(),
+            "job must remain live until 600 seconds"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let completion = tokio::time::timeout(Duration::from_secs(5), completion_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        while adapter.running.lock().await.contains("briefing") {
+            tokio::task::yield_now().await;
+        }
+        let marker = "[cron: timed out after 600 s]";
+        assert_eq!(completion.result_text, marker);
+        assert_eq!(
+            *channel.sent.lock().await,
+            vec![format!("[cron: briefing] {marker}")]
+        );
+        let session = storage
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|m| m.synthetic && m.content == marker)
+        );
+        adapter.shutdown_loop().await.unwrap();
+    }
+    #[test]
+    fn c2b_timeout_validation_accepts_boundaries_and_rejects_outside() {
+        let jobs = [0, 1, 3600, 3601]
+            .into_iter()
+            .map(|timeout_secs| CronJob {
+                name: format!("job-{timeout_secs}"),
+                schedule: "* * * * *".into(),
+                prompt: "test".into(),
+                forward: false,
+                timeout_secs: Some(timeout_secs),
+            })
+            .collect();
+        let jobs = parse_jobs(jobs);
+        assert_eq!(
+            jobs.iter().map(|job| job.timeout_secs).collect::<Vec<_>>(),
+            vec![Some(1), Some(3600)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_job_timeout_override_is_reported() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let provider: Arc<dyn StreamingProvider> = Arc::new(C2bSlowProvider {
+            started: started.clone(),
+        });
+        let (core, storage) = scripted_core(tmp.path(), provider);
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(&path, "[[jobs]]\nname='briefing'\nschedule='* * * * *'\nprompt='report'\nforward=true\ntimeout_secs=2\n").unwrap();
+        let adapter = CronSchedulerAdapter::load(path, core, tx, channel.clone(), storage.clone())
+            .await
+            .unwrap();
+        let session = c2b_fire_one(&adapter).await;
+        started.notified().await;
+        while storage.load_conversation(&session).await.unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let result = rx.recv().await.unwrap().result_text;
+        while adapter.running.lock().await.contains("briefing") {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(result, "[cron: timed out after 2 s]");
+        assert_eq!(
+            *channel.sent.lock().await,
+            vec![format!("[cron: briefing] {result}")]
+        );
+        assert!(
+            storage
+                .load_conversation(&session)
+                .await
+                .unwrap()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.synthetic && m.content == result)
+        );
+        adapter.shutdown_loop().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_shutdown_saves_marker_without_completion_or_forward() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let provider: Arc<dyn StreamingProvider> = Arc::new(C2bSlowProvider {
+            started: started.clone(),
+        });
+        let (core, storage) = scripted_core(tmp.path(), provider);
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(
+            &path,
+            "[[jobs]]\nname='briefing'\nschedule='* * * * *'\nprompt='report'\nforward=true\n",
+        )
+        .unwrap();
+        let adapter = CronSchedulerAdapter::load(path, core, tx, channel.clone(), storage.clone())
+            .await
+            .unwrap();
+        let session = c2b_fire_one(&adapter).await;
+        started.notified().await;
+        let before = tokio::time::Instant::now();
+        adapter.shutdown_loop().await.unwrap();
+        assert!(before.elapsed() <= Duration::from_secs(5));
+        assert!(rx.try_recv().is_err());
+        assert!(channel.sent.lock().await.is_empty());
+        let session = storage.load_conversation(&session).await.unwrap().unwrap();
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|m| m.synthetic && m.content == "[cron: cancelled by daemon shutdown]")
+        );
+    }
+
+    const PROVIDER_START_CANARY: &str = "C2b-raw-provider-start-canary";
+    const PROVIDER_STREAM_CANARY: &str = "C2b-raw-provider-stream-canary";
+    const COMPOSITION_CANARY: &str = "C2b-raw-composition-canary";
+
+    #[derive(Clone, Copy)]
+    enum C2bFailureCase {
+        InitialRequest,
+        Stream(&'static str),
+        SecondResponseDisconnected,
+    }
+
+    struct C2bFailureProvider {
+        calls: AtomicUsize,
+        case: C2bFailureCase,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for C2bFailureProvider {
+        async fn stream_completion(
+            &self,
+            _: Vec<Message>,
+            _: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            let chunks = match self.case {
+                C2bFailureCase::InitialRequest => {
+                    return Err(ProviderError::ConnectionFailed(
+                        PROVIDER_START_CANARY.into(),
+                    ));
+                }
+                C2bFailureCase::Stream(detail) => vec![
+                    StreamChunk::Text {
+                        content: "Partial response".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::Error {
+                        content: detail.into(),
+                    },
+                ],
+                C2bFailureCase::SecondResponseDisconnected
+                    if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 =>
+                {
+                    vec![
+                        StreamChunk::Text {
+                            content: "Checking.".into(),
+                            parent_tool_use_id: None,
+                        },
+                        StreamChunk::ToolUse {
+                            id: "t1".into(),
+                            name: "read_file".into(),
+                            input: serde_json::json!({"file_path": "secret.txt"}),
+                        },
+                        StreamChunk::TurnComplete {
+                            stop_reason: StopReason::ToolUse,
+                        },
+                    ]
+                }
+                C2bFailureCase::SecondResponseDisconnected => vec![],
+            };
+            Ok(futures::stream::iter(chunks).boxed())
+        }
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "c2b-failure".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: Duration::ZERO,
+            })
+        }
+    }
+
+    async fn c2b_failure_case(case: C2bFailureCase, expected: &str, canary: Option<&str>) {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::write(tmp.path().join("secret.txt"), "SECRET-RESULT-C2B").unwrap();
+        let provider: Arc<dyn StreamingProvider> = Arc::new(C2bFailureProvider {
+            calls: AtomicUsize::new(0),
+            case,
+        });
+        let memory: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(NoOpMemory);
+        let (core, storage) = scripted_core_with_memory_tools(
+            tmp.path(),
+            provider,
+            Arc::new(ArcSwap::from_pointee(memory)),
+            Arc::new(tokio::sync::RwLock::new(())),
+            true,
+        );
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(
+            &path,
+            "[[jobs]]\nname='briefing'\nschedule='* * * * *'\nprompt='report'\nforward=true\n",
+        )
+        .unwrap();
+        let adapter = CronSchedulerAdapter::load(path, core, tx, channel.clone(), storage.clone())
+            .await
+            .unwrap();
+        c2b_assert_failure_report(
+            &adapter,
+            storage.as_ref(),
+            &channel,
+            &mut rx,
+            expected,
+            canary,
+        )
+        .await;
+    }
+
+    async fn c2b_assert_failure_report(
+        adapter: &CronSchedulerAdapter,
+        storage: &dyn StoragePort,
+        channel: &RecordingChannel,
+        rx: &mut mpsc::UnboundedReceiver<CronCompletion>,
+        expected: &str,
+        canary: Option<&str>,
+    ) {
+        let session_id = c2b_fire_one(adapter).await;
+        let completion = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("cron completion deadline")
+            .expect("completion channel open");
+        while adapter.running.lock().await.contains("briefing") {
+            tokio::task::yield_now().await;
+        }
+        adapter.shutdown_loop().await.unwrap();
+        assert_eq!(completion.job_name, "briefing");
+        assert_eq!(completion.result_text, expected);
+        assert!(!completion.result_text.contains("SECRET-RESULT-C2B"));
+        let sent = channel.sent.lock().await;
+        assert_eq!(&*sent, &[format!("[cron: briefing] {expected}")]);
+        let session = storage
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let markers: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|message| message.synthetic)
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(markers, [expected]);
+        if let Some(canary) = canary {
+            assert!(!completion.result_text.contains(canary));
+            assert!(
+                sent.iter()
+                    .all(|notification| !notification.contains(canary))
+            );
+            assert!(!serde_json::to_string(&session).unwrap().contains(canary));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_provider_error_is_failed_not_timeout() {
+        c2b_failure_case(
+            C2bFailureCase::InitialRequest,
+            "[cron: failed — turn ended without a reply]",
+            Some(PROVIDER_START_CANARY),
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_disconnected_second_response_reports_partial_reply() {
+        c2b_failure_case(
+            C2bFailureCase::SecondResponseDisconnected,
+            "[cron: failed — Stream disconnected unexpectedly]\nChecking.\n[tool use: read_file (id: t1)]\n",
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_stream_error_detail_is_local() {
+        c2b_failure_case(
+            C2bFailureCase::Stream(PROVIDER_STREAM_CANARY),
+            "[cron: failed — turn ended without a reply]\nPartial response",
+            Some(PROVIDER_STREAM_CANARY),
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_stream_error_cannot_spoof_trusted_disconnect() {
+        const SPOOFED_DISCONNECT: &str = "Stream disconnected unexpectedly";
+        c2b_failure_case(
+            C2bFailureCase::Stream(SPOOFED_DISCONNECT),
+            "[cron: failed — turn ended without a reply]\nPartial response",
+            Some(SPOOFED_DISCONNECT),
+        )
+        .await;
+    }
+
+    fn c2b_forwarding_briefing(
+        workspace: &Path,
+        core: Arc<DaemonCore>,
+        tx: mpsc::UnboundedSender<CronCompletion>,
+        channel: Arc<dyn ChannelPort>,
+        storage: Arc<dyn StoragePort>,
+    ) -> CronSchedulerAdapter {
+        CronSchedulerAdapter::new_loaded(
+            workspace.join("cron.toml"),
+            vec![ScheduledJob {
+                name: "briefing".into(),
+                cron: Cron::from_str("* * * * *").unwrap(),
+                prompt: "report".into(),
+                forward: true,
+                timeout_secs: None,
+            }],
+            core,
+            tx,
+            channel,
+            storage,
+            DEFAULT_JOB_TIMEOUT,
+            1,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_runtime_composition_error_is_local() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ws = tmp.path();
+        let storage = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(ws),
+            ws.to_path_buf(),
+        ));
+        let core = Arc::new(DaemonCore::new(
+            ws.to_path_buf(),
+            Arc::new(ArcSwap::from_pointee(AppConfig::default())),
+            Arc::new(NoOpMemory),
+            storage.clone(),
+            Arc::new(NoOpSecurity),
+            Arc::new(NoOpPersona),
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Box::new(|| {
+                Err(
+                    crate::domain::errors::AdapterCompositionError::AdapterConstructionFailed {
+                        port: crate::domain::models::PortDimension::Tools,
+                        name: "fixture".into(),
+                        source: Box::new(std::io::Error::other(COMPOSITION_CANARY)),
+                    },
+                )
+            }),
+        ));
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let Err(error) = CronSchedulerAdapter::load(
+            ws.join("cron.toml"),
+            core.clone(),
+            tx.clone(),
+            channel.clone(),
+            storage.clone(),
+        )
+        .await
+        else {
+            panic!("startup pre-warm must reject the failing factory");
+        };
+        assert_eq!(error.to_string(), "cron scheduler runtime pre-warm failed");
+        // After the pre-warm failure, exercise the defensive job path with
+        // the still-uninitialised runtime through start_loop.
+        let adapter = c2b_forwarding_briefing(ws, core, tx, channel.clone(), storage.clone());
+        c2b_assert_failure_report(
+            &adapter,
+            storage.as_ref(),
+            &channel,
+            &mut rx,
+            "[cron: failed — runtime unavailable]",
+            Some(COMPOSITION_CANARY),
+        )
+        .await;
+    }
+
+    #[derive(Default)]
+    struct C2bParkSave {
+        saved: Mutex<Vec<Conversation>>,
+        park_attached_result: bool,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl StoragePort for C2bParkSave {
+        async fn save_conversation(&self, conversation: &Conversation) -> Result<(), StorageError> {
+            if conversation.messages.last().is_some_and(|message| {
+                if self.park_attached_result {
+                    message.stop_reason == Some(StopReason::ToolUse)
+                        && message.tool_calls.iter().any(|call| call.result.is_some())
+                } else {
+                    message.synthetic && message.content.starts_with("[cron: failed —")
+                }
+            }) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.saved.lock().await.push(conversation.clone());
+            Ok(())
+        }
+
+        async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError> {
+            Ok(self
+                .saved
+                .lock()
+                .await
+                .last()
+                .filter(|conversation| conversation.id == id)
+                .cloned())
+        }
+
+        async fn list_conversations(
+            &self,
+        ) -> Result<Vec<crate::domain::models::ConversationSummary>, StorageError> {
+            Ok(self
+                .saved
+                .lock()
+                .await
+                .last()
+                .into_iter()
+                .map(|conversation| crate::domain::models::ConversationSummary {
+                    id: conversation.id.clone(),
+                    title: conversation.title.clone(),
+                    created_at: conversation.created_at,
+                    updated_at: conversation.updated_at,
+                    message_count: conversation.messages.len(),
+                    has_fork_source: conversation.fork_source.is_some(),
+                })
+                .collect())
+        }
+
+        async fn read_snapshot(
+            &self,
+            _conversation_id: &str,
+            _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+            _path: &Path,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_shutdown_during_final_save_persists_locally_without_publishing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(C2bParkSave::default());
+        let core = scripted_core_with_storage(
+            tmp.path(),
+            Arc::new(C2bFailureProvider {
+                calls: AtomicUsize::new(0),
+                case: C2bFailureCase::Stream(PROVIDER_STREAM_CANARY),
+            }),
+            storage.clone(),
+        );
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let adapter =
+            c2b_forwarding_briefing(tmp.path(), core, tx, channel.clone(), storage.clone());
+        let id = c2b_fire_one(&adapter).await;
+        tokio::time::timeout(Duration::from_secs(10), storage.entered.notified())
+            .await
+            .expect("final save entered");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(channel.sent.lock().await.is_empty());
+
+        let (shutdown, ()) = tokio::join!(adapter.shutdown_loop(), async {
+            adapter.shutdown.cancelled().await;
+            storage.release.notify_one();
+        });
+        shutdown.unwrap();
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(channel.sent.lock().await.is_empty());
+        assert!(adapter.running.lock().await.is_empty());
+        let session = storage.load_conversation(&id).await.unwrap().unwrap();
+        let marker = session.messages.last().unwrap();
+        assert!(marker.synthetic);
+        assert_eq!(
+            marker.content,
+            "[cron: cancelled by daemon shutdown]\nPartial response"
+        );
+    }
+
+    #[derive(Default)]
+    struct C2bParkSecondResponse {
+        calls: AtomicUsize,
+        active: Notify,
+        dropped: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for C2bParkSecondResponse {
+        async fn stream_completion(
+            &self,
+            _: Vec<Message>,
+            _: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                return Ok(futures::stream::iter([
+                    StreamChunk::Text {
+                        content: "Checking.".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::ToolUse {
+                        id: "t1".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({"file_path": "fixture.txt"}),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ])
+                .boxed());
+            }
+
+            struct NotifyOnDrop<'a>(&'a Notify);
+            impl Drop for NotifyOnDrop<'_> {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+            let _on_drop = NotifyOnDrop(&self.dropped);
+            self.active.notify_one();
+            std::future::pending().await
+        }
+
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "c2b-park-second-response".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: Duration::ZERO,
+            })
+        }
+    }
+
+    enum C2bParkedJobStop {
+        Timeout,
+        Shutdown,
+        Abort,
+    }
+
+    async fn c2b_stop_during_intermediate_save(stop: C2bParkedJobStop) {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(C2bParkSave {
+            park_attached_result: true,
+            ..Default::default()
+        });
+        let provider = Arc::new(C2bParkSecondResponse::default());
+        let core = scripted_core_with_storage(tmp.path(), provider.clone(), storage.clone());
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let adapter =
+            c2b_forwarding_briefing(tmp.path(), core, tx, channel.clone(), storage.clone());
+        let id = c2b_fire_one(&adapter).await;
+        let wait_bound = Duration::from_secs(2);
+        tokio::time::timeout(wait_bound, async {
+            tokio::join!(storage.entered.notified(), provider.active.notified());
+        })
+        .await
+        .expect("attached result save parked with second provider response in flight");
+        let handle = adapter
+            .inflight
+            .lock()
+            .await
+            .pop()
+            .expect("tracked cron job");
+
+        let marker = match stop {
+            C2bParkedJobStop::Timeout => {
+                tokio::time::advance(DEFAULT_JOB_TIMEOUT).await;
+                Some("[cron: timed out after 600 s]")
+            }
+            C2bParkedJobStop::Shutdown => {
+                adapter.request_shutdown();
+                Some("[cron: cancelled by daemon shutdown]")
+            }
+            C2bParkedJobStop::Abort => {
+                handle.abort();
+                None
+            }
+        };
+        tokio::time::timeout(wait_bound, provider.dropped.notified())
+            .await
+            .expect("provider must be dropped before the save is released");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(channel.sent.lock().await.is_empty());
+        let checkpoint = storage.load_conversation(&id).await.unwrap().unwrap();
+        assert_eq!(checkpoint.messages.len(), 2);
+        assert_eq!(checkpoint.messages[0].role, MessageRole::User);
+        assert_eq!(checkpoint.messages[1].content, "Checking.");
+        assert!(checkpoint.messages[1].tool_calls[0].result.is_none());
+
+        let Some(marker) = marker else {
+            // A forced drop is not allowed to leave the turn running, even
+            // though the cancelled job can no longer finish its ordered write.
+            assert!(handle.await.unwrap_err().is_cancelled());
+            adapter.shutdown_loop().await.unwrap();
+            return;
+        };
+        storage.release.notify_one();
+        tokio::time::timeout(wait_bound, handle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(adapter.running.lock().await.is_empty());
+        adapter.shutdown_loop().await.unwrap();
+
+        let expected = format!("{marker}\nChecking.\n[tool use: Read (id: t1)]\n");
+        let saves = storage.saved.lock().await;
+        let mut assistant_saves = saves.iter().filter(|save| save.messages.len() > 1);
+        let span = &assistant_saves.next().unwrap().messages[1];
+        let attached = &assistant_saves.next().unwrap().messages;
+        let finished = &assistant_saves.next().unwrap().messages;
+        assert!(assistant_saves.next().is_none());
+        assert_eq!(attached.len(), 2);
+        assert_eq!(attached[1].id, span.id);
+        assert_eq!(attached[1].tool_calls[0].wire_id(), "t1");
+        assert!(attached[1].tool_calls[0].result.is_some());
+        assert_eq!(finished.len(), 3);
+        assert_eq!(finished[1].id, span.id);
+        assert!(finished[1].tool_calls[0].result.is_some());
+        assert!(finished[2].synthetic);
+        assert_eq!(finished[2].content, expected);
+
+        if matches!(stop, C2bParkedJobStop::Timeout) {
+            assert_eq!(rx.try_recv().unwrap().result_text, expected);
+            assert_eq!(
+                *channel.sent.lock().await,
+                vec![format!("[cron: briefing] {expected}")]
+            );
+        } else {
+            assert!(channel.sent.lock().await.is_empty());
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_timeout_aborts_producer_during_intermediate_save() {
+        c2b_stop_during_intermediate_save(C2bParkedJobStop::Timeout).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_shutdown_aborts_producer_during_intermediate_save() {
+        c2b_stop_during_intermediate_save(C2bParkedJobStop::Shutdown).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_aborted_job_does_not_detach_producer_during_intermediate_save() {
+        c2b_stop_during_intermediate_save(C2bParkedJobStop::Abort).await;
+    }
+
+    #[derive(Default)]
+    struct C2bParkNotification {
+        entered: Notify,
+        dropped: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelPort for C2bParkNotification {
+        async fn notify(&self, _text: &str) -> Result<(), TransitionError> {
+            struct MarkDropped<'a>(&'a AtomicBool);
+            impl Drop for MarkDropped<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, AtomicOrdering::SeqCst);
+                }
+            }
+            let _mark_dropped = MarkDropped(&self.dropped);
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_shutdown_cancels_inflight_notification_before_grace_deadline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(C2bParkSave::default());
+        let core = scripted_core_with_storage(
+            tmp.path(),
+            Arc::new(StaticProvider {
+                chunks: vec![
+                    StreamChunk::Text {
+                        content: "Ready".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+            }),
+            storage.clone(),
+        );
+        let channel = Arc::new(C2bParkNotification::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let adapter =
+            c2b_forwarding_briefing(tmp.path(), core, tx, channel.clone(), storage.clone());
+        let id = c2b_fire_one(&adapter).await;
+        tokio::time::timeout(Duration::from_secs(10), channel.entered.notified())
+            .await
+            .expect("notification entered");
+        let completion = rx.try_recv().unwrap();
+        assert_eq!(completion.result_text, "Ready");
+        assert!(!channel.dropped.load(AtomicOrdering::SeqCst));
+
+        let before = tokio::time::Instant::now();
+        adapter.shutdown_loop().await.unwrap();
+
+        assert!(before.elapsed() < SHUTDOWN_GRACE);
+        assert!(channel.dropped.load(AtomicOrdering::SeqCst));
+        assert!(adapter.running.lock().await.is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let session = storage.load_conversation(&id).await.unwrap().unwrap();
+        let assistant = session.messages.last().unwrap();
+        assert!(!assistant.synthetic);
+        assert_eq!(assistant.content, "Ready");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_invalid_timeouts_never_schedule_a_provider_request() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let provider: Arc<dyn StreamingProvider> = Arc::new(C2bSlowProvider {
+            started: started.clone(),
+        });
+        let (core, storage) = scripted_core(tmp.path(), provider);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(&path, "[[jobs]]\nname='zero'\nschedule='* * * * *'\nprompt='report'\ntimeout_secs=0\n[[jobs]]\nname='large'\nschedule='* * * * *'\nprompt='report'\ntimeout_secs=3601\n").unwrap();
+        let adapter = CronSchedulerAdapter::load(
+            path,
+            core,
+            tx,
+            Arc::new(RecordingChannel::default()),
+            storage,
+        )
+        .await
+        .unwrap();
+        assert!(adapter.jobs.load().is_empty());
+        adapter.start_loop().await.unwrap();
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, started.notified())
+                .await
+                .is_err()
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(adapter.running.lock().await.is_empty());
+        adapter.shutdown_loop().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c2b_private_proposal_is_recorded_but_not_reported() {
+        let tmp = tempfile::Builder::new()
+            .prefix("c-2b-cron-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let provider: Arc<dyn StreamingProvider> = Arc::new(StaticProvider {
+            chunks: vec![
+                StreamChunk::Text {
+                    content: "Public".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::ToolUse {
+                    id: "private-id".into(),
+                    name: crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME.into(),
+                    input: serde_json::json!({"secret": "private argument"}),
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        });
+        let (core, storage) = scripted_core(tmp.path(), provider);
+        let channel = Arc::new(RecordingChannel::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let path = tmp.path().join("cron.toml");
+        std::fs::write(
+            &path,
+            "[[jobs]]\nname='briefing'\nschedule='* * * * *'\nprompt='report'\nforward=true\n",
+        )
+        .unwrap();
+        let adapter = CronSchedulerAdapter::load(path, core, tx, channel.clone(), storage.clone())
+            .await
+            .unwrap();
+        let session_id = c2b_fire_one(&adapter).await;
+        let result = rx.recv().await.unwrap().result_text;
+        while adapter.running.lock().await.contains("briefing") {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(result, "Public");
+        assert_eq!(*channel.sent.lock().await, vec!["[cron: briefing] Public"]);
+        let session = storage
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.messages[1].tool_calls[0].wire_id(), "private-id");
+        adapter.shutdown_loop().await.unwrap();
+    }
+
+    mod c2b_budget_cron {
+        use super::*;
+        use crate::domain::errors::StorageError;
+        use crate::domain::models::pricing::PricingConfig;
+        use crate::domain::models::router::{EscalationReason, ModelTier};
+        use crate::domain::models::usage::{TokenUsage, UsageLedgerEntry};
+        use crate::domain::ports::UsageLedgerPort;
+        use std::sync::atomic::AtomicI64;
+
+        const LEDGER_CANARY: &str = "C2b-raw-ledger-canary";
+
+        #[derive(Default)]
+        struct C2bBudgetCronReadGate {
+            entered: Notify,
+            release: Notify,
+        }
+
+        struct C2bBudgetCronLedger {
+            rows: tokio::sync::Mutex<Vec<UsageLedgerEntry>>,
+            fail: bool,
+            since: AtomicI64,
+            read_gate: Option<C2bBudgetCronReadGate>,
+        }
+
+        #[async_trait::async_trait]
+        impl UsageLedgerPort for C2bBudgetCronLedger {
+            async fn append(&self, entry: UsageLedgerEntry) -> Result<(), StorageError> {
+                self.rows.lock().await.push(entry);
+                Ok(())
+            }
+            async fn read_session(
+                &self,
+                session_id: &str,
+            ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+                Ok(self
+                    .rows
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|row| row.session_id == session_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn read_since(&self, since: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+                self.since.store(since, AtomicOrdering::SeqCst);
+                if self.fail {
+                    return Err(StorageError::Other(LEDGER_CANARY.into()));
+                }
+                let rows = self
+                    .rows
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|row| row.timestamp_ms >= since)
+                    .cloned()
+                    .collect();
+                if let Some(gate) = &self.read_gate {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+                Ok(rows)
+            }
+        }
+
+        struct C2bBudgetCronProvider(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl StreamingProvider for C2bBudgetCronProvider {
+            async fn stream_completion(
+                &self,
+                _messages: Vec<Message>,
+                _options: CompletionOptions,
+            ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(futures::stream::iter(vec![
+                    StreamChunk::Text {
+                        content: "C2bBudgetCron response".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ])
+                .boxed())
+            }
+            async fn abort(&self) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            fn provider_id(&self) -> String {
+                "c2b-budget-cron".into()
+            }
+            fn list_models(&self) -> Vec<ModelDescriptor> {
+                vec![]
+            }
+            async fn health_check(&self) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            async fn connectivity_probe(
+                &self,
+            ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+                Ok(crate::domain::ports::ProbeOutcome {
+                    latency: Duration::ZERO,
+                })
+            }
+        }
+
+        fn c2b_budget_cron_row(timestamp_ms: i64, cents: u32) -> UsageLedgerEntry {
+            UsageLedgerEntry {
+                timestamp_ms,
+                session_id: "C2bBudgetCron-ledger".into(),
+                conversation_id: "C2bBudgetCron-ledger".into(),
+                provider_id: "c2b-budget-cron".into(),
+                model: "c2b-budget-cron-model".into(),
+                tier: ModelTier::Flagship,
+                step_kind: None,
+                escalation_reason: EscalationReason::None,
+                usage: TokenUsage {
+                    tokens_in: cents * 10_000,
+                    tokens_out: 0,
+                    parent_ctx: 0,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                    reasoning_tokens: None,
+                },
+            }
+        }
+
+        fn c2b_budget_cron_core(
+            ws: &Path,
+            storage: Arc<dyn StoragePort>,
+            provider: Arc<dyn StreamingProvider>,
+            limit: Option<f64>,
+            ledger: Arc<C2bBudgetCronLedger>,
+        ) -> Arc<DaemonCore> {
+            let mut config = AppConfig::default();
+            config.budget.daily_limit_usd = limit;
+            config.pricing.insert(
+                "c2b-budget-cron-model".into(),
+                PricingConfig {
+                    input_per_million: 1.0,
+                    output_per_million: 0.0,
+                    cache_creation_per_million: None,
+                    cache_read_per_million: None,
+                    reasoning_per_million: None,
+                },
+            );
+            let config = Arc::new(ArcSwap::from_pointee(config));
+            let factory_ws = ws.to_path_buf();
+            let factory_storage = storage.clone();
+            let factory_config = config.clone();
+            Arc::new(DaemonCore::new(
+                ws.to_path_buf(),
+                config,
+                Arc::new(NoOpMemory),
+                storage.clone(),
+                Arc::new(NoOpSecurity),
+                Arc::new(NoOpPersona),
+                Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+                Box::new(move || {
+                    let mut runtime =
+                        scripted_runtime(provider.clone(), factory_storage.clone(), &factory_ws);
+                    {
+                        let inner = Arc::get_mut(&mut runtime).expect("new runtime has one owner");
+                        inner.app_config = factory_config.clone();
+                        inner.usage_ledger = ledger.clone();
+                    }
+                    Ok(runtime)
+                }),
+            ))
+        }
+
+        async fn c2b_budget_cron_case(
+            limit: Option<f64>,
+            cents: u32,
+            yesterday_cents: u32,
+            fail: bool,
+            expected: &str,
+            requests: usize,
+        ) {
+            let tmp = tempfile::Builder::new()
+                .prefix("c-2b-budget-cron-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let ws = tmp.path();
+            let today = crate::infrastructure::clock_util::today_start_unix_ms();
+            let ledger = Arc::new(C2bBudgetCronLedger {
+                rows: tokio::sync::Mutex::new(vec![
+                    c2b_budget_cron_row(today, cents),
+                    c2b_budget_cron_row(today - 1, yesterday_cents),
+                ]),
+                fail,
+                since: AtomicI64::new(-1),
+                read_gate: None,
+            });
+            let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+                crate::infrastructure::paths::sessions_dir(ws),
+                ws.to_path_buf(),
+            ));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let provider = Arc::new(C2bBudgetCronProvider(calls.clone()));
+            let core = c2b_budget_cron_core(ws, storage.clone(), provider, limit, ledger.clone());
+            let channel = Arc::new(RecordingChannel::default());
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+            let adapter = CronSchedulerAdapter::new_loaded(
+                ws.join("cron.toml"),
+                vec![ScheduledJob {
+                    name: "C2bBudgetCron".into(),
+                    cron: Cron::from_str("* * * * *").unwrap(),
+                    prompt: "C2bBudgetCron prompt".into(),
+                    forward: true,
+                    timeout_secs: None,
+                }],
+                core,
+                completion_tx,
+                channel.clone(),
+                storage.clone(),
+                Duration::from_secs(5),
+                1,
+            );
+            adapter.start_loop().await.unwrap();
+            let fire_at = loop {
+                if let Some((_, Some(ts))) = adapter.next_runs().await.first() {
+                    break *ts;
+                }
+                tokio::task::yield_now().await;
+            };
+            adapter.jobs.store(Arc::new(vec![]));
+            tokio::time::advance(Duration::from_secs(61)).await;
+            let completion = tokio::time::timeout(Duration::from_secs(10), completion_rx.recv())
+                .await
+                .expect("cron completion deadline")
+                .expect("completion channel open");
+            while adapter.running.lock().await.contains("C2bBudgetCron") {
+                tokio::task::yield_now().await;
+            }
+            adapter.shutdown_loop().await.unwrap();
+            assert_eq!(completion.job_name, "C2bBudgetCron");
+            assert_eq!(completion.result_text, expected);
+            assert_eq!(calls.load(AtomicOrdering::SeqCst), requests);
+            if limit.is_some() {
+                assert_eq!(ledger.since.load(AtomicOrdering::SeqCst), today);
+            }
+            let id = format!(
+                "cron-{}-{fire_at}",
+                sanitize_session_component("C2bBudgetCron")
+            );
+            let conversation = storage
+                .load_conversation(&id)
+                .await
+                .unwrap()
+                .expect("stored cron session");
+            let assistant = conversation
+                .messages
+                .iter()
+                .find(|m| m.role == MessageRole::Assistant)
+                .expect("assistant marker or response");
+            assert_eq!(assistant.content, expected);
+            assert_eq!(assistant.synthetic, requests == 0);
+            let sent = channel.sent.lock().await;
+            assert_eq!(&*sent, &[format!("[cron: C2bBudgetCron] {expected}")]);
+            if fail {
+                assert!(!completion.result_text.contains(LEDGER_CANARY));
+                assert!(
+                    sent.iter()
+                        .all(|notification| !notification.contains(LEDGER_CANARY))
+                );
+                assert!(
+                    !serde_json::to_string(&conversation)
+                        .unwrap()
+                        .contains(LEDGER_CANARY)
+                );
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn c2b_shutdown_during_budget_read_does_not_admit_turn() {
+            let tmp = tempfile::tempdir().unwrap();
+            let today = crate::infrastructure::clock_util::today_start_unix_ms();
+            let ledger = Arc::new(C2bBudgetCronLedger {
+                rows: Mutex::new(vec![c2b_budget_cron_row(today, 99)]),
+                fail: false,
+                since: AtomicI64::new(-1),
+                read_gate: Some(C2bBudgetCronReadGate::default()),
+            });
+            let calls = Arc::new(AtomicUsize::new(0));
+            let provider = Arc::new(C2bBudgetCronProvider(calls.clone()));
+            let storage = Arc::new(C2bParkSave::default());
+            let core = c2b_budget_cron_core(
+                tmp.path(),
+                storage.clone(),
+                provider,
+                Some(1.0),
+                ledger.clone(),
+            );
+            let channel = Arc::new(RecordingChannel::default());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let adapter =
+                c2b_forwarding_briefing(tmp.path(), core, tx, channel.clone(), storage.clone());
+            let id = c2b_fire_one(&adapter).await;
+
+            let gate = ledger.read_gate.as_ref().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+                .await
+                .expect("below-limit budget read parked");
+            adapter.request_shutdown();
+            gate.release.notify_one();
+            adapter.shutdown_loop().await.unwrap();
+
+            assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(channel.sent.lock().await.is_empty());
+            assert!(adapter.running.lock().await.is_empty());
+            let session = storage.load_conversation(&id).await.unwrap().unwrap();
+            let [marker] = session.messages.as_slice() else {
+                panic!("shutdown must persist only the marker without admitting a turn");
+            };
+            assert!(marker.synthetic);
+            assert_eq!(marker.content, "[cron: cancelled by daemon shutdown]");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn c2b_budget_cron_equal_limit_refuses() {
+            c2b_budget_cron_case(
+                Some(1.0),
+                100,
+                0,
+                false,
+                "[cron: skipped — daily budget of $1.00 reached ($1.00 spent today)]",
+                0,
+            )
+            .await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn c2b_budget_cron_below_limit_runs() {
+            c2b_budget_cron_case(Some(1.0), 99, 0, false, "C2bBudgetCron response", 1).await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn c2b_budget_cron_no_limit_runs_despite_spend() {
+            c2b_budget_cron_case(None, 5000, 0, false, "C2bBudgetCron response", 1).await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn c2b_budget_cron_unreadable_ledger_refuses_with_limit() {
+            c2b_budget_cron_case(
+                Some(1.0),
+                0,
+                0,
+                true,
+                "[cron: skipped — usage ledger unreadable]",
+                0,
+            )
+            .await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn c2b_budget_cron_unreadable_ledger_runs_without_limit() {
+            c2b_budget_cron_case(None, 0, 0, true, "C2bBudgetCron response", 1).await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn c2b_budget_cron_yesterday_does_not_count() {
+            c2b_budget_cron_case(Some(1.0), 99, 5000, false, "C2bBudgetCron response", 1).await;
+        }
+    }
 }

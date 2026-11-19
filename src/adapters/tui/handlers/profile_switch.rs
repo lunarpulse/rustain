@@ -168,6 +168,14 @@ pub async fn handle_profile_switch_requested(
             });
         }
     };
+    if let Some(notice) =
+        crate::domain::services::adapter_catalog::AdapterCatalog::daemon_only_notice(
+            &target_resolved.name,
+            &target_resolved.selection,
+        )
+    {
+        mcp_config_notices.push(notice);
+    }
 
     let identity_color = target_resolver
         .list_profiles()

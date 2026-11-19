@@ -16,6 +16,11 @@ pub trait SchedulerPort: Send + Sync {
     fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
         crate::domain::models::HealthSummary::unknown()
     }
+
+    /// Signal active work to stop without waiting. Callers still await
+    /// [`Self::shutdown_loop`] to finish teardown.
+    fn request_shutdown(&self) {}
+
     async fn shutdown_loop(&self) -> Result<(), crate::domain::errors::TransitionError> {
         Ok(())
     }

@@ -1,5 +1,5 @@
 name = "personal-assistant"
-description = "Personal-life assistant (preview). Daily-log memory; Telegram + cron coming in Epic 12."
+description = "Personal-life assistant (preview). Daily-log memory. Telegram and cron run under 'rustain daemon start' with your own profile (docs/daemon.md)."
 extends = "base"
 preview = true
 

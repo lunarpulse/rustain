@@ -18,6 +18,56 @@ impl FileUsageLedger {
     pub fn new() -> Self {
         Self
     }
+
+    async fn read_path(path: &std::path::Path) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        let contents = match tokio::fs::read_to_string(path).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StorageError::IoError(e.to_string())),
+        };
+        let mut out = Vec::new();
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<UsageLedgerEntry>(trimmed) {
+                Ok(entry) => out.push(entry),
+                Err(e) => tracing::warn!("ledger line skipped (path={}): {e}", path.display()),
+            }
+        }
+        Ok(out)
+    }
+
+    async fn read_since_in_dir(
+        dir: Result<std::path::PathBuf, StorageError>,
+        since_unix_ms: i64,
+    ) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        let dir = dir?;
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StorageError::IoError(e.to_string())),
+        };
+        let mut out = Vec::new();
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| StorageError::IoError(e.to_string()))?
+        {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            out.extend(
+                Self::read_path(&path)
+                    .await?
+                    .into_iter()
+                    .filter(|entry| entry.timestamp_ms >= since_unix_ms),
+            );
+        }
+        Ok(out)
+    }
 }
 
 impl Default for FileUsageLedger {
@@ -64,71 +114,14 @@ impl UsageLedgerPort for FileUsageLedger {
             .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
 
-        let contents = match tokio::fs::read_to_string(&path).await {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(StorageError::IoError(e.to_string())),
-        };
-
-        let mut out = Vec::new();
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<UsageLedgerEntry>(trimmed) {
-                Ok(entry) => out.push(entry),
-                Err(e) => {
-                    // Story 7.5 AC9 — graceful degradation: skip corrupt lines.
-                    tracing::warn!("ledger line skipped (session={session_id}): {e}");
-                }
-            }
-        }
-        Ok(out)
+        Self::read_path(&path).await
     }
 
     async fn read_since(&self, since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
-        // usage_dir() calls data_dir() which calls create_dir_all.
-        // This means a read operation has a directory-creation side effect.
-        // Acceptable because the dir must exist for any write anyway; the
-        // read would fail on a missing dir regardless.
-        let dir = match crate::infrastructure::paths::usage_dir().await {
-            Ok(d) => d,
-            Err(_) => return Ok(Vec::new()),
-        };
-
-        let mut rd = match tokio::fs::read_dir(&dir).await {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(StorageError::IoError(e.to_string())),
-        };
-
-        let mut sessions: Vec<String> = Vec::new();
-        while let Some(entry) = rd
-            .next_entry()
+        let dir = crate::infrastructure::paths::usage_dir()
             .await
-            .map_err(|e| StorageError::IoError(e.to_string()))?
-        {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            sessions.push(stem.to_string());
-        }
-
-        let mut out = Vec::new();
-        for session in sessions {
-            let entries = self.read_session(&session).await?;
-            out.extend(
-                entries
-                    .into_iter()
-                    .filter(|e| e.timestamp_ms >= since_unix_ms),
-            );
-        }
-        Ok(out)
+            .map_err(|e| StorageError::IoError(e.to_string()));
+        Self::read_since_in_dir(dir, since_unix_ms).await
     }
 }
 
@@ -252,6 +245,40 @@ mod tests {
                 reasoning_tokens: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn read_since_handles_resolution_missing_directory_and_corrupt_lines() {
+        let unresolved = Err(StorageError::IoError("unresolvable usage directory".into()));
+        assert!(
+            FileUsageLedger::read_since_in_dir(unresolved, 0)
+                .await
+                .is_err()
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        assert!(
+            FileUsageLedger::read_since_in_dir(Ok(temp.path().join("missing")), 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let old = make_entry("s", 10, "model");
+        let current = make_entry("s", 20, "model");
+        let contents = format!(
+            "{}\nnot json\n{}\n",
+            serde_json::to_string(&old).unwrap(),
+            serde_json::to_string(&current).unwrap()
+        );
+        tokio::fs::write(temp.path().join("s.jsonl"), contents)
+            .await
+            .unwrap();
+        let rows = FileUsageLedger::read_since_in_dir(Ok(temp.path().to_path_buf()), 20)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].timestamp_ms, 20);
     }
 
     #[tokio::test]

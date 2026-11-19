@@ -1190,3 +1190,69 @@ async fn a_failed_coding_fallback_does_not_report_reload_success() {
     fx.assert_unchanged(&before, "failed fallback");
     assert_eq!(fx.turn(None).await, A_BODY);
 }
+
+#[cfg(all(feature = "telegram", feature = "cron"))]
+#[tokio::test]
+#[serial(c2_profile_switch)]
+async fn switch_to_daemon_only_adapters_keeps_local_noops_and_notifies() {
+    let profiles = [
+        ("a", "name = \"a\"\nextends = \"base\"\n".to_owned()),
+        ("b", "name = \"b\"\nextends = \"base\"\n[channels]\nadapter = \"telegram\"\n[channels.config]\nallowed_chat_ids = [123]\n[scheduler]\nadapter = \"cron\"\n".to_owned()),
+    ];
+    let fx = Fixture::new(&profiles, &[], "a");
+    let mut state = TuiState::new(80, 24);
+    let mut notices = Vec::new();
+    let outcome = handle_profile_switch_requested(
+        &mut state,
+        &fx.core,
+        &fx.ctx,
+        &fx.app_config,
+        &fx.resolver,
+        "b".into(),
+        &mut notices,
+    )
+    .await;
+    let HandlerOutcome::RequestSpawn(rustain::adapters::tui::handlers::SpawnRequest::ProfileSwap {
+        profile_name,
+        identity_color,
+        warm_cold_diffs,
+        agent_core,
+        compose_snapshot,
+        profile_resolver,
+        app_config,
+        guard: _guard,
+        new_resolver,
+    }) = outcome
+    else {
+        panic!("expected cold profile swap, got {}", show(&outcome));
+    };
+    let event = rustain::adapters::tui::handlers::profile_switch::handle_profile_swap_continuation(
+        warm_cold_diffs,
+        agent_core,
+        compose_snapshot,
+        profile_name,
+        identity_color,
+        app_config,
+        profile_resolver,
+        new_resolver,
+    )
+    .await
+    .expect("cold swap succeeds");
+    assert!(matches!(event, AppEvent::ProfileSwitched { .. }));
+    assert_eq!(
+        notices,
+        vec![
+            "Profile 'b' uses daemon-only adapters (channels = telegram, scheduler = cron); they run under 'rustain daemon start'. This session uses terminal and none."
+        ]
+    );
+    let channel = fx.core.channels.load().health_snapshot();
+    let scheduler = fx.core.scheduler.load().health_snapshot();
+    assert_eq!(
+        channel.level,
+        rustain::domain::models::HealthSummary::unknown().level
+    );
+    assert_eq!(
+        scheduler.level,
+        rustain::domain::models::HealthSummary::unknown().level
+    );
+}

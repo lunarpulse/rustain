@@ -594,13 +594,14 @@ fn local_install_honors_strict_features() {
     let permissive_stderr = String::from_utf8_lossy(&permissive.stderr);
     assert!(
         permissive.status.success(),
-        "default local install should fall back to preview; stderr={permissive_stderr}"
+        "local install should succeed; stderr={permissive_stderr}"
     );
     let installed =
         std::fs::read_to_string(permissive_config.join("profiles/local-cron.toml")).unwrap();
-    assert!(
+    assert_eq!(
         installed.contains("preview = true"),
-        "feature fallback must persist preview mode: {installed}"
+        !cfg!(feature = "cron"),
+        "preview is required exactly when cron needs a feature fallback: {installed}"
     );
 
     let strict_config = tmp.path().join("strict");
@@ -613,13 +614,21 @@ fn local_install_honors_strict_features() {
         .output()
         .unwrap();
     let strict_stderr = String::from_utf8_lossy(&strict.stderr);
-    assert_eq!(strict.status.code(), Some(2), "stderr={strict_stderr}");
-    assert!(
-        strict_stderr.contains("requires cargo feature 'cron'"),
-        "strict local install must preserve the feature error: {strict_stderr}"
-    );
-    assert!(
-        !strict_config.join("profiles/local-cron.toml").exists(),
-        "strict refusal must not write the profile"
-    );
+    if cfg!(feature = "cron") {
+        assert!(strict.status.success(), "stderr={strict_stderr}");
+        let installed = std::fs::read_to_string(strict_config.join("profiles/local-cron.toml"))
+            .expect("strict install writes the supported profile");
+        assert!(!installed.contains("preview = true"), "{installed}");
+        assert!(installed.contains("adapter = \"cron\""), "{installed}");
+    } else {
+        assert_eq!(strict.status.code(), Some(2), "stderr={strict_stderr}");
+        assert!(
+            strict_stderr.contains("requires cargo feature 'cron'"),
+            "strict local install must preserve the feature error: {strict_stderr}"
+        );
+        assert!(
+            !strict_config.join("profiles/local-cron.toml").exists(),
+            "strict refusal must not write the profile"
+        );
+    }
 }
