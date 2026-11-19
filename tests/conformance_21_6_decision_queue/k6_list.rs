@@ -5,18 +5,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::conformance_21_5_tool_inspector::support::{Fixture, prose};
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
+use rustain::adapters::tui::handlers::transcript_target::durable_target;
+use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::clock::MockClock;
 use rustain::domain::events::DomainKey;
-use rustain::domain::models::ToolRisk;
 use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
+use rustain::domain::models::{ToolRisk, Turn};
 use rustain::domain::services::approval_runtime::{ApprovalRuntimeEvent, PendingReview};
 use rustain::infrastructure::runtime::approval_bridge;
 
-use super::support::{clocked, facts, key, paint, ready, route, screen, special};
+use super::support::{clocked, facts, key, paint, ready, route, row_text, screen, special};
 
 fn permission(state: &mut TuiState, tool: &str) {
     let id = RequestId::new();
@@ -123,6 +126,98 @@ fn down_then_enter_opens_the_chosen_item_and_back_returns_to_the_callers_frame()
     assert!(!presentation::is_open(&state, Surface::DecisionQueue));
     // Nothing was reselected automatically: all three still wait.
     assert_eq!(decision_queue::waiting(&state), 3);
+}
+
+#[test]
+fn enter_reopens_the_same_deferred_fork_from_needs_you() {
+    const PREVIEW: &str = "Fork queue target";
+    let mut turn = Turn::new("fixture-model".into(), 0);
+    prose(&mut turn, PREVIEW);
+    let mut fixture = Fixture::new(80, 24, turn);
+    assert_eq!(fixture.press(Key::Char('f')), InputAction::ForkAtMessage);
+
+    // Run the host's Fork producer for the Stage's only (durable) message.
+    let conversation = &fixture.h.conversation;
+    assert_eq!(conversation.messages.len(), 1);
+    assert_eq!(durable_target(conversation, 0).unwrap(), 0);
+    let target = &conversation.messages[0];
+    let mut f = facts(&conversation.id);
+    f.active_messages = conversation.messages.len();
+    decision_queue::raise_fork(
+        &mut fixture.h.state,
+        &conversation.id,
+        0,
+        &target.content,
+        decision_queue::message_target_fingerprint(target),
+    );
+
+    let fork_title = "┌ Decision: Fork ";
+    let preview = format!("Message 1: \"{PREVIEW}\"");
+    fixture.paint();
+    let original = screen(fixture.buffer());
+    assert!(
+        original.lines().any(|row| row.starts_with(fork_title)),
+        "{original}"
+    );
+    assert!(original.contains(&preview), "{original}");
+    let decision = fixture
+        .h
+        .state
+        .modal_stack
+        .top()
+        .and_then(|frame| frame.decision.clone())
+        .expect("the original Fork decision");
+
+    ready(&mut fixture.h.state, &fixture.clock);
+    route(&mut fixture.h.state, &special(DomainKey::Esc), &f);
+    fixture.paint();
+    let deferred = screen(fixture.buffer());
+    let status = row_text(fixture.buffer(), fixture.layout().status_bar.y);
+    assert!(status.contains("Needs you (1) ^X q"), "{status}");
+    assert!(
+        !deferred.contains("Decision:") && !deferred.contains("┌ Needs you "),
+        "{deferred}"
+    );
+    assert!(!deferred.contains("Forked from"), "{deferred}");
+
+    assert_eq!(fixture.press(Key::Ctrl('x')), InputAction::Consumed);
+    assert_eq!(fixture.press(Key::Char('q')), InputAction::FocusDecisions);
+    decision_queue::open_waiting(&mut fixture.h.state, &f);
+    fixture.paint();
+    let listed = screen(fixture.buffer());
+    assert!(
+        listed.lines().any(|row| row.starts_with("┌ Needs you ")),
+        "{listed}"
+    );
+    assert!(
+        listed
+            .lines()
+            .any(|row| row.starts_with("│▸ Fork · message 1") && row.contains(" · deferred")),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("[Enter] Open  [Esc] Back  [Up/Down] Select"),
+        "{listed}"
+    );
+    assert!(!presentation::is_open(&fixture.h.state, Surface::Decision));
+
+    route(&mut fixture.h.state, &special(DomainKey::Enter), &f);
+    fixture.paint();
+    let reopened = screen(fixture.buffer());
+    assert!(
+        reopened.lines().any(|row| row.starts_with(fork_title)),
+        "{reopened}"
+    );
+    assert!(reopened.contains(&preview), "{reopened}");
+    assert!(!presentation::is_open(
+        &fixture.h.state,
+        Surface::DecisionQueue
+    ));
+    assert_eq!(
+        fixture.h.state.modal_stack.top().unwrap().decision.as_ref(),
+        Some(&decision),
+        "Enter must reopen the original Fork target"
+    );
 }
 
 #[test]

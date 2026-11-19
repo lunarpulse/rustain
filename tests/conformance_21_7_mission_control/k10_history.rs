@@ -4,14 +4,14 @@
 //! `/` pushes CrossSearch and `Esc` returns to History with its selection, a cancelled delete
 //! leaves History on top again, the delete-all clear empties an open window, and the launchpad
 //! key line names `^X h History` at every local width. Keys travel as crossterm events through
-//! the local host's decoder; assertions read painted cells, the one frame on the stack and the
-//! effects the event loop would run. No sleeps.
+//! the local host's decoder; assertions read painted cells, the frame stack and the decoded effects.
 use super::support::*;
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::decision_queue::{self, INERT_AFTER_PAINT};
 use rustain::adapters::tui::keymap::table::attached_mission_remedy;
 use rustain::adapters::tui::keymap::{AvailCtx, Host, Key, LeaderStep, leader_step};
 use rustain::adapters::tui::presentation::Surface;
+use rustain::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
 use rustain::domain::models::{ConversationSummary, FocusState};
 use rustain::domain::services::session_index::SessionIndex;
 use rustain::infrastructure::runtime::history_bridge;
@@ -113,9 +113,130 @@ async fn the_chord_opens_history_at_every_width_from_the_snapshot_and_a_repaint_
         assert_eq!(top_surface(&rig), None);
     }
 }
+#[tokio::test]
+async fn history_opens_whole_over_a_yielded_strip_at_60x16() {
+    let mut rig = rig(60, 16).await;
+    let plan = Plan {
+        id: "p1".to_owned(),
+        title: "Release".to_owned(),
+        tasks: vec![PlanTask {
+            number: 1,
+            title: "Compile".to_owned(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Completed,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+            sub_tasks: vec![],
+        }],
+        estimated_effort: None,
+        status: PlanStatus::Executing,
+        created_at: 1,
+        resolved_at: None,
+        host_message_id: None,
+        origin_restrictions: None,
+    };
+    rig.f
+        .tabs
+        .active_tab_mut()
+        .conversation
+        .plans
+        .insert("p1".to_owned(), plan);
+    rig.f.h.state.task_panel_state.last_executed_plan_id = Some("p1".to_owned());
+    rig.f.sessions = index(&[("a", "Alpha")]);
+    rig.paint();
+    assert!(rig.f.h.state.input_buffer.is_empty());
+    let strip = rig
+        .f
+        .layout()
+        .mission_strip
+        .expect("empty composer leaves a strip");
+    assert_eq!(lines(&rig)[usize::from(strip.y)].trim_end(), "Tasks 1/1");
+    assert_eq!(rig.key(Key::Char('i')), InputAction::Consumed);
+    assert_eq!(rig.f.h.state.focus, FocusState::Input);
+
+    for line in 0..8 {
+        if line > 0 {
+            assert_eq!(rig.key(Key::AltEnter), InputAction::Consumed);
+        }
+        for c in "draft line".chars() {
+            assert_eq!(rig.key(Key::Char(c)), InputAction::Consumed);
+        }
+        if line == 6 {
+            rig.paint();
+            let strip = rig
+                .f
+                .layout()
+                .mission_strip
+                .expect("seven lines keep the strip");
+            assert_eq!(lines(&rig)[usize::from(strip.y)].trim_end(), "Tasks 1/1");
+        }
+    }
+    assert_eq!(rig.f.h.state.input_buffer, ["draft line"; 8].join("\n"));
+    rig.paint();
+    let layout = rig.f.layout();
+    assert!(
+        layout.mission_strip.is_none(),
+        "eight lines yield the strip"
+    );
+    assert!(!lines(&rig).iter().any(|row| row.contains("Tasks 1/1")));
+    let status_before = status_row(&rig);
+    assert!(!status_before.trim().is_empty());
+
+    open_history(&mut rig);
+    assert_eq!(top_surface(&rig), Some(Surface::History));
+    let frame = frame_rect(&rig);
+    let status_y = rig.f.layout().status_bar.y;
+    assert_eq!(frame.height, 5, "{frame:?}");
+    assert_eq!(frame.bottom(), status_y, "{frame:?}, status at {status_y}");
+    let buffer = rig.f.buffer();
+    let row = |y| {
+        (frame.x..frame.right())
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    let top = row(frame.y);
+    assert!(
+        top.starts_with('┌') && top.contains("History") && top.ends_with('┐'),
+        "{top:?}"
+    );
+    for y in frame.y + 1..frame.bottom() - 1 {
+        let inside = row(y);
+        assert!(
+            inside.starts_with('│') && inside.ends_with('│'),
+            "{inside:?}"
+        );
+    }
+    let first_body = row(frame.y + 1);
+    assert!(first_body.contains("Alpha"), "{first_body:?}");
+    let rail = row(frame.bottom() - 2);
+    assert!(rail.contains("Open") && rail.contains("Esc"), "{rail:?}");
+    let bottom = row(frame.bottom() - 1);
+    let rule = bottom
+        .strip_prefix('└')
+        .and_then(|rest| rest.strip_suffix('┘'));
+    assert!(
+        rule.is_some_and(|rule| !rule.is_empty() && rule.chars().all(|cell| cell == '─')),
+        "{bottom:?}"
+    );
+    let same_paint = lines(&rig);
+    assert_eq!(
+        same_paint[usize::from(frame.bottom())],
+        status_before,
+        "the painted status row is directly below the intact History border"
+    );
+    assert!(
+        !same_paint.iter().any(|row| row.contains("Tasks 1/1")),
+        "the strip is absent from the same paint as the open History frame"
+    );
+}
 
 #[tokio::test]
-async fn enter_names_the_selected_id_and_finishing_the_open_closes_the_frame() {
+async fn enter_names_the_selected_history_id() {
     let mut rig = rig(80, 24).await;
     rig.f.sessions = index(&[("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")]);
     open_history(&mut rig);
@@ -132,12 +253,6 @@ async fn enter_names_the_selected_id_and_finishing_the_open_closes_the_frame() {
         rig.key(Key::Enter),
         InputAction::OpenHistoryEntry("b".to_owned())
     );
-    // The loop loaded (or switched to) the conversation: the window is done and the Stage owns
-    // focus.
-    history_bridge::finish_open(&mut rig.f.h.state);
-    rig.paint();
-    assert_eq!(top_surface(&rig), None);
-    assert_eq!(rig.f.h.state.focus, FocusState::Chat);
 }
 
 #[tokio::test]

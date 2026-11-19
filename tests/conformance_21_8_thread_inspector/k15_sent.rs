@@ -223,7 +223,16 @@ async fn refusal_is_painted_in_the_thread_frame() {
 #[cfg(not(feature = "a2a"))]
 #[tokio::test]
 async fn no_a2a_front_door_warns_without_opening() {
-    let mut rig = Rig::plain(Workspace::new().await, 130, 30).await;
+    use crate::conformance_21_5_tool_inspector::support::row;
+
+    let mut rig = Rig::plain(Workspace::new().await, 80, 24).await;
+    rig.paint();
+    let pane = rig.f.layout().chat_pane;
+    let mut stage = pane;
+    assert!(stage.height > 1);
+    stage.height -= 1; // At 80 columns the single toast occupies only the last row.
+    let before = pixels(rig.f.buffer(), stage);
+    let blocks = rig.f.h.state.feedback_blocks.len();
     transparency_bridge::team_command(
         &mut rig.f.h.state,
         "origin",
@@ -231,6 +240,18 @@ async fn no_a2a_front_door_warns_without_opening() {
         &rig.app,
     )
     .await;
+    rig.paint();
+    assert_eq!(pixels(rig.f.buffer(), stage), before);
+    let toast_y = pane.bottom() - 1;
+    let toast = row(rig.f.buffer(), pane, toast_y);
+    assert!(
+        toast.split_once("Warning ").is_some_and(|(before, after)| {
+            (before.is_empty() || before.ends_with(char::is_whitespace))
+                && after.contains("needs the `a2a` feature")
+        }),
+        "expected the a2a feature warning on row {toast_y}: {toast:?}"
+    );
+    assert_eq!(rig.f.h.state.feedback_blocks.len(), blocks);
     assert!(rig.f.h.state.modal_stack.is_empty());
     let warnings: Vec<_> = rig.f.h.state.notifications.visible().collect();
     assert_eq!(warnings.len(), 1);

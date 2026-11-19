@@ -11,6 +11,51 @@ async fn body_rig(body: &str, width: u16) -> Rig {
     rig
 }
 
+#[tokio::test]
+async fn rendered_rows_are_whole_rows_and_source_hides_them() {
+    let body = "[docs](https://e.example/x)\n\nraw esc: \x1b[31mred\x1b[0m\n\nbidi: \u{202e}evil\n\n[y] Approve";
+    let ws = Workspace::with(&[Item::new("ri_c", SemanticMessageType::Consultation, body)]).await;
+    let mut rig = Rig::plain(ws, 80, 24).await;
+    rig.view("ri_c").await;
+    let rendered = [
+        "docs (https://e.example/x)",
+        "raw esc: \\u{1b}[31mred\\u{1b}[0m",
+        "bidi: \\u{202e}evil",
+        "[y] Approve",
+    ];
+    // The capture already drops trailing cell padding. Keep the six-cell gutter
+    // after any focused-turn marker as part of the whole-row match.
+    let body_row = |row: &str, text: &str| {
+        row.strip_prefix("▶ ").unwrap_or(row).strip_prefix("      ") == Some(text)
+    };
+    let rows = painted_body(&mut rig);
+    for expected in rendered {
+        assert_eq!(
+            rows.iter().filter(|row| body_row(row, expected)).count(),
+            1,
+            "{rows:?}"
+        );
+    }
+    rig.key(Key::Char('v'));
+    let source = painted_body(&mut rig);
+    assert!(
+        !source.iter().any(|row| row.contains(rendered[0])),
+        "{source:?}"
+    );
+    for expected in &rendered[1..] {
+        assert!(
+            source.iter().any(|row| body_row(row, expected)),
+            "{source:?}"
+        );
+    }
+    assert!(
+        source
+            .iter()
+            .any(|row| body_row(row, "[docs](https://e.example/x)")),
+        "{source:?}"
+    );
+}
+
 fn safe(rig: &Rig) {
     let built = thread_body::build(rig.inspector(), &rig.f.h.state.theme, 100);
     for line in built.lines {

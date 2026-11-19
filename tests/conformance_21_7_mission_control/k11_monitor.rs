@@ -13,6 +13,7 @@ use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::keymap::table::{MONITOR_NARROW, attached_mission_remedy};
 use rustain::adapters::tui::keymap::{AvailCtx, Host, LeaderStep, leader_step};
 use rustain::adapters::tui::mission_control::McTab;
+use rustain::adapters::tui::notifications::NoticeSeverity;
 use rustain::adapters::tui::presentation::Surface;
 use rustain::domain::models::SemanticMessageType;
 use rustain::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
@@ -399,6 +400,35 @@ async fn ctrl_x_w_toggles_the_column_on_and_off_at_130_columns() {
     assert!(rig.f.h.state.monitor);
     assert_eq!(rig.f.h.state.notifications.records().count(), 0);
     rig.paint();
+    let layout = rig.f.layout();
+    let rect = layout.sidebar.expect("the monitor has a column");
+    let buffer = rig.f.h.terminal.backend().buffer();
+    assert_eq!(rect.x + rect.width, 130);
+    let top = (0..130)
+        .rev()
+        .find(|&x| buffer[(x, rect.y)].symbol() == "┌")
+        .expect("painted column top left");
+    let right = (top..130)
+        .find(|&x| buffer[(x, rect.y)].symbol() == "┐")
+        .expect("painted column top right");
+    let bottom = (rect.y..30)
+        .find(|&y| buffer[(top, y)].symbol() == "└")
+        .expect("painted column bottom left");
+    assert_eq!(
+        (top, rect.y, right + 1 - top, bottom + 1 - rect.y),
+        (rect.x, rect.y, rect.width, rect.height)
+    );
+    assert_eq!(buffer[(right, bottom)].symbol(), "┘");
+    for y in rect.y + 1..bottom {
+        assert_eq!(buffer[(top, y)].symbol(), "│", "row {y}");
+        assert_eq!(buffer[(right, y)].symbol(), "│", "row {y}");
+    }
+    let status = layout.status_bar;
+    assert_eq!(status.right(), rect.x);
+    assert!((status.x..rect.x).any(|x| !buffer[(x, status.y)].symbol().trim().is_empty()));
+    for x in rect.x + 1..rect.right() - 1 {
+        assert_eq!(buffer[(x, status.y)].symbol(), " ", "status row column {x}");
+    }
     let rows = column(&rig);
     assert!(rows[0].contains("Monitor · Tasks"), "{rows:?}");
     assert!(rows.join("\n").contains("Compile"), "{rows:?}");
@@ -430,9 +460,22 @@ async fn below_120_columns_the_chord_is_refused_and_the_preference_survives_a_re
     rig.key(Key::Ctrl('x'));
     assert_eq!(rig.key(Key::Char('w')), InputAction::Consumed);
     assert!(!rig.f.h.state.monitor, "refused: nothing toggled");
-    assert!(remedies(&rig).iter().any(|m| m == MONITOR_NARROW));
+    let records: Vec<_> = rig.f.h.state.notifications.records().collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].severity, NoticeSeverity::Info);
+    assert_eq!(records[0].message, MONITOR_NARROW);
     rig.paint();
-    assert!(!lines(&rig).iter().any(|row| row.contains("Monitor ·")));
+    let rows = lines(&rig);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row
+                .trim_start()
+                .starts_with("Info The monitor needs a terminal at least 120"))
+            .count(),
+        1,
+        "{rows:?}"
+    );
+    assert!(!rows.iter().any(|row| row.contains("Monitor ·")));
 
     let mut rig = monitored().await;
     for narrow in [119u16, 100, 80] {

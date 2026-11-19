@@ -17,9 +17,9 @@ const MUTATION_ROWS: [&str; 4] = [
 
 #[tokio::test]
 async fn k1_view_opens_one_frame_at_frame_geometry_with_the_local_rail_and_no_mutation_row() {
-    // 90 columns take the full sheet, 130 the centred box: both geometries.
-    for width in [90u16, 130] {
-        let mut rig = Rig::plain(consultation_workspace().await, width, 30).await;
+    // 80 and 90 columns take the full sheet, 130 the centred box.
+    for (width, height) in [(80u16, 24u16), (90, 30), (130, 30)] {
+        let mut rig = Rig::plain(consultation_workspace().await, width, height).await;
         assert!(
             rig.f.h.state.modal_stack.is_empty(),
             "no frame before the view"
@@ -34,13 +34,15 @@ async fn k1_view_opens_one_frame_at_frame_geometry_with_the_local_rail_and_no_mu
         assert_eq!(top.title(), "Thread · consultation");
         assert!(presentation::consistent(state));
 
-        let area = Rect::new(0, 0, width, 30);
+        let area = Rect::new(0, 0, width, height);
         let expected = geometry::frame_rect(geometry::modal_region(&rig.f.layout(), area));
         let rect = frame_rect(&rig.f);
         assert_eq!(
             rect, expected,
             "the frame sits at the shared frame rect ({width})"
         );
+        assert!(rect.bottom() <= rig.f.layout().input_area.y);
+        assert!(rect.bottom() <= rig.f.layout().status_bar.y);
         assert_eq!(rig.f.buffer()[(rect.x, rect.y)].symbol(), "┌");
         assert_eq!(
             rig.f.buffer()[(rect.right() - 1, rect.bottom() - 1)].symbol(),

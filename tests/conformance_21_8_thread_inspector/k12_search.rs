@@ -25,6 +25,109 @@ fn type_query(rig: &mut Rig, text: &str) {
 }
 
 #[tokio::test]
+async fn g_then_k_reaches_the_follow_up_header_below_a_long_body() {
+    use rustain::domain::models::SemanticMessageType;
+    let body = (1..=60)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    // A newer nonmatching turn pushes both short follow-ups above the unfiltered tail viewport.
+    let tail = (1..=24)
+        .map(|n| format!("tail paragraph {n}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let items = [
+        Item::new("ri_open", SemanticMessageType::ArchitectureUpdate, &body),
+        Item::new(
+            "ri_filter_3",
+            SemanticMessageType::ArchitectureUpdate,
+            "line 3",
+        )
+        .reply_to("ri_open"),
+        Item::new(
+            "ri_filter_40",
+            SemanticMessageType::ArchitectureUpdate,
+            "line 40",
+        )
+        .reply_to("ri_open"),
+        Item::new("ri_tail", SemanticMessageType::ArchitectureUpdate, &tail).reply_to("ri_open"),
+    ];
+    let mut rig = Rig::plain(Workspace::with(&items).await, 80, 24).await;
+    rig.view("ri_open").await;
+    rig.paint();
+    let has_header_3 = |rows: &[String]| {
+        rows.iter()
+            .any(|row| row.trim() == "ri_filter_3 · received · follow-up to ri_open")
+    };
+    let walk_from_tail = |rig: &mut Rig, phase: &str| {
+        rig.key(Key::Char('G'));
+        rig.paint();
+        assert_last_row_is_the_end(rig);
+        let mut shown = body_rows(rig);
+        assert!(
+            shown.iter().any(|row| row.trim() == "tail paragraph 24"),
+            "{phase}: the newest turn is at the tail"
+        );
+        assert!(
+            !has_header_3(&shown),
+            "{phase}: the follow-up header must start offscreen"
+        );
+        let (rows, viewport) = rig.fit();
+        for expected_top in (0..rows - viewport).rev() {
+            rig.key(Key::Char('k'));
+            rig.paint();
+            assert_eq!(
+                rig.viewer_top(),
+                expected_top,
+                "{phase}: k moves up one row"
+            );
+            let next = body_rows(rig);
+            assert_ne!(next, shown, "{phase}: k changes the painted viewport");
+            if has_header_3(&next) {
+                return;
+            }
+            shown = next;
+        }
+        panic!("{phase}: k never reached the follow-up header");
+    };
+
+    walk_from_tail(&mut rig, "before filtering");
+
+    rig.key(Key::Char('g'));
+    let identity = header_rows(&rig);
+    type_query(&mut rig, "line 40");
+    rig.key(Key::Enter);
+    rig.paint();
+    let kept = inner_rows(&rig.f);
+    assert!(kept.iter().any(|row| row.trim() == "/ line 40"));
+    assert!(!kept.iter().any(|row| row.contains("Keep filter")));
+    assert!(kept.iter().any(|row| row.contains("[Esc] Close")));
+    assert_eq!(header_rows(&rig), identity);
+    rig.key(Key::Char('G'));
+    rig.paint();
+    assert_last_row_is_the_end(&rig);
+    let filtered = body_rows(&rig);
+    assert!(
+        filtered
+            .iter()
+            .any(|row| row.trim() == "ri_filter_40 · received · follow-up to ri_open")
+    );
+    assert!(filtered.iter().any(|row| row.trim() == "line 40"));
+    assert!(!has_header_3(&filtered));
+    assert!(!filtered.iter().any(|row| row.trim() == "line 3"));
+
+    rig.key(Key::Esc);
+    rig.paint();
+    assert!(rig.is_open());
+    assert!(
+        !inner_rows(&rig.f)
+            .iter()
+            .any(|row| row.trim() == "/ line 40")
+    );
+    walk_from_tail(&mut rig, "after clearing the filter");
+}
+
+#[tokio::test]
 async fn slash_filters_turns_keeping_identity_and_opened_item() {
     let mut rig = search_rig().await;
     let identity = header_rows(&rig);

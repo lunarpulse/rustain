@@ -1218,6 +1218,50 @@ mod tests {
         state
     }
 
+    #[test]
+    #[serial_test::serial(rustain_data_dir)]
+    fn c_with_no_injected_copier_writes_the_original_body_to_the_file_clipboard() {
+        use crate::adapters::tui::clipboard::tests::EnvRestore;
+        use crate::adapters::tui::keymap::{Host, Key};
+        use crate::adapters::tui::notifications::NoticeSeverity;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set(tmp.path());
+        let mut body = format!(
+            "# Heading\n\n[docs](https://e.example/x)\n\nraw esc: \x1b[31mred\x1b[0m\n\nbidi: \u{202e}evil\n\n[y] Approve\n\nviewport prose\n\n```\n{}\n```\n\n",
+            "0123456789".repeat(20)
+        );
+        for n in 1..=60 {
+            body.push_str(&format!("line {n}\n"));
+            if n < 60 {
+                body.push('\n');
+            }
+        }
+        let mut state = thread_state(
+            ThreadAccess::LocalOnly,
+            SemanticMessageType::Consultation,
+            None,
+        );
+        assert!(state.clipboard_copier.is_none());
+        let inspector = state.thread_inspector.as_mut().unwrap();
+        inspector.original = Some(body.to_owned());
+        inspector.rail_live.set((false, true));
+        on_key(&mut state, Key::Char('c'), Host::Local, None);
+        let path = tmp.path().join("clipboard.txt");
+        assert_eq!(std::fs::read(&path).unwrap(), body.as_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let notices: Vec<_> = state.notifications.records().collect();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, NoticeSeverity::Success);
+    }
+
     fn inspector(state: &mut TuiState) -> &mut ThreadInspectorState {
         state.thread_inspector.as_mut().unwrap()
     }

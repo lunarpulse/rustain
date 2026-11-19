@@ -713,3 +713,96 @@ pub(crate) fn ignores_raw_key_in(
         _ => !key.modifiers.is_empty(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::tui::clipboard::tests::EnvRestore;
+    use crate::adapters::tui::mission_control::tasks::TaskRef;
+    use crate::adapters::tui::task_window;
+    use crate::domain::models::Conversation;
+    use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult};
+
+    #[test]
+    #[serial_test::serial(rustain_data_dir)]
+    fn c_with_no_injected_copier_writes_the_original_artifact_and_task_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set(tmp.path());
+        let path = tmp.path().join("clipboard.txt");
+        for body in ["proof artifact body line\n", "**b** \x1b[31mc\n"] {
+            let mut state = TuiState::new(80, 24);
+            assert!(state.clipboard_copier.is_none());
+            let window = ArtifactWindowState::new(
+                "id".into(),
+                String::new(),
+                ArtifactBody::Source(body.as_bytes().to_vec()),
+            );
+            reducer::open_artifact_window(&mut state, window, "Artifact".into());
+            state.artifact_window.as_ref().unwrap().live.set(Live {
+                copy: true,
+                ..Live::default()
+            });
+            on_key_in(
+                &mut state,
+                Key::Char('c'),
+                Host::Local,
+                &ARTIFACT,
+                &mut |_, _| None,
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), body.as_bytes());
+        }
+        let task = PlanTask {
+            number: 1,
+            title: "Review result".into(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Completed,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: Some(TaskResult {
+                text: "Reviewed OK".into(),
+                tool_call_count: 0,
+                token_count: None,
+            }),
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+            sub_tasks: vec![],
+        };
+        let plan = Plan {
+            id: "p1".into(),
+            title: "Ship".into(),
+            tasks: vec![task],
+            estimated_effort: None,
+            status: PlanStatus::Executing,
+            created_at: 1,
+            resolved_at: None,
+            host_message_id: None,
+            origin_restrictions: None,
+        };
+        let conversation = Conversation {
+            id: "conv-1".into(),
+            plans: std::collections::HashMap::from([("p1".into(), plan)]),
+            ..Conversation::default()
+        };
+        let task_ref = TaskRef {
+            conversation_id: "conv-1".into(),
+            plan_id: "p1".into(),
+            number: 1,
+        };
+        let mut state = TuiState::new(80, 24);
+        assert!(task_window::open(&mut state, &conversation, &task_ref));
+        state.task_window.as_ref().unwrap().text.live.set(Live {
+            copy: true,
+            ..Live::default()
+        });
+        on_key_in(
+            &mut state,
+            Key::Char('c'),
+            Host::Local,
+            &task_window::SLOT,
+            &mut |_, _| None,
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"Reviewed OK");
+    }
+}

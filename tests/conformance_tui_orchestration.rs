@@ -1016,3 +1016,115 @@ fn rerun_arm_is_supervised_panics_clear_the_lamp() {
         "F1: a rerun panic must emit SpokeRerunReverted so rerunning_slot is cleared"
     );
 }
+
+// Compare the control-flow seams, not the indentation or explanatory comments.
+fn action_arm_code(event_loop: &str, head: &str) -> String {
+    input_action_arm(event_loop, head)
+        .lines()
+        .flat_map(|line| line.split("//").next().unwrap().split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn fork_arms_verify_then_await_the_fork_and_settle_to_chat() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let fork = action_arm_code(event_loop, "InputAction::ForkAtMessage =>");
+    assert!(fork.starts_with("{ if streaming.is_streaming {"));
+    assert!(
+        fork.contains(concat!(
+            "if let Err(error) = handlers::transcript_target::durable_target(&conversation, fork_message_index) { ",
+            "notifications::warning(&mut state, NoticeSource::Session, error.to_string()); ",
+            "state.needs_redraw = true; continue; } ",
+            "let target = &conversation.messages[fork_message_index]; ",
+            "dq::raise_fork(&mut state, &conversation.id, fork_message_index, &target.content, ",
+            "dq::message_target_fingerprint(target));",
+        )),
+        "an invalid focused target must exit before indexing the message or raising Fork"
+    );
+
+    let confirm = action_arm_code(event_loop, "InputAction::ForkConfirm =>");
+    let after_guard = confirm
+        .strip_prefix(concat!(
+            "{ let Some(DS::Fork(payload)) = state.decisions.take_resolved() else { continue }; ",
+            "let message_index = payload.message_index; ",
+            "if let Err(notice) = handlers::transcript_target::verify_target(&conversation, message_index, payload.target_hash) { ",
+            "notifications::info(&mut state, NoticeSource::Session, notice); ",
+            "state.needs_redraw = true; continue; } ",
+        ))
+        .expect("a stale resolved target must exit the action before any fork work");
+    // `fork_result` exposes the handler's Ok(id) as Some(id); that same id must be loaded.
+    let (_, load) = after_guard
+        .split_once(concat!(
+            "let result = handlers::transcript_target::handle_fork_confirm(&*storage, &mut _pending_save, turn_lifecycle.is_live(&conversation.id), &conversation, message_index).await; ",
+            "if let Some(new_id) = super::error_notices::fork_result(&mut state, result) { ",
+            "match storage.load_conversation(&new_id).await { Ok(Some(forked_conv)) => { ",
+        ))
+        .expect("Fork must load the id returned by the awaited handler");
+    let (success, _) = load
+        .split_once("} Ok(None) => {")
+        .expect("a successful load must be handled separately from a missing fork");
+    let ordered = [
+        "create_tab_with_conversation(forked_conv)",
+        "notifications::success(&mut state, NoticeSource::Session, hint_msg)",
+        "settle_stage_base(&mut state, FocusState::Chat)",
+    ];
+    let positions: Vec<_> = ordered.iter().map(|s| success.find(s).unwrap()).collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(success.contains("message_index + 1"));
+    assert!(!confirm.contains("notifications::info(&mut state, NoticeSource::Session, hint_msg)"));
+
+    let cancel = input_action_arm(event_loop, "InputAction::ForkCancel =>");
+    assert!(
+        cancel
+            .contains("let Some(DS::Fork(_)) = state.decisions.take_resolved() else { continue };")
+    );
+    assert!(!cancel.contains("handle_fork_confirm"));
+}
+
+#[test]
+fn mission_window_arms_delegate_to_their_seams() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let task = input_action_arm(event_loop, "InputAction::OpenTaskWindow(task) =>");
+    assert!(
+        task.contains(
+            "if !crate::adapters::tui::task_window::open(&mut state, &conversation, &task)"
+        )
+    );
+    assert!(task.contains("super::error_notices::TASK_UNAVAILABLE"));
+    assert!(!task.contains("task_window::open(&mut state, &conversation, &task);"));
+    let artifact = input_action_arm(event_loop, "InputAction::OpenArtifactWindow(id) =>");
+    assert!(artifact.contains("artifact_bridge::open_window(&app_state, &mut state, &conversation.id, &id, security.current_mode()).await"));
+    assert!(!artifact.contains("refresh_mission_tab("));
+    let history = action_arm_code(event_loop, "InputAction::OpenHistoryEntry(conv_id) =>");
+    let present = history
+        .strip_prefix(concat!(
+            "{ if session_index.get(&conv_id).is_none() { history_bridge::gone(&mut state); } ",
+            "else { if conv_id == conversation.id { history_bridge::finish_open(&mut state); } ",
+            "else if tab_manager.find_by_conversation(&conv_id).is_some() { ",
+        ))
+        .expect("only an indexed selection may reach the active, open-tab, or stored paths");
+    let (open_tab, load) = present
+        .split_once(concat!(
+            "history_bridge::finish_open(&mut state); } else { ",
+            "match storage.load_conversation(&conv_id).await { Ok(Some(loaded_conv)) => { ",
+        ))
+        .expect("an indexed selection not already open must be loaded by that same id");
+    assert!(
+        !open_tab.contains("storage.load_conversation("),
+        "switching to an already open tab must not reload from storage"
+    );
+    let (loaded, failure) = load
+        .split_once("Ok(None) => {")
+        .expect("the stored open handles a missing conversation separately");
+    let before_commit = loaded
+        .strip_suffix(concat!(
+            "session_index.set_open(&conv_id, true); session_index.set_active(Some(&conv_id)); ",
+            "history_bridge::finish_open(&mut state); } ",
+        ))
+        .expect("only the successful load activates the selected id and closes History");
+    assert!(before_commit.contains("conversation = loaded_conv;"));
+    assert!(failure.contains("history_bridge::gone(&mut state);"));
+    assert!(!failure.contains("history_bridge::finish_open("));
+    assert!(!history.contains("SessionIndex::new()"));
+}

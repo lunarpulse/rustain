@@ -101,7 +101,7 @@ fn clipboard_strategy() -> Strategy {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -153,13 +153,13 @@ mod tests {
     }
 
     /// Restores `RUSTAIN_DATA_DIR` and `RUSTAIN_CLIPBOARD` on every path, panics included.
-    struct EnvRestore {
+    pub(crate) struct EnvRestore {
         data_dir: Option<String>,
         clipboard: Option<String>,
     }
 
     impl EnvRestore {
-        fn set(data_dir: &std::path::Path) -> Self {
+        pub(crate) fn set(data_dir: &std::path::Path) -> Self {
             let saved = Self {
                 data_dir: std::env::var("RUSTAIN_DATA_DIR").ok(), // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
                 clipboard: std::env::var("RUSTAIN_CLIPBOARD").ok(), // CONFORMANCE_EXCEPTION: test-only env var save/restore for the file clipboard strategy

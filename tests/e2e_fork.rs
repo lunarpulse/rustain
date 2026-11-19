@@ -880,6 +880,63 @@ fn test_e2e_fork_widget_renders_frame() {
 }
 
 #[test]
+fn test_e2e_fork_sheet_is_whole_at_80x24() {
+    let (mut state, _) = support::clocked(80, 24);
+    decision_queue::raise_fork(&mut state, "c1", 1, "hello", 0);
+    let painted = support::screen(&support::paint(&mut state, &fork_facts(), 80, 24));
+    let rows: Vec<_> = painted.lines().collect();
+    let title = "┌ Decision: Fork ";
+    let top = rows
+        .iter()
+        .position(|row| row.starts_with(title))
+        .unwrap_or_else(|| panic!("missing Fork title:\n{painted}"));
+    assert_eq!(
+        rows[top],
+        format!("{title}{}┐", "─".repeat(79 - title.chars().count()))
+    );
+    let bottom = (top + 1..rows.len())
+        .find(|&y| rows[y].starts_with('└'))
+        .unwrap_or_else(|| panic!("missing Fork bottom border:\n{painted}"));
+    assert_eq!(rows[bottom], format!("└{}┘", "─".repeat(78)));
+    assert!(
+        rows[bottom + 1..]
+            .iter()
+            .any(|row| row.starts_with("status-row-sentinel")),
+        "missing status row below the Fork sheet:\n{painted}"
+    );
+    let inner = &rows[top + 1..bottom];
+    for line in inner {
+        assert!(line.starts_with('│') && line.ends_with('│'), "{line}");
+    }
+    let content: Vec<_> = inner
+        .iter()
+        .map(|s| s.trim_start_matches('│').trim_end_matches('│').trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        content[0].starts_with("Needs you › Fork") && content[0].ends_with("| 1 pending"),
+        "{content:?}"
+    );
+    assert_eq!(
+        content
+            .iter()
+            .filter(|line| line.contains("Message 2: \"hello\""))
+            .count(),
+        1
+    );
+    for hint in ["[y] Fork", "[n] Cancel", "[Esc] Later"] {
+        assert!(
+            content.iter().rev().take(2).any(|row| row.contains(hint)),
+            "missing {hint} in the in-frame rail: {content:?}"
+        );
+    }
+    assert!(
+        content.last().unwrap().ends_with("[Esc] Later"),
+        "{content:?}"
+    );
+}
+
+#[test]
 fn test_e2e_fork_widget_shows_correct_message_number() {
     let theme = Theme::dark();
     let lines = fork_confirm::lines(&fork_body("Hello", 4), &theme);

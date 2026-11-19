@@ -64,26 +64,10 @@
   },
   "tests": {
     "test_story_19_7_scene_provider.py::test_desync_is_loud_product_side": "native_nightly",
-    "test_story_21_6_decision_queue.py::test_d_deferred_list_and_forked_predicates": "native_nightly",
-    "test_story_21_6_decision_queue.py::test_d_fork_predicate_accepts_the_whole_sheet_and_rejects_torn_frames": "native_nightly",
     "test_story_21_6_decision_queue.py::test_e_proposal_predicate_whole_sheets_and_torn_frames": "native_nightly",
     "test_story_21_6_decision_queue.py::test_e_queue_draft_and_dismissed_rows": "native_nightly",
-    "test_story_21_6_decision_queue.py::test_leg_d_user_confirmation_80x24": "native_nightly",
     "test_story_21_6_decision_queue.py::test_leg_e_team_proposal_80x24": "native_nightly",
-    "test_story_21_7_mission_control.py::test_leg_b_messages_and_artifact_window_at_80x24": "native_nightly",
-    "test_story_21_7_mission_control.py::test_leg_c_agents_tab_and_adapters_window_at_80x24": "native_nightly",
-    "test_story_21_7_mission_control.py::test_leg_d_tasks_tab_and_task_window_at_80x24": "native_nightly",
-    "test_story_21_7_mission_control.py::test_leg_e_history_window_at_80x24": "native_nightly",
-    "test_story_21_7_mission_control.py::test_leg_f_monitor_toggle_at_130x30_and_remedy_at_80x24": "native_nightly",
-    "test_story_21_7_mission_control.py::test_leg_g_mission_strip_at_80x24_and_the_yield_at_60x16": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_a_local": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_b": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_b_desk_filter_and_viewport": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_b_desk_rendered_and_source": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_b_desk_seek_up_reaches_a_header_below_a_long_body": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_c": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_c_desk_log_frames_and_reminder": "native_nightly",
-    "test_story_21_8_thread_inspector.py::test_leg_c_desk_warning_and_stage": "native_nightly"
+    "test_story_21_7_mission_control.py::test_leg_e_history_window_at_80x24": "native_nightly"
   },
   "manual": {
     "test_story_19_16g_log_reminder.py::test_standalone_reminder_discovers_clears_and_survives_restart": "flaky under load at reruns=0 (E2n 31/64 failed, 2 rounds x 32 concurrent); owner tui-5 (MOVE-DOWN: src/infrastructure/transparency_awareness.rs closed_log_observes_a_later_durable_retract, tests/a2a_server.rs 19_16g)",
