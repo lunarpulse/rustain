@@ -676,7 +676,11 @@ mod tests {
             assistant_turn(0, "old", &[("Read", "a/old1.rs")]),
             assistant_turn(1000, "old2", &[("Read", "a/old2.rs")]),
             assistant_turn(60 * MIN, "mid", &[("Read", "b/mid1.rs")]),
-            assistant_turn(60 * MIN + 1000, "mid2", &[("Read", "b/mid2.rs")]),
+            assistant_turn(
+                60 * MIN + 1000,
+                "mid2 with a longer summary than the oldest group",
+                &[("Read", "b/mid2.rs")],
+            ),
             assistant_turn(120 * MIN, "active", &[("Read", "z/active.rs")]),
             assistant_turn(120 * MIN + 1000, "active2", &[("Read", "z/active2.rs")]),
         ]);
@@ -689,17 +693,19 @@ mod tests {
             .iter()
             .filter(|m| m.role == MessageRole::System && m.content.starts_with("[group "))
             .collect();
-        assert!(cold_gist_msgs.len() >= 2);
-        let one_gist_tokens = message_tokens(cold_gist_msgs[0]);
+        assert_eq!(cold_gist_msgs.len(), 2);
+        let oldest_gist_tokens = message_tokens(cold_gist_msgs[0]);
+        let newer_gist_tokens = message_tokens(cold_gist_msgs[1]);
+        assert!(newer_gist_tokens > oldest_gist_tokens);
         let active_tokens: usize = full.messages.iter().map(message_tokens).sum::<usize>()
             - cold_gist_msgs
                 .iter()
                 .map(|m| message_tokens(m))
                 .sum::<usize>();
-        // Keep exactly one cold gist → the most-recent cold group (G1) survives,
-        // the oldest (G0) drops first.
+        // The newer gist costs more, but either gist must fit on its own.
+        // Keep both budget pressure and the assertion about which one survives.
         let budget = AssemblyBudget {
-            max_tokens: active_tokens + one_gist_tokens,
+            max_tokens: active_tokens + newer_gist_tokens,
         };
         let out = asm.assemble(&c, budget);
         let kept: Vec<&Message> = out
