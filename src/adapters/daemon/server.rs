@@ -6553,14 +6553,14 @@ mod tests {
                 request: "oversize".into(), message: "p".repeat(MAX_FRAME_BYTES as usize),
             }).await;
             server.fanout(DaemonFrame::PeerAccepted { sequence: 992 }).await;
-            for stream in [&mut writer, &mut mirror, &mut peer] {
+            for (role, stream) in [("writer", &mut writer), ("mirror", &mut mirror), ("peer", &mut peer)] {
                 loop {
-                    if let DaemonFrame::FrameTooLarge { frame, bytes } = projection_read(stream).await {
-                        assert_eq!(frame, "TeamStatusResult");
-                        assert!(bytes > u64::from(MAX_FRAME_BYTES)); break;
-                    }
+                    let DaemonFrame::FrameTooLarge { frame, bytes } = projection_read(stream).await else { continue };
+                    assert!(frame == "TeamStatusResult", "{role}: wrong cap notice");
+                    assert!(bytes > u64::from(MAX_FRAME_BYTES), "{role}: invalid cap notice"); break;
                 }
-                assert!(matches!(projection_read(stream).await, DaemonFrame::PeerAccepted { sequence: 992 }));
+                let frame = projection_read(stream).await;
+                assert!(matches!(frame, DaemonFrame::PeerAccepted { sequence: 992 }), "{role}: expected liveness witness immediately after cap notice; got {}", frame_variant_name(&frame));
             }
             shutdown.cancel(); drop((writer, mirror, peer)); service.await.unwrap();
         }).await.expect("K07 cap guard keeps sockets connected");
