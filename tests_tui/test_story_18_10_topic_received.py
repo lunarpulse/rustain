@@ -2,7 +2,6 @@
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,17 +14,15 @@ import pytest
 
 import harness
 from fixtures.scene_provider import SceneStub
-from test_story_19_20b_rap_one_way import (
-    _command, _start_daemon, _import_ticket, _stop, _StructuralTUI,
+from harness import (
+    StructuralTUI,
+    pin_local_fixture_ticket,
+    run_fixture_cli,
+    send_pty_command,
+    sha256_file,
+    start_p2p_fixture_daemon,
+    stop_process_group,
 )
-
-
-def _sha256(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _seed_sender(workspace, artifact_id):
@@ -75,44 +72,44 @@ def _exercise(binary, evidence, root, monkeypatch):
                    "RUSTAIN_DATA_DIR": str(ws / ".rustain_data"),
                    "RUSTAIN_LOG_PATH": str(evidence / (alias + ".runtime.log"))}
             worlds[alias] = (ws, env)
-            daemons[alias] = _start_daemon(stack, binary, worlds[alias], evidence, alias)
+            daemons[alias] = start_p2p_fixture_daemon(stack, binary, worlds[alias], evidence, alias)
         tickets = {}
         for alias, world in worlds.items():
-            text = _command(binary, world, ["peer", "invite", "--name", alias], evidence, alias + ".invite")
+            text = run_fixture_cli(binary, world, ["peer", "invite", "--name", alias], evidence, alias + ".invite")
             tickets[alias] = next(line.strip() for line in text.splitlines() if line.startswith("rustain-peer1."))
         for local, remote in (("sender", "answerer"), ("answerer", "sender")):
-            _import_ticket(stack, binary, worlds[local], remote, tickets[remote], evidence)
+            pin_local_fixture_ticket(stack, binary, worlds[local], remote, tickets[remote], evidence)
             for filename in ("p2p.json", "p2p-reach.json"):
                 (evidence / (local + "." + filename)).write_bytes(
                     (worlds[local][0] / ".rustain" / filename).read_bytes())
         # The daemon snapshots its dial map at boot. Ticket import updates disk,
         # not that map (DF-18-10-SHARE-DIAL-MAP-SNAPSHOT). Restart the sender
         # before the act; keep the answerer's advertised address live throughout.
-        _stop(daemons["sender"])
-        daemons["sender"] = _start_daemon(
+        stop_process_group(daemons["sender"])
+        daemons["sender"] = start_p2p_fixture_daemon(
             stack, binary, worlds["sender"], evidence, "sender-ready")
         log_args = ["team", "log", "--filter", "kind=topic-received", "--json"]
-        before = json.loads(_command(binary, worlds["answerer"], log_args, evidence, "before"))
+        before = json.loads(run_fixture_cli(binary, worlds["answerer"], log_args, evidence, "before"))
         assert before["rows"] == [], before
         artifact_id = "a7" * 32
         _seed_sender(worlds["sender"][0], artifact_id)
-        shown = _command(binary, worlds["answerer"], ["peer", "show", "sender"], evidence, "sender.identity")
+        shown = run_fixture_cli(binary, worlds["answerer"], ["peer", "show", "sender"], evidence, "sender.identity")
         match = re.search(r"peer id \(sha-256 of that key, hex, whole\)\s+([0-9a-f]+)", shown)
         assert match, shown
         sender_peer = match.group(1)
         ws, env = worlds["answerer"]
-        tui = _StructuralTUI(binary=binary, build=False, fresh=False, workspace=ws,
-                             env_overrides=env, extra_args=["daemon", "attach"])
+        tui = StructuralTUI(binary=binary, build=False, fresh=False, workspace=ws,
+                            env_overrides=env, extra_args=["daemon", "attach"])
         tui.screens = stack.enter_context((evidence / "answerer.screens.jsonl").open("w"))
         terminal = stack.enter_context((evidence / "answerer.terminal.txt").open("w"))
         stack.callback(tui.stop)
         tui.start()
         tui.child.delaybeforesend = 0
         tui.child.logfile_read = terminal
-        advertised = _command(binary, worlds["sender"], ["peer", "share", "answerer", artifact_id,
+        advertised = run_fixture_cli(binary, worlds["sender"], ["peer", "share", "answerer", artifact_id,
             "--topic", "arch-review", "--summary", "event bus decision"], evidence, "share")
         assert "Advertised" in advertised, advertised
-        tui.child.send("/team log --filter=kind=topic-received\r")
+        send_pty_command(tui, "/team log --filter=kind=topic-received")
         tui.wait_for_screen("topic-received", timeout=30)
         deadline = time.monotonic() + 30
         while True:
@@ -123,7 +120,7 @@ def _exercise(binary, evidence, root, monkeypatch):
                 break
             assert time.monotonic() < deadline, screen
         (evidence / "topic-received.screen.txt").write_text(screen)
-        rows = json.loads(_command(binary, worlds["answerer"], log_args, evidence, "after"))["rows"]
+        rows = json.loads(run_fixture_cli(binary, worlds["answerer"], log_args, evidence, "after"))["rows"]
         assert len(rows) == 1, rows
         assert rows[0]["kind"] == "topic-received", rows
         assert rows[0]["peer"] == sender_peer, rows
@@ -131,8 +128,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         assert artifact_id in rows[0]["summary"], rows
         # A fresh CLI after daemon shutdown reads the same durable receiver state.
         tui.stop()
-        _stop(daemons["answerer"])
-        offline = json.loads(_command(binary, worlds["answerer"], log_args, evidence, "offline"))["rows"]
+        stop_process_group(daemons["answerer"])
+        offline = json.loads(run_fixture_cli(binary, worlds["answerer"], log_args, evidence, "offline"))["rows"]
         assert offline == rows, (offline, rows)
         assert not any(row.get("turn") or row.get("desync") or row.get("kind") == "desync"
                        for row in stub.rows()), stub.rows()
@@ -145,7 +142,6 @@ def _exercise(binary, evidence, root, monkeypatch):
 
 
 @pytest.mark.p2p_binary
-@pytest.mark.timeout(240)
 def test_topic_share_leaves_a_durable_receiver_row(monkeypatch):
     root = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -159,12 +155,12 @@ def test_topic_share_leaves_a_durable_receiver_row(monkeypatch):
         binary = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve()
         assert binary.is_file(), binary
         assert "release" not in str(binary), "this smoke requires a debug p2p binary"
-        manifest.update({"binary": str(binary), "binary_sha256": _sha256(binary),
+        manifest.update({"binary": str(binary), "binary_sha256": sha256_file(binary),
                          "binary_bytes": binary.stat().st_size})
         identity.write_text(json.dumps(manifest, indent=2) + "\n")
         with tempfile.TemporaryDirectory(prefix="r1810-", dir="/tmp") as workspace:
             _exercise(binary, evidence, Path(workspace), monkeypatch)
-        assert _sha256(binary) == manifest["binary_sha256"], "binary changed during capture"
+        assert sha256_file(binary) == manifest["binary_sha256"], "binary changed during capture"
     except BaseException:
         manifest.update({"result": "FAIL", "failure": traceback.format_exc()})
         (evidence / "assertions.txt").write_text("FAIL: native smoke did not complete.\n")
@@ -178,6 +174,6 @@ def test_topic_share_leaves_a_durable_receiver_row(monkeypatch):
         }, indent=2) + "\n")
         (evidence / "smoke-result.txt").write_text(manifest["result"] + "\n" + manifest.get("failure", ""))
         manifest["captures"] = {
-            path.name: {"sha256": _sha256(path), "bytes": path.stat().st_size}
+            path.name: {"sha256": sha256_file(path), "bytes": path.stat().st_size}
             for path in sorted(evidence.iterdir()) if path.is_file() and path != identity}
         identity.write_text(json.dumps(manifest, indent=2) + "\n")

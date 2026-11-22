@@ -15,18 +15,15 @@ import urllib.request
 import pytest
 import harness
 from fixtures.scene_provider import SceneStub
-from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
-from test_story_19_21_act1_distribution import _command, _events
+from harness import (
+    StructuralTUI,
+    room_events,
+    send_pty_command,
+    sha256_file,
+    stop_process_group,
+    wait_for_frame,
+)
 
-
-def _wait_screen(tui, predicate, label, timeout=45):
-    deadline = time.monotonic() + timeout
-    while True:
-        screen = tui.get_screen_text()  # blocks on actual PTY output
-        assert "unavailable in this session" not in screen, screen
-        if predicate(screen):
-            return screen
-        assert time.monotonic() < deadline, f"{label}:\n{screen}"
 
 def _stable_decision(tui, title, rail, timeout=45):
     """Observe an intact frame without depending on toast or Stage changes."""
@@ -97,7 +94,7 @@ def _exercise(binary, evidence, root, monkeypatch):
             log = stack.enter_context(logfile.open("w"))
             process = subprocess.Popen([str(binary), f"--serve-a2a=127.0.0.1:{port}", "daemon", "start", "--foreground"],
                                        cwd=ws, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            stack.callback(_stop, process)
+            stack.callback(stop_process_group, process)
             deadline = time.monotonic() + 45
             while True:
                 assert process.poll() is None, logfile.read_text()
@@ -114,8 +111,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         # Admission and sender consent are independent. Establish standing consent
         # through the recipient's real attached writer before the parity journey.
         ws, env = worlds["B"]
-        recipient = _StructuralTUI(binary=binary, build=False, fresh=False, workspace=ws,
-                                   env_overrides=env, extra_args=["daemon", "attach"])
+        recipient = StructuralTUI(binary=binary, build=False, fresh=False, workspace=ws,
+                                  env_overrides=env, extra_args=["daemon", "attach"])
         recipient.screens = stack.enter_context((evidence / "B.screens.jsonl").open("w"))
         recipient_log = stack.enter_context((evidence / "B.terminal.txt").open("w"))
         stack.callback(recipient.stop)
@@ -123,52 +120,52 @@ def _exercise(binary, evidence, root, monkeypatch):
         recipient.child.delaybeforesend = 0
         recipient.child.logfile_read = recipient_log
         ws, env = worlds["A"]
-        tui = _StructuralTUI(binary=binary, build=False, fresh=False, workspace=ws,
-                             env_overrides=env, extra_args=["daemon", "attach"])
+        tui = StructuralTUI(binary=binary, build=False, fresh=False, workspace=ws,
+                            env_overrides=env, extra_args=["daemon", "attach"])
         tui.screens = stack.enter_context((evidence / "A.screens.jsonl").open("w"))
         terminal_log = stack.enter_context((evidence / "A.terminal.txt").open("w"))
         stack.callback(tui.stop)
         tui.start()
         tui.child.delaybeforesend = 0
         tui.child.logfile_read = terminal_log
-        _command(tui, "/team send B consent-setup")
-        _wait_screen(recipient, lambda screen: "[a] Always allow" in screen, "recipient sender consent")
+        send_pty_command(tui, "/team send B consent-setup")
+        wait_for_frame(recipient, lambda screen: "[a] Always allow" in screen, "recipient sender consent")
         _stable_decision(recipient, "Decision: Peer consent", "[a] Always allow")
         recipient.send("a")
-        _wait_screen(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
-                     "recipient accepted setup")
-        _command(tui, "/team send B hello")
-        screen = _wait_screen(tui, lambda screen: "delivered" in screen and "●" in screen, "first send")
+        wait_for_frame(recipient, lambda screen: "consent-setup" in screen and "Always allow" not in screen,
+                       "recipient accepted setup")
+        send_pty_command(tui, "/team send B hello")
+        screen = wait_for_frame(tui, lambda screen: "delivered" in screen and "●" in screen, "first send")
         (evidence / "01-send.screen.txt").write_text(screen)
-        received = [event for event in _events(worlds["B"][0], "recipient_item_received")
+        received = [event for event in room_events(worlds["B"][0], "recipient_item_received")
                     if event["content"] != "consent-setup"]
         assert len(received) == 1, received
         item = received[0]["address"]["item"]
-        _command(tui, "/team board B")
-        screen = _wait_screen(tui, lambda screen: item in screen, "board root")
+        send_pty_command(tui, "/team board B")
+        screen = wait_for_frame(tui, lambda screen: item in screen, "board root")
         (evidence / "02-board.screen.txt").write_text(screen)
-        _command(tui, f"/team thread B {item}")
-        screen = _wait_screen(tui, lambda screen: f"thread · B · {item}" in screen, "thread view")
+        send_pty_command(tui, f"/team thread B {item}")
+        screen = wait_for_frame(tui, lambda screen: f"thread · B · {item}" in screen, "thread view")
         (evidence / "03-thread.screen.txt").write_text(screen)
         tui.send("\x1b")
-        _wait_screen(tui, lambda screen: "Thread · sent" not in screen, "thread window closed")
-        _command(tui, f"/team followup B {item} more")
-        screen = _wait_screen(tui, lambda screen: screen.count("delivered") >= 3 and "sending…" not in screen,
-                              "second delivered receipt")
+        wait_for_frame(tui, lambda screen: "Thread · sent" not in screen, "thread window closed")
+        send_pty_command(tui, f"/team followup B {item} more")
+        screen = wait_for_frame(tui, lambda screen: screen.count("delivered") >= 3 and "sending…" not in screen,
+                                "second delivered receipt")
         (evidence / "04-followup.screen.txt").write_text(screen)
-        received = [event for event in _events(worlds["B"][0], "recipient_item_received")
+        received = [event for event in room_events(worlds["B"][0], "recipient_item_received")
                     if event["content"] != "consent-setup"]
         assert len(received) == 2, received
         assert received[1]["in_reply_to"] == item, received
-        _command(tui, f"/team retract B {item}")
-        screen = _wait_screen(tui, lambda screen: "Retract on B's host" in screen and "[y] Retract" in screen,
-                              "armed retract card")
+        send_pty_command(tui, f"/team retract B {item}")
+        screen = wait_for_frame(tui, lambda screen: "Retract on B's host" in screen and "[y] Retract" in screen,
+                                "armed retract card")
         (evidence / "05-card.screen.txt").write_text(screen)
         _stable_decision(tui, "Decision: Retract", "[y] Retract")
         tui.send("y")
-        screen = _wait_screen(tui, lambda screen: "Retracted on B's host." in screen, "landed retract")
+        screen = wait_for_frame(tui, lambda screen: "Retracted on B's host." in screen, "landed retract")
         (evidence / "06-landed.screen.txt").write_text(screen)
-        marks = _events(worlds["B"][0], "recipient_item_retracted")
+        marks = room_events(worlds["B"][0], "recipient_item_retracted")
         assert len(marks) == 1, marks
         assert not any(row.get("turn") is not None or row.get("desync") for row in stub.rows()), stub.rows()
         for line in (evidence / "A.screens.jsonl").read_text().splitlines():
@@ -183,7 +180,6 @@ def _exercise(binary, evidence, root, monkeypatch):
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.timeout(240)
 def test_attached_thread_followup_retract_80x24(monkeypatch):
     evidence_root = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     evidence_root.mkdir(parents=True, exist_ok=True)
@@ -194,11 +190,11 @@ def test_attached_thread_followup_retract_80x24(monkeypatch):
     try:
         binary = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve()
         assert binary.is_file() and "release" not in binary.parts, binary
-        manifest.update(binary=str(binary), binary_sha256=_sha256(binary))
+        manifest.update(binary=str(binary), binary_sha256=sha256_file(binary))
         identity.write_text(json.dumps(manifest, indent=2) + "\n")
         with tempfile.TemporaryDirectory(prefix="r19-21c-", dir="/tmp") as root:
             _exercise(binary, evidence, Path(root), monkeypatch)
-        assert _sha256(binary) == manifest["binary_sha256"], "binary changed during native smoke"
+        assert sha256_file(binary) == manifest["binary_sha256"], "binary changed during native smoke"
         manifest["result"] = "PASS"
     except BaseException:
         manifest["result"] = "FAIL"

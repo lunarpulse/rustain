@@ -14,11 +14,10 @@ Scope: only items collected under this directory are judged (by collection path)
 another suite in the same session are ignored; an item collected under this directory
 through a symlink whose target leaves it is a violation (``symlink_escape``).
 
-Stale-entry limits (a table key is judged only through collected items): a listed module
-that collects zero items contributes no row, so its unused key is not reported stale (only
-a missing file is); and ``--lf``/``--last-failed`` disables stale judgement entirely, even
-when an empty cache makes pytest collect everything. Unassigned, API-listed, capability and
-source-marker violations are always judged.
+Ledger paths must exist. Existing keys are judged stale only for modules pytest
+collected in full, including modules with no tests. Explicit node selections and
+files ignored or pruned by last-failed are not full collections. An empty
+last-failed cache normally collects everything, unless its active mode selects none.
 """
 
 from __future__ import annotations
@@ -102,16 +101,39 @@ def test_key(rel, nodeid):
     return f"{rel}::{rest.partition('[')[0]}"
 
 
-def full_modules(rels, args, invocation_dir, last_failed):
-    """Modules among ``rels`` that were collected in full (so stale keys may be judged)."""
-    if last_failed:
-        return set()
-    partial = set()
-    for arg in args:
-        path, sep, _ = str(arg).partition("::")
-        if sep:
-            partial.add(Path(invocation_dir, path).resolve())
-    return {rel for rel in rels if (HERE / rel).resolve() not in partial}
+class _ModuleScope:
+    """Observe full module collection independently of the selected items."""
+
+    def __init__(self):
+        self.full_modules = set()
+        self._reports = {}
+
+    @pytest.hookimpl(wrapper=True, trylast=True)
+    def pytest_make_collect_report(self, collector):
+        report = yield
+        # Pytest's runner attaches CallInfo until the make-report hook returns.
+        # The empty placeholder from last-failed's skip-files hook has no call.
+        if isinstance(collector, pytest.Module) and report.passed and hasattr(report, "call"):
+            path = collector.path
+            if path.is_relative_to(HERE) and path.resolve().is_relative_to(HERE):
+                # This inner wrapper sees the result before last-failed trims it.
+                self._reports[report] = (path.relative_to(HERE).as_posix(), len(report.result))
+        return report
+
+    def pytest_collectreport(self, report):
+        # Pytest emits a successful module report when it traverses that module;
+        # probing it to resolve an explicit :: target does not emit the report.
+        candidate = self._reports.pop(report, None)
+        if candidate is not None:
+            rel, child_count = candidate
+            if len(report.result) == child_count:
+                self.full_modules.add(rel)
+
+    def pytest_collection_finish(self):
+        self._reports.clear()
+
+
+_MODULE_SCOPE = pytest.StashKey[_ModuleScope]()
 
 
 def lane_violations(rows, modules, tests, manual, *, root, full):
@@ -193,8 +215,13 @@ def _report(config, lines):
     config.hook.pytest_collectreport(report=pytest.CollectReport(REPORT_ID, "failed", text, []))
 
 
+def pytest_configure(config):
+    scope = config.stash[_MODULE_SCOPE] = _ModuleScope()
+    config.pluginmanager.register(scope)
+
+
 @pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(session, config, items):
+def pytest_collection_modifyitems(config, items):
     try:
         modules, tests, manual = load_table(TABLE)
     except (OSError, ValueError) as exc:
@@ -202,12 +229,17 @@ def pytest_collection_modifyitems(session, config, items):
         return
     owned, escaped = owned_items(items)
     rows = [(rel, item.nodeid, {mark.name for mark in item.iter_markers()}) for item, rel in owned]
-    full = full_modules(
-        {rel for rel, _, _ in rows},
-        config.args,
-        config.invocation_params.dir,
-        bool(getattr(config.option, "lf", False)),
-    )
+    full = config.stash[_MODULE_SCOPE].full_modules
+    last_failed = config.pluginmanager.get_plugin("lfplugin")
+    # Use the live plugin state: a nonempty cache with no matching selected
+    # failures is not the same as the cache plugin's no-failures fallback.
+    if (
+        config.getoption("last_failed_no_failures", "all") == "none"
+        and last_failed is not None
+        and last_failed.active
+        and not last_failed.lastfailed
+    ):
+        full = ()
     lanes, bad = lane_violations(rows, modules, tests, manual, root=HERE, full=full)
     for item, _ in owned:
         lane = lanes.get(item.nodeid)

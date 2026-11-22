@@ -24,7 +24,7 @@ import pyte
 
 import harness
 from harness import RustainTUI
-from conflict_receipt_manifest import begin_run
+from conflict_receipt_manifest import begin_run, binary_identity, unlinked_path
 from fixtures.scene_provider import SceneStub
 from test_story_19_21_act1_distribution import (
     _chat_pages, _command, _compact, _events, _fresh_board, _open_decision, _painted_item,
@@ -35,7 +35,6 @@ from test_story_19_21b_standalone_modes import _ObservedHttp
 pytestmark = [pytest.mark.story_19_21, pytest.mark.a2a_binary]
 SCENE = Path(__file__).parent / "journeys/j10/scenes/19-21b-conflict-flag-v1.json"
 SOURCE = Path(__file__).resolve()
-RECEIPTS = Path(__file__).parent / "journeys/j10/receipts"
 PERSONAS = {alias: "scene-" + alias for alias in ("lena-po", "jun-dev", "marcus-arch")}
 RECIPIENTS = ("lena-po", "jun-dev")
 STORY = (
@@ -59,14 +58,15 @@ EVENT_NAMES = (
 def conflict_run(request):
     binary_name = os.environ.get("RUSTAIN_TUI_BINARY")
     assert binary_name, "conflict capture requires an explicitly built four-feature release binary"
-    binary = Path(binary_name).resolve()
+    assert not os.environ.get("RUSTAIN_TUI_CLIENT_BINARY"), (
+        "capture uses the same explicit release for hosts and clients")
     viewports = [
         f"{item.callspec.params['columns']}x{item.callspec.params['rows']}"
         for item in request.session.items
         if item.path.resolve() == SOURCE
         and item.originalname == "test_conflict_flag_capture"
     ]
-    return begin_run(SOURCE.parent.parent, binary, viewports)
+    return begin_run(SOURCE.parent.parent, binary_name, viewports)
 
 
 def _painted_rows(text, width):
@@ -269,21 +269,18 @@ def _tls_material(root):
 @pytest.mark.parametrize("columns,rows", [(80, 24), (130, 30), (60, 16)], ids=["80x24", "130x30", "60x16"])
 @pytest.mark.timeout(420)
 def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
-    binary_name = os.environ.get("RUSTAIN_TUI_BINARY")
-    assert binary_name, "conflict capture requires an explicitly built four-feature release binary"
-    binary = Path(binary_name).resolve()
-    assert binary.is_file(), binary
-    assert not os.environ.get("RUSTAIN_TUI_CLIENT_BINARY"), "capture uses the same explicit release for hosts and clients"
-    binary_sha, source_sha, scene_sha = _sha(binary), _sha(SOURCE), _sha(SCENE)
-    assert binary.stat().st_size <= 39_845_888, "four-feature release exceeds the approved byte ceiling"
+    binary = conflict_run.binary
+    executable = binary_identity(binary)
+    source_sha, scene_sha = _sha(SOURCE), _sha(SCENE)
+    assert executable["bytes"] <= 39_845_888, "four-feature release exceeds the approved byte ceiling"
     stamp_time = datetime.now(timezone.utc).replace(microsecond=0)
     stamp = stamp_time.strftime("%Y-%m-%dT%H-%M-%SZ")
     recorded = stamp_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-    identity = f"19-21b-{columns}x{rows}-{stamp_time.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex}"
-    receipt_dir = RECEIPTS / identity
-    receipt_dir.mkdir(parents=True, exist_ok=False)
+    viewport = f"{columns}x{rows}"
+    receipt_dir = conflict_run.receipt_directory(viewport)
+    identity = receipt_dir.name
     extra = os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR")
-    export_dir = Path(extra).resolve() / identity if extra else None
+    export_dir = unlinked_path(Path(extra) / identity, "capture evidence export") if extra else None
     root = Path(tempfile.mkdtemp(dir="/tmp", prefix="r21h-"))
     monkeypatch.setenv("RUSTAIN_TUI_BINARY", str(binary))
     monkeypatch.setattr(harness, "TERM_COLS", columns)
@@ -294,12 +291,16 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
     workspaces = {alias: root / alias for alias in PERSONAS}
     homes = {alias: root / (alias + "-home") for alias in PERSONAS}
     assert len(str(root / "marcus-arch/.rustain_data/daemons" / ("a" * 16 + ".sock"))) <= 100
+    pty_winsizes = {}
     manifest = {
-        "recorded_at": recorded, "run": identity, "columns": columns, "rows": rows,
-        "daemon_binary": str(binary), "daemon_binary_sha256": binary_sha,
-        "daemon_binary_bytes": binary.stat().st_size,
-        "client_binary": str(binary), "client_binary_sha256": binary_sha,
-        "client_binary_bytes": binary.stat().st_size,
+        "recorded_at": recorded, "run": identity, "capture_run_id": conflict_run.token,
+        "columns": columns, "rows": rows, "pty_winsizes": pty_winsizes,
+        "daemon_binary": executable["path"], "daemon_binary_sha256": executable["sha256"],
+        "daemon_binary_bytes": executable["bytes"], "daemon_binary_device": executable["device"],
+        "daemon_binary_inode": executable["inode"],
+        "client_binary": executable["path"], "client_binary_sha256": executable["sha256"],
+        "client_binary_bytes": executable["bytes"], "client_binary_device": executable["device"],
+        "client_binary_inode": executable["inode"],
         "source_sha256": source_sha, "scene_sha256": scene_sha,
         "tls": {"ca_sha256": _sha(ca), "certificate_sha256": _sha(cert),
                 "listener_bind": "0.0.0.0", "advertised_host": "127.0.0.1",
@@ -441,6 +442,27 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
         manifest["boot_order"] = ["lena-po", "jun-dev", "marcus-arch", "restart:lena-po"]
 
         catalog_ready("lena-po", ("marcus-arch",))
+
+        # Observe the real PTY before the harness waits for Ready. On a bad
+        # spawn the harness has not taken ownership yet, so close the child here.
+        spawn = harness.pexpect.spawn
+        aliases_by_workspace = {str(path): alias for alias, path in workspaces.items()}
+
+        def observe_spawn(command, *args, **kwargs):
+            assert command == str(binary), "attached client did not spawn the selected executable"
+            alias = aliases_by_workspace[kwargs["cwd"]]
+            assert alias not in pty_winsizes, f"unexpected second PTY for {alias}"
+            child = spawn(command, *args, **kwargs)
+            try:
+                size = child.getwinsize()
+                assert size == (rows, columns), f"{alias} PTY has {size}; expected {(rows, columns)}"
+                pty_winsizes[alias] = list(size)
+            except BaseException:
+                child.close(force=True)
+                raise
+            return child
+
+        monkeypatch.setattr(harness.pexpect, "spawn", observe_spawn)
 
         def start_tui(alias):
             tui = resources.enter_context(RustainTUI(
@@ -644,7 +666,9 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
             assert parsed["rows"], result.stdout
             logs[alias] = result.stdout
             (root / (alias + ".team-log.json")).write_text(result.stdout)
-        assert _sha(binary) == binary_sha and _sha(SOURCE) == source_sha and _sha(SCENE) == scene_sha, "capture input identity changed during native run"
+        assert (
+            binary_identity(binary) == executable and _sha(SOURCE) == source_sha and _sha(SCENE) == scene_sha
+        ), "capture input identity changed during native run"
         manifest.update({
             "assignment_item_from_painted_surface": item,
             "body_sha256_from_actual_posts_and_journals": body_sha256,
@@ -676,7 +700,7 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
                 sections.append(f"\n--- actual painted {name} ({columns}x{rows}) ---\n{screen}")
             stream.write("\n".join(sections))
     receipt = conflict_run.publish_receipt(
-        f"{columns}x{rows}", staged, receipt,
+        viewport, staged, receipt,
         exported_staged_path=export_dir / staged.name if export_dir is not None else None,
     )
     print(f"CONFLICT_FLAG_RECEIPT={receipt}", flush=True)

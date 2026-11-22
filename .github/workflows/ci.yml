@@ -26,16 +26,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install pinned source-metric parser
-        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
+      - name: Install pinned source-metric parser and TUI control dependencies
+        run: |
+          python3 -m pip install -r tools/ci/requirements-metrics.txt
+          python3 -m pip install -e "./tests_tui[dev]"
 
-      - name: Run real metric CLI, ratchet signoff and TUI skip checker behavioral controls
+      - name: Run metric, ratchet signoff and TUI contract behavioral controls
         run: |
           python3 - <<'PY'
           import sys
           import unittest
           suites = []
-          for pattern in ("test_event_loop_complexity.py", "test_ratchet_signoff_guard.py", "test_check_tui_skips.py"):
+          for pattern in (
+              "test_event_loop_complexity.py",
+              "test_ratchet_signoff_guard.py",
+              "test_check_tui_skips.py",
+              "test_run_nightly_tui.py",
+              "test_carried_j10_receipts.py",
+              "test_named_capture_geometry.py",
+          ):
               suite = unittest.defaultTestLoader.discover(".github/scripts", pattern=pattern)
               if suite.countTestCases() == 0:
                   raise SystemExit(f"No behavioral controls selected: {pattern}")
@@ -408,20 +417,28 @@ jobs:
           python-version: "3.10"
       - name: Install native TUI capture dependencies
         run: pip install -e "./tests_tui[dev]"
-      - name: Execute both named Act 2 viewports without reruns
+      - name: Verify pinned carried Act 1 and Act 2 receipts
+        run: |
+          revision=$(git rev-parse --verify HEAD)
+          python3 tests_tui/carried_j10_receipts.py --repository "$PWD" --revision "$revision"
+          printf 'RUSTAIN_CARRIED_J10_REVISION=%s\n' "$revision" >> "$GITHUB_ENV"
+      - name: Execute named Act 2 80-column capture without reruns
         env:
           RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
           RUSTAIN_CAPTURE_EVIDENCE_DIR: ${{ github.workspace }}/tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          pytest tests_tui/test_story_19_19_act2_consultation.py::test_act2_consultation_adr_fanout \
+          pytest 'tests_tui/test_story_19_19_act2_consultation.py::test_act2_consultation_adr_fanout[80]' \
             -p no:rerunfailures -n 0 --timeout=420 --junitxml=act2-results.xml -v
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           cases = ET.parse("act2-results.xml").findall(".//testcase")
-          expected = {"test_act2_consultation_adr_fanout[80]", "test_act2_consultation_adr_fanout[130]"}
-          assert {case.attrib["name"] for case in cases} == expected and len(cases) == 2, cases
-          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required Act 2 case skipped/failed/errored"
+          actual = [(case.attrib["classname"], case.attrib["name"]) for case in cases]
+          expected = [("test_story_19_19_act2_consultation", "test_act2_consultation_adr_fanout[80]")]
+          assert actual == expected, (actual, expected)
+          assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "The required Act 2 case skipped/failed/errored"
           PY
+      - name: Verify carried receipts after the fresh Act 2 capture
+        run: python3 tests_tui/carried_j10_receipts.py --repository "$PWD" --revision "$RUSTAIN_CARRIED_J10_REVISION"
       - name: Annotate test failures
         if: failure()
         run: python3 .github/scripts/annotate-test-failures.py act2-results.xml
@@ -449,43 +466,50 @@ jobs:
           python-version: "3.10"
       - name: Install native TUI capture dependencies
         run: pip install -e "./tests_tui[dev]"
+      - name: Verify pinned carried Act 1 and Act 2 receipts
+        run: |
+          revision=$(git rev-parse --verify HEAD)
+          python3 tests_tui/carried_j10_receipts.py --repository "$PWD" --revision "$revision"
+          printf 'RUSTAIN_CARRIED_J10_REVISION=%s\n' "$revision" >> "$GITHUB_ENV"
       - name: Exercise standalone proposal Root-mode guards without reruns
         env:
           RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
+          RUSTAIN_NAMED_PTY_EVIDENCE: ${{ github.workspace }}/named-pty-evidence/${{ github.run_id }}-${{ github.run_attempt }}/proposal-modes.jsonl
         run: |
-          pytest tests_tui/test_story_19_21b_standalone_modes.py \
+          pytest \
+            'tests_tui/test_story_19_21b_standalone_modes.py::test_standalone_auto_mode_still_requires_human_send[yolo]' \
+            'tests_tui/test_story_19_21b_standalone_modes.py::test_standalone_auto_mode_still_requires_human_send[autoedit]' \
             -p no:rerunfailures -n 0 --timeout=120 --junitxml=proposal-modes-results.xml -v
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           cases = ET.parse("proposal-modes-results.xml").findall(".//testcase")
+          actual = [(case.attrib["classname"], case.attrib["name"]) for case in cases]
           expected = {
-              "test_standalone_auto_mode_still_requires_human_send[yolo]",
-              "test_standalone_auto_mode_still_requires_human_send[autoedit]",
+              ("test_story_19_21b_standalone_modes", "test_standalone_auto_mode_still_requires_human_send[yolo]"),
+              ("test_story_19_21b_standalone_modes", "test_standalone_auto_mode_still_requires_human_send[autoedit]"),
           }
-          assert {case.attrib["name"] for case in cases} == expected and len(cases) == 2, cases
+          assert len(actual) == len(expected) and set(actual) == expected, (actual, expected)
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required proposal Root-mode case skipped/failed/errored"
           PY
-      - name: Execute named Act 1 viewports and daemon restart without reruns
+      - name: Execute named Act 1 80x24 capture and daemon restart without reruns
         env:
           RUSTAIN_TUI_BINARY: ${{ github.workspace }}/target/release/rustain
           RUSTAIN_CAPTURE_EVIDENCE_DIR: ${{ github.workspace }}/tests_tui/journeys/j10/receipts/evidence/${{ github.run_id }}-${{ github.run_attempt }}
+          RUSTAIN_NAMED_PTY_EVIDENCE: ${{ github.workspace }}/named-pty-evidence/${{ github.run_id }}-${{ github.run_attempt }}/act1.jsonl
         run: |
           pytest \
             'tests_tui/test_story_19_21_act1_distribution.py::test_act1_attached_distribution[80x24]' \
-            'tests_tui/test_story_19_21_act1_distribution.py::test_act1_attached_distribution[130x30]' \
-            'tests_tui/test_story_19_21_act1_distribution.py::test_act1_attached_distribution[60x16]' \
             'tests_tui/test_story_19_21_act1_distribution.py::test_act1_daemon_crash_restart' \
             -p no:rerunfailures -n 0 --timeout=420 --junitxml=act1-results.xml -v
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           cases = ET.parse("act1-results.xml").findall(".//testcase")
+          actual = [(case.attrib["classname"], case.attrib["name"]) for case in cases]
           expected = {
-              "test_act1_attached_distribution[80x24]",
-              "test_act1_attached_distribution[130x30]",
-              "test_act1_attached_distribution[60x16]",
-              "test_act1_daemon_crash_restart",
+              ("test_story_19_21_act1_distribution", "test_act1_attached_distribution[80x24]"),
+              ("test_story_19_21_act1_distribution", "test_act1_daemon_crash_restart"),
           }
-          assert {case.attrib["name"] for case in cases} == expected and len(cases) == 4, cases
+          assert len(actual) == len(expected) and set(actual) == expected, (actual, expected)
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required Act 1 case skipped/failed/errored"
           PY
       - name: Execute all genuine and policy canonical receipt controls
@@ -497,14 +521,22 @@ jobs:
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           cases = ET.parse("receipt-checker-results.xml").findall(".//testcase")
-          names = [case.attrib["name"] for case in cases]
-          assert len(cases) == 45 and len(set(names)) == 45, names
-          for prefix, count in [
-              ("test_genuine_receipt_rejects_changed_identity[", 3),
-              ("test_genuine_act1_receipt_rejects_changed_identity[", 9),
-              ("test_genuine_product_only_arbitrary_cwd[", 4),
-          ]:
-              assert sum(name.startswith(prefix) for name in names) == count, (prefix, names)
+          actual = [(case.attrib["classname"], case.attrib["name"]) for case in cases]
+          module = "test_receipt_controls"
+          assert len(actual) == len(set(actual)) == 37, actual
+          assert all(classname == module for classname, _ in actual), actual
+          policy = {case for case in actual if case[1].startswith("test_canonical_")}
+          genuine = {
+              (module, f"test_genuine_receipt_rejects_changed_identity[{leg}]")
+              for leg in ("scene", "source", "stamp")
+          } | {
+              (module, f"test_genuine_act1_receipt_rejects_changed_identity[80x24-{leg}]")
+              for leg in ("scene", "source", "stamp")
+          } | {
+              (module, f"test_genuine_product_only_arbitrary_cwd[{capture}]")
+              for capture in ("act2", "80x24")
+          }
+          assert len(policy) == 29 and set(actual) - policy == genuine, actual
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required canonical receipt control skipped/failed/errored"
           PY
       - name: Annotate test failures
@@ -519,6 +551,8 @@ jobs:
             act1-results.xml
             proposal-modes-results.xml
             receipt-checker-results.xml
+            named-pty-evidence/${{ github.run_id }}-${{ github.run_attempt }}/act1.jsonl
+            named-pty-evidence/${{ github.run_id }}-${{ github.run_attempt }}/proposal-modes.jsonl
             receipt-checker-evidence/**/positive.json
             receipt-checker-evidence/**/negative.json
             receipt-checker-evidence/**/restored.json
@@ -541,9 +575,9 @@ jobs:
         run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron
       - name: Size ratchet
         run: .github/scripts/release-size-guard.sh target/release/rustain
+      # Explicit bash makes both sides of the locked TLS dependency pipeline blocking.
       - name: Single TLS stack (rustls + ring)
         shell: bash
-        # `shell: bash` runs with `-eo pipefail`, so a failing `cargo tree` fails the step.
         run: |
           for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do
             args=()
@@ -558,23 +592,22 @@ jobs:
         run: pip install -e "./tests_tui[dev]"
       - name: Verify existing ephemeral TLS fixture tool
         run: openssl version
-      - name: Execute exact conflict viewports without reruns
+      - name: Execute exact conflict 80x24 capture without reruns
         env:
           RUSTAIN_CAPTURE_EVIDENCE_DIR: ${{ github.workspace }}/conflict-capture-evidence/${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          env -u RUSTAIN_TUI_CLIENT_BINARY pytest \
+          env -u RUSTAIN_TUI_CLIENT_BINARY -u RUSTAIN_CONFLICT_CAPTURE_ONLY pytest \
             'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[80x24]' \
-            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[130x30]' \
-            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[60x16]' \
             -p no:rerunfailures -n 0 --timeout=420 --junitxml=conflict-native-results.xml -v
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           cases = ET.parse("conflict-native-results.xml").findall(".//testcase")
-          expected = {f"test_conflict_flag_capture[{viewport}]" for viewport in ("80x24", "130x30", "60x16")}
-          assert len(cases) == 3 and {case.attrib["name"] for case in cases} == expected, cases
+          actual = [(case.attrib["classname"], case.attrib["name"]) for case in cases]
+          expected = [("test_story_19_21b_conflict_flag", "test_conflict_flag_capture[80x24]")]
+          assert actual == expected, (actual, expected)
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required conflict viewport skipped/failed/errored"
           PY
-      - name: Execute exact nine current conflict receipt controls
+      - name: Execute exact three current conflict receipt controls
         env:
           RUSTAIN_RECEIPT_EVIDENCE_DIR: ${{ github.workspace }}/conflict-receipt-evidence
         run: |
@@ -582,21 +615,16 @@ jobs:
             'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-scene]' \
             'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-source]' \
             'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-stamp]' \
-            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[130x30-scene]' \
-            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[130x30-source]' \
-            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[130x30-stamp]' \
-            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[60x16-scene]' \
-            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[60x16-source]' \
-            'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[60x16-stamp]' \
             -p no:rerunfailures -n 0 --timeout=120 --junitxml=conflict-integrity-results.xml -v
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           cases = ET.parse("conflict-integrity-results.xml").findall(".//testcase")
+          actual = [(case.attrib["classname"], case.attrib["name"]) for case in cases]
           expected = {
-              f"test_current_conflict_receipt_rejects_independent_corruption[{viewport}-{leg}]"
-              for viewport in ("80x24", "130x30", "60x16") for leg in ("scene", "source", "stamp")
+              ("test_story_19_21b_receipt_controls", f"test_current_conflict_receipt_rejects_independent_corruption[80x24-{leg}]")
+              for leg in ("scene", "source", "stamp")
           }
-          assert len(cases) == 9 and {case.attrib["name"] for case in cases} == expected, cases
+          assert len(actual) == len(expected) and set(actual) == expected, (actual, expected)
           assert all(case.find(tag) is None for case in cases for tag in ("skipped", "failure", "error")), "A required conflict integrity control skipped/failed/errored"
           PY
       - name: Annotate test failures

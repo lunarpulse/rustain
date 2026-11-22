@@ -18,16 +18,19 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import signal
+import subprocess
 import time
 import shutil
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import Callable, Iterable, Iterator, NamedTuple
 
 import pexpect
 import pyte
@@ -63,6 +66,135 @@ REWIND_SETTLE = 3.0
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+def wait_until(predicate, diagnostic, timeout=30):
+    """Return the observed value, with a diagnostic on a bounded wait."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        assert time.monotonic() < deadline, diagnostic()
+        time.sleep(0.04)
+
+
+def stop_process_group(process):
+    """Retire a fixture process started with ``start_new_session=True``."""
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    process.wait(timeout=5)
+
+
+def run_fixture_cli(binary, world, args, evidence, name):
+    """Run a bounded subprocess in one fixture world and retain its output."""
+    ws, env = world
+    result = subprocess.run([str(binary), *args], cwd=ws, env=env,
+                            capture_output=True, text=True, timeout=15)
+    (evidence / (name + ".txt")).write_text(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+def start_p2p_fixture_daemon(stack, binary, world, evidence, alias):
+    ws, env = world
+    log_path = evidence / (alias + ".daemon.log")
+    log = stack.enter_context(log_path.open("w"))
+    process = subprocess.Popen([str(binary), "daemon", "start", "--foreground"],
+                               cwd=ws, env=env, stdout=log,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    stack.callback(stop_process_group, process)
+    deadline = time.monotonic() + 45
+    # The CLI status request is a structural readiness probe. In particular,
+    # an existing socket alone is not proof that the foreground daemon is up.
+    while True:
+        assert process.poll() is None, log_path.read_text()
+        status = subprocess.run([str(binary), "daemon", "status"], cwd=ws, env=env,
+                                capture_output=True, text=True, timeout=5)
+        reach = ws / ".rustain/p2p-reach.json"
+        if (status.returncode == 0 and "running" in (status.stdout + status.stderr).lower()
+                and reach.is_file() and json.loads(reach.read_text()).get("self")):
+            (evidence / (alias + ".status.txt")).write_text(status.stdout + status.stderr)
+            return process
+        assert time.monotonic() < deadline, log_path.read_text() + status.stdout + status.stderr
+
+
+def pin_local_fixture_ticket(stack, binary, world, alias, ticket, evidence):
+    ws, env = world
+    child = pexpect.spawn(str(binary),
+                          ["peer", "add", alias, ticket, "--allow-local-addresses"],
+                          cwd=str(ws), env=env, encoding="utf-8", timeout=20)
+    stack.callback(child.close, force=True)
+    child.delaybeforesend = 0
+    child.logfile_read = stack.enter_context((evidence / ("add-" + alias + ".txt")).open("w"))
+    child.expect_exact("[y] Confirm and pin")
+    child.sendline("y")
+    child.expect_exact("Pinned " + alias)
+    child.expect(pexpect.EOF)
+    child.close()
+    assert child.exitstatus == 0, (child.exitstatus, child.signalstatus)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def send_pty_command(tui, text: str) -> None:
+    """Submit one command; embedded newlines are paste data."""
+    tui.send("\x1b[200~" + text + "\x1b[201~")
+    tui.send("\r")
+
+
+def room_events(workspace: Path, name: str) -> list[dict]:
+    return journal_events(
+        (workspace / ".rustain/rooms").glob("*.jsonl"), name, descend_matches=False,
+    )
+
+
+def journal_events(paths: Iterable[Path], name: str, *, descend_matches: bool = True) -> list[dict]:
+    """Find named events in path, line, then nesting order."""
+    found = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            if value.get("event") == name:
+                found.append(value)
+                if not descend_matches:
+                    return
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for path in sorted(paths):
+        for line in path.read_text().splitlines():
+            visit(json.loads(line))
+    return found
+
+
+def wait_for_frame(tui, predicate, label, timeout=45):
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = tui.get_screen_text()
+        assert "unavailable in this session" not in screen, screen
+        if predicate(screen):
+            return screen
+        assert time.monotonic() < deadline, f"{label}:\n{screen}"
+
 
 def _load_env() -> dict[str, str]:
     """Merge process env with project .env file."""
@@ -1229,6 +1361,49 @@ class RustainTUI:
                     if f.is_file() and not f.name.endswith(".tmp")
                 )
         return total
+
+
+@dataclass
+class StructuralTUI(RustainTUI):
+    """Observe actual PTY output and let callers guard intermediate paints."""
+
+    frame_guard: Callable[[str], None] | None = None
+
+    def _sync_screen(self) -> None:
+        try:
+            data = self.child.read_nonblocking(size=65536, timeout=0.2)
+        except pexpect.TIMEOUT:
+            assert self.child.isalive(), "TUI exited while waiting for a frame"
+            return
+        except pexpect.EOF:
+            raise AssertionError("TUI exited before the expected frame") from None
+        self._stream.feed(data)
+        screen = "\n".join(self._screen.display)
+        if self.frame_guard is not None:
+            self.frame_guard(screen)
+        if hasattr(self, "screens"):
+            self.screens.write(json.dumps({"screen": screen}) + "\n")
+            self.screens.flush()
+
+    def wait_for_screen(self, text, timeout=60, poll_interval=0.5) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if text in self.get_screen_text():
+                return True
+        raise AssertionError(f"Screen did not show {text!r}:\n{self.get_screen_text()}")
+
+    def stop(self) -> None:
+        if self._child is not None:
+            if self.child.isalive():
+                self.child.sendcontrol("c")
+                try:
+                    self.child.expect(pexpect.EOF, timeout=5)
+                except pexpect.TIMEOUT:
+                    self.child.terminate(force=True)
+            self.child.close(force=True)
+        if self._tmpdir:
+            self._tmpdir.cleanup()
+            self._tmpdir = None
 
 
 # ── Convenience Context Manager ──────────────────────────────────────────────

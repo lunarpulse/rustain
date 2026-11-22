@@ -1,15 +1,14 @@
-"""Keystones K1-K8 of the lane guard (tui-4): pure functions of ``lane_guard.py``.
-
-No process is spawned. Items are synthetic ``(module, nodeid, marker names)``
-rows and the module files live in ``tmp_path``. The real-suite behaviour (the
-plugin inside a real collection, through xdist) is observed by the story's RED
-runs, not here.
-"""
+"""Lane guard keystones, including subprocess coverage of pytest's actual collection scope."""
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
+from shlex import join
+from shutil import copyfile
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -162,11 +161,132 @@ def test_k6_stale_entries_are_judged_only_where_the_module_was_collected_in_full
     assert bad["stale"] == {"gone.py (file does not exist)", "unused.py"}
     _, bad = lg.lane_violations(rows, modules, tests, {}, root=root, full=set())
     assert bad["stale"] == {"gone.py (file does not exist)"}
-    rels = {"a.py", "unused.py"}
-    assert lg.full_modules(rels, ["tests_tui/"], tmp_path, False) == rels
-    node_arg = str(Path(lg.HERE) / "a.py") + "::test_x"
-    assert lg.full_modules(rels, [node_arg], tmp_path, False) == rels - {"a.py"}
-    assert lg.full_modules(rels, ["tests_tui/"], tmp_path, True) == set()
+    _check_collection_scope(tmp_path / "pytest-scope")
+
+
+def _check_collection_scope(root):
+    tui = root / "tests_tui"
+    empty = ("nested/test_folder_empty.py", "test_empty.py", "test_glob_empty.py")
+    _root(tui, *empty)
+    foreign_suite = root / "other_suite"
+    foreign_suite.mkdir()
+    copyfile(Path(lg.__file__), tui / "lane_guard.py")
+    (root / "conftest.py").write_text('pytest_plugins = ("lane_guard",)\n', encoding="utf-8")
+    (root / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = tests_tui\npythonpath = tests_tui\n"
+        "markers =\n    core: fixture core lane\n    native_nightly: fixture nightly lane\n",
+        encoding="utf-8",
+    )
+    (tui / "test_scope.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('viewport', ['80', '80x24'])\n"
+        "def test_viewport(viewport):\n"
+        "    assert viewport == '80x24'\n"
+        "def test_nightly():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (tui / "test_stable.py").write_text("def test_stable(): pass\n", encoding="utf-8")
+    (foreign_suite / "test_foreign.py").write_text("def test_foreign(): pass\n", encoding="utf-8")
+    removed = "test_scope.py::test_removed"
+    (tui / "lanes.json").write_text(
+        json.dumps({
+            "modules": dict.fromkeys((*empty, "test_scope.py", "test_stable.py"), "core"),
+            "tests": {"test_scope.py::test_nightly": "native_nightly", removed: "core"},
+        }),
+        encoding="utf-8",
+    )
+    case80 = "tests_tui/test_scope.py::test_viewport[80]"
+    case80x24 = "tests_tui/test_scope.py::test_viewport[80x24]"
+    nightly = "tests_tui/test_scope.py::test_nightly"
+    stable = "tests_tui/test_stable.py::test_stable"
+    foreign = "other_suite/test_foreign.py::test_foreign"
+    scope_ids = (case80, case80x24, nightly)
+    all_ids = (*scope_ids, stable)
+    stale_keys = (*empty, removed)
+
+    timings = root / "subcalls.log"
+    suite_timeout = 30
+    subcall_timeout = 10
+    deadline = monotonic() + suite_timeout
+
+    def run(*args):
+        cmd = [sys.executable, "-m", "pytest", "-q", "--color=no", "--strict-markers", *args]
+        command = join(cmd)
+        started = monotonic()
+        timeout = min(subcall_timeout, deadline - started)
+        with timings.open("a", encoding="utf-8") as log:
+            if timeout <= 0:
+                print(f"not started: {command}", file=log)
+                pytest.fail(f"K6 exceeded its {suite_timeout}s budget before {command}; see {timings}", pytrace=False)
+            print(f"start (deadline in {timeout:.1f}s): {command}", file=log, flush=True)
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=root,
+                    env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    encoding="utf-8",
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                print(f"timed out after {monotonic() - started:.2f}s", file=log)
+                partial = (exc.stdout or b"").decode("utf-8", errors="replace")
+                pytest.fail(f"{command} exceeded its {timeout:.1f}s deadline; see {timings}\n{partial}", pytrace=False)
+            print(f"exit {result.returncode} after {monotonic() - started:.2f}s", file=log)
+            return result
+
+    def diagnostic(result):
+        return f"{join(result.args)} exited {result.returncode}; see {timings}\n{result.stdout}"
+
+    def collect(*args, selected, stale=()):
+        result = run("--collect-only", *args)
+        expected_exit = pytest.ExitCode.OK if selected else pytest.ExitCode.NO_TESTS_COLLECTED
+        if stale:
+            expected_exit = pytest.ExitCode.INTERRUPTED
+        assert result.returncode == expected_exit, diagnostic(result)
+        assert ("ERROR collecting lanes.json" in result.stdout) == bool(stale), diagnostic(result)
+        lines = result.stdout.splitlines()
+        actual_stale = [line.removeprefix("stale: ") for line in lines if line.startswith("stale: ")]
+        assert actual_stale == sorted(stale), diagnostic(result)
+        assert sorted(
+            line for line in lines if line.startswith(("tests_tui/", "other_suite/")) and "::" in line
+        ) == sorted(selected), diagnostic(result)
+
+    # Full collection still checks ledger rows removed by pytest's later item filters.
+    collect(selected=all_ids, stale=stale_keys)
+    collect("-m", "core", "--deselect", case80, selected=(case80x24, stable), stale=stale_keys)
+    collect("--lf", "--cache-clear", selected=all_ids, stale=stale_keys)
+    collect("--last-failed-no-failures=none", "--cache-clear", selected=all_ids, stale=stale_keys)
+    collect("--lf", "--last-failed-no-failures=none", "--cache-clear", selected=())
+
+    collect(case80x24, selected=(case80x24,))
+    collect("tests_tui/test_scope.py", selected=scope_ids, stale=(removed,))
+    collect("tests_tui/test_empty.py", selected=(), stale=("test_empty.py",))
+    collect("other_suite", selected=(foreign,))
+    collect(
+        "--ignore=tests_tui/test_empty.py", "--ignore=tests_tui/nested",
+        "--ignore-glob=tests_tui/test_glob_*.py",
+        selected=all_ids,
+        stale=(removed,),
+    )
+
+    # Let pytest, not the fixture, create a nonempty lastfailed cache.
+    seeded = run("--cache-clear", case80)
+    assert seeded.returncode == pytest.ExitCode.TESTS_FAILED, diagnostic(seeded)
+    cached = root / ".pytest_cache/v/cache/lastfailed"
+    assert cached.is_file(), diagnostic(seeded)
+    assert json.loads(cached.read_text(encoding="utf-8")) == {case80: True}, diagnostic(seeded)
+    collect("--lf", selected=(case80,))
+    # Excluding the known failure means pytest collects everything else, even with lfnf=none.
+    collect(
+        "--lf", "--last-failed-no-failures=none", "--ignore=tests_tui/test_scope.py",
+        selected=(stable,),
+        stale=empty,
+    )
+    timings.unlink()
 
 
 def test_k7_structural_errors_in_the_table_raise_value_error(tmp_path):

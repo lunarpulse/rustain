@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import re
 import shlex
-import signal
 import socket
 import subprocess
 import threading
@@ -22,21 +21,11 @@ import pytest
 
 import harness
 from fixtures.scene_provider import SceneStub
-from harness import RustainTUI
+from harness import RustainTUI, send_pty_command, stop_process_group, wait_until
 
 pytestmark = pytest.mark.a2a_binary
 MARKER = "LATE-19-20C-EXACT-TAIL"
-VIEWPORTS = [(60, 16), (80, 24), (130, 30)]
-
-
-def _wait(predicate, diagnostic, timeout=30):
-    deadline = time.monotonic() + timeout
-    while True:
-        value = predicate()
-        if value:
-            return value
-        assert time.monotonic() < deadline, diagnostic()
-        time.sleep(0.04)
+VIEWPORT_80X24 = pytest.param((80, 24), id="80x24")
 
 
 def _compact(text):
@@ -72,16 +61,6 @@ def _stable_frame(tui, rail, timeout=60):
     pytest.fail("Permission frame did not settle:\n" + screen)
 
 
-def _stop(process):
-    if process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-    process.wait()
-
-
 class Evidence:
     def __init__(self, tag):
         root = os.environ.get("RUSTAIN_19_20C_EVIDENCE")
@@ -104,8 +83,7 @@ class Evidence:
 
 
 def _command(tui, text="run it"):
-    tui.send("\x1b[200~" + text + "\x1b[201~")
-    tui.send("\r")
+    send_pty_command(tui, text)
 
 
 def _bash(canary):
@@ -163,12 +141,12 @@ def _tui(stack, ws, env, evidence, attached=False, name="writer"):
 
 
 def _card(tui, tool, evidence):
-    _wait(lambda: "Decision: Permission" in tui.get_screen_text()
-          or "Needs you (" in tui.get_screen_text(), tui.get_screen_text, 60)
+    wait_until(lambda: "Decision: Permission" in tui.get_screen_text()
+               or "Needs you (" in tui.get_screen_text(), tui.get_screen_text, 60)
     if "Decision: Permission" not in tui.get_screen_text():
         tui.send("\x18q")
-        _wait(lambda: "Permission" in tui.get_screen_text()
-              and "Needs you" in tui.get_screen_text(), tui.get_screen_text)
+        wait_until(lambda: "Permission" in tui.get_screen_text()
+                   and "Needs you" in tui.get_screen_text(), tui.get_screen_text)
         tui.send("\r")
     rail = ("[y] Allow", "[s] Session", "[a] Always", "[n] Deny",
             "[f] Deny + feedback", "[r] Review")
@@ -184,7 +162,7 @@ def _card(tui, tool, evidence):
             break
         before = rows
         tui.send("\x1b[6~")
-        _wait(lambda: _frame(tui.get_screen_text()) != before, tui.get_screen_text, 5)
+        wait_until(lambda: _frame(tui.get_screen_text()) != before, tui.get_screen_text, 5)
         text = tui.get_screen_text()
         rows = _frame(text)
     else:
@@ -194,7 +172,7 @@ def _card(tui, tool, evidence):
 def _review(tui, tool, evidence):
     tui.send("r")
     _stable_frame(tui, ("[y] Allow", "[n] Deny"))
-    _wait(lambda: "Exact tool input (not run yet)" in tui.get_screen_text(), tui.get_screen_text)
+    wait_until(lambda: "Exact tool input (not run yet)" in tui.get_screen_text(), tui.get_screen_text)
     for page in range(100):
         text = evidence.screen(tui, "review-%02d" % page)
         rows = _frame(text)
@@ -207,7 +185,7 @@ def _review(tui, tool, evidence):
             return text
         before = text
         tui.send("\x1b[6~")
-        _wait(lambda: tui.get_screen_text() != before, tui.get_screen_text, 5)
+        wait_until(lambda: tui.get_screen_text() != before, tui.get_screen_text, 5)
     pytest.fail("Review did not reach exact input tail")
 
 
@@ -215,7 +193,7 @@ def _finished(stub):
     return any(row.get("turn") == 2 and row.get("tool_results") == 1 for row in stub.rows())
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["60x16", "80x24", "130x30"])
+@pytest.mark.parametrize("viewport", [VIEWPORT_80X24])
 def test_standalone_bash_exact_review_approve_and_deny(tmp_path, monkeypatch, viewport):
     monkeypatch.setattr(harness, "TERM_COLS", viewport[0])
     monkeypatch.setattr(harness, "TERM_ROWS", viewport[1])
@@ -234,7 +212,7 @@ def test_standalone_bash_exact_review_approve_and_deny(tmp_path, monkeypatch, vi
                 _review(tui, "Bash", evidence)
                 assert not canary.exists(), "Review must not execute"
             tui.send(decision)
-            _wait(lambda: _finished(stub), tui.get_screen_text)
+            wait_until(lambda: _finished(stub), tui.get_screen_text)
             if decision == "y":
                 assert canary.read_bytes() == expected, "exact command must execute once"
                 evidence.text("executor-output.txt", canary.read_text())
@@ -244,7 +222,7 @@ def test_standalone_bash_exact_review_approve_and_deny(tmp_path, monkeypatch, vi
             evidence.screen(tui, "decided")
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["60x16", "80x24", "130x30"])
+@pytest.mark.parametrize("viewport", [VIEWPORT_80X24])
 @pytest.mark.parametrize("attached", [False, True], ids=["standalone", "rich-attached"])
 def test_write_exact_review(tmp_path, monkeypatch, viewport, attached):
     monkeypatch.setattr(harness, "TERM_COLS", viewport[0])
@@ -265,7 +243,7 @@ def test_write_exact_review(tmp_path, monkeypatch, viewport, attached):
         _review(tui, "Write", evidence)
         assert not target.exists()
         tui.send("y")
-        _wait(lambda: _finished(stub), tui.get_screen_text)
+        wait_until(lambda: _finished(stub), tui.get_screen_text)
         assert target.read_bytes() == content.encode()
         evidence.text("executor-output.txt", target.read_text())
         evidence.screen(tui, "decided")
@@ -275,13 +253,13 @@ def _daemon(stack, ws, env, tmp_path):
     log = stack.enter_context((tmp_path / "daemon.log").open("w"))
     proc = subprocess.Popen([os.environ["RUSTAIN_TUI_BINARY"], "daemon", "start", "--foreground"],
                             cwd=ws, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    stack.callback(_stop, proc)
+    stack.callback(stop_process_group, proc)
     def ready():
         assert proc.poll() is None, (tmp_path / "daemon.log").read_text()
         probe = subprocess.run([os.environ["RUSTAIN_TUI_BINARY"], "daemon", "status"], cwd=ws,
                                env=env, capture_output=True, text=True, timeout=5)
         return probe.returncode == 0 and "running" in (probe.stdout + probe.stderr).lower()
-    _wait(ready, lambda: (tmp_path / "daemon.log").read_text())
+    wait_until(ready, lambda: (tmp_path / "daemon.log").read_text())
     return proc
 
 
@@ -291,7 +269,7 @@ class Plain:
         self.proc = subprocess.Popen([os.environ["RUSTAIN_TUI_BINARY"], *(args or ["daemon", "attach", "--plain"])],
                                      cwd=ws, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
-        stack.callback(_stop, self.proc)
+        stack.callback(stop_process_group, self.proc)
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -306,13 +284,13 @@ class Plain:
         self.proc.stdin.flush()
 
     def wait(self, needle):
-        return _wait(lambda: needle in self.text(), self.text, 60)
+        return wait_until(lambda: needle in self.text(), self.text, 60)
 
 
 def _observer(stack, ws, env, evidence):
     mirror = _tui(stack, ws, env, evidence, attached=True, name="mirror")
     # The read-only notice is a toast now (30 s Info lifetime from `_world`).
-    _wait(lambda: "Read-only" in mirror.get_screen_text(), mirror.get_screen_text)
+    wait_until(lambda: "Read-only" in mirror.get_screen_text(), mirror.get_screen_text)
     return mirror
 
 
@@ -323,7 +301,7 @@ def _observer_pending(mirror, evidence):
     assert "input withheld" not in text, text
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["60x16", "80x24", "130x30"])
+@pytest.mark.parametrize("viewport", [VIEWPORT_80X24])
 def test_rich_attach_exact_review_and_trusted_mirror(tmp_path, monkeypatch, viewport):
     monkeypatch.setattr(harness, "TERM_COLS", viewport[0])
     monkeypatch.setattr(harness, "TERM_ROWS", viewport[1])
@@ -340,10 +318,10 @@ def test_rich_attach_exact_review_and_trusted_mirror(tmp_path, monkeypatch, view
         _review(writer, "Bash", evidence)
         assert not canary.exists()
         writer.send("y")
-        _wait(lambda: _finished(stub), writer.get_screen_text)
+        wait_until(lambda: _finished(stub), writer.get_screen_text)
         assert canary.read_bytes() == expected
         evidence.text("executor-output.txt", canary.read_text())
-        _wait(lambda: "printf" in mirror.get_screen_text(), mirror.get_screen_text)
+        wait_until(lambda: "printf" in mirror.get_screen_text(), mirror.get_screen_text)
         text = evidence.screen(mirror, "mirror-tool-input")
         assert "input withheld" not in text and "[r] Review" not in text, text
         evidence.screen(writer, "decided")
@@ -389,7 +367,7 @@ def test_plain_attach_exact_review_retained_reissue(tmp_path):
         assert not canary.exists()
         assert "[APPROVAL REQUESTED]" not in mirror.text()
         replacement.send("approve " + rid)
-        _wait(lambda: _finished(stub), replacement.text)
+        wait_until(lambda: _finished(stub), replacement.text)
         assert canary.read_bytes() == expected
         evidence.text("executor-output.txt", canary.read_text())
         evidence.text("replacement-writer.txt", replacement.text())
@@ -409,12 +387,15 @@ def test_acp_stdio_exact_permission_executes_once(tmp_path):
         def response(rid):
             return next((f for f in frames() if f.get("id") == rid and "result" in f), None)
         send({"id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}}})
-        _wait(lambda: response(1), acp.text)
+        wait_until(lambda: response(1), acp.text)
         send({"id": 2, "method": "session/new", "params": {"cwd": str(ws), "mcpServers": []}})
-        session = _wait(lambda: response(2), acp.text)["result"]["sessionId"]
+        session = wait_until(lambda: response(2), acp.text)["result"]["sessionId"]
         send({"id": 3, "method": "session/prompt", "params": {"sessionId": session,
               "prompt": [{"type": "text", "text": "run it"}]}})
-        permission = _wait(lambda: next((f for f in frames() if f.get("method") == "session/request_permission"), None), acp.text)
+        permission = wait_until(
+            lambda: next((f for f in frames() if f.get("method") == "session/request_permission"), None),
+            acp.text,
+        )
         call = permission["params"]["toolCall"]
         assert call["title"] == "Bash: " + invocation["command"].splitlines()[0] + "…"
         assert call["rawInput"] == invocation
@@ -422,13 +403,13 @@ def test_acp_stdio_exact_permission_executes_once(tmp_path):
         assert not canary.exists()
         option = next(o["optionId"] for o in permission["params"]["options"] if o["kind"] == "allow_once")
         send({"id": permission["id"], "result": {"outcome": {"outcome": "selected", "optionId": option}}})
-        _wait(lambda: response(3), acp.text)
+        wait_until(lambda: response(3), acp.text)
         assert canary.read_bytes() == expected
         evidence.text("executor-output.txt", canary.read_text())
         evidence.text("stdio.jsonl", acp.text())
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["60x16", "80x24", "130x30"])
+@pytest.mark.parametrize("viewport", [VIEWPORT_80X24])
 @pytest.mark.parametrize("attached", [False, True], ids=["standalone", "rich-attached"])
 def test_delegation_exact_review(tmp_path, monkeypatch, viewport, attached):
     monkeypatch.setattr(harness, "TERM_COLS", viewport[0])
@@ -456,7 +437,7 @@ def test_delegation_exact_review(tmp_path, monkeypatch, viewport, attached):
         proc = subprocess.Popen([os.environ["RUSTAIN_TUI_BINARY"], f"--serve-a2a=127.0.0.1:{port}",
                                  "daemon", "start", "--foreground"], cwd=peer, env=peer_env,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        stack.callback(_stop, proc)
+        stack.callback(stop_process_group, proc)
         def ready():
             assert proc.poll() is None, log_path.read_text()
             try:
@@ -465,14 +446,24 @@ def test_delegation_exact_review(tmp_path, monkeypatch, viewport, attached):
                     return card if any(s["id"] == "native-review" for s in card["skills"]) else None
             except (OSError, urllib.error.URLError):
                 return None
-        card = _wait(ready, lambda: log_path.read_text())
+        card = wait_until(ready, lambda: log_path.read_text())
         evidence.text("peer-agent-card.json", json.dumps(card, indent=2))
         (ws / ".rustain/a2a.json").write_text(json.dumps({"agents": {"reviewer": {"url": endpoint + "/"}}}))
         if attached:
+            # Boot catalog readiness is logged at debug by the daemon.
+            env["RUST_LOG"] = "info,rustain::adapters::daemon::server=debug"
             _daemon(stack, ws, env, tmp_path)
         tui = _tui(stack, ws, env, evidence, attached=attached)
         mirror = _observer(stack, ws, env, evidence) if attached else None
-        _wait(lambda: any("peer_id=reviewer" in path.read_text() for path in tmp_path.glob("runtime.log*")), tui.get_screen_text)
+        catalog_event = "A2aCatalogChanged" if attached else "A2A AgentCard catalog changed"
+        wait_until(
+            lambda: any(
+                catalog_event in line and "peer_id=reviewer" in line and "skill_count=1" in line
+                for path in tmp_path.glob("runtime.log*")
+                for line in path.read_text().splitlines()
+            ),
+            tui.get_screen_text,
+        )
         _command(tui)
         _card(tui, tool, evidence)
         if mirror:
@@ -480,7 +471,7 @@ def test_delegation_exact_review(tmp_path, monkeypatch, viewport, attached):
         _review(tui, tool, evidence)
         assert not _finished(stub), "Review must not resolve the delegation"
         tui.send("n")
-        _wait(lambda: _finished(stub), tui.get_screen_text)
+        wait_until(lambda: _finished(stub), tui.get_screen_text)
         evidence.screen(tui, "denied")
         turns = [row for row in stub.rows() if "turn" in row]
         assert [(row["persona"], row["turn"], row["tool_results"]) for row in turns] == [

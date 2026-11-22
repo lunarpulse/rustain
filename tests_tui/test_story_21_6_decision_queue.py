@@ -44,7 +44,7 @@ import harness
 import pytest
 from fixtures.scene_provider import SceneStub
 from test_story_21_3_keymap_truth import _PermissionTUI, _permission_daemon
-from test_story_19_21b_standalone_modes import _ObservedHttp, _events, _stop
+from test_story_19_21b_standalone_modes import _ObservedHttp
 
 import test_story_21_1_notification_lifecycle as s21_1
 from decision_frame_helpers import HEIGHT, REGION, WIDTH, decision_frame, sheet
@@ -700,7 +700,6 @@ def test_e_queue_draft_and_dismissed_rows():
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.timeout(400)
 def test_leg_e_team_proposal_80x24(tmp_path, monkeypatch):
     binary = Path(os.environ.get("RUSTAIN_TUI_BINARY", harness.BINARY)).resolve()
     if not binary.is_file():
@@ -711,7 +710,7 @@ def test_leg_e_team_proposal_80x24(tmp_path, monkeypatch):
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     parent.mkdir(parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="21-6-e-", dir=parent))
-    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    digest = harness.sha256_file(binary)
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size,
                 "viewport": [WIDTH, HEIGHT], "leg": "E",
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING"}
@@ -756,7 +755,7 @@ def test_leg_e_team_proposal_80x24(tmp_path, monkeypatch):
             process = subprocess.Popen([str(binary), f"--serve-a2a=127.0.0.1:{port}",
                                         "daemon", "start", "--foreground"], cwd=recipient, env=env,
                                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            stack.callback(_stop, process)
+            stack.callback(harness.stop_process_group, process)
             deadline = time.monotonic() + 60
             while True:
                 assert process.poll() is None, log_path.read_text()
@@ -828,10 +827,10 @@ def test_leg_e_team_proposal_80x24(tmp_path, monkeypatch):
             screen = _b_wait(tui, _e_dismissed, "proposal dismissed without send")
             _b_capture(evidence, "dismissed", screen)
             assert observer.snapshot()["post"] == 0
-            assert not _events(sender, "team_send_action_recorded")
-            assert not _events(sender, "remote_envelope_dispatched")
+            assert not harness.journal_events(sender.rglob("*.jsonl"), "team_send_action_recorded")
+            assert not harness.journal_events(sender.rglob("*.jsonl"), "remote_envelope_dispatched")
             assert not any(row.get("desync") or row.get("kind") == "desync" for row in stub.rows())
-        assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
+        assert harness.sha256_file(binary) == digest
         manifest["result"] = "PASS"
     except BaseException:
         manifest["result"] = "FAIL"

@@ -15,24 +15,18 @@ glyphs, styles, wrapping, scrolling, and disabled autowrap without a live provid
 ## Quick Start
 
 ```bash
-# Install dependencies (once)
-pip install pytest pexpect
+# From the product checkout, with Python 3.10+ (this installs the pytest plugins too)
+python3 -m pip install -e "./tests_tui[dev]"
 
 # Build the binary (done automatically by fixtures, or manually)
 cargo build
 
-# Run all tests
-cd tests_tui
-pytest
+# Run the generic per-PR lane; the policy and named capture jobs are separate.
+RUSTAIN_TUI_BINARY="$PWD/target/debug/rustain" python3 -m pytest tests_tui/ \
+  -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py
 
-# Run only tests that don't need an API key
-pytest -m "not requires_api"
-
-# Run the per-PR lanes (what CI runs)
-pytest -m "core or (governance and not a2a_binary)" --ignore=test_receipt_controls.py
-
-# Run with output visible
-pytest -v -s
+# Preview collection and lane assignments without executing the cases.
+python3 -m pytest tests_tui --collect-only -q
 ```
 
 ## Canonical receipt controls
@@ -49,39 +43,40 @@ old outer `--check-receipt` entrypoint no longer exists.
 # From the product checkout; also works from an unrelated CWD with absolute paths.
 .github/scripts/check-receipt.sh --product-root "$PWD" /absolute/path/to/receipt.transcript.txt
 
-# All 45 exact authored controls: 16 genuine-capture and 29 policy-boundary cases.
-# Run after fresh native Act 1 (all three viewports) and Act 2 captures.
-RUSTAIN_RECEIPT_EVIDENCE_DIR="$PWD/receipt-checker-evidence" \
+# Pin the actual checked-out commit and verify both carried receipts before native capture.
+RUSTAIN_CARRIED_J10_REVISION=$(git rev-parse --verify HEAD)
+export RUSTAIN_CARRIED_J10_REVISION
+python3 tests_tui/carried_j10_receipts.py --repository "$PWD" --revision "$RUSTAIN_CARRIED_J10_REVISION"
+
+# All 37 controls, using the same pin after fresh capture in the Act 1 job.
+out=$(mktemp -d /tmp/rustain-receipt-checker.XXXXXX)
+RUSTAIN_RECEIPT_EVIDENCE_DIR="$out/evidence" \
   python3 -m pytest tests_tui/test_receipt_controls.py \
-  -p no:rerunfailures -n 0 --timeout=120 --junitxml=receipt-checker-results.xml -v
+  -p no:rerunfailures -n 0 --timeout=120 --junitxml="$out/receipt-checker-results.xml" -v
 
 # Product-only policy lane before native capture (29 cases, no binary bootstrap).
 python3 -m pytest tests_tui/test_receipt_controls.py -m "not a2a_binary" \
   -p no:rerunfailures -n 0 --timeout=120 --junitxml=receipt-policy-results.xml -v
 ```
 
-The two migrated mutation selectors are
-`tests_tui/test_receipt_controls.py::test_genuine_receipt_rejects_changed_identity`
-(3 cases) and
-`tests_tui/test_receipt_controls.py::test_genuine_act1_receipt_rejects_changed_identity`
-(9 cases). Native cases are marked `a2a_binary` so the generic pre-capture lane
-does not certify stale source identities; dedicated receipt enforcement selects
-them explicitly without marker exclusion. Missing captures are assertion failures,
-not skips. Each selector picks the latest filename stamp (then run-directory
-identity) for its required viewport; old flat and nested Act 2 receipts are both
-recognized. Changed capture-source bytes require new genuine capture receipts:
-never rewrite old headers or accept an archived source as the current source.
+The complete suite is 29 policy checks, 3 Act 2 mutations `[scene]`, `[source]`,
+`[stamp]`, 3 Act 1 mutations `[80x24-scene]`, `[80x24-source]`, `[80x24-stamp]`,
+and 2 genuine product-only arbitrary-CWD checks `[act2]` and `[80x24]`. The eight
+genuine controls are marked `a2a_binary` but do not launch a native binary.
+They share the preflight's selection contract: both exact 80×24 transcript paths
+must be regular, contained files with bytes matching blobs at the pinned commit;
+the canonical checker also verifies scene, source and stamp. The Act 2 job
+rechecks the same revision after the fresh capture. Fresh Act 1 evidence is
+separate; parity quarantines fresh Act 2 evidence rather than letting it substitute
+for the carried files. Missing or changed carried bytes fail even if a newer
+capture passes. Never rewrite historical headers or select by filename or mtime.
 
-CI must check the JUnit exact selected counts (45 complete, 29 policy-only,
-3 Act 2 identity, 9 Act 1 identity, 4 genuine product-only/CWD), with no skipped,
-failed or errored nodes and reruns disabled. Run the dedicated complete step only
-after the current-source genuine inputs are present. On all outcomes upload only
-`receipt-checker-results.xml`, `receipt-policy-results.xml` when produced, named
-command logs, and `receipt-checker-evidence/**/{positive,negative,restored}.json`
-(spell the three JSON paths separately in the workflow; do not rely on brace
-expansion). Never upload the pytest temporary tree, environment, homes, credentials
-or full repository. These are integration requirements, not an assertion that CI
-or the controls have already run.
+CI checks JUnit membership and rejects skips, failures and errors. The policy
+step expects 29 unique cases; the complete step also requires each exact genuine
+node in its module and rejects extras or duplicates. Upload only the named JUnit
+and command logs when produced, plus `receipt-checker-evidence/**/positive.json`,
+`negative.json` and `restored.json` (separate paths in the workflow). Never upload
+the pytest temporary tree, environment, homes, credentials or full repository.
 
 The controls execute the real command, test independent scene/source/stamp
 corruption, exact paths, required and duplicate applicable headers, all supported
@@ -101,52 +96,102 @@ same change. The conformance test
 run stamp, and on any committed `*-mutants.txt|json` or `*-mutants` directory (story
 mutant receipts live next to the story file in the outer repo).
 
+### Named Act 1 and Act 2 gates
+
+The two PR jobs keep exact, single-attempt selectors:
+
+| Job / module under `tests_tui/` | Exact selectors after `::` |
+|---|---|
+| `tui-act1` / `test_story_19_21_act1_distribution.py` | `test_act1_attached_distribution[80x24]`, `test_act1_daemon_crash_restart` |
+| `tui-act1` / `test_story_19_21b_standalone_modes.py` | `test_standalone_auto_mode_still_requires_human_send[yolo]`, `test_standalone_auto_mode_still_requires_human_send[autoedit]` |
+| `tui-act2` / `test_story_19_19_act2_consultation.py` | `test_act2_consultation_adr_fanout[80]` (24 rows) |
+
+Act 1 and modes use the shipped six-feature release; the Act 2 CI build is A2A-only.
+Parity additionally runs the same Act 2 ID against the shipped release. Run the
+pinned preflight above in both jobs before native work. Pass `-p no:rerunfailures`
+and give each Act 1 and modes invocation a separate, fresh absolute
+`RUSTAIN_NAMED_PTY_EVIDENCE` JSONL path if retaining evidence. The fixture checks
+actual 80×24 size at every restart and modes spawn even without that export.
+CI uploads both files; each row records pytest's `tests_tui`-relative `nodeid`,
+its 1-based `spawn`, `rows` and `columns`.
+
+Act 1 `[60x16]`/`[130x30]` and Act 2 `[130]` are capture-only. Use those quoted
+full IDs only for an explicitly authorized capture with fresh evidence paths,
+never a bare module or unqualified function. They do not enter CI, nightly,
+parity or the carried controls.
+
 ### Executing conflict-flag capture (Story 19.21h)
 
-The original `19-21b` scene names are retained. Run from the product checkout with
-an explicit four-feature release; the driver uses that same binary for every host
-and client, with `build=False` and short per-run `/tmp` workspaces. The existing
-`openssl` executable is required for ephemeral local TLS and synthetic pinned
-Ed25519 identities. Certificate verification stays enabled; each observing proxy
-has its own trusted-CA context. No provider account or sibling checkout is needed.
+The original `19-21b` scene names are retained. The job builds the locked shipped
+six-feature release once, checks size and the single TLS stack, then uses that
+same binary for every host and client. The existing `openssl` executable is
+required for ephemeral local TLS and synthetic pinned Ed25519 identities.
+Certificate verification stays enabled; each observing proxy has its own
+trusted-CA context. No provider account or sibling checkout is needed.
 
-```sh
+```bash
+set -e -o pipefail
+export CARGO_TARGET_DIR="$(pwd -P)/target"
+cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron
+.github/scripts/release-size-guard.sh "$CARGO_TARGET_DIR/release/rustain"
+for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do
+  args=()
+  if [ -n "$features" ]; then args=(--features "$features"); fi
+  cargo tree --locked -e normal --prefix none --format '{p}' "${args[@]}" \
+    | .github/scripts/single-tls-stack.sh "${features:-default}"
+done
 openssl version
-cargo build --locked --release --features self-update,relay-server,a2a,p2p
+out=$(mktemp -d /tmp/rustain-conflict.XXXXXX)
 # Supply a new manifest path and an independent intended-run token for each
 # native invocation; preserve both unchanged for the subsequent controls.
-export RUSTAIN_TUI_BINARY="$PWD/target/release/rustain"
+export RUSTAIN_TUI_BINARY="$CARGO_TARGET_DIR/release/rustain"
 export RUSTAIN_CONFLICT_CAPTURE_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-export RUSTAIN_CONFLICT_RECEIPT_MANIFEST="$PWD/conflict-run-manifests/$RUSTAIN_CONFLICT_CAPTURE_RUN_ID.json"
-env -u RUSTAIN_TUI_CLIENT_BINARY \
-  RUSTAIN_CAPTURE_EVIDENCE_DIR="$PWD/conflict-capture-evidence" \
+export RUSTAIN_CONFLICT_RECEIPT_MANIFEST="$out/manifest.json"
+env -u RUSTAIN_TUI_CLIENT_BINARY -u RUSTAIN_CONFLICT_CAPTURE_ONLY \
+  RUSTAIN_CAPTURE_EVIDENCE_DIR="$out/captures" \
   python3 -m pytest \
   'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[80x24]' \
-  'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[130x30]' \
-  'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[60x16]' \
-  -p no:rerunfailures -n 0 --timeout=420 --junitxml=conflict-native-results.xml -v
+  -p no:rerunfailures -n 0 --timeout=420 --junitxml="$out/conflict-native-results.xml" -v
 
-RUSTAIN_RECEIPT_EVIDENCE_DIR="$PWD/conflict-receipt-evidence" \
-  python3 -m pytest tests_tui/test_story_19_21b_receipt_controls.py \
-  -p no:rerunfailures -n 0 --timeout=120 --junitxml=conflict-integrity-results.xml -v
+RUSTAIN_RECEIPT_EVIDENCE_DIR="$out/receipt-controls" \
+  python3 -m pytest \
+  'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-scene]' \
+  'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-source]' \
+  'tests_tui/test_story_19_21b_receipt_controls.py::test_current_conflict_receipt_rejects_independent_corruption[80x24-stamp]' \
+  -p no:rerunfailures -n 0 --timeout=120 --junitxml="$out/conflict-integrity-results.xml" -v
 ```
 
-Require exactly three native viewports and nine independent scene/source/stamp
-controls, with no skip/failure/error. Each integrity leg checks its current genuine
-receipt, a corrupted copy and the byte-restored original through the canonical
-command above. Successful native runs alone mint
+Require one native 80×24 result and the three exact scene/source/stamp controls,
+with no skip/failure/error. Each integrity leg checks the same current genuine
+receipt, an independently corrupted copy and the byte-restored original through
+the canonical command above. Successful native runs alone mint
 `journeys/j10/receipts/<run>/story-19-21b-conflict-flag-<stamp>.transcript.txt`;
 failed runs retain diagnostics without a success transcript.
 
+For an explicitly authorized non-80 capture, keep the same validated release,
+allocate a fresh `out`, manifest path and independent run token as above, and
+opt in to **capture only**:
+
+```bash
+viewport=60x16 # Or 130x30; select one exact full node.
+env -u RUSTAIN_TUI_CLIENT_BINARY RUSTAIN_CONFLICT_CAPTURE_ONLY=1 \
+  RUSTAIN_CAPTURE_EVIDENCE_DIR="$out/captures" \
+  python3 -m pytest \
+  "tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[$viewport]" \
+  -p no:rerunfailures -n 0 --timeout=420 --junitxml="$out/conflict-capture-only.xml" -v
+```
+
+No automated job sets this opt-in, and the 80×24 integrity controls do not accept
+capture-only receipts.
+
 The manifest path and intended-run token above are mandatory, not hints. The
 native session creates the path exclusively and records the exact selected width
-scope, actual binary SHA256, and every runtime source path/hash (all `src/**`
-files, Cargo manifest/lock, optional `build.rs`, native driver, scene, shared
-manifest helper, imported Act1 journal/navigation helpers, standalone HTTP
-observer, terminal harness and its keys, pytest setup, and the scene-provider
-package/implementation). Changes to an imported observation oracle invalidate
-earlier captures just like Rust source changes; additions, deletions and byte
-drift invalidate selection.
+scope, binary identity and every runtime source path/hash (all `src/**` files,
+Cargo manifest/lock, optional `build.rs`, native driver, scene, shared manifest
+helper, imported Act 1 journal/navigation helpers, standalone HTTP observer, terminal
+harness and keys, `conftest.py`, `lane_guard.py`, `lanes.json` and the scene provider).
+Changes to an imported observation oracle invalidate earlier captures just like Rust
+source changes; additions, deletions and byte drift invalidate selection.
 The canonical checker is deliberately outside this runtime-source fingerprint so
 semantic checker mutations reach the real consumer.
 Source symlinks are refused because the full mutation snapshot omits them.
@@ -158,12 +203,11 @@ before the run index is committed with the contained product-relative path and
 byte hash. Export or index publication failure rolls back this run's final
 names, never another run's receipt. CI's transcript allowlist therefore retains
 the finalized export rather than an unuploaded `.staged` file.
-A partial native selection may finish its own manifest,
-but cannot supply the controls: they require all three widths from one complete
-explicitly selected run, the independently intended token, unchanged source and
-binary bytes, and every indexed finalized receipt. Missing, stale, partial,
-drifted or uncontained evidence is a prerequisite failure; historical files are
-never searched or substituted.
+The integrity controls require exactly one finalized 80×24 receipt from the
+explicitly selected run. They bind its producer-owned path to the independent
+token, captured geometry, current source, and daemon/client binary bytes. Missing,
+stale, drifted, wrong-width or uncontained evidence fails; historical files and
+alternate client binaries cannot substitute.
 
 For a mutation freeze, the selected manifest, finalized receipts and an identical
 copy of the captured binary must be inside the product tree in snapshot-included
@@ -413,7 +457,7 @@ Scenes are versioned and never edited (`-v2` for a change): receipts pin them by
 
 - `RUSTAIN_J21_VIEWPORT` = `80x24` (default), `60x16` or `130x30`; anything else fails. The viewport is **not** a test id: `test_j21_leg[<leg>]` exists once per leg, so the suite has no 60x16/130x30 id for a demotion to touch.
 - `RUSTAIN_J21_RECEIPT_DIR` names the directory receipts are written to (`<leg>-<WxH>-<YYYYmmddTHHMMSSffffffZ>-<uuid32>/journey-J21-<STAMP>.transcript.txt`). Without it the receipt lives and dies in the run's scratch root (`/tmp/j21-<leg>-…`), removed after a clean run. `RUSTAIN_J21_BINARY_LABEL` overrides the `binary:` header (default: the binary's file name); the header never carries a home path.
-- **Nightly role.** The offline controls (`test_j21_receipt_writer_controls`, nine `test_j21_predicate_*`) and the seven 80x24 legs sit in the `native_nightly` lane and run in the parity nightly leg on the debug binary: the legs are the Epic 21 pre-release smoke. No J21 case enters a per-PR job.
+- **Nightly role.** The offline controls (`test_j21_receipt_writer_controls`, nine `test_j21_predicate_*`) and seven 80×24 legs run in the plain debug nightly pass, also mirrored by parity. They are the Epic 21 pre-release smoke. No J21 case enters a per-PR job.
 - **Campaign (capture row 21-10).** On the release binary the integrator's gate retained, once per leg and viewport: `RUSTAIN_TUI_BINARY=<release> RUSTAIN_J21_BINARY_LABEL=rustain-four-release RUSTAIN_J21_VIEWPORT=<WxH> RUSTAIN_J21_RECEIPT_DIR=<scratch>/receipts pytest 'tests_tui/test_story_21_10_epic21_capture.py::test_j21_leg[<leg>]' -p no:rerunfailures -n 0 --timeout=420`. The receipts go to the outer receipt archive (D-17), not into this tree; the outer `21-10-smoke/native/verify-sources.py` binds each receipt's `source:` and `scene:` hash to the product bytes at the commit its `tree:` line names (the verifier itself does not check `source:`).
 - **Single attempt.** Each campaign case runs once. A failure is quarantined byte-identically, classified (driver, product, environment) and reported; a second execution needs the integrator's approval naming the cause; a product defect stops that leg and becomes a DF.
 
@@ -427,18 +471,31 @@ Every test belongs to exactly one lane:
 
 | Lane | Marker | Runs | Meaning |
 |------|--------|------|---------|
-| core | `core` | per PR | the regression stoppers: the native tests D1 keeps and the helper controls they run; no capability build |
-| governance | `governance` | per PR | receipt and conflict-manifest controls |
-| native_nightly | `native_nightly` | parity leg (debug) / named capture jobs | native or a2a/p2p tests kept out of the per-PR lane |
-| manual | `manual` | never selected | needs a build no lane makes; the table names the owner row |
+| core | `core` | generic per PR | the regression stoppers: the native tests D1 keeps and the helper controls they run; no capability build |
+| governance | `governance` | generic per PR or named receipt jobs | receipt and conflict-manifest controls; capability-tagged governance is not a nightly product variant |
+| native_nightly | `native_nightly` | nightly debug, parity, or exact named PR jobs | the scheduled plain/federation subsets are disjoint from Act 1, modes, Act 2 and Conflict |
+| manual | `manual` | explicit local only | the table names the owning `tui-` row |
 | API | `requires_api` | on request | needs a live key; skipped without one; no lane marker, never in `lanes.json` |
 
-`tests_tui/lanes.json` assigns lanes: `modules` (one lane per module file), `tests` (`<module>::<function>` or `<module>::<Class>::<function>` overrides, parametrized ids follow their function), `manual` (module or test key with a reason that names the owner `tui-` row). `tests_tui/lane_guard.py`, loaded by `conftest.py`, adds the lane marker from that table and fails collection (an `ERROR collecting lanes.json` naming each entry) on: an unassigned test, an entry that names an API test, a `core` test with `a2a_binary` or `p2p_binary`, a lane marker written in a test file, a stale entry, a malformed table. It runs before `-m`, `-k` and `--deselect` deselect anything, so a filtered run cannot hide an unassigned test. A stale entry is judged only for modules collected in full (not with `module::test` arguments, `--lf`, `--ignore`). Limits: only items under `tests_tui/` are judged (another suite collected in the same session is ignored; a test collected under `tests_tui/` through a symlink that leaves it fails collection as `symlink_escape`); a listed module that collects no item at all is not reported stale unless its file is missing; and any `--lf` run skips the stale check, even when an empty cache makes pytest collect everything. `--strict-markers` is on: a misspelled or unregistered marker is a collection error.
+`tests_tui/lanes.json` assigns lanes via `modules` and `tests`
+(`<module>::<function>` or `<module>::<Class>::<function>`; parameters follow
+their function). `manual` keys also carry a reason and owner. `conftest.py`
+loads `lane_guard.py`, which reports malformed entries, unassigned tests,
+test-level API entries, source-written lane markers, capability marks on core
+tests, symlink escapes and stale keys as `ERROR collecting lanes.json`.
+
+The guard checks owned items before `-m`, `-k` and `--deselect`; it observes which
+modules pytest actually collected in full, independently of surviving items.
+Missing ledger paths always fail. An existing fully collected module with no
+tests can be stale, including with empty-cache `--lf` (the default fallback
+collects everything). A real partial `--lf` selection does not stale-check pruned
+scopes; `--last-failed-no-failures=none` with an empty cache selects none.
+Explicit `file.py::test[param]`, ignored files and other suites do not make
+unvisited modules full. `--strict-markers` rejects unregistered marks.
 
 ```bash
 pytest tests_tui -m core                          # the stoppers
 pytest tests_tui -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py   # CI
-pytest tests_tui -m "native_nightly and not a2a_binary and not p2p_binary" --timeout=300   # parity leg
 pytest tests_tui -m requires_api                  # API lane (needs a key)
 pytest tests_tui --collect-only -q                # also runs the lane guard
 ```
@@ -454,10 +511,55 @@ RUSTAIN_TUI_BINARY=$PWD/target/debug/rustain pytest tests_tui/ \
   -n auto --timeout=120 -v --durations=0 --junitxml=tui-results.xml
 ```
 
-- The lane runs with no reruns (`reruns = 0` in `pyproject.toml`): a failure is a failure. `--timeout=120` is the lane's timeout; the integrator's parity leg runs the debug `native_nightly` lane with `--timeout=300` until a nightly CI job exists.
-- `test_receipt_controls.py` runs only in its own receipt-policy step, so the generic step ignores it.
+- `reruns = 0` in `pyproject.toml` keeps the generic lane single-attempt, with a 120-second case timeout. Named receipt/capture and nightly commands additionally disable the plugin with `-p no:rerunfailures`. Do not rerun a failed or timed-out result to make the gate green; retain diagnostics and report the cause. J21 campaign reruns need the explicit approval described above.
+- The generic step excludes `test_receipt_controls.py`; its separate policy step and the complete Act 1 job cover it.
 - Every skip must be listed with a reason that names its owner row in `tests_tui/skip-allowlist.json` (key `<module>::<test name>`; the file is `{}` while nothing may skip). An unlisted skip and a listed test that did not skip (stale entry) both fail the lane (`.github/scripts/check-tui-skips.py <junit.xml>... <allowlist.json>`; several JUnit files are judged as one union).
 - The `python-tui-results` artifact holds `tui-results.xml` (JUnit) and `tui-results.log` (pytest output with `--durations=0`).
+
+### Scheduled TUI nightly
+
+`.github/workflows/nightly-tui.yml` is scheduled on the default branch daily at
+**03:17 UTC** (`17 3 * * *`) and also supports manual `workflow_dispatch` on
+branches. It does not run on PRs, pushes or tags. Both triggers run the same two
+debug passes within one 45-minute job; a dispatch is diagnostic, not evidence
+that the schedule was delivered.
+
+| Pass | Exact lane filter | Profile and limit |
+|---|---|---|
+| Plain (24 cases) | `native_nightly and not a2a_binary and not p2p_binary` | Default debug, `-n auto`, `--timeout=300`, default 80×24 J21 |
+| Federation (15 cases) | `native_nightly and (a2a_binary or p2p_binary)` excluding Act 1, standalone modes, Act 2 and Conflict capture modules | A2A+P2P debug, `-n 0`, `--timeout=420` |
+
+The shared runner checks exact collected and executed IDs and zero skips, uses
+isolated scratch and HOME, and invokes scripted providers and loopback peers only.
+Run locally from a clean checkout with no credentials or nonempty `.env` and the
+Python dependencies installed:
+
+```bash
+export CARGO_TARGET_DIR="$(pwd -P)/target"
+out=$(mktemp -d /tmp/rustain-nightly.XXXXXX)
+cargo build --locked --bin rustain
+python3 .github/scripts/run-nightly-tui.py --lane plain \
+  --binary "$CARGO_TARGET_DIR/debug/rustain" --root "$out/plain"
+# Build after the plain pass exits: the build replaces the same binary path.
+cargo build --locked --features a2a,p2p --bin rustain
+python3 .github/scripts/run-nightly-tui.py --lane federation \
+  --binary "$CARGO_TARGET_DIR/debug/rustain" --root "$out/federation"
+```
+
+Each pass owns its `result.xml`, `pytest.log` and `captures/`; plain also owns
+`j21/` and federation `19-20c/`. The runner takes an absolute debug executable
+and fresh absolute result root, never a fallback binary. Do not change or rebuild
+that executable during the pass. The workflow retains only allowlisted results.
+
+Plain retains the 20.9j sign-in link test (both herdr and screen profiles in one
+case), the 20.9g relock/relogin case, and 21.7 History. Neither nightly nor PR
+lanes select the 19.16g **standalone** reminder or the 20.1d4a Gemini reload case:
+
+- `tests_tui/test_story_19_16g_log_reminder.py::test_standalone_reminder_discovers_clears_and_survives_restart` — manual, tui-7. The attached slash-log companion stays in core.
+- `tests_tui/test_story_20_1d4a_tool_turn_reload.py::test_gemini_tool_turn_survives_tui_reload_80x24` — manual, tui-6; use a debug binary built with `--locked --features test-instrumentation --bin rustain`.
+
+Target these full IDs explicitly for local manual runs; do not sweep a module
+that mixes lanes.
 
 ## Adding a New Story
 

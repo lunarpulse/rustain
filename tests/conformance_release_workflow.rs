@@ -622,6 +622,7 @@ fn k5_single_tls_stack_check_rejects_missing_ring_or_a_second_stack() {
 fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
     const RELEASE_RATCHET: &str = "      - name: Size ratchet\n        if: matrix.target == 'x86_64-unknown-linux-gnu'\n        run: .github/scripts/release-size-guard.sh \"${ASSET}\"\n";
     assert!(WORKFLOW.contains(RELEASE_RATCHET));
+    assert!(WORKFLOW.find(RELEASE_BUILD).unwrap() < WORKFLOW.find(RELEASE_RATCHET).unwrap());
     assert!(
         WORKFLOW
             .find("      - name: Size guard (≤ 40 MiB)")
@@ -630,31 +631,66 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
     );
     assert!(
         WORKFLOW.find(RELEASE_RATCHET).unwrap()
-            < WORKFLOW.find("      - name: Upload artifact").unwrap()
+            < WORKFLOW
+                .find("        uses: actions/upload-artifact@v4")
+                .unwrap()
     );
     let ci = include_str!("../.github/workflows/ci.yml");
     let capture = ci
         .split_once("  tui-conflict-flag:\n")
         .expect("capture job")
         .1;
-    const BUILD_AND_GUARD: &str = "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron\n      - name: Size ratchet\n        run: .github/scripts/release-size-guard.sh target/release/rustain\n";
-    assert!(capture.contains(BUILD_AND_GUARD));
+    const BUILD_AND_GUARD: &str = concat!(
+        "      - name: Build shipped release set capture binary\n",
+        "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron\n",
+        "      - name: Size ratchet\n",
+        "        run: .github/scripts/release-size-guard.sh target/release/rustain\n",
+    );
+    const TLS_GUARD: &str = concat!(
+        "      - name: Single TLS stack (rustls + ring)\n",
+        "        shell: bash\n",
+        "        run: |\n",
+        "          for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do\n",
+        "            args=()\n",
+        "            if [ -n \"$features\" ]; then args=(--features \"$features\"); fi\n",
+        "            cargo tree --locked -e normal --prefix none --format '{p}' \"${args[@]}\" \\\n",
+        "              | .github/scripts/single-tls-stack.sh \"${features:-default}\"\n",
+        "          done\n",
+    );
+    const NATIVE_RUN: &str = concat!(
+        "          env -u RUSTAIN_TUI_CLIENT_BINARY -u RUSTAIN_CONFLICT_CAPTURE_ONLY pytest \\\n",
+        "            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[80x24]' \\\n",
+        "            -p no:rerunfailures -n 0 --timeout=420 --junitxml=conflict-native-results.xml -v\n",
+    );
     assert_eq!(
         capture.matches("cargo build ").count(),
         1,
         "reuse the existing release build"
     );
-    assert!(capture.contains("      - name: Single TLS stack (rustls + ring)\n"));
-    assert!(capture.contains("cargo tree --locked -e normal --prefix none --format '{p}'"));
+    let positions = [
+        BUILD_AND_GUARD,
+        TLS_GUARD,
+        "      - name: Verify existing ephemeral TLS fixture tool\n        run: openssl version\n",
+        "      - name: Execute exact conflict 80x24 capture without reruns\n",
+        NATIVE_RUN,
+        "      - name: Execute exact three current conflict receipt controls\n",
+        "      - name: Retain allowlisted conflict capture and integrity evidence\n",
+    ]
+    .map(|step| {
+        capture
+            .find(step)
+            .unwrap_or_else(|| panic!("missing exact Conflict workflow step: {step}"))
+    });
     assert!(
-        capture.contains("for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do")
+        positions.is_sorted(),
+        "Conflict must build once, check size, TLS and OpenSSL, then capture, verify and publish"
     );
-    assert!(capture.contains("| .github/scripts/single-tls-stack.sh \"${features:-default}\"\n"));
     assert!(
-        capture.find(BUILD_AND_GUARD).unwrap()
+        positions[5]
             < capture
-                .find("      - name: Execute exact conflict viewports without reruns")
-                .unwrap()
+                .find("        uses: actions/upload-artifact@v4")
+                .unwrap(),
+        "Conflict upload must follow the current receipt controls"
     );
 }
 

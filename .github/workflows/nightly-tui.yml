@@ -1,0 +1,107 @@
+name: nightly-tui
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-tui:
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install TUI test dependencies
+        run: python3 -m pip install -e "./tests_tui[dev]"
+      - name: Allocate run-owned evidence root
+        id: roots
+        run: |
+          root=$(mktemp -d "$RUNNER_TEMP/nightly-tui.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Build default debug binary
+        id: build-plain
+        run: cargo build --locked --bin rustain
+      - name: Run plain TUI nightly
+        id: plain
+        if: ${{ steps.build-plain.outcome == 'success' }}
+        env:
+          EVIDENCE: ${{ steps.roots.outputs.root }}
+        run: python3 .github/scripts/run-nightly-tui.py --lane plain --binary "$CARGO_TARGET_DIR/debug/rustain" --root "$EVIDENCE/plain"
+      # Both lanes run after successful setup. A failed plain run remains red but
+      # must not mask the federation result. The second build cannot race the first pass.
+      - name: Build federation debug binary
+        id: build-federation
+        if: ${{ !cancelled() && steps.roots.outcome == 'success' }}
+        run: cargo build --locked --features a2a,p2p --bin rustain
+      - name: Run federation TUI nightly
+        id: federation
+        if: ${{ !cancelled() && steps.build-federation.outcome == 'success' }}
+        env:
+          EVIDENCE: ${{ steps.roots.outputs.root }}
+        run: python3 .github/scripts/run-nightly-tui.py --lane federation --binary "$CARGO_TARGET_DIR/debug/rustain" --root "$EVIDENCE/federation"
+      - name: Retain plain TUI results and captures
+        if: ${{ !cancelled() && steps.roots.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-tui-plain
+          if-no-files-found: ignore
+          path: |
+            ${{ steps.roots.outputs.root }}/plain/pytest.log
+            ${{ steps.roots.outputs.root }}/plain/result.xml
+            ${{ steps.roots.outputs.root }}/plain/j21/*-80x24-*/journey-J21-*.transcript.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/21-7-leg-e/raw.pty
+            ${{ steps.roots.outputs.root }}/plain/captures/21-7-leg-e/launchpad.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/21-7-leg-e/history-open.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/21-7-leg-e/transcript.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/21-7-leg-e/run.json
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/run.json
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/failure.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/*.screen.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/*.screens.jsonl
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/*.raw.bin
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/*.raw.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/*.terminal.txt
+            ${{ steps.roots.outputs.root }}/plain/captures/20-*/*.runtime.log
+      - name: Retain federation TUI results and captures
+        if: ${{ !cancelled() && steps.roots.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-tui-federation
+          if-no-files-found: ignore
+          path: |
+            ${{ steps.roots.outputs.root }}/federation/pytest.log
+            ${{ steps.roots.outputs.root }}/federation/result.xml
+            ${{ steps.roots.outputs.root }}/federation/captures/*/run.json
+            ${{ steps.roots.outputs.root }}/federation/captures/*/failure.txt
+            ${{ steps.roots.outputs.root }}/federation/captures/*/assertions.txt
+            ${{ steps.roots.outputs.root }}/federation/captures/*/*.screen.txt
+            ${{ steps.roots.outputs.root }}/federation/captures/*/*.screens.jsonl
+            ${{ steps.roots.outputs.root }}/federation/captures/*/*.frames.jsonl
+            ${{ steps.roots.outputs.root }}/federation/captures/*/*.terminal.txt
+            ${{ steps.roots.outputs.root }}/federation/captures/*/*.runtime.log
+            ${{ steps.roots.outputs.root }}/federation/captures/*/*.daemon.log
+            ${{ steps.roots.outputs.root }}/federation/captures/21-6-e-*/recipient.log
+            ${{ steps.roots.outputs.root }}/federation/captures/19-20a-*/act5/*.screen.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/*.screen.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/*.terminal.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/executor-output.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/outcome.json
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/writer-before-detach.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/replacement-writer.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/read-only-mirror.txt
+            ${{ steps.roots.outputs.root }}/federation/19-20c/*/*/stdio.jsonl

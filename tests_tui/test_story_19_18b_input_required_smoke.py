@@ -17,8 +17,7 @@ import urllib.request
 import pytest
 import harness
 from fixtures.scene_provider import SceneStub
-from test_story_19_20b_rap_one_way import _StructuralTUI, _sha256, _stop
-from test_story_19_21_act1_distribution import _command
+from harness import StructuralTUI, send_pty_command, sha256_file, stop_process_group
 from decision_frame_helpers import open_recipient
 
 NOTICE = "[cancelled] This request was cancelled before you answered; no response was sent."
@@ -89,8 +88,8 @@ def _world(root, alias, stub, evidence):
 
 
 def _tui(stack, binary, workspace, env, evidence, name, attached=False):
-    tui = _StructuralTUI(binary=binary, build=False, fresh=False, workspace=workspace,
-                         env_overrides=env, extra_args=["daemon", "attach"] if attached else [])
+    tui = StructuralTUI(binary=binary, build=False, fresh=False, workspace=workspace,
+                        env_overrides=env, extra_args=["daemon", "attach"] if attached else [])
     tui.screens = stack.enter_context((evidence / (name + ".screens.jsonl")).open("w"))
     terminal = stack.enter_context((evidence / (name + ".terminal.txt")).open("w"))
     stack.callback(tui.stop)
@@ -149,7 +148,7 @@ def _outbound(stack, binary, root, stub, evidence):
         if any("peer_id=clarifier" in path.read_text() for path in evidence.glob("operator.runtime.log*")):
             break
         assert time.monotonic() < deadline, "clarifier discovery did not settle"
-    _command(tui, "ask clarifier")
+    send_pty_command(tui, "ask clarifier")
     approved = False
     opened = False
     deadline = time.monotonic() + 60
@@ -209,7 +208,7 @@ def _inbound(stack, binary, root, stub, evidence):
     log = stack.enter_context(logfile.open("w"))
     process = subprocess.Popen([str(binary), f"--serve-a2a=127.0.0.1:{port}", "daemon", "start", "--foreground"],
                                cwd=workspace, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    stack.callback(_stop, process)
+    stack.callback(stop_process_group, process)
     deadline = time.monotonic() + 45
     while True:
         assert process.poll() is None, logfile.read_text()
@@ -288,7 +287,6 @@ def _exercise(binary, evidence, root, monkeypatch):
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.timeout(240)
 def test_input_required_waiting_and_parked_cancel_80x24(monkeypatch):
     evidence_root = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
     evidence_root.mkdir(parents=True, exist_ok=True)
@@ -299,11 +297,11 @@ def test_input_required_waiting_and_parked_cancel_80x24(monkeypatch):
     try:
         binary = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve()
         assert binary.is_file() and "release" not in binary.parts, binary
-        manifest.update(binary=str(binary), binary_sha256=_sha256(binary))
+        manifest.update(binary=str(binary), binary_sha256=sha256_file(binary))
         identity.write_text(json.dumps(manifest, indent=2) + "\n")
         with tempfile.TemporaryDirectory(prefix="r19-18b-", dir="/tmp") as root:
             _exercise(binary, evidence, Path(root), monkeypatch)
-        assert _sha256(binary) == manifest["binary_sha256"], "binary changed during smoke"
+        assert sha256_file(binary) == manifest["binary_sha256"], "binary changed during smoke"
         manifest["result"] = "PASS"
     except BaseException:
         manifest["result"] = "FAIL"

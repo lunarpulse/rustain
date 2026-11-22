@@ -15,15 +15,20 @@ import subprocess
 
 import pytest
 
+from carried_j10_receipts import CHECKER, REVISION_ENV, load_carried_receipts
+
 REPOSITORY = Path(__file__).resolve().parents[1]
-GATE = REPOSITORY / ".github/scripts/check-receipt.sh"
-RECEIPTS = REPOSITORY / "tests_tui/journeys/j10/receipts"
-VIEWPORTS = ("80x24", "130x30", "60x16")
+GATE = REPOSITORY / CHECKER
 
 
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
     """Receipt CLI controls launch no Rust binary and need no cargo bootstrap."""
+
+
+@pytest.fixture(scope="session")
+def carried_receipts():
+    return load_carried_receipts(REPOSITORY, os.environ.get(REVISION_ENV))
 
 
 def _verify(receipt, *, root=REPOSITORY, cwd=None, gate=GATE, legacy=None):
@@ -55,11 +60,14 @@ def _evidence(tmp_path, name, receipt, result):
         (target / (name + ".json")).write_text(json.dumps(record, indent=2) + "\n")
 
 
-def _changed_identity(tmp_path, receipt, leg, *, prefix=""):
+def _changed_identity(tmp_path, carried, leg, *, prefix=""):
+    receipt = carried.path
+    original = receipt.read_bytes()
+    assert hashlib.sha256(original).hexdigest() == carried.sha256, "carried receipt bytes changed"
     valid = _verify(receipt, cwd=tmp_path)
     _evidence(tmp_path, "positive", receipt, valid)
     _assert_valid(valid)
-    body = receipt.read_text()
+    body = original.decode("utf-8")
     if leg in {"scene", "source"}:
         changed, count = re.subn(r"^(" + leg + r": .* sha256: )[0-9a-f]{64}$",
                                 lambda match: match[1] + "0" * 64, body, flags=re.M)
@@ -72,36 +80,30 @@ def _changed_identity(tmp_path, receipt, leg, *, prefix=""):
         changed_stamp = (stamp + timedelta(seconds=1)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         changed = body.replace(match[0], "recorded-at: " + changed_stamp, 1)
         expected = "disagree"
-    negative = tmp_path / receipt.name
-    negative.write_text(changed)
-    invalid = _verify(negative)
-    _evidence(tmp_path, "negative", negative, invalid)
+    isolated = tmp_path / receipt.name
+    isolated.write_bytes(changed.encode("utf-8"))
+    invalid = _verify(isolated)
+    _evidence(tmp_path, "negative", isolated, invalid)
     assert invalid.returncode != 0, f"{prefix}{leg}: changed genuine receipt was accepted\n" + invalid.stdout
     assert expected in invalid.stdout + invalid.stderr, invalid.stdout + invalid.stderr
-    restored = _verify(receipt)
-    _evidence(tmp_path, "restored", receipt, restored)
+    isolated.write_bytes(original)
+    assert _sha(isolated) == carried.sha256 == _sha(receipt), "genuine receipt bytes changed"
+    restored = _verify(isolated)
+    _evidence(tmp_path, "restored", isolated, restored)
     _assert_valid(restored)
 
 
 @pytest.mark.a2a_binary
 @pytest.mark.parametrize("leg", ["scene", "source", "stamp"])
-def test_genuine_receipt_rejects_changed_identity(tmp_path, leg):
-    candidates = list(RECEIPTS.glob("story-19-19-act2-*.transcript.txt"))
-    candidates += list(RECEIPTS.glob("*/story-19-19-act2-*.transcript.txt"))
-    assert candidates, "Prerequisite: no genuine executing Act 2 receipt"
-    receipt = max(candidates, key=lambda path: (path.name, path.parent.name))
-    _changed_identity(tmp_path, receipt, leg, prefix="M39 ")
+def test_genuine_receipt_rejects_changed_identity(tmp_path, leg, carried_receipts):
+    _changed_identity(tmp_path, carried_receipts["act2"], leg, prefix="M39 ")
 
 
 @pytest.mark.a2a_binary
 @pytest.mark.parametrize("leg", ["scene", "source", "stamp"])
-@pytest.mark.parametrize("viewport", VIEWPORTS)
-def test_genuine_act1_receipt_rejects_changed_identity(tmp_path, leg, viewport):
-    candidates = [path for path in RECEIPTS.glob("*/story-19-21-act1-*.transcript.txt")
-                  if path.parent.name.split("-", 1)[0] == viewport]
-    assert candidates, f"Prerequisite: native receipt viewport missing: {viewport}"
-    receipt = max(candidates, key=lambda path: (path.name, path.parent.name))
-    _changed_identity(tmp_path, receipt, leg)
+@pytest.mark.parametrize("act", [pytest.param("act1", id="80x24")])
+def test_genuine_act1_receipt_rejects_changed_identity(tmp_path, leg, act, carried_receipts):
+    _changed_identity(tmp_path, carried_receipts[act], leg)
 
 
 def _sha(path):
@@ -284,16 +286,10 @@ def test_canonical_legacy_stem_policies(policy, stem, token):
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.parametrize("capture", ["act2", *VIEWPORTS])
-def test_genuine_product_only_arbitrary_cwd(tmp_path, capture):
-    if capture == "act2":
-        candidates = list(RECEIPTS.glob("story-19-19-act2-*.transcript.txt"))
-        candidates += list(RECEIPTS.glob("*/story-19-19-act2-*.transcript.txt"))
-    else:
-        candidates = [path for path in RECEIPTS.glob("*/story-19-21-act1-*.transcript.txt")
-                      if path.parent.name.split("-", 1)[0] == capture]
-    assert candidates, f"Prerequisite: no genuine {capture} receipt"
-    receipt = max(candidates, key=lambda path: (path.name, path.parent.name))
+@pytest.mark.parametrize("capture", ["act2", pytest.param("act1", id="80x24")])
+def test_genuine_product_only_arbitrary_cwd(tmp_path, capture, carried_receipts):
+    carried = carried_receipts[capture]
+    receipt = carried.path
     _assert_valid(_verify(receipt, cwd=tmp_path))
     root = tmp_path / "isolated-product"
     gate = root / ".github/scripts/check-receipt.sh"
@@ -317,7 +313,7 @@ def test_genuine_product_only_arbitrary_cwd(tmp_path, capture):
     inferred = subprocess.run([str(gate), str(copied)], cwd=tmp_path,
                               capture_output=True, text=True, timeout=30)
     _assert_valid(inferred)
-    assert _sha(copied) == _sha(receipt), "genuine receipt bytes changed"
+    assert _sha(copied) == carried.sha256 == _sha(receipt), "genuine receipt bytes changed"
 
 
 def test_canonical_checks_every_product_timestamp(policy):

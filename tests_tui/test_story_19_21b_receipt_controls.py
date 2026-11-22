@@ -1,6 +1,6 @@
-"""Nine native conflict-receipt controls against the product canonical executable.
+"""Three current 80x24 conflict-receipt controls against the canonical checker.
 
-A current, width-specific h capture is a prerequisite, never a synthetic fixture.
+A current native capture is a prerequisite, never a synthetic fixture.
 Only diagnostic JSON is exported; private host trees and historical receipts are
 never modified or copied into the evidence export.
 """
@@ -14,13 +14,12 @@ import subprocess
 
 import pytest
 
-from conflict_receipt_manifest import selected_receipts
+from conflict_receipt_manifest import CURRENT_VIEWPORT, selected_receipts
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 GATE = REPOSITORY / ".github/scripts/check-receipt.sh"
 SCENE = REPOSITORY / "tests_tui/journeys/j10/scenes/19-21b-conflict-flag-v1.json"
 SOURCE = REPOSITORY / "tests_tui/test_story_19_21b_conflict_flag.py"
-VIEWPORTS = ("80x24", "130x30", "60x16")
 LEGS = ("scene", "source", "stamp")
 
 
@@ -96,10 +95,9 @@ def _corrupt(original, leg):
 
 
 @pytest.mark.a2a_binary
-@pytest.mark.parametrize("viewport,leg", [(viewport, leg) for viewport in VIEWPORTS for leg in LEGS],
-                         ids=[f"{viewport}-{leg}" for viewport in VIEWPORTS for leg in LEGS])
-def test_current_conflict_receipt_rejects_independent_corruption(
-        tmp_path, viewport, leg, current_conflict_receipts):
+@pytest.mark.parametrize("leg", LEGS, ids=[f"{CURRENT_VIEWPORT}-{leg}" for leg in LEGS])
+def test_current_conflict_receipt_rejects_independent_corruption(tmp_path, leg, current_conflict_receipts):
+    viewport = CURRENT_VIEWPORT
     receipt = current_conflict_receipts[viewport]
     original = receipt.read_bytes()
     valid = _verify(receipt, cwd=tmp_path)

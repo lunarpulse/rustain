@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Lane guard: assigns every test to one lane (lanes.json) and fails collection otherwise.
 pytest_plugins = ("lane_guard",)
 
+import harness
 from harness import RustainTUI, PROJECT_ROOT, BINARY, CTRL_X
 
 
@@ -51,6 +53,74 @@ def pytest_collection_modifyitems(config, items):
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
+
+_TUI_ROOT = Path(__file__).resolve().parent
+_NAMED_PTY_SPAWNS = {
+    "test_story_19_21_act1_distribution.py::test_act1_daemon_crash_restart": 3,
+    "test_story_19_21b_standalone_modes.py::test_standalone_auto_mode_still_requires_human_send[yolo]": 1,
+    "test_story_19_21b_standalone_modes.py::test_standalone_auto_mode_still_requires_human_send[autoedit]": 1,
+}
+
+
+@pytest.fixture(autouse=True)
+def _named_capture_geometry(request):
+    """Set and measure the PTY geometry of the three captures without a size parameter."""
+    path, _, case = request.node.nodeid.partition("::")
+    # Pytest's root can be tests_tui/ or the product checkout. Keep the full
+    # class/function/parameter suffix and normalize only the path.
+    path = request.config.rootpath / path
+    nodeid = f"{path.relative_to(_TUI_ROOT).as_posix()}::{case}" if path.is_relative_to(_TUI_ROOT) else ""
+    expected_spawns = _NAMED_PTY_SPAWNS.get(nodeid)
+    if expected_spawns is None:
+        yield
+        return
+
+    dimensions = (24, 80)
+    evidence = os.environ.get("RUSTAIN_NAMED_PTY_EVIDENCE")
+    spawns = 0
+    start = RustainTUI.start
+
+    def start_with_observed_pty(tui):
+        child = None
+        spawn = harness.pexpect.spawn
+
+        def observed_spawn(*args, **kwargs):
+            nonlocal child, spawns
+            child = spawn(*args, **kwargs)
+            spawns += 1
+            rows, columns = child.getwinsize()
+            if evidence:
+                with open(evidence, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({
+                        "nodeid": nodeid, "spawn": spawns, "rows": rows, "columns": columns,
+                    }) + "\n")
+            assert (rows, columns) == dimensions, (
+                f"{nodeid} spawn {spawns}: expected PTY size {dimensions}, got {(rows, columns)}"
+            )
+            return child
+
+        try:
+            with pytest.MonkeyPatch.context() as patch_spawn:
+                patch_spawn.setattr(harness.pexpect, "spawn", observed_spawn)
+                return start(tui)
+        except BaseException:
+            # A failed __enter__ does not run __exit__. A measurement failure
+            # happens before start can take ownership of the spawned child.
+            if child is not None and tui._child is not child:
+                with suppress(Exception):
+                    child.close(force=True)
+            with suppress(Exception):
+                tui.stop()
+            raise
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(harness, "TERM_ROWS", dimensions[0])
+        patch.setattr(harness, "TERM_COLS", dimensions[1])
+        patch.setattr(RustainTUI, "start", start_with_observed_pty)
+        yield
+    # A separate pytest teardown assertion leaves any original failure visible.
+    assert spawns == expected_spawns, f"{nodeid}: expected {expected_spawns} PTY spawns, observed {spawns}"
+
 
 @pytest.fixture(scope="session", autouse=True)
 def build_binary():
