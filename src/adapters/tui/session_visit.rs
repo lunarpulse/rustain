@@ -1,9 +1,9 @@
 //! Read-only retained session reader for one exact, host-authorized Main task result.
 //! It shares text-window navigation and paint, never a live agent or its spool.
 
-use crate::adapters::tui::tool_inspector::ToolTarget;
+use crate::adapters::tui::tool_inspector::{ToolFrameKey, ToolTab, ToolTarget};
 use crate::domain::models::conversation::HistorySource;
-use crate::domain::models::{Conversation, MessageRole, PartId, TurnPart};
+use crate::domain::models::{Conversation, MessageRole, PartId, TabId, TurnPart};
 
 use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::artifact_window::{
@@ -13,6 +13,7 @@ use crate::adapters::tui::keymap::table_mission::MissionCmd;
 use crate::adapters::tui::keymap::{CommandId, Context, Host, Key};
 use crate::adapters::tui::presentation::{Surface, reducer};
 use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::theme::Theme;
 use crate::domain::models::AgentId;
 use crate::domain::models::view_state::ScrollDelta;
 use crate::domain::services::peer_text::sanitize_display_line;
@@ -21,6 +22,7 @@ use crate::infrastructure::subagent::session_history::{
 };
 use std::cell::Cell;
 use std::fmt::{self, Write};
+use tokio_util::sync::DropGuard;
 
 /// The durable address to revalidate, even while another frame covers the Visit.
 #[derive(Debug)]
@@ -31,6 +33,60 @@ pub(crate) struct VisitCursor {
     pub backing: Option<VisitBacking>,
     // Never follow a rebound attempt under the same result address.
     attempt: Option<AgentId>,
+}
+
+/// Which frame's key started a pending open. The origin frame owns the pending open, so
+/// dropping its payload (Back, retarget, close, quit) cancels the read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpeningOrigin {
+    Inspector {
+        frame_id: u64,
+        tab: ToolTab,
+    },
+    Visit {
+        frame_id: u64,
+        cursor_key: MainVisitKey,
+    },
+}
+
+impl OpeningOrigin {
+    pub(crate) fn frame_id(&self) -> u64 {
+        match self {
+            Self::Inspector { frame_id, .. } | Self::Visit { frame_id, .. } => *frame_id,
+        }
+    }
+}
+
+/// One pending, cancelable open. It holds identities only, never a body, and cancels its
+/// read when dropped.
+#[derive(Debug)]
+pub(crate) struct VisitOpening {
+    pub(crate) generation: u64,
+    pub(crate) key: MainVisitKey,
+    pub(crate) origin: OpeningOrigin,
+    pub(crate) tab_id: TabId,
+    pub(crate) conversation_id: String,
+    _cancel: DropGuard,
+}
+
+impl VisitOpening {
+    pub(crate) fn new(
+        generation: u64,
+        key: MainVisitKey,
+        origin: OpeningOrigin,
+        tab_id: TabId,
+        conversation_id: String,
+        cancel: DropGuard,
+    ) -> Self {
+        Self {
+            generation,
+            key,
+            origin,
+            tab_id,
+            conversation_id,
+            _cancel: cancel,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +143,8 @@ pub(crate) struct VisitWindowState {
     next: Option<MainVisitKey>,
     /// A relation acts only when the widget painted the whole relation hint.
     pub(crate) relations_painted: Cell<bool>,
+    /// A related open the key above started and that has not completed yet.
+    pub(crate) opening: Option<VisitOpening>,
 }
 
 /// Only committed turn ordinals, tool names and authorized public text enter search/copy.
@@ -148,12 +206,19 @@ fn relation(key: &MainVisitKey, candidate: Option<MainVisitKey>) -> Option<MainV
 }
 
 impl VisitWindowState {
-    fn new(key: MainVisitKey, read: VisitRead) -> Self {
+    /// Build the reader. The asynchronous open runs this off the event loop; given a layout
+    /// (theme and body width of the painting frame) it also lays the body out once, so the
+    /// first paint reuses the cache.
+    pub(crate) fn prepare(
+        key: MainVisitKey,
+        read: VisitRead,
+        layout: Option<(Theme, u16)>,
+    ) -> Self {
         let (status, mut body) = unpack(read);
         let text = reader(status, body.as_ref());
         let previous = relation(&key, body.as_mut().and_then(|b| b.previous.take()));
         let next = relation(&key, body.as_mut().and_then(|b| b.next.take()));
-        Self {
+        let window = Self {
             cursor: VisitCursor {
                 key,
                 expires_at_ms: body.as_ref().and_then(|b| b.expires_at_ms),
@@ -165,7 +230,12 @@ impl VisitWindowState {
             previous,
             next,
             relations_painted: Cell::new(false),
+            opening: None,
+        };
+        if let Some((theme, width)) = layout {
+            drop(window.text.rows(&theme, width));
         }
+        window
     }
 
     pub(crate) fn title(&self) -> String {
@@ -248,7 +318,7 @@ pub(crate) fn can_visit_related(state: &TuiState, target: &MainVisitKey) -> bool
             .is_some_and(|v| v.previous.as_ref() == Some(target) || v.next.as_ref() == Some(target))
 }
 
-pub(crate) fn open_visit(state: &mut TuiState, key: MainVisitKey, read: VisitRead) {
+pub(crate) fn open_visit(state: &mut TuiState, window: VisitWindowState) {
     if state.local_read_only {
         return;
     }
@@ -256,11 +326,9 @@ pub(crate) fn open_visit(state: &mut TuiState, key: MainVisitKey, read: VisitRea
         if !text::is_top_in(state, &SLOT) {
             return;
         }
-        if v.cursor.key == key {
-            refresh_visit(state, read);
-            return;
-        }
-        if !can_visit_related(state, &key) {
+        // Both production entries open a different key: an Inspector origin has no cursor,
+        // and a related target differs by `relation`.
+        if v.cursor.key == window.cursor.key || !can_visit_related(state, &window.cursor.key) {
             return;
         }
     } else if !matches!(
@@ -269,7 +337,7 @@ pub(crate) fn open_visit(state: &mut TuiState, key: MainVisitKey, read: VisitRea
     ) {
         return;
     }
-    reducer::open_session_visit(state, VisitWindowState::new(key, read));
+    reducer::open_session_visit(state, window);
 }
 
 pub(crate) fn refresh_visit(state: &mut TuiState, read: VisitRead) {
@@ -379,6 +447,7 @@ mod tests {
     use super::*;
     use crate::domain::models::turn::{PartId, TurnId};
     use crate::infrastructure::subagent::session_history::hash_body;
+    use tokio_util::sync::CancellationToken;
 
     fn key(root: &str, part: u64) -> MainVisitKey {
         MainVisitKey {
@@ -410,7 +479,8 @@ mod tests {
     fn revocation_drops_body_filter_layout_and_edges_without_following_a_successor() {
         let original = AgentId::new();
         let body = record(original.clone(), Some(key("main", 3)));
-        let mut visit = VisitWindowState::new(key("main", 1), VisitRead::Available(body.clone()));
+        let mut visit =
+            VisitWindowState::prepare(key("main", 1), VisitRead::Available(body.clone()), None);
         visit.text.search.open();
         visit.text.search.query.set("retained");
         visit.relations_painted.set(true);
@@ -465,7 +535,10 @@ mod tests {
         let target = key("main", 3);
         let mut first = record(AgentId::new(), Some(target.clone()));
         first.previous = Some(key("other", 7));
-        open_visit(&mut state, key("main", 1), VisitRead::Available(first));
+        open_visit(
+            &mut state,
+            VisitWindowState::prepare(key("main", 1), VisitRead::Available(first), None),
+        );
         let frame_id = state.modal_stack.top().unwrap().id;
         assert!(!can_visit_related(&state, &key("other", 7)));
         assert!(can_visit_related(&state, &target));
@@ -508,8 +581,11 @@ mod tests {
         let second = AgentId::new();
         open_visit(
             &mut state,
-            target.clone(),
-            VisitRead::Partial(record(second.clone(), None)),
+            VisitWindowState::prepare(
+                target.clone(),
+                VisitRead::Partial(record(second.clone(), None)),
+                None,
+            ),
         );
         let frame = state.modal_stack.top().unwrap();
         assert_eq!(frame.id, frame_id);
@@ -550,8 +626,11 @@ mod tests {
         let target = key("main", 3);
         open_visit(
             &mut state,
-            key("main", 1),
-            VisitRead::Available(record(AgentId::new(), Some(target.clone()))),
+            VisitWindowState::prepare(
+                key("main", 1),
+                VisitRead::Available(record(AgentId::new(), Some(target.clone()))),
+                None,
+            ),
         );
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
         let mut draw = |state: &TuiState, width| {
@@ -617,9 +696,10 @@ mod tests {
             (VisitRead::Changed, "Changed"),
         ] {
             let attempt = AgentId::new();
-            let mut visit = VisitWindowState::new(
+            let mut visit = VisitWindowState::prepare(
                 key("main", 1),
                 VisitRead::Partial(record(attempt.clone(), Some(key("main", 3)))),
+                None,
             );
             visit.text.search.open();
             visit.text.search.query.set("retained");
@@ -632,6 +712,234 @@ mod tests {
             assert!(visit.cursor.backing.is_none());
             assert_eq!(visit.relations(), (false, false));
         }
+    }
+
+    fn layout() -> (Theme, u16) {
+        (TuiState::new(60, 16).theme, 48)
+    }
+
+    fn opening(origin: OpeningOrigin) -> (VisitOpening, CancellationToken) {
+        let token = CancellationToken::new();
+        let pending = VisitOpening::new(
+            1,
+            key("main", 1),
+            origin,
+            0,
+            "main".into(),
+            token.clone().drop_guard(),
+        );
+        (pending, token)
+    }
+
+    fn tool_frame(state: &mut TuiState) -> u64 {
+        reducer::open_tool(
+            state,
+            ToolTarget {
+                conversation_id: "main".into(),
+                tool_call_id: "selected".into(),
+            },
+            "Tool · task #1".into(),
+            8,
+        );
+        state.modal_stack.top().unwrap().id
+    }
+
+    fn painted(state: &TuiState) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
+        term.draw(|frame| {
+            let area = frame.area();
+            crate::adapters::tui::widgets::agent_window::render_visit(
+                frame,
+                area,
+                state,
+                state.modal_stack.top().unwrap().title(),
+                true,
+            );
+        })
+        .unwrap();
+        let buffer = term.backend().buffer();
+        (0..16_u16)
+            .map(|y| {
+                (0..60_u16)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn visit_async_open_prepare_builds_every_status_and_prewarms_only_the_layout() {
+        let attempt = AgentId::new();
+        let readable = "Turn 1 · Tools: Read\nretained text";
+        let cases = [
+            (
+                VisitRead::Available(record(attempt.clone(), None)),
+                Status::Available,
+            ),
+            (
+                VisitRead::Partial(record(attempt.clone(), None)),
+                Status::Partial,
+            ),
+            (VisitRead::Missing, Status::Missing),
+            (VisitRead::Denied, Status::Denied),
+            (VisitRead::Expired, Status::Expired),
+            (VisitRead::Changed, Status::Changed),
+        ];
+        for (read, status) in cases {
+            let plain = VisitWindowState::prepare(key("main", 1), read.clone(), None);
+            let warmed = VisitWindowState::prepare(key("main", 1), read, Some(layout()));
+            assert_eq!(plain.status, status);
+            assert_eq!(warmed.status, status);
+            assert_eq!(plain.title(), warmed.title());
+            assert!(plain.opening.is_none() && warmed.opening.is_none());
+            assert!(plain.text.body == warmed.text.body);
+            assert_eq!(plain.relations(), warmed.relations());
+            assert_eq!(plain.cursor.expires_at_ms, warmed.cursor.expires_at_ms);
+            assert_eq!(plain.text.layouts_built(), 0);
+            assert_eq!(warmed.text.layouts_built(), 1);
+            let (theme, width) = layout();
+            drop(warmed.text.rows(&theme, width));
+            assert_eq!(
+                warmed.text.layouts_built(),
+                1,
+                "{status:?}: the first paint reuses the prewarmed layout"
+            );
+            drop(warmed.text.rows(&theme, width - 1));
+            assert_eq!(warmed.text.layouts_built(), 2);
+            if matches!(status, Status::Available | Status::Partial) {
+                assert!(plain.title().contains(attempt.as_str()));
+                assert!(plain.title().ends_with(status.label()));
+                assert!(matches!(
+                    &plain.text.body,
+                    ArtifactBody::Source(bytes) if bytes.as_slice() == readable.as_bytes()
+                ));
+                assert_eq!(plain.cursor.expires_at_ms, Some(123));
+                assert!(plain.cursor.backing.is_some());
+            } else {
+                assert_eq!(plain.title(), format!("Session Visit · {}", status.label()));
+                assert!(!plain.text.has_source());
+                assert!(plain.cursor.backing.is_none());
+            }
+        }
+    }
+
+    /// A row that reached the 128-turn cap resolves `Partial` with turns 1..=127: slot 128 is
+    /// a durable cap marker and is never a transcript turn. The async `prepare` must paint the
+    /// literal bytes the base reader painted.
+    #[test]
+    fn visit_async_open_partial_row_without_the_slot_128_marker_keeps_the_base_bytes() {
+        let attempt = AgentId::new();
+        let mut body = record(attempt.clone(), None);
+        body.turns = (1..=127)
+            .map(|ordinal| VisitTurn {
+                ordinal,
+                tool_names: Vec::new(),
+                public_text: format!("t{ordinal}"),
+            })
+            .collect();
+        let expected = (1..=127)
+            .map(|n| format!("Turn {n}\nt{n}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(expected.starts_with("Turn 1\nt1\n\nTurn 2\nt2\n\nTurn 3\nt3"));
+        assert!(expected.ends_with("Turn 126\nt126\n\nTurn 127\nt127"));
+        assert!(!expected.contains("Turn 128"));
+        for layout in [None, Some(layout())] {
+            let window =
+                VisitWindowState::prepare(key("main", 1), VisitRead::Partial(body.clone()), layout);
+            assert_eq!(window.status, Status::Partial);
+            assert!(window.title().ends_with("Partial"));
+            assert!(matches!(
+                &window.text.body,
+                ArtifactBody::Source(bytes) if bytes.as_slice() == expected.as_bytes()
+            ));
+        }
+    }
+
+    #[test]
+    fn visit_async_open_prepared_reader_can_cross_to_the_blocking_pool() {
+        fn send<T: Send>() {}
+        send::<VisitWindowState>();
+        send::<Theme>();
+    }
+
+    #[test]
+    fn visit_async_open_cancel_opening_acts_only_on_the_top_frame() {
+        let mut state = TuiState::new(60, 16);
+        let id = tool_frame(&mut state);
+        let (pending, token) = opening(OpeningOrigin::Inspector {
+            frame_id: id,
+            tab: ToolTab::Output,
+        });
+        state.tool_inspectors.get_mut(&id).unwrap().visit_opening = Some(pending);
+        reducer::open(&mut state, Surface::Help);
+        state.needs_redraw = false;
+        assert!(!cancel_opening(&mut state), "a key above never cancels it");
+        assert!(!token.is_cancelled());
+        assert!(pending_open(&state).is_some());
+        assert!(!state.needs_redraw);
+
+        reducer::close(&mut state, Surface::Help);
+        assert!(cancel_opening(&mut state));
+        assert!(
+            token.is_cancelled(),
+            "dropping the pending open cancels the read"
+        );
+        assert!(pending_open(&state).is_none());
+        assert!(state.needs_redraw);
+        assert!(!cancel_opening(&mut state), "nothing is pending any more");
+    }
+
+    #[test]
+    fn visit_async_open_related_cue_replaces_the_relation_hint_and_keeps_relations_inert() {
+        let mut state = TuiState::new(60, 16);
+        tool_frame(&mut state);
+        let target = key("main", 3);
+        open_visit(
+            &mut state,
+            VisitWindowState::prepare(
+                key("main", 1),
+                VisitRead::Available(record(AgentId::new(), Some(target.clone()))),
+                None,
+            ),
+        );
+        let frame_id = state.modal_stack.top().unwrap().id;
+        let (pending, token) = opening(OpeningOrigin::Visit {
+            frame_id,
+            cursor_key: key("main", 1),
+        });
+        state.session_visit.as_mut().unwrap().opening = Some(pending);
+        assert!(painted(&state).contains(" [Esc] Cancel  Opening related source… "));
+        assert!(
+            !state
+                .session_visit
+                .as_ref()
+                .unwrap()
+                .relations_painted
+                .get()
+        );
+        assert_eq!(
+            on_visit_key(&mut state, Key::Right, Host::Local),
+            InputAction::Consumed,
+            "the relation key is inert while the open is pending"
+        );
+
+        assert!(cancel_opening(&mut state));
+        assert!(token.is_cancelled());
+        assert!(!painted(&state).contains("Cancel"));
+        assert!(
+            state
+                .session_visit
+                .as_ref()
+                .unwrap()
+                .relations_painted
+                .get()
+        );
+        assert_eq!(
+            on_visit_key(&mut state, Key::Right, Host::Local),
+            InputAction::OpenSessionVisit(target)
+        );
     }
 }
 
@@ -736,6 +1044,61 @@ pub(crate) fn visit_key(conversation: &Conversation, target: &ToolTarget) -> Opt
 
 pub(crate) fn visit_cursor(state: &TuiState) -> Option<&VisitCursor> {
     state.session_visit.as_ref().map(|visit| &visit.cursor)
+}
+
+/// Whether `read` is readable and its fresh edges name `target` after the same `relation`
+/// filter the reader applies.
+pub(crate) fn edge_names(read: &VisitRead, key: &MainVisitKey, target: &MainVisitKey) -> bool {
+    let (VisitRead::Available(body) | VisitRead::Partial(body)) = read else {
+        return false;
+    };
+    [&body.previous, &body.next]
+        .into_iter()
+        .any(|edge| relation(key, edge.clone()).as_ref() == Some(target))
+}
+
+/// The pending-open slot of the top frame's payload.
+pub(crate) fn top_slot(state: &mut TuiState) -> Option<&mut Option<VisitOpening>> {
+    let surface = state.modal_stack.top()?.surface;
+    match surface {
+        Surface::ToolInspector(ToolFrameKey(id)) => state
+            .tool_inspectors
+            .get_mut(&id)
+            .map(|tool| &mut tool.visit_opening),
+        Surface::SessionVisit => state.session_visit.as_mut().map(|visit| &mut visit.opening),
+        _ => None,
+    }
+}
+
+/// The one pending open, whichever frame owns it (covered frames included).
+pub(crate) fn pending_open(state: &TuiState) -> Option<&VisitOpening> {
+    state
+        .tool_inspectors
+        .values()
+        .find_map(|tool| tool.visit_opening.as_ref())
+        .or_else(|| {
+            state
+                .session_visit
+                .as_ref()
+                .and_then(|visit| visit.opening.as_ref())
+        })
+}
+
+/// Drop every pending open; dropping cancels its read.
+pub(crate) fn clear_pending(state: &mut TuiState) {
+    for tool in state.tool_inspectors.values_mut() {
+        tool.visit_opening = None;
+    }
+    if let Some(visit) = state.session_visit.as_mut() {
+        visit.opening = None;
+    }
+}
+
+/// `Esc` / `Ctrl+C` while the top frame's open is pending: cancel it and do nothing else.
+pub(crate) fn cancel_opening(state: &mut TuiState) -> bool {
+    let cancelled = top_slot(state).is_some_and(|slot| slot.take().is_some());
+    state.needs_redraw |= cancelled;
+    cancelled
 }
 
 pub(crate) fn ignores_raw_key(state: &TuiState, key: &crossterm::event::KeyEvent) -> bool {

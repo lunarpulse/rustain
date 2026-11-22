@@ -330,7 +330,10 @@ pub(super) fn log_facts(conversation_id: &str) -> LogFacts {
 }
 
 /// Key and wheel ingress share the same owner boundary; paste stays borrowed.
-pub(super) fn route_event(state: &mut TuiState, event: &Event) -> Option<RouteEffect> {
+pub(in crate::infrastructure::runtime) fn route_event(
+    state: &mut TuiState,
+    event: &Event,
+) -> Option<RouteEffect> {
     match convert_crossterm_event(event, &MouseConfig::default()) {
         Some(event) => presentation::route(state, &event, Host::Attached, &LogFacts::default()),
         None => presentation::route::blocks_paste(state).then_some(RouteEffect::Consumed),
@@ -1892,11 +1895,11 @@ pub(crate) mod tests {
             self.paint();
         }
 
-        async fn ch(&mut self, c: char) -> KeyFlow {
+        pub(crate) async fn ch(&mut self, c: char) -> KeyFlow {
             self.press(KeyCode::Char(c), KeyModifiers::NONE).await
         }
 
-        async fn ctrl(&mut self, c: char) -> KeyFlow {
+        pub(crate) async fn ctrl(&mut self, c: char) -> KeyFlow {
             self.press(KeyCode::Char(c), KeyModifiers::CONTROL).await
         }
 
@@ -5101,19 +5104,6 @@ pub(crate) mod tests {
         assert!(rig.frames().is_empty(), "never sent to the daemon");
     }
 
-    /// With an empty attached queue the chord answers without sending a frame.
-    #[tokio::test]
-    async fn story21_1_attached_ctrl_x_q_answers_that_no_decision_waits_in_this_client() {
-        let mut rig = Rig::new(false);
-        assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
-        assert_eq!(rig.ch('q').await, KeyFlow::Continue);
-        let notice = rig.state.notifications.visible().next().expect("a toast");
-        assert_eq!(notice.message, "No decisions waiting");
-        assert_eq!(notice.severity, NoticeSeverity::Info);
-        assert!(rig.state.decisions.is_empty());
-        assert!(rig.frames().is_empty(), "never sent to the daemon");
-    }
-
     /// K6 (attached families) — a refused send and a dead socket reach the user
     /// as store notices through the real key ingress, never as a status
     /// flash or a transcript row: the read-only send refusal is an Info toast,
@@ -5223,7 +5213,7 @@ pub(crate) mod tests {
 
     /// Everything a key with no row must leave alone.
     #[derive(Debug, PartialEq)]
-    struct Salient {
+    pub(crate) struct Salient {
         focus: FocusState,
         input: String,
         multiline: bool,
@@ -5234,7 +5224,7 @@ pub(crate) mod tests {
         feedback: usize,
     }
 
-    fn salient(rig: &Rig) -> Salient {
+    pub(crate) fn salient(rig: &Rig) -> Salient {
         let state = &rig.state;
         Salient {
             focus: state.focus.clone(),
@@ -6835,11 +6825,7 @@ pub(crate) mod tests {
                     | Surface::Tour
                     | Surface::Login => unreachable!("surface not offered attached"),
                     #[cfg(feature = "session-visit")]
-                    Surface::SessionVisit => {
-                        unreachable!(
-                            "Visit requires local exact-read custody; never offered attached"
-                        )
-                    }
+                    Surface::SessionVisit => unreachable!("Visit is never offered attached"),
                     Surface::ThreadInspector => unreachable!(
                         "the thread frame owns its keys by value: story21_8_attached_thread_frame_keys_act_by_value"
                     ),
@@ -6878,66 +6864,6 @@ pub(crate) mod tests {
             base.state.input_buffer, "y",
             "positive control: base keys still reach Input"
         );
-    }
-
-    /// Visit's opener and reader commands are local-only. Exercise the real attached
-    /// Messages frame without constructing a Visit payload or acquiring local custody.
-    #[cfg(feature = "session-visit")]
-    #[tokio::test]
-    async fn session_visit_attached_has_no_local_bindings_or_open_effect() {
-        use crate::adapters::tui::keymap::table_tool::ToolCmd;
-
-        assert!(
-            matches!(
-                resolve(Context::ToolInspector, Host::Local, &[Key::Char('o')]),
-                Resolved::Hit(row) if row.command == CommandId::Tool(ToolCmd::VisitSource)
-            ),
-            "positive control: the local source key really opens Visit"
-        );
-        assert!(
-            matches!(
-                resolve(Context::ToolInspector, Host::Attached, &[Key::Char('o')]),
-                Resolved::Miss
-            ),
-            "attached cannot construct the local Visit source action"
-        );
-        assert!(rows_of(Context::SessionVisit, Host::Local).next().is_some());
-        assert!(
-            rows_of(Context::SessionVisit, Host::Attached)
-                .next()
-                .is_none(),
-            "attached has no Visit reader commands"
-        );
-
-        for read_only in [false, true] {
-            let mut rig = Rig::new(read_only);
-            rig.type_text("retained draft").await;
-            rig.ctrl('x').await;
-            rig.ch('l').await;
-            assert!(presentation::is_open(&rig.state, Surface::MissionControl));
-            let before = salient(&rig);
-            let frames = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
-            let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
-
-            assert_eq!(
-                route_event(&mut rig.state, &Event::Key(key)),
-                Some(RouteEffect::Consumed),
-                "the attached source key has no host action"
-            );
-            assert_eq!(rig.raw_key(key).await, KeyFlow::Continue);
-            assert_eq!(salient(&rig), before, "no composer or reader side effect");
-            assert_eq!(
-                rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
-                frames,
-                "the real attached frame remains the owner"
-            );
-            assert!(rig.state.session_visit.is_none());
-            assert!(!presentation::is_open(&rig.state, Surface::SessionVisit));
-            assert!(
-                rig.frames().is_empty(),
-                "no Visit request or other frame is sent to the daemon"
-            );
-        }
     }
 
     /// A20: the attached hub is Messages only. Its keys act by value: Esc closes (dropping the

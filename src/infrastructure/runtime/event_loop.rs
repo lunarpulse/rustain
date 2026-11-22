@@ -30,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::mission_bridge::{self, get_subagent_provider};
 use super::task_panel_bridge::{self, TaskCtx};
+#[cfg(feature = "session-visit")]
+use super::visit_open;
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
 use crate::adapters::palette_registry::PaletteRegistry;
@@ -708,6 +710,13 @@ pub async fn run(
     let mut turn_lifecycle = super::tui_turn_lifecycle::TuiTurnLifecycle::default();
     #[cfg(feature = "session-visit")]
     turn_lifecycle.set_visit_history(mission_bridge::session_history(&app_state.agent_core));
+    // A finished Visit read travels on this private channel, never on the event bus.
+    #[cfg(feature = "session-visit")]
+    let (visit_open_tx, visit_rx) = mpsc::channel::<visit_open::VisitOpenDone>(4);
+    #[cfg(feature = "session-visit")]
+    let mut visit_open_rx = Some(visit_rx);
+    #[cfg(not(feature = "session-visit"))]
+    let mut visit_open_rx: Option<mpsc::Receiver<std::convert::Infallible>> = None;
 
     // Story 12.2a — the turn-origination seam. `LocalTurnDriver` owns the
     // agent-side dependencies (provider/security/tools/scheduler/persona/context/
@@ -835,8 +844,24 @@ pub async fn run(
         }};
     }
 
+    #[cfg(feature = "session-visit")]
+    macro_rules! visit_ctx {
+        () => {
+            visit_open::VisitOpenCtx {
+                conversation: &conversation,
+                tab_id: tab_manager.active_tab_id(),
+                local_allowed: !tab_manager.active_tab().read_only
+                    && !app_state.session_cancel.is_cancelled(),
+                session_cancel: &app_state.session_cancel,
+                tab_count: tab_manager.tab_count(),
+            }
+        };
+    }
+
     macro_rules! render_local {
         ($context_window:expr) => {{
+            #[cfg(feature = "session-visit")]
+            visit_open::reconcile(&mut state, visit_ctx!());
             #[cfg(feature = "session-visit")]
             mission_bridge::reauthorize_session_visit(
                 &mut state,
@@ -1058,7 +1083,7 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         #[cfg(feature = "session-visit")]
-                        let visit_was_open = crate::adapters::tui::session_visit::visit_cursor(&state).is_some();
+                        let visit_was_open = visit_open::active(&state);
                         state.local_read_only = tab_manager.active_tab().read_only;
                         #[cfg(feature = "session-visit")]
                         mission_bridge::reauthorize_session_visit(
@@ -2234,17 +2259,17 @@ pub async fn run(
                                 }
                                 #[cfg(feature = "session-visit")]
                                 InputAction::VisitCurrentSource => {
-                                    mission_bridge::open_current_session_visit(
-                                        &mut state, &app_state.agent_core, &conversation,
-                                        !tab_manager.active_tab().read_only, &app_state.session_cancel,
-                                    ).await;
+                                    let _ = visit_open::begin_current(
+                                        &mut state, mission_bridge::session_history(&app_state.agent_core),
+                                        visit_ctx!(), &visit_open_tx,
+                                    );
                                 }
                                 #[cfg(feature = "session-visit")]
                                 InputAction::OpenSessionVisit(key) => {
-                                    mission_bridge::open_session_visit(
-                                        &mut state, &app_state.agent_core, &conversation,
-                                        !tab_manager.active_tab().read_only, &app_state.session_cancel, key,
-                                    ).await;
+                                    let _ = visit_open::begin_related(
+                                        &mut state, mission_bridge::session_history(&app_state.agent_core),
+                                        visit_ctx!(), &visit_open_tx, key,
+                                    );
                                 }
                                 #[cfg(feature = "session-visit")]
                                 InputAction::CopySessionVisit | InputAction::SearchSessionVisit => {
@@ -4112,8 +4137,7 @@ pub async fn run(
                             }
                         }
                         #[cfg(feature = "session-visit")]
-                        if state.needs_redraw && (visit_was_open
-                            || crate::adapters::tui::session_visit::visit_cursor(&state).is_some())
+                        if state.needs_redraw && visit_open::redraw_needed(visit_was_open, &state)
                         {
                             // A reader key should not wait for the periodic chat tick.
                             let context_window = active_context_window(&app_state, &router, &state, config);
@@ -6164,6 +6188,39 @@ pub async fn run(
                         }
                     }
                 }
+            }
+
+            // Branch 6: a finished Visit read (private channel, never the event bus). With the
+            // feature off the receiver is `None`, so this branch never fires.
+            visit_done = async {
+                match &mut visit_open_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(done) = visit_done else {
+                    visit_open_rx = None;
+                    continue;
+                };
+                #[cfg(feature = "session-visit")]
+                {
+                    visit_open::apply(&mut state, done, visit_ctx!());
+                    if state.needs_redraw {
+                        let context_window = active_context_window(&app_state, &router, &state, config);
+                        state.active_context_window = context_window;
+                        match render_local!(context_window) {
+                            Ok(()) => state.needs_redraw = false,
+                            Err(error) => {
+                                handlers::render_error::handle_render_error(error,
+                                    |streaming, state| turn_lifecycle.interrupt_active(
+                                        &mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model),
+                                    &mut streaming, &mut state, terminal);
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "session-visit"))]
+                match done {}
             }
 
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)

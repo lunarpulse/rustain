@@ -294,6 +294,16 @@ pub fn render(
             "{} Back",
             render::rail(Context::ToolInspector, ToolCmd::Back)
         );
+        // While `o`'s read is pending, `Esc` only cancels it: the rail says so.
+        #[cfg(feature = "session-visit")]
+        let back = if state.visit_opening.is_some() {
+            format!(
+                "{} Cancel  Opening Session Visit…",
+                render::rail(Context::ToolInspector, ToolCmd::Back)
+            )
+        } else {
+            back
+        };
         let label = if state.missing {
             back
         } else {
@@ -309,7 +319,7 @@ pub fn render(
             let copy = render::rail(Context::ToolInspector, ToolCmd::Copy);
             let mut text = back;
             #[cfg(feature = "session-visit")]
-            if !editing && state.can_visit_source() {
+            if !editing && state.visit_opening.is_none() && state.can_visit_source() {
                 text.push_str(&format!(
                     "  {} Visit source",
                     render::rail(Context::ToolInspector, ToolCmd::VisitSource)

@@ -7,6 +7,8 @@ pub mod artifact_bridge;
 pub mod ask_limits;
 #[cfg(unix)]
 pub(crate) mod attach_interrupt;
+#[cfg(all(test, unix))]
+mod attach_keys_split_tests;
 #[cfg(unix)]
 pub mod attach_loop;
 pub mod decision_effects;
@@ -38,3 +40,5 @@ pub mod transparency_bridge;
 pub mod tui_turn_lifecycle;
 pub mod turn;
 pub mod turn_driver;
+#[cfg(feature = "session-visit")]
+pub mod visit_open;

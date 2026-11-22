@@ -3158,14 +3158,17 @@ mod tests {
 
         session_visit::open_visit(
             &mut state,
-            MainVisitKey {
-                conversation_id: "main".into(),
-                turn_id: TurnId("turn".into()),
-                invocation: PartId(1),
-                result: PartId(2),
-                revision: hash_body("literal result"),
-            },
-            VisitRead::Missing,
+            session_visit::VisitWindowState::prepare(
+                MainVisitKey {
+                    conversation_id: "main".into(),
+                    turn_id: TurnId("turn".into()),
+                    invocation: PartId(1),
+                    result: PartId(2),
+                    revision: hash_body("literal result"),
+                },
+                VisitRead::Missing,
+                None,
+            ),
         );
         let context = focus_context(&state).expect("exact Visit owns keys");
         assert_eq!(context, Context::SessionVisit);

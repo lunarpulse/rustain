@@ -14,10 +14,10 @@ use tokio_util::sync::CancellationToken;
 use crate::adapters::tui::decision_queue;
 use crate::adapters::tui::mission_control::agents;
 use crate::adapters::tui::notifications::{self, NoticeSource};
+#[cfg(feature = "session-visit")]
+use crate::adapters::tui::session_visit;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::agent_panel;
-#[cfg(feature = "session-visit")]
-use crate::adapters::tui::{presentation::Surface, session_visit};
 use crate::domain::models::subagent_view::AgentRowView;
 use crate::domain::models::{AgentId, NodeState, Op};
 #[cfg(feature = "session-visit")]
@@ -142,7 +142,7 @@ pub(super) async fn load_visit_deadlines(
 }
 
 #[cfg(feature = "session-visit")]
-fn visit_unavailable(state: &mut TuiState, read: VisitRead) {
+pub(super) fn visit_unavailable(state: &mut TuiState, read: VisitRead) {
     let message = match read {
         VisitRead::Missing => "No readable retained session for this exact source.",
         VisitRead::Denied => "Session Visit is not allowed for this source.",
@@ -168,123 +168,6 @@ pub(super) fn session_visit_access_allowed(
     false
 }
 
-#[cfg(feature = "session-visit")]
-pub(super) async fn open_current_session_visit(
-    state: &mut TuiState,
-    agent_core: &AgentCore,
-    conversation: &Conversation,
-    local_allowed: bool,
-    session_cancel: &CancellationToken,
-) {
-    if !session_visit_access_allowed(state, local_allowed, session_cancel) {
-        visit_unavailable(state, VisitRead::Denied);
-        return;
-    }
-    if !matches!(
-        state.modal_stack.top().map(|frame| frame.surface),
-        Some(Surface::ToolInspector(_))
-    ) {
-        return;
-    }
-    if let Some(key) = crate::adapters::tui::tool_inspector::visit_target(state, conversation) {
-        open_session_visit(
-            state,
-            agent_core,
-            conversation,
-            local_allowed,
-            session_cancel,
-            key,
-        )
-        .await;
-    } else {
-        visit_unavailable(state, VisitRead::Missing);
-    }
-}
-
-#[cfg(feature = "session-visit")]
-async fn read_visit(
-    agent_core: &AgentCore,
-    conversation: &Conversation,
-    local_allowed: bool,
-    key: &MainVisitKey,
-    session_cancel: &CancellationToken,
-) -> VisitRead {
-    if !local_allowed || session_cancel.is_cancelled() || conversation.id != key.conversation_id {
-        return VisitRead::Denied;
-    }
-    let read = match session_history(agent_core) {
-        Some(history) => history.resolve(key, conversation, local_allowed).await,
-        None => VisitRead::Missing,
-    };
-    if session_cancel.is_cancelled() {
-        VisitRead::Denied
-    } else {
-        read
-    }
-}
-
-#[cfg(feature = "session-visit")]
-pub(super) async fn open_session_visit(
-    state: &mut TuiState,
-    agent_core: &AgentCore,
-    conversation: &Conversation,
-    local_allowed: bool,
-    session_cancel: &CancellationToken,
-    key: MainVisitKey,
-) {
-    if !session_visit_access_allowed(state, local_allowed, session_cancel) {
-        visit_unavailable(state, VisitRead::Denied);
-        return;
-    }
-    if let Some(cursor) = session_visit::visit_cursor(state) {
-        if !state
-            .modal_stack
-            .top()
-            .is_some_and(|frame| frame.surface == Surface::SessionVisit)
-        {
-            return;
-        }
-        let same = cursor.key == key;
-        let source = read_visit(
-            agent_core,
-            conversation,
-            local_allowed,
-            &cursor.key,
-            session_cancel,
-        )
-        .await;
-        if !session_visit_access_allowed(state, local_allowed, session_cancel) {
-            return;
-        }
-        let readable = matches!(&source, VisitRead::Available(_) | VisitRead::Partial(_));
-        session_visit::refresh_visit(state, source);
-        if same || !readable {
-            return;
-        }
-        if !session_visit::can_visit_related(state, &key) {
-            visit_unavailable(state, VisitRead::Missing);
-            return;
-        }
-    }
-    let read = read_visit(
-        agent_core,
-        conversation,
-        local_allowed,
-        &key,
-        session_cancel,
-    )
-    .await;
-    if !session_visit_access_allowed(state, local_allowed, session_cancel) {
-        return;
-    }
-    match read {
-        VisitRead::Available(_) | VisitRead::Partial(_) => {
-            session_visit::open_visit(state, key, read);
-        }
-        unavailable => visit_unavailable(state, unavailable),
-    }
-}
-
 /// Recheck source and metadata before every paint and key, including covered
 /// readers. Copy and search use this checked lease; explicit opens resolve anew.
 #[cfg(feature = "session-visit")]
@@ -294,10 +177,27 @@ pub(super) fn reauthorize_session_visit(
     conversation: &Conversation,
     local_allowed: bool,
 ) {
+    reauthorize_with(
+        state,
+        session_history(agent_core).as_deref(),
+        conversation,
+        local_allowed,
+    );
+}
+
+/// The recheck against an explicit history: the loop passes the agent core's, the
+/// conformance witness the one it seeded.
+#[cfg(feature = "session-visit")]
+pub fn reauthorize_with(
+    state: &mut TuiState,
+    history: Option<&SessionHistory>,
+    conversation: &Conversation,
+    local_allowed: bool,
+) {
     let Some(cursor) = session_visit::visit_cursor(state) else {
         return;
     };
-    let failure = match session_history(agent_core) {
+    let failure = match history {
         Some(history) => history
             .check_source(&cursor.key, conversation, local_allowed)
             .or_else(|| {
@@ -328,7 +228,10 @@ pub(super) fn expire_session_visit(state: &mut TuiState) {
 mod visit_authority_tests {
     use super::*;
     use crate::adapters::tui::{
-        artifact_window::ArtifactBody, presentation::reducer, tool_inspector::ToolTarget,
+        artifact_window::ArtifactBody,
+        presentation::{Surface, reducer},
+        session_visit::VisitWindowState,
+        tool_inspector::ToolTarget,
     };
     use crate::domain::models::turn::{PartId, TurnId};
     use crate::infrastructure::subagent::session_history::{VisitBacking, VisitBody, VisitTurn};
@@ -349,26 +252,29 @@ mod visit_authority_tests {
             );
             session_visit::open_visit(
                 &mut state,
-                MainVisitKey {
-                    conversation_id: "main".into(),
-                    turn_id: TurnId("turn".into()),
-                    invocation: PartId(1),
-                    result: PartId(2),
-                    revision: hash_body("literal"),
-                },
-                VisitRead::Available(VisitBody {
-                    attempt: AgentId::new(),
-                    previous: None,
-                    next: None,
-                    report: None,
-                    expires_at_ms: None,
-                    backing: VisitBacking::default(),
-                    turns: vec![VisitTurn {
-                        ordinal: 1,
-                        tool_names: Vec::new(),
-                        public_text: "retained secret".into(),
-                    }],
-                }),
+                VisitWindowState::prepare(
+                    MainVisitKey {
+                        conversation_id: "main".into(),
+                        turn_id: TurnId("turn".into()),
+                        invocation: PartId(1),
+                        result: PartId(2),
+                        revision: hash_body("literal"),
+                    },
+                    VisitRead::Available(VisitBody {
+                        attempt: AgentId::new(),
+                        previous: None,
+                        next: None,
+                        report: None,
+                        expires_at_ms: None,
+                        backing: VisitBacking::default(),
+                        turns: vec![VisitTurn {
+                            ordinal: 1,
+                            tool_names: Vec::new(),
+                            public_text: "retained secret".into(),
+                        }],
+                    }),
+                    None,
+                ),
             );
             if covered {
                 reducer::open(&mut state, Surface::Help);

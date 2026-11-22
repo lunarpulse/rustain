@@ -1276,14 +1276,17 @@ mod tests {
 
         crate::adapters::tui::session_visit::open_visit(
             &mut state,
-            MainVisitKey {
-                conversation_id: "stage".into(),
-                turn_id: TurnId("turn".into()),
-                invocation: PartId(1),
-                result: PartId(2),
-                revision: hash_body("literal"),
-            },
-            VisitRead::Missing,
+            crate::adapters::tui::session_visit::VisitWindowState::prepare(
+                MainVisitKey {
+                    conversation_id: "stage".into(),
+                    turn_id: TurnId("turn".into()),
+                    invocation: PartId(1),
+                    result: PartId(2),
+                    revision: hash_body("literal"),
+                },
+                VisitRead::Missing,
+                None,
+            ),
         );
         assert_eq!(state.modal_stack.len(), 4);
         assert_eq!(

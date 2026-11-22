@@ -118,6 +118,10 @@ pub struct ToolInspectorState {
     visit_expires_at_ms: Option<i64>,
     #[cfg(feature = "session-visit")]
     visit_current: bool,
+    /// The Visit open `o` started and that has not completed. This frame's payload owns it:
+    /// replacing or dropping the payload cancels the read.
+    #[cfg(feature = "session-visit")]
+    pub(crate) visit_opening: Option<crate::adapters::tui::session_visit::VisitOpening>,
 }
 
 impl ToolInspectorState {
@@ -155,6 +159,8 @@ impl ToolInspectorState {
             visit_expires_at_ms: None,
             #[cfg(feature = "session-visit")]
             visit_current: false,
+            #[cfg(feature = "session-visit")]
+            visit_opening: None,
         }
     }
 
@@ -203,6 +209,20 @@ impl ToolInspectorState {
         });
         self.visit_current = key.is_some();
         self.visit_key = key;
+    }
+
+    /// A pending open survives only while this frame still shows the exact result and tab
+    /// it was started on and no search is being edited.
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn opening_still_current(
+        &self,
+        opening: &crate::adapters::tui::session_visit::VisitOpening,
+    ) -> bool {
+        use crate::adapters::tui::session_visit::OpeningOrigin;
+        self.visit_current
+            && self.visit_key.as_ref() == Some(&opening.key)
+            && !self.search.editor.editing
+            && matches!(opening.origin, OpeningOrigin::Inspector { tab, .. } if tab == self.tab)
     }
 
     pub fn rows(&self) -> &[Line<'static>] {
@@ -1065,7 +1085,7 @@ mod visit_tests {
         i64::try_from(now.as_millis()).unwrap() + 60_000
     }
 
-    fn fixture() -> (Conversation, ToolTarget) {
+    pub(super) fn fixture() -> (Conversation, ToolTarget) {
         let mut turn = Turn::new("model".into(), 0);
         let invocation = turn.push_part(|id| TurnPart::ToolInvocation {
             id,
@@ -1205,5 +1225,92 @@ mod visit_tests {
         state.focused_item_id = Some(target.tool_call_id);
         assert!(inspect_focused(&mut state, &conversation, Some(&shadow)));
         assert!(visit_target(&state, &conversation).is_none());
+    }
+}
+
+#[cfg(test)]
+mod visit_cue_tests {
+    #[cfg(feature = "session-visit")]
+    use super::visit_tests::fixture;
+    #[cfg(feature = "session-visit")]
+    use super::*;
+    #[cfg(feature = "session-visit")]
+    use crate::adapters::tui::state::TuiState;
+
+    #[cfg(feature = "session-visit")]
+    fn painted(inspector: &ToolInspectorState, width: u16, height: u16) -> Vec<String> {
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::adapters::tui::widgets::tool_inspector::render(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    inspector,
+                    &theme,
+                    "Tool · task #1",
+                    false,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn visit_async_open_rail_shows_the_cancel_cue_and_changes_nothing_else() {
+        use crate::adapters::tui::session_visit::{OpeningOrigin, VisitOpening};
+        let (conversation, target) = fixture();
+        for (width, height) in [(80_u16, 24_u16), (60, 16)] {
+            let mut state = TuiState::new(width, height);
+            state.focused_item_id = Some(target.tool_call_id.clone());
+            assert!(inspect_focused(&mut state, &conversation, None));
+            let id = state.modal_stack.top().unwrap().id;
+            let key = state.tool_inspectors[&id].visit_key.clone().unwrap();
+            let area = ratatui::layout::Rect::new(0, 0, width, height);
+            let rail = usize::from(layout::parts(area).rail.y);
+
+            let before = painted(&state.tool_inspectors[&id], width, height);
+            assert!(before[rail].contains("[Esc] Back"), "{}", before[rail]);
+            assert!(before[rail].contains("[o] Visit source"));
+
+            let token = tokio_util::sync::CancellationToken::new();
+            state.tool_inspectors.get_mut(&id).unwrap().visit_opening = Some(VisitOpening::new(
+                1,
+                key,
+                OpeningOrigin::Inspector {
+                    frame_id: id,
+                    tab: ToolTab::Output,
+                },
+                0,
+                "main".into(),
+                token.clone().drop_guard(),
+            ));
+            let during = painted(&state.tool_inspectors[&id], width, height);
+            assert!(
+                during[rail].contains("[Esc] Cancel  Opening Session Visit…"),
+                "{width}x{height}: {}",
+                during[rail]
+            );
+            assert!(!during[rail].contains("[Esc] Back"));
+            assert!(!during[rail].contains("[o] Visit source"));
+            for (row, (was, now)) in before.iter().zip(&during).enumerate() {
+                if row != rail {
+                    assert_eq!(was, now, "{width}x{height}: row {row} is untouched");
+                }
+            }
+
+            state.tool_inspectors.get_mut(&id).unwrap().visit_opening = None;
+            assert!(token.is_cancelled());
+            assert_eq!(
+                painted(&state.tool_inspectors[&id], width, height),
+                before,
+                "{width}x{height}: cancel restores the origin frame byte for byte"
+            );
+        }
     }
 }

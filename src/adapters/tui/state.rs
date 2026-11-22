@@ -2316,6 +2316,9 @@ pub struct TuiState {
     /// Exact retained local Visit, independent of the live roster and spool cache.
     #[cfg(feature = "session-visit")]
     pub(crate) session_visit: Option<crate::adapters::tui::session_visit::VisitWindowState>,
+    /// Mints one generation per Visit open; a completion applies only for the live one.
+    #[cfg(feature = "session-visit")]
+    pub(crate) visit_open_generation: u64,
     /// The task window's payload (Story 21.7 A8): set by the reducer's opener, cleared when
     /// the frame closes.
     pub task_window: Option<crate::adapters::tui::task_window::TaskWindowState>,
@@ -2773,6 +2776,8 @@ impl TuiState {
             agent_window: None,
             #[cfg(feature = "session-visit")]
             session_visit: None,
+            #[cfg(feature = "session-visit")]
+            visit_open_generation: 0,
             task_window: None,
             adapters_window: None,
             attached_channel_link: None,

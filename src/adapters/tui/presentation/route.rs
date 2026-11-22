@@ -293,6 +293,23 @@ pub fn route(
             RouteEffect::Consumed
         });
     }
+    // A pending Visit open on the top frame turns the frame's Back key (`Esc`, `Ctrl+C`)
+    // into "cancel the open" and nothing else; the next Back is the ordinary one.
+    #[cfg(feature = "session-visit")]
+    if host == Host::Local
+        && matches!(surface, Surface::ToolInspector(_) | Surface::SessionVisit)
+        && matches!(
+            keymap::resolve(context, host, &[key]),
+            Resolved::Hit(row) if matches!(
+                row.command,
+                CommandId::Tool(keymap::table_tool::ToolCmd::Back)
+                    | CommandId::Mission(keymap::table_mission::MissionCmd::Back)
+            )
+        )
+        && crate::adapters::tui::session_visit::cancel_opening(state)
+    {
+        return Some(RouteEffect::Action(InputAction::Consumed));
+    }
     Some(match surface {
         #[cfg(feature = "session-visit")]
         Surface::ToolInspector(_)

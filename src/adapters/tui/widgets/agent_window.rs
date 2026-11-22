@@ -82,17 +82,27 @@ pub(crate) fn render_visit(
     if visit.text.search.editing || rect.height < 3 || rect.width < 3 {
         return;
     }
-    let hint = match visit.relations() {
-        (true, true) => format!(
-            " {} Related ",
-            rail_arrows(context, MissionCmd::PreviousVisit, MissionCmd::NextVisit)
-        ),
-        (true, false) => format!(
-            " {} Previous source ",
-            rail(context, MissionCmd::PreviousVisit)
-        ),
-        (false, true) => format!(" {} Next source ", rail(context, MissionCmd::NextVisit)),
-        (false, false) => return,
+    // While a related open is pending the cue takes the relation hint's place and the
+    // relation keys stay inert (`relations_painted` stays false).
+    let pending = visit.opening.is_some();
+    let hint = if pending {
+        format!(
+            " {} Cancel  Opening related source… ",
+            rail(context, MissionCmd::Back)
+        )
+    } else {
+        match visit.relations() {
+            (true, true) => format!(
+                " {} Related ",
+                rail_arrows(context, MissionCmd::PreviousVisit, MissionCmd::NextVisit)
+            ),
+            (true, false) => format!(
+                " {} Previous source ",
+                rail(context, MissionCmd::PreviousVisit)
+            ),
+            (false, true) => format!(" {} Next source ", rail(context, MissionCmd::NextVisit)),
+            (false, false) => return,
+        }
     };
     let width = rect.width - 2;
     if cells(&hint) <= usize::from(width) {
@@ -100,6 +110,6 @@ pub(crate) fn render_visit(
             Line::styled(hint, Style::default().fg(state.theme.colors.fg_secondary)),
             Rect::new(rect.x + 1, rect.bottom() - 1, width, 1),
         );
-        visit.relations_painted.set(true);
+        visit.relations_painted.set(!pending);
     }
 }
