@@ -792,6 +792,11 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         RoomEvent::TeamSendActionRecorded { .. } | RoomEvent::TeamSendRecipientSettled { .. } => {
             return None;
         }
+        // Known private local custody is not a peer interaction or an unknown
+        // record, including when the Visit reader is disabled.
+        RoomEvent::VisitTurnRecorded { .. }
+        | RoomEvent::VisitLinked { .. }
+        | RoomEvent::LocalEngagement { .. } => return None,
         RoomEvent::Unrecognized => (
             TransparencyKind::Unknown,
             Direction::Unknown,

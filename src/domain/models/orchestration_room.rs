@@ -88,6 +88,123 @@ impl HostBinding {
     }
 }
 
+/// Host-authenticated projection of the exact result, never a peer claim.
+/// Kept readable with Visit disabled so existing local journals retain their type.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisitReport {
+    pub report: Option<crate::domain::models::worker_report::WorkerReport>,
+    pub unstructured: bool,
+    pub attempt: Option<AgentId>,
+    /// Local retention deadline derived from the authoritative journal stamp.
+    #[serde(skip)]
+    pub expires_at_ms: Option<i64>,
+}
+
+impl std::fmt::Debug for VisitReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisitReport")
+            .field("report", &self.report.as_ref().map(|_| "[redacted]"))
+            .field("unstructured", &self.unstructured)
+            .field("attempt", &self.attempt)
+            .finish()
+    }
+}
+
+/// Exact original result address and literal digest.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MainVisitKey {
+    pub conversation_id: String,
+    pub turn_id: crate::domain::models::turn::TurnId,
+    pub invocation: crate::domain::models::turn::PartId,
+    pub result: crate::domain::models::turn::PartId,
+    pub revision: ContentHash,
+}
+
+/// Compatibility-only local settlement metadata; bodies stay in private custody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalEngageRefusal {
+    Unavailable,
+    Suspended,
+    Terminal,
+    NoRequest,
+    Cancelled,
+    Interrupted,
+    NoReply,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum LocalEngageReceipt {
+    Recorded,
+    Attached {
+        request: String,
+    },
+    Replied {
+        request: String,
+        ordinal: u32,
+        artifact: ArtifactRef,
+    },
+    Refused {
+        reason: LocalEngageRefusal,
+    },
+    /// Future private states stay private; known states still validate their fields.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for LocalEngageReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Buffer only this private leaf: field order is arbitrary, and a future
+        // state's payload must not be interpreted using today's field types.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let state = value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("receipt state must be a string"))?;
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "state")]
+        enum KnownReceipt {
+            Recorded,
+            Attached {
+                request: String,
+            },
+            Replied {
+                request: String,
+                ordinal: u32,
+                artifact: ArtifactRef,
+            },
+            Refused {
+                reason: LocalEngageRefusal,
+            },
+        }
+
+        // Only unknown string tags are compatible. A known state's malformed
+        // fields must remain an error, never fall through to Unknown.
+        if !matches!(state, "recorded" | "attached" | "replied" | "refused") {
+            return Ok(Self::Unknown);
+        }
+        let known = KnownReceipt::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(match known {
+            KnownReceipt::Recorded => Self::Recorded,
+            KnownReceipt::Attached { request } => Self::Attached { request },
+            KnownReceipt::Replied {
+                request,
+                ordinal,
+                artifact,
+            } => Self::Replied {
+                request,
+                ordinal,
+                artifact,
+            },
+            KnownReceipt::Refused { reason } => Self::Refused { reason },
+        })
+    }
+}
+
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1330,6 +1447,29 @@ pub enum RoomEvent {
         index: u32,
         settlement: SendSettlement,
     },
+    /// Private local custody, always recognized even when Visit is disabled.
+    /// This does not make older binaries safe rollback targets: they may render
+    /// these tags as unknown rows. No older-binary downgrade claim is made.
+    VisitTurnRecorded {
+        root: String,
+        attempt: AgentId,
+        ordinal: u32,
+        artifact: ArtifactRef,
+        partial: bool,
+    },
+    VisitLinked {
+        key: MainVisitKey,
+        attempt: AgentId,
+        artifact: ArtifactRef,
+    },
+    /// Compatibility-only local receipt; never an ordinary room artifact.
+    LocalEngagement {
+        root: String,
+        attempt: AgentId,
+        correlation: crate::domain::models::CorrelationId,
+        digest: ContentHash,
+        receipt: LocalEngageReceipt,
+    },
     /// An `event` tag this build does not recognise.
     ///
     /// `RoomEvent` is `#[non_exhaustive]` and the journal is a durable
@@ -1760,6 +1900,10 @@ impl OrchestrationRoom {
             // (no new transparency kind).
             | RoomEvent::TeamSendActionRecorded { .. }
             | RoomEvent::TeamSendRecipientSettled { .. } => {}
+            // Known local private custody never enters the ordinary room fold.
+            RoomEvent::VisitTurnRecorded { .. }
+            | RoomEvent::VisitLinked { .. }
+            | RoomEvent::LocalEngagement { .. } => {}
             // The room read model has nothing to fold an unknown tag into.
             // The transparency projection renders it as an explicit unknown
             // row instead (UX-DR-ROOM-01); dropping it here is not a silent
@@ -1786,6 +1930,99 @@ mod tests {
 
     fn sample_artifact_id() -> ArtifactId {
         ArtifactId::from(ContentHash::from_bytes([0x11; 32]))
+    }
+
+    #[test]
+    fn private_receipt_unknown_states_remain_private_without_hiding_corruption() {
+        let legacy = serde_json::json!({
+            "event": "local_engagement",
+            "root": "private-root",
+            "attempt": "local-attempt",
+            "correlation": "private-correlation",
+            "digest": "11".repeat(32),
+            "receipt": { "state": "attached", "request": "private-request" }
+        });
+        let decoded: RoomEvent =
+            serde_json::from_value(legacy.clone()).expect("historic receipt decodes");
+        assert!(matches!(
+            &decoded,
+            RoomEvent::LocalEngagement {
+                receipt: LocalEngageReceipt::Attached { request }, ..
+            } if request == "private-request"
+        ));
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("serialize historic receipt"),
+            legacy
+        );
+
+        let mut future = legacy.clone();
+        future["receipt"] = serde_json::json!({
+            "state": "future_private_state", "private_body": { "text": "never projected" },
+            "request": 42, "ordinal": "future-format", "reason": null
+        });
+        let decoded: RoomEvent =
+            serde_json::from_value(future).expect("future private state decodes");
+        assert!(matches!(
+            &decoded,
+            RoomEvent::LocalEngagement {
+                receipt: LocalEngageReceipt::Unknown,
+                ..
+            }
+        ));
+        let id = OrchestrationRoomId::new();
+        assert_eq!(
+            OrchestrationRoom::project(id.clone(), [decoded]),
+            OrchestrationRoom::project(id, [])
+        );
+        assert!(matches!(
+            serde_json::from_value::<RoomEvent>(serde_json::json!({
+                "event": "future_ordinary_event", "payload": "ordinary unknown"
+            }))
+            .expect("ordinary unknown event decodes"),
+            RoomEvent::Unrecognized
+        ));
+
+        for receipt in [
+            serde_json::json!({ "state": "recorded" }),
+            serde_json::json!({ "state": "attached", "request": "" }),
+            serde_json::json!({ "state": "refused", "reason": "unavailable" }),
+            serde_json::json!({ "state": "unknown" }),
+        ] {
+            let mut valid = legacy.clone();
+            valid["receipt"] = receipt.clone();
+            let decoded: RoomEvent = serde_json::from_value(valid.clone())
+                .unwrap_or_else(|error| panic!("valid receipt {receipt}: {error}"));
+            assert_eq!(
+                serde_json::to_value(decoded).expect("serialize valid receipt"),
+                valid,
+                "valid receipt {receipt}"
+            );
+        }
+
+        for receipt in [
+            serde_json::json!({ "state": "attached" }),
+            serde_json::json!({ "state": "attached", "request": 42 }),
+            serde_json::json!({ "state": "replied", "request": "r", "ordinal": "bad" }),
+            serde_json::json!({ "state": "refused", "reason": "invalid_reason" }),
+            serde_json::json!({ "state": 42 }),
+            serde_json::json!({ "state": 0 }),
+            serde_json::json!({ "state": null }),
+            serde_json::json!({ "state": true }),
+            serde_json::json!({ "state": [] }),
+            serde_json::json!({ "state": {} }),
+            serde_json::json!([]),
+            serde_json::json!("attached"),
+            serde_json::json!({ "request": "missing-state" }),
+        ] {
+            let mut malformed = legacy.clone();
+            malformed["receipt"] = receipt.clone();
+            let result = serde_json::from_value::<RoomEvent>(malformed);
+            assert!(result.is_err(), "malformed receipt {receipt}: {result:?}");
+        }
+        let mut malformed = legacy;
+        malformed["digest"] = serde_json::json!("not-a-hash");
+        malformed["receipt"] = serde_json::json!({ "state": "future_private_state" });
+        assert!(serde_json::from_value::<RoomEvent>(malformed).is_err());
     }
 
     #[test]

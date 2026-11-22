@@ -7,6 +7,8 @@ pub mod node_journal;
 pub mod node_recovery;
 pub mod node_tree;
 pub mod registry;
+#[cfg(feature = "session-visit")]
+pub mod session_history;
 pub mod spool;
 
 pub use node_handle::{NodeHandle, NodeHandleError};

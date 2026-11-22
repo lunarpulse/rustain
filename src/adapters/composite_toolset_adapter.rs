@@ -102,6 +102,10 @@ struct SubagentCallContext<'a> {
     conversation_id: &'a str,
     parent_ctx_tokens: u32,
     parent_trace: Option<&'a crate::domain::models::TraceContext>,
+    /// The call's scheduler route; only a trusted interactive `task` call opens
+    /// a Session Visit capture (candidate, default off).
+    #[cfg(feature = "session-visit")]
+    route: Option<crate::domain::models::turn::TurnRoute>,
 }
 
 impl SubagentCallContext<'_> {
@@ -109,6 +113,8 @@ impl SubagentCallContext<'_> {
         conversation_id: "",
         parent_ctx_tokens: 0,
         parent_trace: None,
+        #[cfg(feature = "session-visit")]
+        route: None,
     };
 }
 
@@ -207,6 +213,16 @@ impl CompositeToolsetAdapter {
                 "__conversation_id".into(),
                 serde_json::json!(ctx.conversation_id),
             );
+        }
+        #[cfg(feature = "session-visit")]
+        if capability_id.tool == "task"
+            && ctx.route == Some(crate::domain::models::turn::TurnRoute::Interactive)
+            && !ctx.conversation_id.is_empty()
+        {
+            return provider
+                .invoke_interactive_task(ctx.conversation_id, input, cancel)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()));
         }
         provider
             .invoke(capability_id, input, cancel)
@@ -1026,6 +1042,8 @@ impl ToolSetPort for CompositeToolsetAdapter {
                         conversation_id: invocation.conversation_id,
                         parent_ctx_tokens: invocation.parent_ctx_tokens,
                         parent_trace: invocation.parent_trace,
+                        #[cfg(feature = "session-visit")]
+                        route: invocation.route,
                     },
                 )
                 .await;

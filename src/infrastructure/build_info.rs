@@ -58,6 +58,7 @@ const FEATURES: &[Feature] = features![
     "relay-server",
     "sandbox",
     "self-update",
+    "session-visit",
     "skills-validation",
     "slack",
     "telegram",

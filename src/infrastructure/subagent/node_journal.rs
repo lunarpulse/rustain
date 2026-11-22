@@ -13,20 +13,32 @@ use crate::domain::models::{
     NodeCheckpoint, OrchestrationRoom, OrchestrationRoomId, RoomEvent,
 };
 
+#[cfg(feature = "session-visit")]
+#[path = "visit_index.rs"]
+mod visit_index;
+#[cfg(feature = "session-visit")]
+use visit_index::{Index, IndexedRevision};
+#[cfg(feature = "session-visit")]
+pub(super) use visit_index::{LinkRow, VisitRows};
+#[cfg(feature = "session-visit")]
+/// Recovery work per changed journal revision, not a durable storage quota.
+pub(super) const MAX_VISIT_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+
 /// Append-only journal for one orchestration room.
 ///
 /// Appends are serialized both in-process (the async guard) and across
 /// processes (an OS advisory `flock` covering the whole read-tail → repair →
-/// append → fsync critical section). The sequence number is **re-derived from
-/// the durable tail under the lock on every append** — never cached — so a
-/// second daemon/ACP/TUI opening the same room cannot allocate a duplicate
-/// `seq` and poison the log (R1: one ordered append-only journal per room).
+/// append → fsync critical section). Ordinary writes read the canonical tail.
+/// Indexed Visit writes reuse its sequence only after revalidating the file
+/// revision under that same lock, so two writers cannot allocate the same `seq`.
 pub struct NodeJournal {
     path: PathBuf,
     lock_path: PathBuf,
     room_id: OrchestrationRoomId,
     /// In-process serialization; cross-process safety is the file `flock`.
     append_guard: tokio::sync::Mutex<()>,
+    #[cfg(feature = "session-visit")]
+    visit_index: std::sync::Arc<std::sync::Mutex<Option<IndexedRevision>>>,
     /// Story 18.2 (AC2, P-2). The sole source of `JournalEntry::
     /// recorded_at_ms`. Each append reads the wall clock once inside the
     /// critical section, then clamps it to the last durable nonlegacy stamp.
@@ -92,6 +104,8 @@ impl NodeJournal {
             lock_path,
             room_id,
             append_guard: tokio::sync::Mutex::new(()),
+            #[cfg(feature = "session-visit")]
+            visit_index: Default::default(),
             clock: std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
             #[cfg(any(test, feature = "test-instrumentation"))]
             stamp_reads: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -123,6 +137,80 @@ impl NodeJournal {
 
     pub async fn append_room(&self, event: RoomEvent) -> Result<JournalEntry, JournalError> {
         self.append(JournalRecord::Room(event)).await
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(crate) async fn append_room_bounded(
+        &self,
+        event: RoomEvent,
+        max_bytes: usize,
+    ) -> Result<JournalEntry, JournalError> {
+        let _guard = self.append_guard.lock().await;
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        let index = self.visit_index.clone();
+        let clock = self.clock.clone();
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let stamp_reads = self.stamp_reads.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = FileLock::acquire_exclusive(&lock_path)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let file = options.open(&path)?;
+            let mut index = index.lock().expect("Visit index mutex poisoned");
+            let snapshot = IndexedRevision::rebuild_if_changed(&mut index, &file, &path)?;
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            snapshot.append(&file, &path, event, max_bytes, clock.wall_now_ms())
+        })
+        .await
+        .expect("Visit journal append task panicked")
+    }
+
+    #[cfg(feature = "session-visit")]
+    async fn read_visit_projection<T: Send + 'static>(
+        &self,
+        file: std::fs::File,
+        select: impl FnOnce(&Index) -> T + Send + 'static,
+    ) -> Result<T, JournalError> {
+        let _guard = self.append_guard.lock().await;
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        let index = self.visit_index.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = FileLock::acquire_existing_shared(&lock_path)?;
+            let mut index = index.lock().expect("Visit index mutex poisoned");
+            let snapshot = IndexedRevision::rebuild_if_changed(&mut index, &file, &path)?;
+            Ok(select(snapshot.index()))
+        })
+        .await
+        .expect("Visit projection task panicked")
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(super) async fn visit_links(
+        &self,
+        file: std::fs::File,
+        root: String,
+    ) -> Result<Vec<(LinkRow, bool)>, JournalError> {
+        self.read_visit_projection(file, move |index| index.links(&root))
+            .await
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(super) async fn visit_rows(
+        &self,
+        file: std::fs::File,
+        key: crate::domain::models::orchestration_room::MainVisitKey,
+        turn_cap: usize,
+    ) -> Result<Option<VisitRows>, JournalError> {
+        self.read_visit_projection(file, move |index| index.select(&key, turn_cap))
+            .await
     }
 
     pub async fn append_alias(
@@ -404,14 +492,7 @@ impl NodeJournal {
             let recorded_at_ms = clamp_recorded_at_ms(&entries, clock.wall_now_ms());
             #[cfg(any(test, feature = "test-instrumentation"))]
             stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            append_records_locked(
-                &path,
-                &entries,
-                valid_len,
-                file_len,
-                records,
-                recorded_at_ms,
-            )
+            append_records_locked(&path, &entries, valid_len, file_len, records, recorded_at_ms)
         })
         .await
         .expect("journal append task panicked")
@@ -845,15 +926,6 @@ fn append_records_locked(
     records: Vec<JournalRecord>,
     recorded_at_ms: i64,
 ) -> Result<Vec<JournalEntry>, JournalError> {
-    // A non-crash mid-write error (ENOSPC/EIO) can leave a torn tail that a
-    // later append would concatenate into a corrupt middle record. Truncate to
-    // the last valid offset under the lock before writing.
-    if valid_len != file_len {
-        let file = std::fs::OpenOptions::new().write(true).open(path)?;
-        file.set_len(valid_len as u64)?;
-        file.sync_all()?;
-    }
-
     let mut seq = entries.last().map_or(Ok(1u64), |entry| {
         entry
             .seq
@@ -868,6 +940,12 @@ fn append_records_locked(
         encoded.push(b'\n');
         out.push(entry);
         seq = seq.checked_add(1).ok_or(JournalError::SequenceExhausted)?;
+    }
+
+    if valid_len != file_len {
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        file.set_len(valid_len as u64)?;
+        file.sync_all()?;
     }
 
     let mut file = open_or_create_append(path)?;
@@ -909,11 +987,13 @@ impl FileLock {
     /// Observer paths must not create or truncate a lock merely to inspect a
     /// journal. A missing sidecar is valid for a readable legacy journal.
     fn acquire_existing_shared(path: &Path) -> Result<Option<Self>, JournalError> {
-        let file = match std::fs::OpenOptions::new().read(true).open(path) {
+        let mut options = Self::lock_options();
+        let file = match options.read(true).open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        Self::verify_file(path, &file)?;
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
@@ -927,11 +1007,8 @@ impl FileLock {
     }
 
     fn acquire(path: &Path, exclusive: bool) -> Result<Self, JournalError> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)?;
+        let file = Self::lock_options().create(true).truncate(false).write(true).open(path)?;
+        Self::verify_file(path, &file)?;
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
@@ -947,6 +1024,27 @@ impl FileLock {
             }
         }
         Ok(Self { file })
+    }
+
+    fn lock_options() -> std::fs::OpenOptions {
+        let mut options = std::fs::OpenOptions::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        options
+    }
+
+    fn verify_file(path: &Path, file: &std::fs::File) -> Result<(), JournalError> {
+        let descriptor = file.metadata()?;
+        let named = std::fs::symlink_metadata(path)?;
+        if !descriptor.is_file() || !named.is_file()
+            || JournalFileStamp::of(&descriptor) != JournalFileStamp::of(&named)
+        {
+            return Err(std::io::Error::other("not the canonical room lock file").into());
+        }
+        Ok(())
     }
 }
 
@@ -989,7 +1087,7 @@ fn sync_directory(directory: &Path) -> Result<(), JournalError> {
 /// then see a flat stream and need no batch awareness; the atomicity was
 /// already enforced at write time (one line = all-or-nothing under the
 /// torn-tail repair).
-fn flatten_batches(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
+pub(super) fn flatten_batches(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
         match entry.record {
@@ -1028,43 +1126,52 @@ fn parse_entries(bytes: &[u8]) -> Result<(Vec<JournalEntry>, usize, usize), Jour
     let mut lines = bytes.split_inclusive(|byte| *byte == b'\n').peekable();
 
     while let Some(raw_line) = lines.next() {
-        let is_last = lines.peek().is_none();
-        let newline_terminated = raw_line.last() == Some(&b'\n');
-        if is_last && !newline_terminated {
+        let Some(entry) = parse_entry(raw_line, expected_seq, lines.peek().is_none())? else {
             break;
-        }
-        let line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
-        let parsed = serde_json::from_slice::<JournalEntry>(line);
-        let entry = match parsed {
-            Ok(entry) => entry,
-            Err(_) if is_last => break,
-            Err(source) => {
-                return Err(JournalError::CorruptRecord {
-                    line: entries.len() + 1,
-                    source,
-                });
-            }
         };
-        if entry.schema_version != NODE_JOURNAL_SCHEMA_VERSION {
-            return Err(JournalError::UnsupportedSchema {
-                found: entry.schema_version,
-                supported: NODE_JOURNAL_SCHEMA_VERSION,
-            });
-        }
-        if entry.seq != expected_seq {
-            return Err(JournalError::InvalidSequence {
-                expected: expected_seq,
-                found: entry.seq,
-            });
-        }
-        expected_seq = expected_seq
-            .checked_add(1)
-            .ok_or(JournalError::SequenceExhausted)?;
+        expected_seq += 1;
         entries.push(entry);
         valid_len += raw_line.len();
     }
 
     Ok((entries, valid_len, file_len))
+}
+
+fn parse_entry(
+    raw_line: &[u8],
+    expected_seq: u64,
+    is_last: bool,
+) -> Result<Option<JournalEntry>, JournalError> {
+    if is_last && !raw_line.ends_with(b"\n") {
+        return Ok(None);
+    }
+    let line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
+    let entry = match serde_json::from_slice::<JournalEntry>(line) {
+        Ok(entry) => entry,
+        Err(_) if is_last => return Ok(None),
+        Err(source) => {
+            return Err(JournalError::CorruptRecord {
+                line: expected_seq as usize,
+                source,
+            });
+        }
+    };
+    if entry.schema_version != NODE_JOURNAL_SCHEMA_VERSION {
+        return Err(JournalError::UnsupportedSchema {
+            found: entry.schema_version,
+            supported: NODE_JOURNAL_SCHEMA_VERSION,
+        });
+    }
+    if entry.seq != expected_seq {
+        return Err(JournalError::InvalidSequence {
+            expected: expected_seq,
+            found: entry.seq,
+        });
+    }
+    if expected_seq == u64::MAX {
+        return Err(JournalError::SequenceExhausted);
+    }
+    Ok(Some(entry))
 }
 
 #[non_exhaustive]
@@ -1381,4 +1488,90 @@ pub enum RecoveryError {
     LockIo(std::io::Error),
     #[error("node restore failed: {0}")]
     Restore(String),
+}
+
+#[cfg(all(test, feature = "session-visit"))]
+mod visit_append_tests {
+    use super::*;
+    use crate::domain::models::artifact::{ArtifactKind, ContentHash, EvidenceArtifact};
+    use crate::domain::models::capability_token::CapabilityTokenId;
+    use crate::domain::models::orchestration_room::HostBinding;
+
+    fn turn(attempt: AgentId, ordinal: u32) -> RoomEvent {
+        let hash = ContentHash::default();
+        RoomEvent::VisitTurnRecorded {
+            root: "root".into(),
+            attempt: attempt.clone(),
+            ordinal,
+            artifact: EvidenceArtifact {
+                id: hash.into(),
+                kind: ArtifactKind::Evidence,
+                producer: attempt,
+                content_hash: hash,
+                authority: CapabilityTokenId::nil(),
+                provenance: Vec::new(),
+                depends_on: Vec::new(),
+                review: None,
+                host: HostBinding::new("host", "workspace"),
+            },
+            partial: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_append_rejects_encoded_overflow_without_repairing_tail() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        std::fs::write(journal.path(), b"torn").unwrap();
+        assert!(
+            journal
+                .append_room_bounded(turn(AgentId::new(), 0), 4)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(journal.path()).unwrap(), b"torn");
+    }
+
+    #[tokio::test]
+    async fn bounded_turn_append_serializes_instances_and_checks_batches() {
+        let workspace = tempfile::tempdir().unwrap();
+        let a = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let b = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let attempt = AgentId::new();
+        let event = turn(attempt.clone(), 0);
+        let (first, second) = tokio::join!(
+            a.append_room_bounded(event.clone(), 65536),
+            b.append_room_bounded(event, 65536),
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        let batched = turn(attempt, 1);
+        a.append(JournalRecord::Batch(vec![JournalRecord::Batch(vec![
+            JournalRecord::Room(batched.clone()),
+        ])]))
+        .await
+        .unwrap();
+        let before = std::fs::read(a.path()).unwrap();
+        assert!(b.append_room_bounded(batched, 65536).await.is_err());
+        assert_eq!(std::fs::read(a.path()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn warm_projection_rejects_a_torn_external_append_until_ordinary_repair() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        let attempt = AgentId::new();
+        journal.append_room_bounded(turn(attempt.clone(), 1), 65536).await.unwrap();
+        let mut external = std::fs::OpenOptions::new().append(true)
+            .open(journal.path()).unwrap();
+        external.write_all(b"{\"schema_version\":").unwrap();
+        let file = || std::fs::File::open(journal.path()).unwrap();
+        assert!(journal.visit_links(file(), "root".into()).await.is_err());
+        assert!(journal.append_room_bounded(turn(attempt.clone(), 2), 65536).await.is_err());
+
+        let other = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        assert_eq!(other.append_alias(attempt.clone(), "worker".into()).await.unwrap().seq, 2);
+        assert!(journal.visit_links(file(), "root".into()).await.is_ok());
+        assert_eq!(journal.append_room_bounded(turn(attempt, 2), 65536).await.unwrap().seq, 3);
+        assert_eq!(other.load().await.unwrap().len(), 3);
+    }
 }

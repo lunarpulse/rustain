@@ -9,6 +9,11 @@ use crate::domain::models::{
 use crate::domain::ports::{AuthorityProvider, CapabilityProvider};
 use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
 
+#[cfg(feature = "session-visit")]
+use crate::domain::models::worker_report::{VisitAttemptLink, frame_visit};
+#[cfg(feature = "session-visit")]
+use crate::infrastructure::subagent::session_history::SessionHistory;
+
 pub struct SubagentProvider {
     runner: Arc<dyn crate::domain::ports::SubagentRunner>,
     registry: Arc<crate::infrastructure::subagent::NodeTree>,
@@ -22,6 +27,8 @@ pub struct SubagentProvider {
     /// Story 10.7 — optional usage ledger for per-call TokenUsage recording (AC-10-7-12).
     ledger: Arc<tokio::sync::RwLock<Option<Arc<dyn crate::domain::ports::UsageLedgerPort>>>>,
     authority: Arc<tokio::sync::RwLock<Option<(Arc<dyn AuthorityProvider>, CapabilityToken)>>>,
+    #[cfg(feature = "session-visit")]
+    session_history: Option<Arc<SessionHistory>>,
 }
 
 struct RunningTask {
@@ -33,6 +40,28 @@ struct RunningTask {
 struct CompletedTask {
     agent_id: crate::domain::models::AgentId,
     generated_task_id: String,
+}
+
+#[cfg(feature = "session-visit")]
+#[derive(Default)]
+struct TaskCapture {
+    link: Option<VisitAttemptLink>,
+}
+
+/// Dropping an invocation before it produces a result revokes the live grant.
+/// An offer, if one was made on completion, is separately owned by the custodian.
+#[cfg(feature = "session-visit")]
+struct LiveVisit<'a> {
+    history: &'a SessionHistory,
+    root: &'a str,
+    attempt: AgentId,
+}
+
+#[cfg(feature = "session-visit")]
+impl Drop for LiveVisit<'_> {
+    fn drop(&mut self) {
+        self.history.forget(&self.attempt);
+    }
 }
 
 impl SubagentProvider {
@@ -71,7 +100,31 @@ impl SubagentProvider {
             completed_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             ledger: Arc::new(tokio::sync::RwLock::new(None)),
             authority: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(feature = "session-visit")]
+            session_history: None,
         }
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn with_session_history(mut self, history: Arc<SessionHistory>) -> Self {
+        self.session_history = Some(history);
+        self
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn session_history(&self) -> Option<&Arc<SessionHistory>> {
+        self.session_history.as_ref()
+    }
+
+    /// Only the composite adapter's trusted, interactive scheduler route uses this entry.
+    #[cfg(feature = "session-visit")]
+    pub(crate) async fn invoke_interactive_task(
+        &self,
+        root: &str,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, CapabilityError> {
+        self.invoke_reported_task(input, cancel, Some(root)).await
     }
 
     async fn predecessor_for_alias(&self, alias: &str) -> Option<CompletedTask> {
@@ -203,7 +256,14 @@ impl CapabilityProvider for SubagentProvider {
         cancel: CancellationToken,
     ) -> Result<ToolResult, CapabilityError> {
         match id.tool.as_str() {
-            "task" => self.invoke_task(input, cancel).await,
+            "task" => {
+                #[cfg(feature = "session-visit")]
+                {
+                    self.invoke_reported_task(input, cancel, None).await
+                }
+                #[cfg(not(feature = "session-visit"))]
+                self.invoke_task(input, cancel).await
+            }
             "read_task_output" => self.invoke_read_task_output(input, cancel).await,
             // Legacy per-agent capabilities (discovered agents)
             _ => self.invoke_legacy_agent(id, input, cancel).await,
@@ -212,10 +272,30 @@ impl CapabilityProvider for SubagentProvider {
 }
 
 impl SubagentProvider {
+    #[cfg(feature = "session-visit")]
+    async fn invoke_reported_task(
+        &self,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+        visit_root: Option<&str>,
+    ) -> Result<ToolResult, CapabilityError> {
+        let mut capture = TaskCapture::default();
+        let mut result = self
+            .invoke_task(input, cancel, visit_root, &mut capture)
+            .await?;
+        result.content = match capture.link {
+            Some(link) => frame_visit(&result.content, link),
+            None => result.content,
+        };
+        Ok(result)
+    }
+
     async fn invoke_task(
         &self,
         mut input: serde_json::Value,
         cancel: CancellationToken,
+        #[cfg(feature = "session-visit")] visit_root: Option<&str>,
+        #[cfg(feature = "session-visit")] capture: &mut TaskCapture,
     ) -> Result<ToolResult, CapabilityError> {
         if let Err(err) = self
             .validate_authority(CapabilityFlag::Spawn, &AgentId::root())
@@ -264,11 +344,10 @@ impl SubagentProvider {
                 });
             }
         };
-        let conversation_id = input
-            .get("__conversation_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let conversation_id = input.get("__conversation_id").and_then(|v| v.as_str());
+        #[cfg(feature = "session-visit")]
+        let conversation_id = visit_root.or(conversation_id);
+        let conversation_id = conversation_id.unwrap_or("").to_owned();
         // Remove internal fields before they pollute the tool payload
         let _ = input.as_object_mut().map(|m| {
             m.remove("__parent_ctx_tokens");
@@ -442,14 +521,25 @@ impl SubagentProvider {
         );
 
         // 7. Launch
+        let attempt = AgentId::new();
+        #[cfg(feature = "session-visit")]
+        let live_visit = match (visit_root, self.session_history.as_deref()) {
+            (Some(root), Some(history)) => match history.begin(root, &attempt) {
+                Ok(()) => Some(LiveVisit {
+                    history,
+                    root,
+                    attempt: attempt.clone(),
+                }),
+                Err(error) => {
+                    tracing::debug!(%error, "Visit capture not admitted");
+                    None
+                }
+            },
+            _ => None,
+        };
         let handle = match self
             .runner
-            .launch(
-                spec,
-                cancel.clone(),
-                None,
-                crate::domain::models::AgentId::new(),
-            )
+            .launch(spec, cancel.clone(), None, attempt)
             .await
         {
             Ok(h) => h,
@@ -601,6 +691,31 @@ impl SubagentProvider {
             }
         }
 
+        #[cfg(feature = "session-visit")]
+        if let Some(live) = live_visit
+            && handle.agent_id == live.attempt
+            && matches!(
+                last_status,
+                Some(crate::domain::models::NodeState::Completed)
+            )
+            && !cancel.is_cancelled()
+        {
+            use crate::domain::models::orchestration_room::VisitReport;
+            let metadata = VisitReport {
+                report: None,
+                unstructured: true,
+                attempt: Some(handle.agent_id.clone()),
+                expires_at_ms: None,
+            };
+            match live
+                .history
+                .offer(live.root, &live.attempt, &final_content, metadata)
+            {
+                Ok(()) => capture.link = Some(VisitAttemptLink::new(handle.agent_id)),
+                Err(error) => tracing::debug!(%error, "Visit result was not offered"),
+            }
+        }
+
         Ok(ToolResult {
             tool_use_id: String::new(),
             content: final_content,
@@ -734,6 +849,12 @@ impl SubagentProvider {
         if task_input.get("description").is_none() {
             task_input["description"] = serde_json::json!(id.tool);
         }
+        #[cfg(feature = "session-visit")]
+        {
+            self.invoke_task(task_input, cancel, None, &mut TaskCapture::default())
+                .await
+        }
+        #[cfg(not(feature = "session-visit"))]
         self.invoke_task(task_input, cancel).await
     }
 }

@@ -88,6 +88,15 @@ pub fn route(
         return Some(RouteEffect::Consumed);
     }
     let key = Key::from_domain(event).unwrap_or(Key::Other);
+    #[cfg(feature = "session-visit")]
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::SessionVisit)
+        && matches!(key, Key::Ctrl('x') | Key::Ctrl('p') | Key::Ctrl('q'))
+    {
+        return Some(RouteEffect::Consumed);
+    }
     if Key::from_domain(event).is_some()
         && state
             .modal_stack
@@ -198,6 +207,14 @@ pub fn route(
         crate::adapters::tui::agent_window::on_wheel(state, *delta);
         return Some(RouteEffect::Consumed);
     }
+    #[cfg(feature = "session-visit")]
+    if host == Host::Local
+        && surface == Surface::SessionVisit
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        crate::adapters::tui::session_visit::on_visit_wheel(state, *delta);
+        return Some(RouteEffect::Action(InputAction::Consumed));
+    }
     if surface == Surface::TaskWindow
         && let DomainInputEvent::MouseScroll(delta) = event
     {
@@ -277,6 +294,17 @@ pub fn route(
         });
     }
     Some(match surface {
+        #[cfg(feature = "session-visit")]
+        Surface::ToolInspector(_)
+            if host == Host::Local
+                && matches!(
+                    keymap::resolve(Context::ToolInspector, host, &[key]),
+                    Resolved::Hit(row)
+                        if row.command == CommandId::Tool(keymap::table_tool::ToolCmd::VisitSource)
+                ) =>
+        {
+            RouteEffect::Action(InputAction::VisitCurrentSource)
+        }
         Surface::ToolInspector(_) => RouteEffect::Action(
             crate::adapters::tui::tool_inspector::on_key(state, key, host),
         ),
@@ -318,6 +346,12 @@ pub fn route(
         Surface::AgentWindow if host == Host::Local => {
             RouteEffect::Action(crate::adapters::tui::agent_window::on_key(state, key, host))
         }
+        #[cfg(feature = "session-visit")]
+        Surface::SessionVisit if host == Host::Local => RouteEffect::Action(
+            crate::adapters::tui::session_visit::on_visit_key(state, key, host),
+        ),
+        #[cfg(feature = "session-visit")]
+        Surface::SessionVisit => RouteEffect::Consumed,
         Surface::TaskWindow if host == Host::Local => {
             RouteEffect::Action(crate::adapters::tui::task_window::on_key(state, key, host))
         }

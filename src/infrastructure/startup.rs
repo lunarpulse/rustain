@@ -2350,27 +2350,37 @@ pub async fn run() -> Result<()> {
                 Arc::new(adapter) as Arc<dyn crate::domain::ports::ToolSetPort>
             });
 
-            let runner: Arc<dyn crate::domain::ports::SubagentRunner> = Arc::new(
-                crate::adapters::subagent::InProcessSubagentRunner::new(
-                    router.clone() as Arc<dyn crate::domain::ports::StreamingProvider>,
-                    tools_storage.clone(),
-                    security.clone(),
-                    _tools_direct.clone(),
-                    approval_runtime.clone(),
-                    subagent_scheduler,
-                    event_bus.clone(),
-                    subagent_registry.clone(),
-                    sandbox_policy_ref.clone(),
-                    spool.clone(),
-                    authority_provider.clone(),
-                    root_authority.clone(),
-                )
-                .with_isolation(
-                    workspace_path.clone(),
-                    isolation_provider,
-                    tools_factory,
+            let artifact_store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+                &workspace_path,
+            ));
+            let artifact_host =
+                crate::infrastructure::subagent::current_host_binding(&workspace_path);
+            #[cfg(feature = "session-visit")]
+            let session_history = Arc::new(
+                crate::infrastructure::subagent::session_history::SessionHistory::new(
+                    node_journal.clone(),
+                    artifact_store.clone(),
+                    artifact_host.clone(),
                 ),
             );
+            let runner = crate::adapters::subagent::InProcessSubagentRunner::new(
+                router.clone() as Arc<dyn crate::domain::ports::StreamingProvider>,
+                tools_storage.clone(),
+                security.clone(),
+                _tools_direct.clone(),
+                approval_runtime.clone(),
+                subagent_scheduler,
+                event_bus.clone(),
+                subagent_registry.clone(),
+                sandbox_policy_ref.clone(),
+                spool.clone(),
+                authority_provider.clone(),
+                root_authority.clone(),
+            )
+            .with_isolation(workspace_path.clone(), isolation_provider, tools_factory);
+            #[cfg(feature = "session-visit")]
+            let runner = runner.with_session_history(session_history.clone());
+            let runner: Arc<dyn crate::domain::ports::SubagentRunner> = Arc::new(runner);
 
             // Story 14.3 — fork-join orchestrator, bound to the SAME ports as
             // the runner (AC8: drives children through the SubagentRunner port,
@@ -2409,11 +2419,6 @@ pub async fn run() -> Result<()> {
                 .derive_recovered_occupancy(recovered_occupancy)
                 .await
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
-                crate::adapters::artifact::FileSystemArtifactStore::new(&workspace_path),
-            );
-            let artifact_host =
-                crate::infrastructure::subagent::current_host_binding(&workspace_path);
             // 17.5b (Task 6): wire the input-request artifact sink into every
             // MCP task runtime. The coordinator authority + host are
             // orchestrator-only fields; the sink impl supplies them so the
@@ -2494,13 +2499,16 @@ pub async fn run() -> Result<()> {
                 fork_join_executor.clone();
             orchestrator = Some(orchestrator_inner);
 
-            let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
+            let subagent_provider = crate::adapters::subagent::SubagentProvider::new(
                 runner,
                 subagent_registry.clone(),
                 agent_registry,
                 model_router,
                 spool.clone(),
-            ));
+            );
+            #[cfg(feature = "session-visit")]
+            let subagent_provider = subagent_provider.with_session_history(session_history);
+            let subagent_provider = Arc::new(subagent_provider);
             subagent_provider
                 .set_authority(authority_provider.clone(), root_authority.clone())
                 .await;

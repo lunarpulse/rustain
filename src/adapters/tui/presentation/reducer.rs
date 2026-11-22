@@ -39,6 +39,12 @@ fn may_set_base(state: &TuiState, _focus: &FocusState) -> bool {
 
 /// Reopen truncates to the existing frame and retains its untouched payload.
 pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
+    #[cfg(feature = "session-visit")]
+    assert_ne!(
+        surface,
+        Surface::SessionVisit,
+        "Visit requires an exact read"
+    );
     assert!(
         !matches!(
             surface,
@@ -169,6 +175,29 @@ pub fn open_agent_window(
     state.needs_redraw = true;
     debug_assert!(super::consistent(state));
     opened
+}
+
+/// Related reads replace only this payload, retaining the invoking frame and its scroll.
+#[cfg(feature = "session-visit")]
+pub(crate) fn open_session_visit(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::session_visit::VisitWindowState,
+) {
+    let title = payload.title();
+    let conversation_id = payload.cursor.key.conversation_id.clone();
+    state.session_visit = Some(payload);
+    if let Some(frame) = state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::SessionVisit)
+    {
+        frame.conversation_id = Some(conversation_id);
+        frame.tool_title = Some(title);
+    } else {
+        open_frame(state, Surface::SessionVisit, None, Some(title));
+    }
+    state.needs_redraw = true;
+    debug_assert!(super::consistent(state));
 }
 
 /// The task window is one frame at a time (A8) and **stage-bound**: the frame carries the
@@ -642,6 +671,11 @@ fn fresh_frame(
             Surface::BlockViewer(key) => {
                 Some(state.block_viewers[&key.0].target.conversation_id.clone())
             }
+            #[cfg(feature = "session-visit")]
+            Surface::SessionVisit => state
+                .session_visit
+                .as_ref()
+                .map(|window| window.cursor.key.conversation_id.clone()),
             Surface::TaskWindow => state
                 .task_window
                 .as_ref()
@@ -715,6 +749,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::Adapters
         | Surface::History
         | Surface::Tour => {}
+        #[cfg(feature = "session-visit")]
+        Surface::SessionVisit => {}
     }
 }
 
@@ -923,6 +959,11 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::AgentWindow => {
             state.agent_window = None;
+            None
+        }
+        #[cfg(feature = "session-visit")]
+        Surface::SessionVisit => {
+            state.session_visit = None;
             None
         }
         Surface::TaskWindow => {
@@ -1210,6 +1251,55 @@ mod tests {
             conversation_id: "stage".into(),
             tool_call_id: id.into(),
         }
+    }
+
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn session_visit_at_cap_restores_exact_inspector_and_scroll_even_when_missing() {
+        use crate::domain::models::turn::{PartId, TurnId};
+        use crate::infrastructure::subagent::session_history::{
+            MainVisitKey, VisitRead, hash_body,
+        };
+
+        let mut state = TuiState::new(80, 24);
+        for surface in [
+            Surface::ModelSelector,
+            Surface::ProfileSwitcher,
+            Surface::UsagePanel,
+        ] {
+            open(&mut state, surface);
+        }
+        open_tool(&mut state, tool_target("a"), "Tool · Bash #1".into(), 12);
+        let caller = state.modal_stack.top().unwrap().clone();
+        state.tool_inspectors.get_mut(&caller.id).unwrap().viewers[0].top = 7;
+        let base = state.focus.clone();
+
+        crate::adapters::tui::session_visit::open_visit(
+            &mut state,
+            MainVisitKey {
+                conversation_id: "stage".into(),
+                turn_id: TurnId("turn".into()),
+                invocation: PartId(1),
+                result: PartId(2),
+                revision: hash_body("literal"),
+            },
+            VisitRead::Missing,
+        );
+        assert_eq!(state.modal_stack.len(), 4);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::SessionVisit
+        );
+        assert!(consistent(&state));
+        assert!(!state.session_visit.as_ref().unwrap().text.has_source());
+        assert_eq!(state.tool_inspectors[&caller.id].viewers[0].top, 7);
+
+        assert_eq!(back(&mut state), Some(Surface::SessionVisit));
+        assert_eq!(state.modal_stack.top(), Some(&caller));
+        assert_eq!(state.tool_inspectors[&caller.id].viewers[0].top, 7);
+        assert_eq!(state.focus, base);
+        assert!(state.session_visit.is_none());
+        assert!(consistent(&state));
     }
 
     // Topology controls complement the conversation/paint front-door conformance.

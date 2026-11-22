@@ -706,6 +706,8 @@ pub async fn run(
 
     // Local producer ownership survives tab switches; no global task handle.
     let mut turn_lifecycle = super::tui_turn_lifecycle::TuiTurnLifecycle::default();
+    #[cfg(feature = "session-visit")]
+    turn_lifecycle.set_visit_history(mission_bridge::session_history(&app_state.agent_core));
 
     // Story 12.2a — the turn-origination seam. `LocalTurnDriver` owns the
     // agent-side dependencies (provider/security/tools/scheduler/persona/context/
@@ -821,23 +823,48 @@ pub async fn run(
         );
     }
 
+    macro_rules! hydrate_visit_deadlines {
+        () => {{
+            #[cfg(feature = "session-visit")]
+            mission_bridge::load_visit_deadlines(
+                &app_state.agent_core,
+                &mut conversation,
+                !tab_manager.active_tab().read_only && !app_state.session_cancel.is_cancelled(),
+            )
+            .await;
+        }};
+    }
+
+    macro_rules! render_local {
+        ($context_window:expr) => {{
+            #[cfg(feature = "session-visit")]
+            mission_bridge::reauthorize_session_visit(
+                &mut state,
+                &app_state.agent_core,
+                &conversation,
+                !tab_manager.active_tab().read_only && !app_state.session_cancel.is_cancelled(),
+            );
+            render(
+                terminal,
+                &mut state,
+                &conversation,
+                &streaming,
+                &config.model,
+                &router.active_delegate_id(),
+                security.as_ref(),
+                tab_manager.tab_count(),
+                tab_manager.active_tab_index(),
+                Some(&mut tab_manager),
+                &session_index,
+                $context_window,
+            )
+        }};
+    }
+
     // Render first frame immediately
     let _ctx_window = active_context_window(&app_state, &router, &state, config);
     state.active_context_window = _ctx_window;
-    match render(
-        terminal,
-        &mut state,
-        &conversation,
-        &streaming,
-        &config.model,
-        &router.active_delegate_id(),
-        security.as_ref(),
-        tab_manager.tab_count(),
-        tab_manager.active_tab_index(),
-        Some(&mut tab_manager),
-        &session_index,
-        _ctx_window,
-    ) {
+    match render_local!(_ctx_window) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
             handlers::render_error::handle_render_error(
@@ -858,6 +885,12 @@ pub async fn run(
                 return Ok(());
             }
         }
+    }
+
+    #[cfg(feature = "session-visit")]
+    if !conversation.turns.is_empty() {
+        hydrate_visit_deadlines!();
+        state.needs_redraw = true;
     }
 
     // Story 5-1 AC6: Spawn skill discovery as background task after first frame.
@@ -1024,7 +1057,14 @@ pub async fn run(
             Some(event_result) = terminal_events.next() => {
                 match event_result {
                     Ok(event) => {
+                        #[cfg(feature = "session-visit")]
+                        let visit_was_open = crate::adapters::tui::session_visit::visit_cursor(&state).is_some();
                         state.local_read_only = tab_manager.active_tab().read_only;
+                        #[cfg(feature = "session-visit")]
+                        mission_bridge::reauthorize_session_visit(
+                            &mut state, &app_state.agent_core, &conversation,
+                            !tab_manager.active_tab().read_only && !app_state.session_cancel.is_cancelled(),
+                        );
                         task_panel_bridge::settle_reorder_origin(&mut state, &conversation, tab_manager.tabs_mut());
                         if let crossterm::event::Event::Paste(text) = &event
                             && apply_query_paste(&mut tab_manager, &mut state, &conversation, text, &storage, &session_index, &domain_tx).is_some()
@@ -1068,6 +1108,28 @@ pub async fn run(
                                     let Some(action) = crate::adapters::tui::app::handle_operator_input(&mut state, &event, &domain_event) else { continue };
                                     action
                                 }
+                            };
+                            #[cfg(feature = "session-visit")]
+                            let action = match action {
+                                InputAction::CopySessionVisit | InputAction::SearchSessionVisit => {
+                                    // The input fence above validated the exact source and backing.
+                                    // Use that lease before any await in this dispatch. Never re-read
+                                    // the journal or worker bodies to search or copy an open Visit.
+                                    use crate::adapters::tui::session_visit;
+                                    if mission_bridge::session_visit_access_allowed(
+                                        &mut state, !tab_manager.active_tab().read_only, &app_state.session_cancel,
+                                    ) && session_visit::visit_cursor(&state)
+                                        .is_some_and(|cursor| cursor.backing.is_some())
+                                    {
+                                        if action == InputAction::SearchSessionVisit {
+                                            session_visit::begin_visit_search(&mut state);
+                                        } else {
+                                            let _ = session_visit::copy_visit(&mut state);
+                                        }
+                                    }
+                                    InputAction::Consumed
+                                }
+                                other => other,
                             };
 
                             // AC-10-4-10: Reject mutations on read-only tabs
@@ -1175,7 +1237,7 @@ pub async fn run(
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
+                                        match render_local!(_ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -2164,11 +2226,29 @@ pub async fn run(
                                         submit_turn!(full_text, all_images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
+                                        match render_local!(_ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
                                     }
+                                }
+                                #[cfg(feature = "session-visit")]
+                                InputAction::VisitCurrentSource => {
+                                    mission_bridge::open_current_session_visit(
+                                        &mut state, &app_state.agent_core, &conversation,
+                                        !tab_manager.active_tab().read_only, &app_state.session_cancel,
+                                    ).await;
+                                }
+                                #[cfg(feature = "session-visit")]
+                                InputAction::OpenSessionVisit(key) => {
+                                    mission_bridge::open_session_visit(
+                                        &mut state, &app_state.agent_core, &conversation,
+                                        !tab_manager.active_tab().read_only, &app_state.session_cancel, key,
+                                    ).await;
+                                }
+                                #[cfg(feature = "session-visit")]
+                                InputAction::CopySessionVisit | InputAction::SearchSessionVisit => {
+                                    unreachable!("Visit effects are dispatched synchronously before palette work")
                                 }
                                 InputAction::InspectTool => {
                                     crate::adapters::tui::block_viewer::inspect_focused(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref());
@@ -2462,6 +2542,7 @@ pub async fn run(
                                         agent_activator.on_tab_closed(&closing_conv_id).await;
                                         // Load the new active tab into proxies
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2485,6 +2566,7 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_next();
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2500,6 +2582,7 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_prev();
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2523,6 +2606,7 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_index(n);
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2538,8 +2622,14 @@ pub async fn run(
                                         tab.conversation.id == conversation_id && !tab.read_only
                                     }) {
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                        #[cfg(feature = "session-visit")]
+                                        let visit_tab_changed = tab_manager.active_tab_index() != index;
                                         tab_manager.switch_to_index(index + 1);
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        #[cfg(feature = "session-visit")]
+                                        if visit_tab_changed {
+                                            hydrate_visit_deadlines!();
+                                        }
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2577,6 +2667,7 @@ pub async fn run(
                                             if let Some(idx) = tab_manager.tabs().iter().position(|t| t.conversation.id == conv_id) {
                                                 tab_manager.switch_to_index(idx + 1); // 1-based
                                                 let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2599,6 +2690,7 @@ pub async fn run(
                                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     // Overwrite the fresh conversation with the loaded one
                                                     conversation = loaded_conv;
+                                                    hydrate_visit_deadlines!();
                                                     // G1-P4: flip any Running tasks back to Pending — they were in-flight
                                                     // when the session was saved and must not re-enter Running on reload.
                                                     for plan in conversation.plans.values_mut() {
@@ -2675,6 +2767,7 @@ pub async fn run(
                                                     tab_manager.close_tab(tab_id);
                                                     state.tab_render_states.remove(&tab_id);
                                                     let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                    hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
@@ -2804,6 +2897,7 @@ pub async fn run(
                                                         tab_manager.create_tab_with_conversation(forked_conv);
                                                         // Load the new active tab
                                                         let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                        hydrate_visit_deadlines!();
                                                         // Update session index
                                                         session_index.set_open(&conversation.id, true);
                                                         session_index.set_active(Some(&conversation.id));
@@ -2956,6 +3050,7 @@ pub async fn run(
                                                 save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                                 tab_manager.active_tab_mut().conversation = truncated;
                                                 let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                hydrate_visit_deadlines!();
 
                                                 // 4. DF-005: height cache eviction for removed turns.
                                                 // Per-tab cache survives tab switches; rewind explicitly invalidates
@@ -3009,6 +3104,7 @@ pub async fn run(
                                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                                         tab_manager.create_tab_with_conversation(forked_conv);
                                                         let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                        hydrate_visit_deadlines!();
                                                         session_index.set_open(&conversation.id, true);
                                                         session_index.set_active(Some(&conversation.id));
                                                         let hint_msg = if is_last {
@@ -3111,6 +3207,8 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::OpenCrossSearchResult => {
+                                    #[cfg(feature = "session-visit")]
+                                    let previous_tab_id = tab_manager.active_tab_id();
                                     apply_open_cross_search_result(
                                         &mut tab_manager,
                                         &mut conversation,
@@ -3124,6 +3222,10 @@ pub async fn run(
                                         &domain_tx,
                                     )
                                     .await;
+                                    #[cfg(feature = "session-visit")]
+                                    if tab_manager.active_tab_id() != previous_tab_id {
+                                        hydrate_visit_deadlines!();
+                                    }
                                 }
                                 InputAction::CloseCrossSearch => {
                                     handlers::export::close_cross_search(&mut state);
@@ -3565,6 +3667,7 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_next();
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        hydrate_visit_deadlines!();
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
@@ -4008,6 +4111,23 @@ pub async fn run(
                                 }
                             }
                         }
+                        #[cfg(feature = "session-visit")]
+                        if state.needs_redraw && (visit_was_open
+                            || crate::adapters::tui::session_visit::visit_cursor(&state).is_some())
+                        {
+                            // A reader key should not wait for the periodic chat tick.
+                            let context_window = active_context_window(&app_state, &router, &state, config);
+                            state.active_context_window = context_window;
+                            match render_local!(context_window) {
+                                Ok(()) => state.needs_redraw = false,
+                                Err(error) => {
+                                    handlers::render_error::handle_render_error(error,
+                                        |streaming, state| turn_lifecycle.interrupt_active(
+                                            &mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model),
+                                        &mut streaming, &mut state, terminal);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Terminal event stream error: {}", e);
@@ -4035,6 +4155,9 @@ pub async fn run(
                         }
                     }
                     AppEvent::ProviderChunk { conversation_id, chunk } => {
+                        // Only a generation-admitted local terminal carries its producer model.
+                        #[cfg(feature = "session-visit")]
+                        let owned_completion = completed_model.is_some();
                         if matches!(&chunk, StreamChunk::TurnComplete { stop_reason: crate::domain::models::StopReason::Cancelled }) {
                             if conversation_id == conversation.id {
                                 turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
@@ -4066,8 +4189,23 @@ pub async fn run(
 
                             // Drain committed turn into the conversation clone (syncs to tab_manager via save_active_tab)
                             if let Some(committed) = tab_manager.active_tab_mut().reducer.committed_turn.take() {
+                                #[cfg(feature = "session-visit")]
+                                let committed = {
+                                    let mut committed = committed;
+                                    mission_bridge::commit_turn_reports(
+                                        &app_state.agent_core, &conversation,
+                                        owned_completion && !tab_manager.active_tab().read_only
+                                            && !app_state.session_cancel.is_cancelled(),
+                                        &mut committed,
+                                    ).await;
+                                    committed
+                                };
                                 conversation.turns.push(committed);
                                 conversation.rebuild_messages_mirror();
+                            }
+                            #[cfg(feature = "session-visit")]
+                            if owned_completion {
+                                turn_lifecycle.discard_visit_offers(&conversation_id);
                             }
                             // Compute title-generation trigger after committed turn is drained
                             let title_trigger = conversation.turns.len() == 2
@@ -4235,7 +4373,7 @@ pub async fn run(
                                         submit_turn!(queued_msg.content, queued_msg.images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
+                                        match render_local!(_ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -4269,8 +4407,18 @@ pub async fn run(
                                 if let Some(model) = completed_model {
                                     committed.model = model;
                                 }
+                                #[cfg(feature = "session-visit")]
+                                mission_bridge::commit_turn_reports(
+                                    &app_state.agent_core, &tab.conversation,
+                                    owned_completion && !tab.read_only && !app_state.session_cancel.is_cancelled(),
+                                    &mut committed,
+                                ).await;
                                 tab.conversation.turns.push(committed);
                                 tab.conversation.rebuild_messages_mirror();
+                            }
+                            #[cfg(feature = "session-visit")]
+                            if owned_completion {
+                                turn_lifecycle.discard_visit_offers(&conversation_id);
                             }
 
                             // Compute title-generation trigger after committed turn is drained
@@ -5004,7 +5152,7 @@ pub async fn run(
                         submit_turn!(text, vec![], false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                         state.active_context_window = _ctx_window;
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
+                        match render_local!(_ctx_window) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                         }
@@ -5690,6 +5838,14 @@ pub async fn run(
                             mcp_config_notices: &mut mcp_config_notices,
                         };
                         let outcome = crate::adapters::tui::handlers::config::handle_config_reload_with_two_pass(ctx);
+                        if matches!(
+                            &outcome,
+                            HandlerOutcome::Notify(AppEvent::ConfigReloaded { success: true, .. })
+                        ) {
+                            // Recomposition can replace the local history provider; old
+                            // availability must not survive into the Inspector's next paint.
+                            hydrate_visit_deadlines!();
+                        }
                         for message in mcp_config_notices {
                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
@@ -5748,6 +5904,7 @@ pub async fn run(
                             tracing::info!(cleared_count, "Session adapter overrides cleared on profile switch");
                         }
                         handlers::profile_switch::complete(&mut state);
+                        hydrate_visit_deadlines!();
                         notifications::success(&mut state, NoticeSource::Profile, format!("Profile switched to '{profile_name}' — {summary}"));
                         state.needs_redraw = true;
                     }
@@ -5757,6 +5914,9 @@ pub async fn run(
                         rolled_back,
                     } => {
                         handlers::profile_switch::complete(&mut state);
+                        // A failed cold swap can retain a completed warm session swap.
+                        // Reconcile against the actual provider, including rollback.
+                        hydrate_visit_deadlines!();
                         let rollback_note = if rolled_back {
                             " (previous adapters preserved)"
                         } else {
@@ -6062,11 +6222,13 @@ pub async fn run(
                 );
                 crate::infrastructure::runtime::panel_bridge::tick_live_reasoning(&mut state, &streaming);
                 crate::adapters::tui::tour::tick(&mut state, streaming.is_streaming);
+                #[cfg(feature = "session-visit")]
+                mission_bridge::expire_session_visit(&mut state);
 
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window) {
+                                        match render_local!(_ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }

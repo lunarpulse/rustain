@@ -79,6 +79,16 @@ fn same_usage_amount(a: &UsageInfo, b: &UsageInfo) -> bool {
         && a.reasoning_tokens == b.reasoning_tokens
 }
 
+#[cfg(feature = "session-visit")]
+fn strip_provider_task_frame(tool_name: &str, content: &mut String) {
+    if tool_name == "task"
+        && let Some((_, original)) = crate::domain::models::worker_report::split(content)
+    {
+        let header_len = content.len() - original.len();
+        drop(content.drain(..header_len));
+    }
+}
+
 /// Story 19.1 A3 — the ONE infrastructure site that populates a completed
 /// Write's display diff. Reads the pre-write snapshot back through
 /// [`StoragePort::read_snapshot`] (the adapter snapshotted the original in
@@ -985,6 +995,17 @@ pub async fn run_turn(
                                         images: images.clone(),
                                     },
                                 });
+                                // Keep the authenticated handoff on the local event, never
+                                // in the tool result sent back to the provider.
+                                #[cfg(feature = "session-visit")]
+                                let content = {
+                                    let mut content = content;
+                                    strip_provider_task_frame(
+                                        &batch_with_idx[i].1.tool_name,
+                                        &mut content,
+                                    );
+                                    content
+                                };
                                 indexed_results.push((
                                     batch_with_idx[i].0,
                                     ToolResultMessage {
@@ -1072,4 +1093,32 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(all(test, feature = "session-visit"))]
+mod worker_report_boundary_tests {
+    use super::strip_provider_task_frame;
+    use crate::domain::models::worker_report::{ReportCapture, frame};
+
+    #[test]
+    fn provider_receives_only_original_authenticated_task_output() {
+        for original in ["", "first\nsecond\n", "échec"] {
+            let mut content = frame(ReportCapture::Unavailable, original);
+            strip_provider_task_frame("task", &mut content);
+            assert_eq!(content, original);
+        }
+    }
+
+    #[test]
+    fn provider_keeps_other_tools_and_unauthenticated_text_literal() {
+        let framed = frame(ReportCapture::Unstructured, "original");
+        let mut other_tool = framed.clone();
+        strip_provider_task_frame("other", &mut other_tool);
+        assert_eq!(other_tool, framed);
+
+        let mut forged = format!("{framed}tampered");
+        let original = forged.clone();
+        strip_provider_task_frame("task", &mut forged);
+        assert_eq!(forged, original);
+    }
 }

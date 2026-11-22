@@ -32,6 +32,11 @@ pub enum MissionCmd {
     CopySource,
     /// `c` (agent window, local): copy the agent transcript's original text.
     CopyTranscript,
+    /// Move among exact linked and readable retained sources in this conversation.
+    #[cfg(feature = "session-visit")]
+    PreviousVisit,
+    #[cfg(feature = "session-visit")]
+    NextVisit,
     /// `c` (task window, local): copy the task's result (or its error / skip reason).
     CopyResult,
     /// `p` (Agents and Tasks tabs, agent and task windows, local): pause a running agent or
@@ -84,6 +89,17 @@ const fn w(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Bi
 const fn g(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
     bind(
         Context::AgentWindow,
+        keys,
+        CommandId::Mission(command),
+        label,
+    )
+    .local()
+}
+
+#[cfg(feature = "session-visit")]
+const fn visit(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
+    bind(
+        Context::SessionVisit,
         keys,
         CommandId::Mission(command),
         label,
@@ -156,6 +172,19 @@ pub const ROWS: &[Binding] = &[
     bind(Context::AgentWindow, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").local().does("Open the Ctrl+X menu above the agent window"),
     bind(Context::AgentWindow, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").local().does("Open the command palette above the agent window"),
     bind(Context::AgentWindow, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").local().does("Ask to quit without closing the agent window"),
+    // Visit inherits only read-only body scrolling, never agent lifecycle controls.
+    #[cfg(feature = "session-visit")]
+    visit(&[Key::Left], MissionCmd::PreviousVisit, "Previous").does("Visit the previous linked and readable source in the same conversation"),
+    #[cfg(feature = "session-visit")]
+    visit(&[Key::Right], MissionCmd::NextVisit, "Next").does("Visit the next linked and readable source in the same conversation"),
+    #[cfg(feature = "session-visit")]
+    visit(&[Key::Char('c')], MissionCmd::CopySource, "Copy").copy().does("Copy only the currently authorized retained Visit text"),
+    #[cfg(feature = "session-visit")]
+    bind(Context::SessionVisit, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").local().does("Filter the retained Visit text"),
+    #[cfg(feature = "session-visit")]
+    visit(&[Key::Esc], MissionCmd::Back, "Back").does("Clear a kept filter, else return to the original frame"),
+    #[cfg(feature = "session-visit")]
+    visit(&[Key::Ctrl('c')], MissionCmd::Back, "").does("Back without cancelling work"),
     // ── the task window (local) ──
     t(&[Key::Char('p')], MissionCmd::Pause, "Pause/Resume").does("Pause the task, or resume it when paused"),
     t(&[Key::Char('s')], MissionCmd::Skip, "Skip").does("Skip the task; a decision confirms it when other tasks depend on it"),

@@ -106,6 +106,18 @@ pub struct ArtifactWindowState {
     /// shared "Copied to clipboard".
     copy_done: Option<String>,
     literal: bool,
+    #[cfg(feature = "session-visit")]
+    visit_filter: Option<VisitFilter>,
+}
+
+/// A Visit reader's body is immutable for the life of its lease. Keep its
+/// ordinary layout while filtering, and fold UTF-8 for search once per read.
+#[cfg(feature = "session-visit")]
+struct VisitFilter {
+    sanitized: Option<String>,
+    folded: String,
+    cache: RefCell<Cache>,
+    query_generation: u64,
 }
 
 impl std::fmt::Debug for ArtifactWindowState {
@@ -140,6 +152,8 @@ impl ArtifactWindowState {
             lossy: false,
             copy_done: None,
             literal: false,
+            #[cfg(feature = "session-visit")]
+            visit_filter: None,
         }
     }
 
@@ -187,6 +201,44 @@ impl ArtifactWindowState {
         self.literal
     }
 
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn prepare_visit_search(&mut self) {
+        use crate::adapters::tui::presentation::inspector_search::caseless_chars;
+        let ArtifactBody::Source(bytes) = &self.body else {
+            return;
+        };
+        // Use the existing bounded reader/notice if a future caller supplies
+        // a source beyond the clipboard contract.
+        if self.display_truncated() {
+            return;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let safe = sanitize_tool_text_block(&text);
+        let mut folded = String::with_capacity(safe.len());
+        folded.extend(caseless_chars(&safe));
+        let sanitized = match (safe, &text) {
+            (std::borrow::Cow::Owned(safe), _) => Some(safe),
+            (_, std::borrow::Cow::Owned(_)) => Some(text.into_owned()),
+            _ => None,
+        };
+        self.visit_filter = Some(VisitFilter {
+            sanitized,
+            folded,
+            cache: RefCell::new(Cache::default()),
+            query_generation: 0,
+        });
+    }
+
+    #[cfg(feature = "session-visit")]
+    fn visit_filter_dirty(&mut self) -> bool {
+        let Some(filter) = &mut self.visit_filter else {
+            return false;
+        };
+        filter.query_generation = filter.query_generation.wrapping_add(1);
+        self.viewer = Viewer::default();
+        true
+    }
+
     /// What the window says when its body is empty (default `body is empty`).
     #[must_use]
     pub fn with_empty_text(mut self, text: &'static str) -> Self {
@@ -200,6 +252,10 @@ impl ArtifactWindowState {
         if self.header != header || self.body != body {
             self.header = header;
             self.body = body;
+            #[cfg(feature = "session-visit")]
+            {
+                self.visit_filter = None;
+            }
             self.generation = self.generation.wrapping_add(1);
         }
     }
@@ -220,6 +276,12 @@ impl ArtifactWindowState {
     /// The rows for `width`: facts, a blank row, then the body. Laid out once per (width,
     /// mode, generation) and reused by every repaint.
     pub fn rows(&self, theme: &Theme, width: u16) -> Ref<'_, [Line<'static>]> {
+        #[cfg(feature = "session-visit")]
+        if let Some(filter) = &self.visit_filter
+            && !self.search.query.is_empty()
+        {
+            return self.visit_filter_rows(theme, width, filter);
+        }
         let key = (width, self.mode, self.generation);
         if self.cache.borrow().key != Some(key) {
             let laid = self.build(theme, usize::from(width));
@@ -234,9 +296,60 @@ impl ArtifactWindowState {
         Ref::map(self.cache.borrow(), |cache| cache.lines.as_slice())
     }
 
+    #[cfg(feature = "session-visit")]
+    fn visit_filter_rows<'a>(&'a self, theme: &Theme, width: u16, filter: &'a VisitFilter) -> Ref<'a, [Line<'static>]> {
+        use crate::adapters::tui::presentation::inspector_search::caseless_chars;
+        let key = (width, BodyMode::Source, filter.query_generation);
+        if filter.cache.borrow().key != Some(key) {
+            let ArtifactBody::Source(bytes) = &self.body else {
+                unreachable!("Visit filters belong to immutable source bodies");
+            };
+            let text = filter.sanitized.as_deref().unwrap_or_else(|| {
+                std::str::from_utf8(bytes).expect("borrowed display source was UTF-8")
+            });
+            let query = caseless_chars(self.search.query.as_str()).collect::<String>();
+            let mut matching = text.lines().zip(filter.folded.lines())
+                .filter_map(|(line, folded)| folded.contains(&query).then_some(line))
+                .peekable();
+            let matches = matching.peek().is_some();
+            let layout = self.build_text_filter(theme, usize::from(width), matching, matches);
+            *filter.cache.borrow_mut() = Cache {
+                key: Some(key),
+                lines: layout,
+                ..Cache::default()
+            };
+            self.layouts_built.set(self.layouts_built.get() + 1);
+        }
+        Ref::map(filter.cache.borrow(), |cache| cache.lines.as_slice())
+    }
+
+    #[cfg(feature = "session-visit")]
+    fn build_text_filter<'a>(&self, theme: &Theme, width: usize, matching: impl Iterator<Item = &'a str>, matches: bool) -> Vec<Line<'static>> {
+        use std::fmt::Write as _;
+        let mut text = String::new();
+        for line in self.header.lines() {
+            let _ = writeln!(text, "{}", sanitize_tool_text_block(line));
+        }
+        text.push('\n');
+        if matches {
+            for line in matching {
+                let _ = writeln!(text, "{line}");
+            }
+        } else {
+            text.push_str("no line matches this filter");
+        }
+        let mut rows = markdown_body::layout(&text, width, theme, BodyMode::Source, true).lines;
+        rows.pop();
+        rows
+    }
+
     /// The rows of the last layout that scroll sideways (wide code blocks and tables of a
     /// rendered body) and the widest block in cells.
     pub fn wide_rows(&self) -> (Vec<std::ops::Range<usize>>, usize) {
+        #[cfg(feature = "session-visit")]
+        if self.visit_filter.is_some() && !self.search.query.is_empty() {
+            return (Vec::new(), 0);
+        }
         let cache = self.cache.borrow();
         (cache.wide.clone(), cache.widest)
     }
@@ -548,6 +661,11 @@ pub(crate) fn search_changed(state: &mut TuiState) {
 
 pub(crate) fn search_changed_in(state: &mut TuiState, slot: &Slot) {
     if let Some(window) = (slot.get_mut)(state) {
+        #[cfg(feature = "session-visit")]
+        if window.visit_filter_dirty() {
+            state.needs_redraw = true;
+            return;
+        }
         window.invalidate();
     }
     state.needs_redraw = true;

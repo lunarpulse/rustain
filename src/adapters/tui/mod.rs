@@ -27,6 +27,8 @@ pub mod palette_gate;
 pub mod presentation;
 pub mod quit_confirm;
 pub mod refresh_tracker;
+#[cfg(feature = "session-visit")]
+pub mod session_visit;
 pub mod state;
 #[cfg(test)]
 mod story21_2_slash_tests;

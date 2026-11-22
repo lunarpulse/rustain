@@ -76,6 +76,10 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
         Surface::AgentWindow if super::agent_window::search_editing(state) => {
             super::keymap::Context::InspectorSearch
         }
+        #[cfg(feature = "session-visit")]
+        Surface::SessionVisit if super::session_visit::visit_search_editing(state) => {
+            Context::InspectorSearch
+        }
         Surface::TaskWindow if super::task_window::search_editing(state) => {
             super::keymap::Context::InspectorSearch
         }
@@ -114,6 +118,12 @@ pub(crate) fn inspector_search_mut(
             .agent_window
             .as_mut()
             .map(|window| &mut window.text.search),
+        #[cfg(feature = "session-visit")]
+        Surface::SessionVisit => state
+            .session_visit
+            .as_mut()
+            .filter(|window| window.text.has_source())
+            .map(|window| &mut window.text.search),
         Surface::TaskWindow => state
             .task_window
             .as_mut()
@@ -126,6 +136,10 @@ pub(crate) fn inspector_search_mut(
 #[must_use]
 pub fn consistent(state: &TuiState) -> bool {
     let stack = &state.modal_stack;
+    #[cfg(feature = "session-visit")]
+    if is_open(state, Surface::SessionVisit) != state.session_visit.is_some() {
+        return false;
+    }
     stack.len() <= 4
         && stack.all_frames().enumerate().all(|(index, frame)| {
             frame.id > 0
@@ -163,6 +177,14 @@ pub fn consistent(state: &TuiState) -> bool {
                                 frame.conversation_id.as_deref() == Some(window.conversation_id())
                             })
                     }
+                    #[cfg(feature = "session-visit")]
+                    Surface::SessionVisit => {
+                        frame.tool_title.is_some()
+                            && state.session_visit.as_ref().is_some_and(|window| {
+                                frame.conversation_id.as_deref()
+                                    == Some(window.cursor.key.conversation_id.as_str())
+                            })
+                    }
                     Surface::ThreadInspector
                     | Surface::MissionControl
                     | Surface::ArtifactWindow
@@ -171,7 +193,7 @@ pub fn consistent(state: &TuiState) -> bool {
                     _ => frame.tool_title.is_none(),
                 }
         })
-        && stack.continuations.len() <= 5
+        && stack.continuations.len() <= 5 + usize::from(cfg!(feature = "session-visit"))
         && stack
             .continuations
             .iter()

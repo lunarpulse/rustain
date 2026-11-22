@@ -25,6 +25,15 @@ use crate::domain::services::slash_command::parse_slash_command;
 pub enum InputAction {
     /// Event handled, no further action needed.
     Consumed,
+    /// Resolve only the exact retained source owned by the open tool inspector.
+    #[cfg(feature = "session-visit")]
+    VisitCurrentSource,
+    #[cfg(feature = "session-visit")]
+    OpenSessionVisit(crate::domain::models::orchestration_room::MainVisitKey),
+    #[cfg(feature = "session-visit")]
+    CopySessionVisit,
+    #[cfg(feature = "session-visit")]
+    SearchSessionVisit,
     /// Inspect the render-focused tool; the runtime resolves the live conversation.
     InspectTool,
     /// Resolve a same-turn step against canonical sources before the next paint.
@@ -549,6 +558,12 @@ pub fn frame_ignores_raw_key(state: &TuiState, event: &crossterm::event::Event) 
         && let Event::Key(key) = event
     {
         return crate::adapters::tui::thread_inspector::ignores_raw_key(state, key);
+    }
+    #[cfg(feature = "session-visit")]
+    if let Event::Key(key) = event
+        && crate::adapters::tui::session_visit::ignores_raw_key(state, key)
+    {
+        return true;
     }
     if let Event::Key(key) = event
         && (crate::adapters::tui::mission_control::keys::ignores_raw_key(state, key)
@@ -1617,6 +1632,10 @@ fn edit_query(
                     Some(Surface::AgentWindow) => {
                         crate::adapters::tui::agent_window::search_changed(state);
                     }
+                    #[cfg(feature = "session-visit")]
+                    Some(Surface::SessionVisit) => {
+                        crate::adapters::tui::session_visit::visit_search_changed(state);
+                    }
                     _ => unreachable!("only inspector frames lend the child field"),
                 }
             }
@@ -1781,6 +1800,24 @@ fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
                     thread.search.back();
                 }
                 crate::adapters::tui::thread_inspector::search_changed(state);
+            }
+            _ => {}
+        }
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+    #[cfg(feature = "session-visit")]
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::SessionVisit)
+    {
+        match cmd {
+            OverlayCmd::InspectorAccept => {
+                crate::adapters::tui::session_visit::accept_visit_search(state);
+            }
+            OverlayCmd::InspectorBack => {
+                crate::adapters::tui::session_visit::clear_visit_search(state);
             }
             _ => {}
         }
@@ -3080,6 +3117,116 @@ pub fn convert_crossterm_event(
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn session_visit_real_frame_keeps_native_axes_and_excludes_agent_controls() {
+        use crate::adapters::tui::{
+            keymap::{render, table_mission::MissionCmd, table_tool::ToolCmd},
+            presentation::viewer::ViewerCmd,
+            session_visit,
+            tool_inspector::ToolTarget,
+        };
+        use crate::domain::models::{
+            orchestration_room::MainVisitKey,
+            turn::{PartId, TurnId},
+        };
+        use crate::infrastructure::subagent::session_history::{VisitRead, hash_body};
+
+        let mut state = TuiState::new(100, 30);
+        reducer::open_tool(
+            &mut state,
+            ToolTarget {
+                conversation_id: "main".into(),
+                tool_call_id: "call".into(),
+            },
+            "task".into(),
+            12,
+        );
+        let inspector_context = focus_context(&state).expect("open inspector owns keys");
+        assert_eq!(inspector_context, Context::ToolInspector);
+        assert!(matches!(
+            resolve(inspector_context, Host::Local, &[Key::Char('o')]),
+            Resolved::Hit(row) if row.command == CommandId::Tool(ToolCmd::VisitSource)
+                && row.label == "Visit source"
+        ));
+        assert_eq!(render::rail(inspector_context, ToolCmd::VisitSource), "[o]");
+        assert!(matches!(
+            resolve(inspector_context, Host::Attached, &[Key::Char('o')]),
+            Resolved::Miss
+        ));
+
+        session_visit::open_visit(
+            &mut state,
+            MainVisitKey {
+                conversation_id: "main".into(),
+                turn_id: TurnId("turn".into()),
+                invocation: PartId(1),
+                result: PartId(2),
+                revision: hash_body("literal result"),
+            },
+            VisitRead::Missing,
+        );
+        let context = focus_context(&state).expect("exact Visit owns keys");
+        assert_eq!(context, Context::SessionVisit);
+        for (key, command) in [
+            (Key::Left, CommandId::Mission(MissionCmd::PreviousVisit)),
+            (Key::Right, CommandId::Mission(MissionCmd::NextVisit)),
+            (Key::Up, CommandId::Viewer(ViewerCmd::LineUp)),
+            (Key::Down, CommandId::Viewer(ViewerCmd::LineDown)),
+            (Key::Char('k'), CommandId::Viewer(ViewerCmd::LineUp)),
+            (Key::Char('j'), CommandId::Viewer(ViewerCmd::LineDown)),
+            (Key::PageUp, CommandId::Viewer(ViewerCmd::PageUp)),
+            (Key::PageDown, CommandId::Viewer(ViewerCmd::PageDown)),
+            (Key::Char('c'), CommandId::Mission(MissionCmd::CopySource)),
+            (
+                Key::Char('/'),
+                CommandId::Overlay(OverlayCmd::InspectorSearch),
+            ),
+            (Key::Esc, CommandId::Mission(MissionCmd::Back)),
+            (Key::Ctrl('c'), CommandId::Mission(MissionCmd::Back)),
+        ] {
+            assert!(
+                matches!(
+                    resolve(context, Host::Local, &[key]),
+                    Resolved::Hit(row) if row.command == command
+                ),
+                "{key:?}"
+            );
+        }
+        for key in ['p', 'x', 'e', 's', 'r', 'o', 'v'] {
+            assert!(
+                matches!(
+                    resolve(context, Host::Local, &[Key::Char(key)]),
+                    Resolved::Miss
+                ),
+                "{key}"
+            );
+        }
+        assert_eq!(state.input_buffer, "");
+        assert_eq!(render::rail(context, MissionCmd::CopySource), "[c]");
+        assert_eq!(render::rail(context, OverlayCmd::InspectorSearch), "[/]");
+        assert_eq!(render::rail(context, MissionCmd::Back), "[Esc]");
+        let release = crossterm::event::Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        assert!(frame_ignores_raw_key(&state, &release));
+        for key in ['p', 'x', 'e', 's', 'r', 'c', '/'] {
+            assert_eq!(
+                handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
+                InputAction::Consumed
+            );
+            assert_eq!(focus_context(&state), Some(Context::SessionVisit));
+            assert_eq!(state.input_buffer, "");
+        }
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc)),
+            InputAction::Consumed
+        );
+        assert_eq!(focus_context(&state), Some(inspector_context));
+    }
 
     #[test]
     fn story21_5_missing_tool_cannot_lend_search_child() {

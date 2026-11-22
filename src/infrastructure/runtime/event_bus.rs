@@ -199,8 +199,15 @@ pub(crate) fn public_transcript_message(
             .map(|tool| {
                 let mut tool = tool.clone();
                 tool.provider_id = None;
+                #[cfg(feature = "session-visit")]
+                let task = tool.name == "task";
                 if let Some(result) = &mut tool.result {
                     result.images = Vec::new();
+                    #[cfg(feature = "session-visit")]
+                    if task {
+                        let header = result.content.len() - public_tool_text(&result.content).len();
+                        drop(result.content.drain(..header));
+                    }
                 }
                 tool
             })
@@ -218,6 +225,15 @@ pub(crate) fn public_transcript_message(
     }
 }
 
+/// Authenticated local task handoffs never become observer history.
+fn public_tool_text(content: &str) -> &str {
+    #[cfg(feature = "session-visit")]
+    if let Some((_, original)) = crate::domain::models::worker_report::split(content) {
+        return original;
+    }
+    content
+}
+
 /// Result images stay in the operator's own history: every observer event
 /// carries the chunk without them (Story 20.1d4a T3).
 fn public_chunk(chunk: &StreamChunk) -> StreamChunk {
@@ -231,7 +247,7 @@ fn public_chunk(chunk: &StreamChunk) -> StreamChunk {
             images: _,
         } => StreamChunk::ToolResult {
             id: id.clone(),
-            content: content.clone(),
+            content: public_tool_text(content).to_owned(),
             is_error: *is_error,
             operator_private: *operator_private,
             diff: diff.clone(),
@@ -256,7 +272,17 @@ fn public_transition(
             id: id.clone(),
             request: request.clone(),
             result: ToolCallResult {
-                output: result.output.clone(),
+                output: {
+                    #[cfg(feature = "session-visit")]
+                    let output = if request.tool_name == "task" {
+                        public_tool_text(&result.output)
+                    } else {
+                        &result.output
+                    };
+                    #[cfg(not(feature = "session-visit"))]
+                    let output = &result.output;
+                    output.to_owned()
+                },
                 is_error: result.is_error,
                 duration_ms: result.duration_ms,
                 images: Vec::new(),
@@ -1122,6 +1148,28 @@ mod tests {
             "A6 stored transcript is unchanged"
         );
         assert_eq!(projected.tool_calls.len(), 1);
+    }
+
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn observer_projection_hides_only_authenticated_frame_and_preserves_literal() {
+        use crate::domain::models::{WriteDiffState, worker_report};
+        let original = "actual task output\néchec";
+        let framed = worker_report::frame(worker_report::ReportCapture::Unstructured, original);
+        let marker = "RUSTAIN_TASK_REPORT_V1\t{\"tag\":\"not-authenticated\"}\nliteral";
+        for (payload, expected) in [(framed.as_str(), original), (marker, marker)] {
+            let public = public_chunk(&StreamChunk::ToolResult {
+                id: "call".into(),
+                content: payload.to_owned(),
+                is_error: false,
+                operator_private: false,
+                diff: WriteDiffState::NotAWrite,
+                images: vec![],
+            });
+            assert!(
+                matches!(public, StreamChunk::ToolResult { content, .. } if content == expected)
+            );
+        }
     }
 
     /// Story 20.1d4a T3: result images, provider call ids and response spans

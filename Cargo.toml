@@ -424,6 +424,8 @@ procfs = "0.17"
 
 [features]
 default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev"]
+# Candidate read-only Visit UI; durable private event recognition is unconditional.
+session-visit = []
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses

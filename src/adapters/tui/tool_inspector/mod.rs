@@ -109,6 +109,15 @@ pub struct ToolInspectorState {
     saved_view: [(usize, usize); 2],
     tabs_revision: Option<u64>,
     pending: Vec<PendingIntent>,
+    /// Capture once per exact inspector target; never follow a replaced result.
+    #[cfg(feature = "session-visit")]
+    visit_key: Option<crate::domain::models::orchestration_room::MainVisitKey>,
+    #[cfg(feature = "session-visit")]
+    visit_revision: Option<u64>,
+    #[cfg(feature = "session-visit")]
+    visit_expires_at_ms: Option<i64>,
+    #[cfg(feature = "session-visit")]
+    visit_current: bool,
 }
 
 impl ToolInspectorState {
@@ -138,7 +147,62 @@ impl ToolInspectorState {
             search_projection: None,
             tabs_revision: None,
             pending: Vec::new(),
+            #[cfg(feature = "session-visit")]
+            visit_key: None,
+            #[cfg(feature = "session-visit")]
+            visit_revision: None,
+            #[cfg(feature = "session-visit")]
+            visit_expires_at_ms: None,
+            #[cfg(feature = "session-visit")]
+            visit_current: false,
         }
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn can_visit_source(&self) -> bool {
+        self.visit_current
+            && !self.missing
+            && self.visit_expires_at_ms.is_some_and(|deadline| {
+                crate::infrastructure::subagent::session_history::SessionHistory::check_expiry(
+                    Some(deadline),
+                )
+                .is_none()
+            })
+    }
+
+    #[cfg(feature = "session-visit")]
+    fn visit_key_for_view(
+        conversation: &crate::domain::models::Conversation,
+        target: &ToolTarget,
+        view: &ToolView<'_>,
+    ) -> Option<crate::domain::models::orchestration_room::MainVisitKey> {
+        crate::adapters::tui::session_visit::visit_key(conversation, target).filter(|_| {
+            project::without_tail(&conversation.turns, None, target).is_some_and(|committed| {
+                view.result
+                    .zip(committed.result)
+                    .is_some_and(|(selected, original)| std::ptr::eq(selected, original))
+            })
+        })
+    }
+
+    #[cfg(feature = "session-visit")]
+    fn pin_visit(
+        &mut self,
+        conversation: &crate::domain::models::Conversation,
+        key: Option<crate::domain::models::orchestration_room::MainVisitKey>,
+        revision: Option<u64>,
+    ) {
+        self.visit_revision = revision;
+        self.visit_expires_at_ms = key.as_ref().and_then(|key| {
+            conversation
+                .turns
+                .iter()
+                .find(|turn| turn.id == key.turn_id)
+                .and_then(|turn| turn.visit_deadlines.get(&key.result))
+                .copied()
+        });
+        self.visit_current = key.is_some();
+        self.visit_key = key;
     }
 
     pub fn rows(&self) -> &[Line<'static>] {
@@ -542,6 +606,12 @@ pub fn inspect_focused(
     let viewport =
         frame_rect(state, 1).map_or(1, |rect| usize::from(layout::parts(rect).body.height));
     let selected = target.tool_call_id.clone();
+    #[cfg(feature = "session-visit")]
+    let visit_key = fresh
+        .then(|| ToolInspectorState::visit_key_for_view(conversation, &target, &view))
+        .flatten();
+    #[cfg(feature = "session-visit")]
+    let visit_revision = visit_key.as_ref().map(|_| view.source_revision);
     crate::adapters::tui::presentation::reducer::open_tool(state, target, title, viewport);
     if fresh {
         let id = state
@@ -555,6 +625,8 @@ pub fn inspect_focused(
             .expect("frame owns its tool payload");
         inspector.tabs = tabs;
         inspector.viewers[ToolTab::Output.index()].follow = following;
+        #[cfg(feature = "session-visit")]
+        inspector.pin_visit(conversation, visit_key, visit_revision);
     }
     state.selected_item_id = Some(selected);
     true
@@ -610,6 +682,10 @@ pub fn step(
     let viewport = current.viewport;
     let following = view.is_running();
     let tabs = source::available_tabs(&view);
+    #[cfg(feature = "session-visit")]
+    let visit_key = ToolInspectorState::visit_key_for_view(conversation, &target, &view);
+    #[cfg(feature = "session-visit")]
+    let visit_revision = visit_key.as_ref().map(|_| view.source_revision);
     let mut replacement = ToolInspectorState::new(target, viewport);
     replacement.tabs = tabs;
     replacement.wrap = current.wrap;
@@ -620,6 +696,8 @@ pub fn step(
         ToolTab::Output
     };
     replacement.viewers[ToolTab::Output.index()].follow = following;
+    #[cfg(feature = "session-visit")]
+    replacement.pin_visit(conversation, visit_key, visit_revision);
     reducer::retarget_tool(state, id, replacement, title)
 }
 
@@ -664,6 +742,10 @@ pub fn refresh(
     for inspector in state.tool_inspectors.values_mut() {
         if inspector.target.conversation_id != conversation.id {
             inspector.missing = true;
+            #[cfg(feature = "session-visit")]
+            {
+                inspector.visit_current = false;
+            }
             continue;
         }
         inspector.prepare(
@@ -673,7 +755,47 @@ pub fn refresh(
             &state.theme,
             now_ms,
         );
+        #[cfg(feature = "session-visit")]
+        {
+            inspector.visit_current = !inspector.missing
+                && inspector.tabs_revision == inspector.visit_revision
+                && inspector.visit_key.as_ref().is_some_and(|key| {
+                    crate::adapters::tui::session_visit::visit_revision_is_current(
+                        conversation,
+                        &inspector.target,
+                        key,
+                        inspector.visit_revision,
+                    )
+                });
+        }
     }
+}
+
+/// Recheck the frame's originally captured result against the committed source.
+#[cfg(feature = "session-visit")]
+pub fn visit_target(
+    state: &crate::adapters::tui::state::TuiState,
+    conversation: &crate::domain::models::Conversation,
+) -> Option<crate::domain::models::orchestration_room::MainVisitKey> {
+    use crate::adapters::tui::presentation::Surface;
+    if state.local_read_only {
+        return None;
+    }
+    let Surface::ToolInspector(ToolFrameKey(id)) = state.modal_stack.top()?.surface else {
+        return None;
+    };
+    let inspector = state.tool_inspectors.get(&id)?;
+    if !inspector.can_visit_source() {
+        return None;
+    }
+    let key = inspector.visit_key.as_ref()?;
+    crate::adapters::tui::session_visit::visit_revision_is_current(
+        conversation,
+        &inspector.target,
+        key,
+        inspector.visit_revision,
+    )
+    .then(|| key.clone())
 }
 
 /// Top-frame keys resolve only in S-TOOL's registered context.
@@ -927,5 +1049,161 @@ mod cache_tests {
         assert!(state.viewers[0].follow);
         state.prepare(inputs, 76, 12, &theme, 0);
         assert!(state.viewers[0].follow);
+    }
+}
+
+#[cfg(all(test, feature = "session-visit"))]
+mod visit_tests {
+    use super::*;
+    use crate::adapters::tui::state::TuiState;
+    use crate::domain::models::{Conversation, PartId, ToolOutput, Turn, TurnPart, WriteDiffState};
+
+    fn retained_deadline() -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i64::try_from(now.as_millis()).unwrap() + 60_000
+    }
+
+    fn fixture() -> (Conversation, ToolTarget) {
+        let mut turn = Turn::new("model".into(), 0);
+        let invocation = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "task".into(),
+            args: serde_json::json!({"description":"retained"}),
+            status: InvocationStatus::Success,
+            started_at: 0,
+            ended_at: Some(1),
+        });
+        let result = turn.push_part(|id| TurnPart::ToolResult {
+            id,
+            refs: invocation,
+            output: ToolOutput {
+                content: "literal original output".into(),
+                is_error: false,
+                diff: WriteDiffState::NotAWrite,
+                images: Vec::new(),
+            },
+        });
+        turn.visit_deadlines.insert(result, retained_deadline());
+        let target = ToolTarget {
+            conversation_id: "main".into(),
+            tool_call_id: crate::domain::models::tool_call_id_for(&turn.id, invocation),
+        };
+        (
+            Conversation {
+                id: "main".into(),
+                turns: vec![turn],
+                ..Default::default()
+            },
+            target,
+        )
+    }
+
+    #[test]
+    fn exact_guard_rejects_replaced_result_before_repaint_and_never_repins() {
+        let (mut conversation, target) = fixture();
+        let mut state = TuiState::new(80, 24);
+        state.focused_item_id = Some(target.tool_call_id.clone());
+        assert!(inspect_focused(&mut state, &conversation, None));
+        let original = visit_target(&state, &conversation).unwrap();
+        assert_eq!(
+            original.revision,
+            crate::infrastructure::subagent::session_history::hash_body("literal original output")
+        );
+        let TurnPart::ToolResult { output, .. } = &mut conversation.turns[0].parts[1] else {
+            panic!("fixture result");
+        };
+        output.content = "replacement".into();
+        assert!(visit_target(&state, &conversation).is_none());
+        assert!(inspect_focused(&mut state, &conversation, None));
+        assert!(visit_target(&state, &conversation).is_none());
+    }
+
+    #[test]
+    fn exact_guard_rejects_expired_missing_metadata_and_ambiguous_results() {
+        let (mut conversation, target) = fixture();
+        conversation.turns[0].visit_deadlines.insert(PartId(1), 0);
+        assert!(crate::adapters::tui::session_visit::visit_key(&conversation, &target).is_none());
+        conversation.turns[0].visit_deadlines.remove(&PartId(1));
+        assert!(crate::adapters::tui::session_visit::visit_key(&conversation, &target).is_none());
+        conversation.turns[0]
+            .visit_deadlines
+            .insert(PartId(1), retained_deadline());
+        conversation.turns[0].parts.push(TurnPart::ToolResult {
+            id: PartId(2),
+            refs: PartId(0),
+            output: ToolOutput {
+                content: "ambiguous".into(),
+                is_error: false,
+                diff: WriteDiffState::NotAWrite,
+                images: Vec::new(),
+            },
+        });
+        assert!(crate::adapters::tui::session_visit::visit_key(&conversation, &target).is_none());
+    }
+
+    #[test]
+    fn old_or_unlinked_result_has_no_visit_key_and_never_repins_on_reopen() {
+        let (mut conversation, target) = fixture();
+        conversation.turns[0].visit_deadlines.clear();
+        let mut state = TuiState::new(80, 24);
+        state.focused_item_id = Some(target.tool_call_id);
+        assert!(inspect_focused(&mut state, &conversation, None));
+        let inspector = state.tool_inspectors.values().next().unwrap();
+        assert!(!inspector.can_visit_source());
+        assert!(inspector.visit_key.is_none());
+        assert!(visit_target(&state, &conversation).is_none());
+
+        conversation.turns[0]
+            .visit_deadlines
+            .insert(PartId(1), retained_deadline());
+        assert!(inspect_focused(&mut state, &conversation, None));
+        assert!(visit_target(&state, &conversation).is_none());
+    }
+
+    #[test]
+    fn metadata_revocation_or_expiry_rejects_pinned_action_before_repaint() {
+        for deadline in [None, Some(0)] {
+            let (mut conversation, target) = fixture();
+            let mut state = TuiState::new(80, 24);
+            state.focused_item_id = Some(target.tool_call_id);
+            assert!(inspect_focused(&mut state, &conversation, None));
+            assert!(visit_target(&state, &conversation).is_some());
+            conversation.turns[0].visit_deadlines.clear();
+            if let Some(deadline) = deadline {
+                conversation.turns[0]
+                    .visit_deadlines
+                    .insert(PartId(1), deadline);
+            }
+            assert!(visit_target(&state, &conversation).is_none());
+        }
+    }
+
+    #[test]
+    fn chrome_requires_a_present_unexpired_deadline() {
+        let mut inspector = ToolInspectorState::new(
+            ToolTarget {
+                conversation_id: "main".into(),
+                tool_call_id: "selected".into(),
+            },
+            12,
+        );
+        inspector.visit_current = true;
+        assert!(!inspector.can_visit_source());
+        inspector.visit_expires_at_ms = Some(0);
+        assert!(!inspector.can_visit_source());
+        inspector.visit_expires_at_ms = Some(retained_deadline());
+        assert!(inspector.can_visit_source());
+    }
+
+    #[test]
+    fn open_turn_shadow_cannot_borrow_committed_visit_authority() {
+        let (conversation, target) = fixture();
+        let shadow = conversation.turns[0].clone();
+        let mut state = TuiState::new(80, 24);
+        state.focused_item_id = Some(target.tool_call_id);
+        assert!(inspect_focused(&mut state, &conversation, Some(&shadow)));
+        assert!(visit_target(&state, &conversation).is_none());
     }
 }

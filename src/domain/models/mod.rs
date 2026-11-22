@@ -114,6 +114,8 @@ pub mod view_state;
 #[allow(dead_code)]
 pub mod visual;
 pub mod waiting_hazard;
+// Persisted private event shapes must decode even when the Visit candidate is off.
+pub mod worker_report;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.

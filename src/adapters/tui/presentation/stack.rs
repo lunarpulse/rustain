@@ -35,6 +35,9 @@ pub enum Surface {
     /// `TuiState.agent_window` and its painted title is the frame's `tool_title`
     /// (`Agent · <type>`).
     AgentWindow,
+    /// Local exact Visit; retain the invoking frame as a continuation at the depth cap.
+    #[cfg(feature = "session-visit")]
+    SessionVisit,
     /// The task window (Story 21.7 A8): global slot, one at a time, **stage-bound** to the
     /// conversation of its task (the frame carries that conversation id, so a reset, close or
     /// tab switch of that Stage pops it); its payload is `TuiState.task_window` and its
@@ -79,6 +82,8 @@ impl Surface {
             Self::ArtifactWindow => "Artifact",
             Self::AgentWindow => "Agent",
             Self::TaskWindow => "Task",
+            #[cfg(feature = "session-visit")]
+            Self::SessionVisit => "Session Visit",
             Self::Adapters => "Adapters",
             Self::History => "History",
             Self::Tour => "Tour",
@@ -109,6 +114,8 @@ impl Surface {
             Self::ArtifactWindow => Context::ArtifactWindow,
             Self::AgentWindow => Context::AgentWindow,
             Self::TaskWindow => Context::TaskWindow,
+            #[cfg(feature = "session-visit")]
+            Self::SessionVisit => Context::SessionVisit,
             Self::Adapters => Context::Adapters,
             Self::History => Context::History,
             Self::Tour => Context::Tour,

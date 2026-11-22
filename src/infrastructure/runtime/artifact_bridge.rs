@@ -302,6 +302,12 @@ pub fn fold_artifacts_read(
     let events: Vec<RoomEvent> = entries
         .into_iter()
         .filter_map(|entry| match entry.record {
+            // Private custody handles are never generic artifact addresses.
+            crate::domain::models::JournalRecord::Room(
+                RoomEvent::VisitTurnRecorded { .. }
+                | RoomEvent::VisitLinked { .. }
+                | RoomEvent::LocalEngagement { .. },
+            ) => None,
             crate::domain::models::JournalRecord::Room(event) => {
                 if event == RoomEvent::Unrecognized {
                     unknown_records += 1;
@@ -852,5 +858,136 @@ pub async fn record_verdict(
             }),
         )),
         Err(PatchReviewError::Refused(message)) => Err(message),
+    }
+}
+
+#[cfg(test)]
+mod visit_compatibility_tests {
+    use super::*;
+    use crate::domain::models::artifact::{
+        ArtifactId, ArtifactKind, ContentHash, EvidenceArtifact,
+    };
+    use crate::domain::models::orchestration_room::HostBinding;
+    use crate::domain::models::{
+        CapabilityTokenId, JournalEntry, JournalRecord, OrchestrationRoomId,
+    };
+    use crate::domain::services::transparency::{
+        TransparencyKind, fold_transparency, render_export,
+    };
+
+    /// Run both with and without `session-visit`. This proves this build's
+    /// flag-off compatibility, not downgrade safety for an older binary.
+    #[test]
+    fn mixed_legacy_unknown_and_private_records_keep_handles_out_of_generic_views() {
+        let public_hash = ContentHash::from_bytes([0x11; 32]);
+        let public = EvidenceArtifact {
+            id: ArtifactId::from(public_hash),
+            kind: ArtifactKind::Evidence,
+            producer: AgentId::from_validated("local/public"),
+            content_hash: public_hash,
+            authority: CapabilityTokenId::default(),
+            provenance: Vec::new(),
+            depends_on: Vec::new(),
+            review: None,
+            host: HostBinding::new("host-A", "workspace"),
+        };
+        let private_hash = ContentHash::from_bytes([0x22; 32]);
+        let private = EvidenceArtifact {
+            id: ArtifactId::from(private_hash),
+            producer: AgentId::from_validated("local/private-attempt"),
+            content_hash: private_hash,
+            ..public.clone()
+        };
+        let payloads = [
+            serde_json::json!({"event": "artifact_created", "artifact": public}),
+            serde_json::json!({"event": "future_event_not_known", "private": private}),
+            serde_json::json!({
+                "event": "visit_turn_recorded", "root": "private-root",
+                "attempt": private.producer, "ordinal": 1, "artifact": private, "partial": false
+            }),
+            serde_json::json!({
+                "event": "visit_linked",
+                "key": {
+                    "conversation_id": "private-conversation", "turn_id": "turn-1",
+                    "invocation": 1, "result": 2, "revision": private_hash
+                },
+                "attempt": private.producer, "artifact": private
+            }),
+            serde_json::json!({
+                "event": "local_engagement", "root": "private-root",
+                "attempt": private.producer, "correlation": "private-correlation",
+                "digest": private_hash,
+                "receipt": {
+                    "state": "replied", "request": "private-request",
+                    "ordinal": 2, "artifact": private
+                }
+            }),
+        ];
+        // Legacy envelopes omit the later timestamp field. Exercise the
+        // persisted serde boundary, not just in-memory enum construction.
+        let entries: Vec<JournalEntry> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1, "seq": index + 1,
+                    "record": {"kind": "room", "payload": payload}
+                }))
+                .expect("mixed journal decodes without Visit enabled")
+            })
+            .collect();
+        assert!(entries.iter().all(|entry| entry.recorded_at_ms == 0));
+        assert!(matches!(
+            entries[1].record,
+            JournalRecord::Room(RoomEvent::Unrecognized)
+        ));
+        assert!(matches!(
+            entries[2].record,
+            JournalRecord::Room(RoomEvent::VisitTurnRecorded { .. })
+        ));
+        assert!(matches!(
+            entries[3].record,
+            JournalRecord::Room(RoomEvent::VisitLinked { .. })
+        ));
+        assert!(matches!(
+            entries[4].record,
+            JournalRecord::Room(RoomEvent::LocalEngagement { .. })
+        ));
+
+        let rows = fold_transparency(&entries);
+        assert_eq!(rows.len(), 1, "only the genuinely unknown tag renders");
+        assert_eq!(rows[0].kind, TransparencyKind::Unknown);
+        assert_eq!(rows[0].seq, 2);
+        let export = render_export(&rows);
+        assert!(!export.contains("private"));
+        assert!(!export.contains(&private.id.to_string()));
+
+        let direct = OrchestrationRoom::project_for_host(
+            OrchestrationRoomId::new(),
+            entries.iter().filter_map(|entry| match &entry.record {
+                JournalRecord::Room(event) => Some(event.clone()),
+                _ => None,
+            }),
+            "host-A",
+        );
+        assert_eq!(direct.artifacts().len(), 1);
+        assert!(!direct.artifacts().contains_key(&private.id));
+        assert!(handler::resolve_artifact(&direct, &private.id.to_string()).is_err());
+        assert!(handler::resolve_artifact(&direct, &public.id.to_string()).is_ok());
+
+        let id = OrchestrationRoomId::new();
+        let (artifacts, artifact_head, artifact_unknown) =
+            fold_artifacts_read(entries.clone(), id.clone(), "host-A");
+        let (room, room_head, room_unknown) =
+            crate::infrastructure::runtime::room_bridge::fold_room_read(entries, id, "host-A");
+        assert_eq!((artifact_head, artifact_unknown), (5, 1));
+        assert_eq!((room_head, room_unknown), (5, 1));
+        assert_eq!(artifacts, room);
+        assert_eq!(room.artifacts().len(), 1);
+        assert!(room.artifacts().contains_key(&public.id));
+        assert!(!room.artifacts().contains_key(&private.id));
+        assert!(handler::resolve_artifact(&room, &private.id.to_string()).is_err());
+        assert!(handler::resolve_artifact(&artifacts, &private.id.to_string()).is_err());
+        assert!(room.nodes().is_empty());
     }
 }

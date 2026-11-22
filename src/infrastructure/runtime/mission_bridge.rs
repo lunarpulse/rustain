@@ -8,16 +8,27 @@
 //! rebuilds the tab's rows and refreshes an open agent window from the same cache.
 
 use std::sync::Arc;
+#[cfg(feature = "session-visit")]
+use tokio_util::sync::CancellationToken;
 
 use crate::adapters::tui::decision_queue;
 use crate::adapters::tui::mission_control::agents;
 use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::agent_panel;
+#[cfg(feature = "session-visit")]
+use crate::adapters::tui::{presentation::Surface, session_visit};
 use crate::domain::models::subagent_view::AgentRowView;
 use crate::domain::models::{AgentId, NodeState, Op};
+#[cfg(feature = "session-visit")]
+use crate::domain::models::{
+    Conversation, MessageRole, Turn, TurnPart, conversation::HistorySource,
+    orchestration_room::MainVisitKey, worker_report,
+};
 use crate::infrastructure::runtime::agent_core::AgentCore;
 use crate::infrastructure::runtime::app_state::AppState;
+#[cfg(feature = "session-visit")]
+use crate::infrastructure::subagent::session_history::{SessionHistory, VisitRead, hash_body};
 use crate::infrastructure::subagent::{NodeTree, SubagentSpool};
 
 /// The warning a mutation on a read-only (subagent output) tab gets.
@@ -34,6 +45,357 @@ pub fn get_subagent_provider(
     let composite = any_ref
         .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()?;
     composite.subagent_provider().cloned()
+}
+
+#[cfg(feature = "session-visit")]
+pub(super) fn session_history(agent_core: &AgentCore) -> Option<Arc<SessionHistory>> {
+    get_subagent_provider(agent_core)?
+        .session_history()
+        .cloned()
+}
+
+/// Remove the authenticated handoff while preserving the literal task result.
+/// Only one canonical result in an admitted local Main turn may claim its link.
+#[cfg(feature = "session-visit")]
+pub(super) async fn commit_turn_reports(
+    agent_core: &AgentCore,
+    conversation: &Conversation,
+    local_allowed: bool,
+    turn: &mut Turn,
+) {
+    if turn.role != MessageRole::Assistant {
+        return;
+    }
+    let local = local_allowed && turn.history_source == HistorySource::Local;
+    let part_id = |part: &TurnPart| match part {
+        TurnPart::Prose { id, .. }
+        | TurnPart::ToolInvocation { id, .. }
+        | TurnPart::ToolResult { id, .. }
+        | TurnPart::Reasoning { id, .. }
+        | TurnPart::ProviderReplay { id, .. } => *id,
+    };
+    for index in 0..turn.parts.len() {
+        let TurnPart::ToolResult { id, refs, output } = &turn.parts[index] else {
+            continue;
+        };
+        let Some((_, literal, link)) = worker_report::split_committed(&output.content) else {
+            continue;
+        };
+        let (id, refs) = (*id, *refs);
+        let mut parents = turn.parts.iter().filter(|part| part_id(part) == refs);
+        let unique = matches!(parents.next(), Some(TurnPart::ToolInvocation { tool, .. }) if tool == "task")
+            && parents.next().is_none()
+            && turn.parts.iter().filter(|part| {
+                part_id(part) == id
+                    || matches!(part, TurnPart::ToolResult { refs: parent, .. } if *parent == refs)
+            }).count() == 1
+            && !conversation.turns.iter().any(|committed| committed.id == turn.id);
+        let key = (local && unique && !output.is_error && link.is_some()).then(|| MainVisitKey {
+            conversation_id: conversation.id.clone(),
+            turn_id: turn.id.clone(),
+            invocation: refs,
+            result: id,
+            revision: hash_body(literal),
+        });
+        let prefix_len = output.content.len() - literal.len();
+        if let TurnPart::ToolResult { output, .. } = &mut turn.parts[index] {
+            drop(output.content.drain(..prefix_len));
+        }
+        let Some((key, link)) = key.zip(link) else {
+            continue;
+        };
+        let Some(history) = session_history(agent_core) else {
+            continue;
+        };
+        match history.commit_link(key, link.into_attempt()).await {
+            Ok(report) => {
+                if let Some(deadline) = report.expires_at_ms {
+                    turn.visit_deadlines.insert(id, deadline);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%error, "exact session visit link was not committed");
+            }
+        }
+    }
+}
+
+/// Restore availability only from authorized host metadata, never report bodies.
+#[cfg(feature = "session-visit")]
+pub(super) async fn load_visit_deadlines(
+    agent_core: &AgentCore,
+    conversation: &mut Conversation,
+    local_allowed: bool,
+) {
+    if conversation.turns.is_empty() {
+        return;
+    }
+    if local_allowed && let Some(history) = session_history(agent_core) {
+        history
+            .load_visit_deadlines(conversation, local_allowed)
+            .await;
+    } else {
+        for turn in &mut conversation.turns {
+            turn.visit_deadlines.clear();
+        }
+    }
+}
+
+#[cfg(feature = "session-visit")]
+fn visit_unavailable(state: &mut TuiState, read: VisitRead) {
+    let message = match read {
+        VisitRead::Missing => "No readable retained session for this exact source.",
+        VisitRead::Denied => "Session Visit is not allowed for this source.",
+        VisitRead::Expired => "The retained session for this exact source expired.",
+        VisitRead::Changed => "The exact Session Visit source changed.",
+        VisitRead::Available(_) | VisitRead::Partial(_) => return,
+    };
+    notifications::warning(state, NoticeSource::Session, message);
+}
+
+/// Check live host authority at every async transition and explicit reader effect.
+/// Revocation also scrubs a reader covered by another surface.
+#[cfg(feature = "session-visit")]
+pub(super) fn session_visit_access_allowed(
+    state: &mut TuiState,
+    local_allowed: bool,
+    session_cancel: &CancellationToken,
+) -> bool {
+    if local_allowed && !session_cancel.is_cancelled() {
+        return true;
+    }
+    session_visit::refresh_visit(state, VisitRead::Denied);
+    false
+}
+
+#[cfg(feature = "session-visit")]
+pub(super) async fn open_current_session_visit(
+    state: &mut TuiState,
+    agent_core: &AgentCore,
+    conversation: &Conversation,
+    local_allowed: bool,
+    session_cancel: &CancellationToken,
+) {
+    if !session_visit_access_allowed(state, local_allowed, session_cancel) {
+        visit_unavailable(state, VisitRead::Denied);
+        return;
+    }
+    if !matches!(
+        state.modal_stack.top().map(|frame| frame.surface),
+        Some(Surface::ToolInspector(_))
+    ) {
+        return;
+    }
+    if let Some(key) = crate::adapters::tui::tool_inspector::visit_target(state, conversation) {
+        open_session_visit(
+            state,
+            agent_core,
+            conversation,
+            local_allowed,
+            session_cancel,
+            key,
+        )
+        .await;
+    } else {
+        visit_unavailable(state, VisitRead::Missing);
+    }
+}
+
+#[cfg(feature = "session-visit")]
+async fn read_visit(
+    agent_core: &AgentCore,
+    conversation: &Conversation,
+    local_allowed: bool,
+    key: &MainVisitKey,
+    session_cancel: &CancellationToken,
+) -> VisitRead {
+    if !local_allowed || session_cancel.is_cancelled() || conversation.id != key.conversation_id {
+        return VisitRead::Denied;
+    }
+    let read = match session_history(agent_core) {
+        Some(history) => history.resolve(key, conversation, local_allowed).await,
+        None => VisitRead::Missing,
+    };
+    if session_cancel.is_cancelled() {
+        VisitRead::Denied
+    } else {
+        read
+    }
+}
+
+#[cfg(feature = "session-visit")]
+pub(super) async fn open_session_visit(
+    state: &mut TuiState,
+    agent_core: &AgentCore,
+    conversation: &Conversation,
+    local_allowed: bool,
+    session_cancel: &CancellationToken,
+    key: MainVisitKey,
+) {
+    if !session_visit_access_allowed(state, local_allowed, session_cancel) {
+        visit_unavailable(state, VisitRead::Denied);
+        return;
+    }
+    if let Some(cursor) = session_visit::visit_cursor(state) {
+        if !state
+            .modal_stack
+            .top()
+            .is_some_and(|frame| frame.surface == Surface::SessionVisit)
+        {
+            return;
+        }
+        let same = cursor.key == key;
+        let source = read_visit(
+            agent_core,
+            conversation,
+            local_allowed,
+            &cursor.key,
+            session_cancel,
+        )
+        .await;
+        if !session_visit_access_allowed(state, local_allowed, session_cancel) {
+            return;
+        }
+        let readable = matches!(&source, VisitRead::Available(_) | VisitRead::Partial(_));
+        session_visit::refresh_visit(state, source);
+        if same || !readable {
+            return;
+        }
+        if !session_visit::can_visit_related(state, &key) {
+            visit_unavailable(state, VisitRead::Missing);
+            return;
+        }
+    }
+    let read = read_visit(
+        agent_core,
+        conversation,
+        local_allowed,
+        &key,
+        session_cancel,
+    )
+    .await;
+    if !session_visit_access_allowed(state, local_allowed, session_cancel) {
+        return;
+    }
+    match read {
+        VisitRead::Available(_) | VisitRead::Partial(_) => {
+            session_visit::open_visit(state, key, read);
+        }
+        unavailable => visit_unavailable(state, unavailable),
+    }
+}
+
+/// Recheck source and metadata before every paint and key, including covered
+/// readers. Copy and search use this checked lease; explicit opens resolve anew.
+#[cfg(feature = "session-visit")]
+pub(super) fn reauthorize_session_visit(
+    state: &mut TuiState,
+    agent_core: &AgentCore,
+    conversation: &Conversation,
+    local_allowed: bool,
+) {
+    let Some(cursor) = session_visit::visit_cursor(state) else {
+        return;
+    };
+    let failure = match session_history(agent_core) {
+        Some(history) => history
+            .check_source(&cursor.key, conversation, local_allowed)
+            .or_else(|| {
+                cursor.backing.as_ref().and_then(|backing| {
+                    SessionHistory::check_expiry(cursor.expires_at_ms)
+                        .or_else(|| SessionHistory::check_backing(backing))
+                })
+            }),
+        None => Some(VisitRead::Denied),
+    };
+    if let Some(failure) = failure {
+        session_visit::refresh_visit(state, failure);
+    }
+}
+
+/// Retention expires even while the reader is idle, without reading bodies.
+#[cfg(feature = "session-visit")]
+pub(super) fn expire_session_visit(state: &mut TuiState) {
+    let expired = session_visit::visit_cursor(state)
+        .filter(|cursor| cursor.backing.is_some())
+        .and_then(|cursor| SessionHistory::check_expiry(cursor.expires_at_ms));
+    if let Some(expired) = expired {
+        session_visit::refresh_visit(state, expired);
+    }
+}
+
+#[cfg(all(test, feature = "session-visit"))]
+mod visit_authority_tests {
+    use super::*;
+    use crate::adapters::tui::{
+        artifact_window::ArtifactBody, presentation::reducer, tool_inspector::ToolTarget,
+    };
+    use crate::domain::models::turn::{PartId, TurnId};
+    use crate::infrastructure::subagent::session_history::{VisitBacking, VisitBody, VisitTurn};
+
+    #[test]
+    fn live_cancellation_at_transition_scrubs_active_and_covered_readers() {
+        for covered in [false, true] {
+            let mut state = TuiState::new(60, 16);
+            let session_cancel = CancellationToken::new();
+            reducer::open_tool(
+                &mut state,
+                ToolTarget {
+                    conversation_id: "main".into(),
+                    tool_call_id: "selected".into(),
+                },
+                "Tool · task #1".into(),
+                8,
+            );
+            session_visit::open_visit(
+                &mut state,
+                MainVisitKey {
+                    conversation_id: "main".into(),
+                    turn_id: TurnId("turn".into()),
+                    invocation: PartId(1),
+                    result: PartId(2),
+                    revision: hash_body("literal"),
+                },
+                VisitRead::Available(VisitBody {
+                    attempt: AgentId::new(),
+                    previous: None,
+                    next: None,
+                    report: None,
+                    expires_at_ms: None,
+                    backing: VisitBacking::default(),
+                    turns: vec![VisitTurn {
+                        ordinal: 1,
+                        tool_names: Vec::new(),
+                        public_text: "retained secret".into(),
+                    }],
+                }),
+            );
+            if covered {
+                reducer::open(&mut state, Surface::Help);
+            }
+            assert!(session_visit_access_allowed(
+                &mut state,
+                true,
+                &session_cancel
+            ));
+            assert!(state.session_visit.as_ref().unwrap().text.has_source());
+
+            // Model a read completing after an independently owned shutdown token
+            // cancels, or cancellation between refresh and the copy/search effect.
+            session_cancel.clone().cancel();
+            assert!(!session_visit_access_allowed(
+                &mut state,
+                true,
+                &session_cancel
+            ));
+            let visit = state.session_visit.as_ref().unwrap();
+            assert!(
+                matches!(&visit.text.body, ArtifactBody::Unavailable(label) if label == "Denied")
+            );
+            assert!(visit.cursor.backing.is_none());
+            assert!(visit.title().contains("Denied"));
+        }
+    }
 }
 
 /// Replace the roster the surfaces read: kill confirmations whose agent left are moot, a tail

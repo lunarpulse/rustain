@@ -15,6 +15,9 @@ use crate::domain::ports::{AuthorityProvider, IsolationProvider, SubagentRunner,
 use crate::domain::services::sandbox_narrowing::validate_narrowing;
 use crate::infrastructure::subagent::{NodeTree, SpoolMeta, SubagentSpool};
 
+#[cfg(feature = "session-visit")]
+use crate::infrastructure::subagent::session_history::SessionHistory;
+
 #[derive(Clone)]
 pub struct InProcessSubagentRunner {
     provider: Arc<dyn crate::domain::ports::StreamingProvider>,
@@ -41,6 +44,8 @@ pub struct InProcessSubagentRunner {
     /// Defaults to [`SystemClock`]; a golden-trace test injects a `MockClock`
     /// so the recorded launch time is deterministic.
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "session-visit")]
+    session_history: Option<Arc<SessionHistory>>,
 }
 
 impl InProcessSubagentRunner {
@@ -81,6 +86,8 @@ impl InProcessSubagentRunner {
             authority,
             root_authority,
             clock: Arc::new(crate::domain::clock::SystemClock::default()),
+            #[cfg(feature = "session-visit")]
+            session_history: None,
         }
     }
 
@@ -88,6 +95,12 @@ impl InProcessSubagentRunner {
     /// 17.3d-RC-B). Non-breaking; defaults to [`SystemClock`] in [`new`].
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn with_session_history(mut self, history: Arc<SessionHistory>) -> Self {
+        self.session_history = Some(history);
         self
     }
 
@@ -312,6 +325,16 @@ impl SubagentRunner for InProcessSubagentRunner {
         // scratch cleanup is surfaced to the user — "never silently vanished".
         let notice_event_bus = self.event_bus.clone();
         let registry_for_spawn = self.registry.clone();
+        #[cfg(feature = "session-visit")]
+        let visit = self
+            .session_history
+            .as_ref()
+            .filter(|history| parent.is_none() && history.admits(&agent_id))
+            .map(|history| ChildVisit {
+                history: history.clone(),
+                parent: parent_agent_id.clone(),
+                ordinal: 0,
+            });
         let _handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(run_child(
                 spec,
@@ -338,6 +361,8 @@ impl SubagentRunner for InProcessSubagentRunner {
                 authority_for_spawn,
                 yield_tx,
                 mailbox_budget_for_spawn,
+                #[cfg(feature = "session-visit")]
+                visit,
             ))
             .catch_unwind()
             .await;
@@ -670,6 +695,33 @@ fn update_child_policy(
     }
 }
 
+#[cfg(feature = "session-visit")]
+struct ChildVisit {
+    history: Arc<SessionHistory>,
+    parent: AgentId,
+    ordinal: u32,
+}
+
+#[cfg(feature = "session-visit")]
+impl ChildVisit {
+    fn tool_outcome(available: &[String], tool: &str, outcome: &str) -> Option<String> {
+        (tool != crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
+            && available.iter().any(|name| name == tool))
+        .then(|| format!("{tool}: {outcome}"))
+    }
+
+    async fn record(&mut self, attempt: &AgentId, tools: &[String], public_text: &str) {
+        self.ordinal = self.ordinal.saturating_add(1);
+        if let Err(error) = self
+            .history
+            .record_turn(attempt, &self.parent, self.ordinal, tools, public_text)
+            .await
+        {
+            tracing::debug!(%error, "Visit turn record not written");
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_child(
     spec: AgentLaunchSpec,
@@ -696,6 +748,7 @@ async fn run_child(
     authority: Arc<dyn AuthorityProvider>,
     yield_tx: mpsc::Sender<String>,
     mailbox_budget: crate::infrastructure::subagent::MailboxBudget,
+    #[cfg(feature = "session-visit")] mut visit: Option<ChildVisit>,
 ) {
     use crate::domain::models::tool_call::ApprovalSource;
     use crate::domain::models::{
@@ -1477,6 +1530,8 @@ async fn run_child(
         let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
         // Story 20.1d1b: replayed on this subagent's next request, never spooled.
         let mut provider_replay = Vec::new();
+        #[cfg(feature = "session-visit")]
+        let mut visit_stream_failed = false;
         let mut received_turn_complete = false;
         let mut stop_reason = StopReason::EndTurn;
 
@@ -1658,6 +1713,10 @@ async fn run_child(
                     provider_replay.push(item.clone());
                 }
                 StreamChunk::Error { content } => {
+                    #[cfg(feature = "session-visit")]
+                    {
+                        visit_stream_failed = true;
+                    }
                     if let Err(e) = spool
                         .append(&task_id, format!("ERROR: {}", content).as_bytes())
                         .await
@@ -1707,10 +1766,19 @@ async fn run_child(
             return;
         }
 
+        #[cfg(feature = "session-visit")]
+        let visit_turn = visit
+            .as_mut()
+            .filter(|_| !visit_stream_failed && !cancel.is_cancelled());
+
         child_state.update_metrics(|m| m.turns = m.turns.saturating_add(1));
         match stop_reason {
             StopReason::ToolUse => {
                 if tool_calls.is_empty() {
+                    #[cfg(feature = "session-visit")]
+                    if let Some(visit) = visit_turn {
+                        visit.record(&agent_id, &[], &accumulated_text).await;
+                    }
                     emit_yield(NodeState::Completed, &accumulated_text, &yield_tx).await;
                     emit_status(
                         NodeState::Completed,
@@ -1784,6 +1852,25 @@ async fn run_child(
                     Err(e) => Err(e),
                 };
                 if let Err(err) = gate {
+                    #[cfg(feature = "session-visit")]
+                    if let Some(visit) = visit_turn {
+                        let outcomes: Vec<_> = requests
+                            .iter()
+                            .filter_map(|request| {
+                                ChildVisit::tool_outcome(
+                                    &all_tool_names,
+                                    &request.tool_name,
+                                    "blocked",
+                                )
+                            })
+                            .collect();
+                        let text = &messages
+                            .last()
+                            .expect("assistant message just pushed")
+                            .content;
+                        visit.record(&agent_id, &outcomes, text).await;
+                    }
+
                     let blocked: Vec<ToolResultMessage> = requests
                         .iter()
                         .map(|r| ToolResultMessage {
@@ -1848,7 +1935,32 @@ async fn run_child(
                     .await;
 
                 let mut tool_result_messages: Vec<ToolResultMessage> = Vec::new();
+                #[cfg(feature = "session-visit")]
+                let mut outcomes = Vec::new();
                 for call in terminal {
+                    #[cfg(feature = "session-visit")]
+                    if visit_turn.is_some() {
+                        let status = match &call {
+                            crate::domain::models::ToolCall::Success { result, .. }
+                                if !result.is_error =>
+                            {
+                                Some("succeeded")
+                            }
+                            crate::domain::models::ToolCall::Success { .. }
+                            | crate::domain::models::ToolCall::Error { .. } => Some("failed"),
+                            crate::domain::models::ToolCall::Cancelled { .. } => Some("cancelled"),
+                            _ => None,
+                        };
+                        if let Some(label) = status.and_then(|status| {
+                            ChildVisit::tool_outcome(
+                                &all_tool_names,
+                                &call.request().tool_name,
+                                status,
+                            )
+                        }) {
+                            outcomes.push(label);
+                        }
+                    }
                     let (id, content, is_error, images) = match call {
                         crate::domain::models::ToolCall::Success { id, result, .. } => {
                             (id, result.output, result.is_error, result.images)
@@ -1881,6 +1993,15 @@ async fn run_child(
                     }
                 }
 
+                #[cfg(feature = "session-visit")]
+                if let Some(visit) = visit_turn {
+                    let text = &messages
+                        .last()
+                        .expect("assistant message just pushed")
+                        .content;
+                    visit.record(&agent_id, &outcomes, text).await;
+                }
+
                 // Append tool results as user message
                 messages.push(Message {
                     role: MessageRole::User,
@@ -1897,6 +2018,10 @@ async fn run_child(
                 continue;
             }
             StopReason::EndTurn | StopReason::MaxTokens => {
+                #[cfg(feature = "session-visit")]
+                if let Some(visit) = visit_turn {
+                    visit.record(&agent_id, &[], &accumulated_text).await;
+                }
                 // P1 fix: text was already appended per-chunk during streaming; no redundant write
                 emit_yield(NodeState::Completed, &accumulated_text, &yield_tx).await;
                 emit_status(
@@ -2142,6 +2267,117 @@ mod tests {
             )) as Arc<dyn crate::domain::ports::AuthorityProvider>,
             root,
         )
+    }
+
+    #[cfg(feature = "session-visit")]
+    struct PublicVisitProvider;
+
+    #[cfg(feature = "session-visit")]
+    #[async_trait::async_trait]
+    impl StreamingProvider for PublicVisitProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let chunks = vec![
+                StreamChunk::Thinking {
+                    content: "PRIVATE_THINKING".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::Usage {
+                    usage: crate::domain::models::UsageInfo {
+                        input_tokens: 12,
+                        output_tokens: 34,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                        reasoning_tokens: None,
+                        counters_observed: false,
+                    },
+                    session_id: None,
+                },
+                StreamChunk::Text {
+                    content: "done".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::EndTurn,
+                },
+            ];
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "usage-once".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    #[cfg(feature = "session-visit")]
+    #[tokio::test]
+    async fn visit_records_only_exact_completed_public_text() {
+        use crate::domain::models::node_journal::JournalRecord;
+        use crate::domain::models::orchestration_room::RoomEvent;
+        use crate::domain::ports::ArtifactStore;
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            tmp.path(),
+        ));
+        let history = Arc::new(SessionHistory::new(
+            journal.clone(),
+            store.clone(),
+            crate::infrastructure::subagent::current_host_binding(tmp.path()),
+        ));
+        let (runner, _, _) =
+            make_runner_with_provider(tmp.path(), false, Arc::new(PublicVisitProvider)).await;
+        let runner = runner.with_session_history(history.clone());
+        let attempt = AgentId::new();
+        history.begin("visit-root", &attempt).unwrap();
+        let mut spec = isolated_launch_spec("PRIVATE_PROMPT");
+        spec.isolated = false;
+        let mut handle = runner
+            .launch(spec, CancellationToken::new(), None, attempt.clone())
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&mut handle).await, NodeState::Completed);
+        let records = journal.load().await.unwrap();
+        let artifacts: Vec<_> = records
+            .iter()
+            .filter_map(|entry| match &entry.record {
+                JournalRecord::Room(RoomEvent::VisitTurnRecorded {
+                    attempt: actual,
+                    artifact,
+                    ..
+                }) if actual == &attempt => Some(artifact),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(artifacts.len(), 1);
+        let bytes = store.get(&artifacts[0].id).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["turn"]["public_text"], "done");
+        assert_eq!(body["turn"]["tool_names"], serde_json::json!([]));
+        assert!(!String::from_utf8(bytes).unwrap().contains("PRIVATE_"));
     }
 
     async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
@@ -8229,6 +8465,18 @@ mod tests {
                         "journal TeamSendRecipientSettled action={action:?} index={index} \
                          settlement={settlement:?}"
                     ));
+                }
+                // Private Visit custody is not part of an ordinary flat-root
+                // wave. Keep explicit witnesses so any such event drifts from
+                // the golden instead of disappearing from the sequence.
+                RoomEvent::VisitTurnRecorded { .. } => {
+                    lines.push("journal VisitTurnRecorded".to_owned());
+                }
+                RoomEvent::VisitLinked { .. } => {
+                    lines.push("journal VisitLinked".to_owned());
+                }
+                RoomEvent::LocalEngagement { .. } => {
+                    lines.push("journal LocalEngagement".to_owned());
                 }
                 RoomEvent::Unrecognized => {
                     lines.push("journal Unrecognized".to_owned());

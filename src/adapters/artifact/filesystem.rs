@@ -27,6 +27,11 @@ impl FileSystemArtifactStore {
         }
     }
 
+    #[cfg(feature = "session-visit")]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     #[must_use]
     pub fn with_max_body_bytes(mut self, max_body_bytes: usize) -> Self {
         self.max_body_bytes = max_body_bytes;

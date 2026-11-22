@@ -2313,6 +2313,9 @@ pub struct TuiState {
     /// The agent window's payload (Story 21.7 A7): set by the reducer's opener, cleared when
     /// the frame closes.
     pub agent_window: Option<crate::adapters::tui::agent_window::AgentWindowState>,
+    /// Exact retained local Visit, independent of the live roster and spool cache.
+    #[cfg(feature = "session-visit")]
+    pub(crate) session_visit: Option<crate::adapters::tui::session_visit::VisitWindowState>,
     /// The task window's payload (Story 21.7 A8): set by the reducer's opener, cleared when
     /// the frame closes.
     pub task_window: Option<crate::adapters::tui::task_window::TaskWindowState>,
@@ -2768,6 +2771,8 @@ impl TuiState {
             artifacts_panel: ArtifactsPanelState::default(),
             artifact_window: None,
             agent_window: None,
+            #[cfg(feature = "session-visit")]
+            session_visit: None,
             task_window: None,
             adapters_window: None,
             attached_channel_link: None,

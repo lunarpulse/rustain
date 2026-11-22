@@ -246,6 +246,12 @@ pub fn fold_room_read(
     let events: Vec<RoomEvent> = entries
         .into_iter()
         .filter_map(|entry| match entry.record {
+            // Private custody is not an ordinary room row, including flag-off.
+            crate::domain::models::JournalRecord::Room(
+                RoomEvent::VisitTurnRecorded { .. }
+                | RoomEvent::VisitLinked { .. }
+                | RoomEvent::LocalEngagement { .. },
+            ) => None,
             crate::domain::models::JournalRecord::Room(event) => {
                 if event == RoomEvent::Unrecognized {
                     unknown_records += 1;

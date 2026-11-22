@@ -308,6 +308,13 @@ pub fn render(
             let wrap = render::rail(Context::ToolInspector, ToolCmd::Wrap);
             let copy = render::rail(Context::ToolInspector, ToolCmd::Copy);
             let mut text = back;
+            #[cfg(feature = "session-visit")]
+            if !editing && state.can_visit_source() {
+                text.push_str(&format!(
+                    "  {} Visit source",
+                    render::rail(Context::ToolInspector, ToolCmd::VisitSource)
+                ));
+            }
             if parts.status.is_none() {
                 if state.wrap_applies() {
                     text.push_str(&format!("  {wrap} {wrap_status}"));

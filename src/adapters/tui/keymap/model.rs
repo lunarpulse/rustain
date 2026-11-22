@@ -383,6 +383,9 @@ pub enum Context {
     /// The agent window (Story 21.7 A7): one agent's facts and transcript, `v` rendered or
     /// source, `p` pause or resume, `x` kill (a decision), `c` copies the transcript.
     AgentWindow,
+    /// Exact retained session source, read-only and isolated from agent controls.
+    #[cfg(feature = "session-visit")]
+    SessionVisit,
     /// The Adapters window (Story 21.7 A21): the port and MCP health rows, read-only.
     Adapters,
     /// The Mission Control hub (S-MC): the tab row, the list/detail focus and the RU-25
@@ -451,7 +454,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 61] = [
+    pub const ALL: [Context; 61 + cfg!(feature = "session-visit") as usize] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -473,6 +476,8 @@ impl Context {
         Context::TaskWindow,
         Context::MissionReorder,
         Context::AgentWindow,
+        #[cfg(feature = "session-visit")]
+        Context::SessionVisit,
         Context::Adapters,
         Context::MissionControl,
         Context::ArtifactWindow,
@@ -539,6 +544,8 @@ impl Context {
             Context::TaskWindow => "Task window",
             Context::MissionReorder => "Tasks (reorder)",
             Context::AgentWindow => "Agent window",
+            #[cfg(feature = "session-visit")]
+            Context::SessionVisit => "Session Visit",
             Context::Adapters => "Adapters",
             Context::MissionControl => "Mission Control",
             Context::ArtifactWindow => "Artifact window",
@@ -627,6 +634,8 @@ impl Context {
             Context::ArtifactWindow => &[Context::MarkdownBody],
             // The agent window: the Markdown body rows (`v`) and the RU-25 scroll rows.
             Context::AgentWindow => &[Context::MarkdownBody],
+            #[cfg(feature = "session-visit")]
+            Context::SessionVisit => &[Context::InspectorBody],
             // The Adapters window: the RU-25 scroll rows only.
             Context::Adapters => &[Context::InspectorBody],
             // The block viewport's chain excludes the thread rows: `l` moves columns there.

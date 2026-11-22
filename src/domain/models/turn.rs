@@ -196,6 +196,10 @@ pub enum InvocationStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutput {
+    #[cfg_attr(
+        feature = "session-visit",
+        serde(serialize_with = "serialize_literal_tool_output")
+    )]
     pub content: String,
     pub is_error: bool,
     /// UI-only display-diff state riding the journaled tool result (Story
@@ -206,6 +210,18 @@ pub struct ToolOutput {
     /// Result images, persisted for the provider history (Story 20.1d4a T1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<super::message::ImageAttachment>,
+}
+
+/// Interrupted turns and mirrors serialize through the same boundary as a
+/// normal commit. Do not persist the transient process-authenticated handle.
+#[cfg(feature = "session-visit")]
+fn serialize_literal_tool_output<S: serde::Serializer>(
+    content: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let literal =
+        super::worker_report::split_committed(content).map_or(content, |(_, original, _)| original);
+    serializer.serialize_str(literal)
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +398,11 @@ pub struct Turn {
     /// turns recorded before it and for migrated rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub responses: Vec<ResponseMark>,
+    /// A metadata-only offer for an already bound exact Visit. Never stored
+    /// with the turn, shown to a provider, or sufficient to authorize a read.
+    #[cfg(feature = "session-visit")]
+    #[serde(skip)]
+    pub(crate) visit_deadlines: std::collections::BTreeMap<PartId, i64>,
     /// Turn-local counter; not persisted.
     #[serde(skip)]
     next_part_id: u64,
@@ -420,6 +441,8 @@ impl Turn {
             history_source: super::conversation::HistorySource::Local,
             stop_reason: None,
             responses: Vec::new(),
+            #[cfg(feature = "session-visit")]
+            visit_deadlines: Default::default(),
             next_part_id: 0,
         }
     }
@@ -638,6 +661,8 @@ pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
         // The row's own `ResponseSpan` blocks stay on the row; the mirror keeps
         // them for a turn without marks (Story 20.1d4a T2).
         responses: Vec::new(),
+        #[cfg(feature = "session-visit")]
+        visit_deadlines: Default::default(),
         next_part_id: 0,
     };
     turn.history_source = if msg.is_peer_display() {
@@ -718,6 +743,34 @@ fn map_tool_call_status(tc: &ToolCallInfo) -> InvocationStatus {
 mod tests {
     use super::*;
     use crate::domain::models::{MessageRole, ToolResultInfo};
+
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn interrupted_tool_output_serializes_literal_without_transient_visit_link() {
+        use super::super::worker_report::{VisitAttemptLink, frame_visit};
+        let literal = "ordinary kept tool result\n";
+        let attempt = crate::domain::models::AgentId::new();
+        let framed = frame_visit(literal, VisitAttemptLink::new(attempt.clone()));
+        let mut output = ToolOutput {
+            content: framed.clone(),
+            is_error: false,
+            diff: Default::default(),
+            images: Vec::new(),
+        };
+        let saved = serde_json::to_string(&output).unwrap();
+        assert!(!saved.contains(attempt.as_str()));
+        assert_eq!(
+            serde_json::from_str::<ToolOutput>(&saved).unwrap().content,
+            literal
+        );
+        assert_eq!(
+            output.content, framed,
+            "commit still owns the ephemeral handoff"
+        );
+        output.content.push_str("different literal");
+        let saved = serde_json::to_string(&output).unwrap();
+        assert_eq!(serde_json::from_str::<ToolOutput>(&saved).unwrap(), output);
+    }
 
     #[test]
     fn story21_5_parts_epochs_track_mutation_clone_and_rehydration_without_wire_changes() {

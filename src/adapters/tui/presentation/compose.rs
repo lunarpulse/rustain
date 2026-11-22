@@ -144,6 +144,14 @@ pub fn compose(
                 modal.title(),
                 show_caret,
             ),
+            #[cfg(feature = "session-visit")]
+            Surface::SessionVisit => crate::adapters::tui::widgets::agent_window::render_visit(
+                frame,
+                rect,
+                state,
+                modal.title(),
+                show_caret,
+            ),
             Surface::TaskWindow => crate::adapters::tui::widgets::task_window::render(
                 frame,
                 rect,
@@ -295,7 +303,10 @@ pub fn compose(
             ),
         }
         opaque.frame(rect);
-        if depth > 0 && modal.surface != Surface::Search {
+        let show_breadcrumb = depth > 0 && modal.surface != Surface::Search;
+        #[cfg(feature = "session-visit")]
+        let show_breadcrumb = show_breadcrumb && modal.surface != Surface::SessionVisit;
+        if show_breadcrumb {
             let ancestor = Style::default().fg(theme.colors.fg_secondary);
             let current = Style::default().fg(theme.colors.fg_primary);
             let mut title = Vec::with_capacity(depth * 2 + 3);
@@ -326,6 +337,8 @@ pub fn compose(
                 | Surface::Adapters
                 | Surface::History
                 | Surface::Tour => theme.colors.accent,
+                #[cfg(feature = "session-visit")]
+                Surface::SessionVisit => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

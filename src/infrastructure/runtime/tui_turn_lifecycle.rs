@@ -13,6 +13,8 @@ use crate::domain::clock::Clock;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{Conversation, StopReason, StreamChunk, StreamingState};
 use crate::domain::services::reducer::ReducerState;
+#[cfg(feature = "session-visit")]
+use crate::infrastructure::subagent::session_history::SessionHistory;
 
 struct Producer {
     identity: u64,
@@ -27,9 +29,24 @@ struct Producer {
 pub struct TuiTurnLifecycle {
     next_identity: u64,
     producers: HashMap<String, Producer>,
+    #[cfg(feature = "session-visit")]
+    visit_history: Option<std::sync::Arc<SessionHistory>>,
 }
 
 impl TuiTurnLifecycle {
+    #[cfg(feature = "session-visit")]
+    pub(super) fn set_visit_history(&mut self, history: Option<std::sync::Arc<SessionHistory>>) {
+        self.visit_history = history;
+    }
+
+    /// Close custody only for this producer root, after any successful drain.
+    #[cfg(feature = "session-visit")]
+    pub(super) fn discard_visit_offers(&self, root: &str) {
+        if let Some(history) = self.visit_history.as_ref() {
+            history.discard_offers(root);
+        }
+    }
+
     pub fn is_live(&self, conversation_id: &str) -> bool {
         self.producers.contains_key(conversation_id)
     }
@@ -55,6 +72,8 @@ impl TuiTurnLifecycle {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let owner = conversation_id.clone();
         let forwarding_cancel = cancel.clone();
+        #[cfg(feature = "session-visit")]
+        let close_visit_on_eof = self.visit_history.is_some();
         let forwarder = tokio::spawn(async move {
             let mut closing = false;
             let mut terminal_seen = false;
@@ -76,9 +95,16 @@ impl TuiTurnLifecycle {
                     // Natural producer EOF is the accounting boundary. Some
                     // adapters emit Usage after a normal terminal; completion
                     // effects must observe that usage before saving/retitling.
+                    let stop_reason = buffered_success;
+                    #[cfg(feature = "session-visit")]
+                    let stop_reason = stop_reason.or_else(|| {
+                        // Attribute a fatal provider's terminal-less EOF to its
+                        // producer, never whichever tab receives its notice.
+                        (close_visit_on_eof && !terminal_seen).then_some(StopReason::Cancelled)
+                    });
                     if !closing
                         && !forwarding_cancel.is_cancelled()
-                        && let Some(stop_reason) = buffered_success
+                        && let Some(stop_reason) = stop_reason
                     {
                         let _ = domain_tx.send(AppEvent::LocalProviderChunk {
                             conversation_id: owner.clone(),
@@ -179,6 +205,8 @@ impl TuiTurnLifecycle {
             if let Some(task) = producer.task_abort {
                 task.abort();
             }
+            #[cfg(feature = "session-visit")]
+            self.discard_visit_offers(conversation_id);
         }
     }
 
@@ -288,10 +316,16 @@ impl TuiTurnLifecycle {
 
 impl Drop for TuiTurnLifecycle {
     fn drop(&mut self) {
-        for (_, producer) in self.producers.drain() {
+        #[cfg(feature = "session-visit")]
+        let history = self.visit_history.as_deref();
+        for (_root, producer) in self.producers.drain() {
             producer.cancel.cancel();
             if let Some(task) = producer.task_abort {
                 task.abort();
+            }
+            #[cfg(feature = "session-visit")]
+            if let Some(history) = history {
+                history.discard_offers(&_root);
             }
         }
     }
