@@ -405,6 +405,7 @@ Also inherits: Inspector body.
 | `Right` | Select the next Mission Control tab (inert while only one tab exists) | local, attached | portable |  |
 | `Tab` | Move between the list and its detail preview (only where the frame shows both) | local, attached | portable |  |
 | `Enter` | Open the selected row's window (Agents, Tasks, Artifacts) | local | portable |  |
+| `t` | Open the exact peer thread of the selected delegation (Agents; only where this host verified it) | local | portable |  |
 | `e` | Export the unfiltered A2A log snapshot the Messages view was read from | local | portable |  |
 | `p` | Pause the selected running agent or task, or resume a suspended agent or a paused task (Agents, Tasks) | local | portable |  |
 | `x` | Ask to kill the selected agent and its subtree (Agents), or to cancel the plan (Tasks); a decision confirms it | local | portable |  |
@@ -690,6 +691,7 @@ Also inherits: Markdown body.
 | `3` | Leave the third retrospective field out of what is shared, or put it back | attached | portable |  |
 | `u` | Use the opened item as peer context for this conversation, or stop using it | attached | portable |  |
 | `x` | Retract the item you sent, or your newest auto-sent reply to this item (asks to confirm first) | local, attached | portable |  |
+| `f` | Follow up on the newest eligible turn of the sent thread in a field of this window (local host, writable tab; sends through /team followup) | local | portable |  |
 
 ## Thread reply field
 
@@ -697,12 +699,12 @@ Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Enter` | Send the reply through /team reply and close the thread window | attached | portable |  |
-| `Esc` | Clear the reply and leave its field | attached | portable |  |
-| `Ctrl+C` | Clear the reply and leave its field | attached | portable |  |
-| `Ctrl+X` | Open the menu above this reply field | attached | portable |  |
-| `Ctrl+P` | Open the command palette above this reply field | attached | portable |  |
-| `Ctrl+Q` | Ask to quit without closing this reply field | attached | portable |  |
+| `Enter` | Send the reply through /team reply and close the thread window (attached), or the follow-up through /team followup and keep the window open for its receipt (local) | local, attached | portable |  |
+| `Esc` | Clear the reply or follow-up and leave its field | local, attached | portable |  |
+| `Ctrl+C` | Clear the reply or follow-up and leave its field | local, attached | portable |  |
+| `Ctrl+X` | Open the menu above this reply or follow-up field | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this reply or follow-up field | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing this reply or follow-up field | local, attached | portable |  |
 
 ## Block viewport
 

@@ -775,11 +775,18 @@ async fn read_thread_block(
         conversation_id,
         generation,
         message,
+        follow_up,
     } = event
     else {
         panic!("a thread read publishes TeamThreadReady, got {event:?}");
     };
-    team_thread_ready(state, &conversation_id, generation, &message);
+    team_thread_ready(
+        state,
+        &conversation_id,
+        generation,
+        &message,
+        follow_up.as_deref(),
+    );
     assert!(!state.feedback_blocks.contains_key("team-thread"));
     state
         .thread_inspector
@@ -1274,12 +1281,14 @@ async fn the_reply_round_trip_through_every_front_door() {
         &first_read.origin,
         first_read.generation,
         "stale completion",
+        None,
     );
     team_thread_ready(
         &mut state,
         "other-origin",
         current_read.generation,
         "foreign completion",
+        None,
     );
     assert_eq!(state.thread_inspector.as_ref().unwrap().content, again);
     assert_eq!(
@@ -2649,3 +2658,24 @@ mod b_k02_model_resume;
 
 #[path = "conformance_19_18b/b_k03_model_cancel.rs"]
 mod b_k03_model_cancel;
+
+#[path = "conformance_agents_thread/ak01_open_one.rs"]
+mod ak01_open_one;
+
+#[path = "conformance_agents_thread/ak02_duplicates.rs"]
+mod ak02_duplicates;
+
+#[path = "conformance_agents_thread/ak03_zero_many.rs"]
+mod ak03_zero_many;
+
+#[path = "conformance_agents_thread/ak04_late.rs"]
+mod ak04_late;
+
+#[path = "conformance_agents_thread/ak05_follow_up.rs"]
+mod ak05_follow_up;
+
+#[path = "conformance_agents_thread/ak06_lost_answer.rs"]
+mod ak06_lost_answer;
+
+#[path = "conformance_agents_thread/ak07_ownership.rs"]
+mod ak07_ownership;

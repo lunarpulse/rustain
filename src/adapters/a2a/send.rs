@@ -1246,44 +1246,41 @@ pub enum ThreadRead {
     Failed(RecipientOutcome),
 }
 
-/// Read one thread on `peer_id`'s host and settle it against this host's
-/// ledger. Shared by explicit `/team thread` and status action-board reads.
-pub async fn read_thread(
+/// Resolve `peer_id`'s roster binding and its JSON-RPC transport (card slot → endpoint): the
+/// preamble every thread read shares. The `Err` side is the read's own refusal.
+async fn thread_transport(
     runtime: &A2aDelegationRuntime,
     peer_id: &str,
-    item_id: &str,
-) -> ThreadRead {
-    use super::jsonrpc::JsonRpcErrorKind;
-
+) -> Result<(crate::domain::models::A2aPeerSpec, TaskClient), ThreadRead> {
     let Some((spec, client)) = runtime.peer_binding(peer_id) else {
-        return ThreadRead::UnknownPeer {
+        return Err(ThreadRead::UnknownPeer {
             known: runtime.known_peer_ids(),
-        };
+        });
     };
     let card = match client.card_slot().await {
         CardSlot::Ready(card, _) => card,
         CardSlot::AnchorRefused(cause) => {
-            return ThreadRead::Failed(RecipientOutcome::Unreachable {
+            return Err(ThreadRead::Failed(RecipientOutcome::Unreachable {
                 cause: Some(SendCause::Ratified(
                     anchor_error(&spec.id, &cause).to_string(),
                 )),
-            });
+            }));
         }
         CardSlot::Pending | CardSlot::Unavailable => {
-            return ThreadRead::Failed(RecipientOutcome::Unreachable {
+            return Err(ThreadRead::Failed(RecipientOutcome::Unreachable {
                 cause: Some(SendCause::Ratified(
                     SendError::CardNotCached {
                         peer: peer_id.to_owned(),
                     }
                     .to_string(),
                 )),
-            });
+            }));
         }
     };
     let endpoint = match resolve_jsonrpc_endpoint(&card) {
         Ok(endpoint) => endpoint,
         Err(source) => {
-            return ThreadRead::Failed(RecipientOutcome::Unreachable {
+            return Err(ThreadRead::Failed(RecipientOutcome::Unreachable {
                 cause: Some(SendCause::PeerInfluenced(
                     SendError::Endpoint {
                         peer: peer_id.to_owned(),
@@ -1291,17 +1288,25 @@ pub async fn read_thread(
                     }
                     .to_string(),
                 )),
-            });
+            }));
         }
     };
     let transport = TaskClient::new(client, endpoint.url().to_owned());
-    // Story 19.18c `A10` — resolve this host's capability for the item first;
-    // a failed list read renders like a failed thread read and sends nothing.
-    let capability = match capability_for(runtime, &spec, &transport, item_id).await {
-        Ok(capability) => capability,
-        Err(error) => return ThreadRead::Failed(transport_failure(&error)),
-    };
-    let result = match transport.read_thread(item_id, capability.as_ref()).await {
+    Ok((spec, transport))
+}
+
+/// Read `item_id`'s thread with the capability already resolved, bound it, parse it and settle
+/// it against this host's ledger: the tail every thread read shares.
+async fn read_thread_with(
+    runtime: &A2aDelegationRuntime,
+    spec: &crate::domain::models::A2aPeerSpec,
+    transport: &TaskClient,
+    item_id: &str,
+    capability: Option<&ItemCapability>,
+) -> ThreadRead {
+    use super::jsonrpc::JsonRpcErrorKind;
+
+    let result = match transport.read_thread(item_id, capability).await {
         Ok(result) => result,
         Err(A2aError::JsonRpc { code, .. }) => {
             return match JsonRpcErrorKind::classify(code) {
@@ -1334,8 +1339,97 @@ pub async fn read_thread(
             }
         })
         .collect();
-    let mine = runtime.settle_thread(&spec, &observed).await;
+    let mine = runtime.settle_thread(spec, &observed).await;
     ThreadRead::Read { thread, mine }
+}
+
+/// Read one thread on `peer_id`'s host and settle it against this host's
+/// ledger. Shared by explicit `/team thread` and status action-board reads.
+pub async fn read_thread(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    item_id: &str,
+) -> ThreadRead {
+    let (spec, transport) = match thread_transport(runtime, peer_id).await {
+        Ok(resolved) => resolved,
+        Err(refusal) => return refusal,
+    };
+    // Story 19.18c `A10` — resolve this host's capability for the item first;
+    // a failed list read renders like a failed thread read and sends nothing.
+    let capability = match capability_for(runtime, &spec, &transport, item_id).await {
+        Ok(capability) => capability,
+        Err(error) => return ThreadRead::Failed(transport_failure(&error)),
+    };
+    read_thread_with(runtime, &spec, &transport, item_id, capability.as_ref()).await
+}
+
+/// What resolving one remote task to its item thread produced (story `agents-thread` D4).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TaskThreadRead {
+    /// Exactly one scoped list row names the task: its item id and the thread read of it
+    /// (the same read `/team thread <peer> <item>` performs).
+    One { item: String, read: ThreadRead },
+    /// Two or more rows name the task: nothing was read; the exact item ids in list order.
+    Candidates(Vec<String>),
+    /// No row names the task: nothing was read.
+    NoItem,
+    /// The peer is unknown or the list read failed (`ThreadRead::UnknownPeer` or
+    /// `ThreadRead::Failed`): nothing was read.
+    Failed(ThreadRead),
+}
+
+/// The item ids of `listed` (an `x-rustain-items/list` result) whose `task` equals `task`
+/// byte for byte, in list order. A row without a string `itemId` or `task`, and an absent or
+/// non-array `items`, never match.
+#[must_use]
+pub fn items_for_task(listed: &serde_json::Value, task: &str) -> Vec<String> {
+    listed
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| row.get("task").and_then(serde_json::Value::as_str) == Some(task))
+        .filter_map(|row| row.get("itemId").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Story `agents-thread` D4 — the thread of the one item that names `task` on `peer_id`'s
+/// host: one scoped `x-rustain-items/list`, then (only for exactly one match) the shared
+/// thread read with the capability derived for `task` (the derivation `capability_for`
+/// reaches at its step 3). Zero or several matches read no thread. The caller proves the
+/// task is its own dispatch before asking; a task this host did not dispatch derives no
+/// capability here either (`PQ2`).
+pub async fn read_thread_of_task(
+    runtime: &A2aDelegationRuntime,
+    peer_id: &str,
+    task: &str,
+) -> TaskThreadRead {
+    let (spec, transport) = match thread_transport(runtime, peer_id).await {
+        Ok(resolved) => resolved,
+        Err(refusal) => return TaskThreadRead::Failed(refusal),
+    };
+    let listed = match transport.list_items().await {
+        Ok(listed) => listed,
+        Err(error) => return TaskThreadRead::Failed(ThreadRead::Failed(transport_failure(&error))),
+    };
+    let mut items = items_for_task(&listed, task);
+    match items.len() {
+        0 => TaskThreadRead::NoItem,
+        1 => {
+            let item = items.remove(0);
+            let capability = if runtime.resolves_capabilities() {
+                runtime.own_task_capability(&spec, task).await
+            } else {
+                None
+            };
+            let read =
+                read_thread_with(runtime, &spec, &transport, &item, capability.as_ref()).await;
+            TaskThreadRead::One { item, read }
+        }
+        _ => TaskThreadRead::Candidates(items),
+    }
 }
 
 /// A failed read in 19.17's outcome vocabulary — ⛔ no new cause words:
@@ -2404,6 +2498,40 @@ mod tests {
             selection: Some(&selection),
             ..request
         }));
+    }
+
+    /// Story `agents-thread` D4 — the list filter is exact bytes, in list order, and never
+    /// guesses: absent or non-array `items`, rows missing a string `itemId` or `task`, and a
+    /// task that differs only by case, a prefix or a trailing space match nothing.
+    #[test]
+    fn agents_thread_items_for_task_is_exact_ordered_and_total() {
+        use serde_json::json;
+
+        let listed = json!({"items": [
+            {"itemId": "ri_1", "task": "t-a", "state": "received", "ordinal": 1},
+            {"itemId": "ri_2", "task": "t-b"},
+            {"itemId": "ri_3", "task": "t-a"},
+            {"itemId": 7, "task": "t-a"},
+            {"task": "t-a"},
+            {"itemId": "ri_4", "task": 9},
+            {"itemId": "ri_5"},
+            {"itemId": "ri_6", "task": "T-A"},
+            {"itemId": "ri_7", "task": "t-a "},
+            {"itemId": "ri_8", "task": "t-"},
+        ]});
+        assert_eq!(
+            super::items_for_task(&listed, "t-a"),
+            vec!["ri_1".to_owned(), "ri_3".to_owned()]
+        );
+        assert_eq!(
+            super::items_for_task(&listed, "t-b"),
+            vec!["ri_2".to_owned()]
+        );
+        assert!(super::items_for_task(&listed, "t-zzz").is_empty());
+        assert!(super::items_for_task(&listed, "").is_empty());
+        assert!(super::items_for_task(&json!({}), "t-a").is_empty());
+        assert!(super::items_for_task(&json!({"items": "t-a"}), "t-a").is_empty());
+        assert!(super::items_for_task(&json!(null), "t-a").is_empty());
     }
 }
 

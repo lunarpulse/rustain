@@ -45,6 +45,7 @@ async fn thread(sender: &mut Sender, state: &mut TuiState, peer: &str, item: &st
         conversation_id,
         generation,
         message,
+        follow_up,
     } = event
     else {
         panic!("thread front door must publish its settled result: {event:?}");
@@ -54,6 +55,7 @@ async fn thread(sender: &mut Sender, state: &mut TuiState, peer: &str, item: &st
         &conversation_id,
         generation,
         &message,
+        follow_up.as_deref(),
     );
     assert!(!state.feedback_blocks.contains_key("team-thread"));
     state

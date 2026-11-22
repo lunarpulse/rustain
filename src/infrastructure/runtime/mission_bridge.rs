@@ -17,6 +17,7 @@ use crate::adapters::tui::widgets::agent_panel;
 use crate::domain::models::subagent_view::AgentRowView;
 use crate::domain::models::{AgentId, NodeState, Op};
 use crate::infrastructure::runtime::agent_core::AgentCore;
+use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::subagent::{NodeTree, SubagentSpool};
 
 /// The warning a mutation on a read-only (subagent output) tab gets.
@@ -55,11 +56,15 @@ pub async fn refresh_roster_from(state: &mut TuiState, registry: &NodeTree) {
     apply_roster(state, entries);
 }
 
-pub async fn refresh_roster(state: &mut TuiState, agent_core: &AgentCore) {
-    match get_subagent_provider(agent_core) {
+/// Refresh the roster the surfaces read and recompute the Agents tab's peer-thread offers
+/// (story `agents-thread`: every refresh site goes through here, so an offer never outlives
+/// the roster it was computed from).
+pub async fn refresh_roster(state: &mut TuiState, app_state: &AppState) {
+    match get_subagent_provider(&app_state.agent_core) {
         Some(provider) => refresh_roster_from(state, provider.registry()).await,
         None => apply_roster(state, Vec::new()),
     }
+    super::agents_thread::refresh_offers(state, app_state).await;
 }
 
 /// The tail of an agent's spool as text: the last [`TAIL_READ_BYTES`] bytes, cut at a character
@@ -133,13 +138,14 @@ pub async fn open_agents_tab_from(
     }
 }
 
-pub async fn open_agents_tab(state: &mut TuiState, agent_core: &AgentCore) {
-    match get_subagent_provider(agent_core) {
+pub async fn open_agents_tab(state: &mut TuiState, app_state: &AppState) {
+    match get_subagent_provider(&app_state.agent_core) {
         Some(provider) => {
             open_agents_tab_from(state, provider.registry(), provider.spool()).await;
         }
         None => apply_roster(state, Vec::new()),
     }
+    super::agents_thread::refresh_offers(state, app_state).await;
 }
 
 /// `Enter` on an Agents row: the agent's window, opened on a fresh roster and tail.
@@ -154,8 +160,8 @@ pub async fn open_agent_window_from(
     crate::adapters::tui::agent_window::open(state, agent_id);
 }
 
-pub async fn open_agent_window(state: &mut TuiState, agent_core: &AgentCore, agent_id: AgentId) {
-    match get_subagent_provider(agent_core) {
+pub async fn open_agent_window(state: &mut TuiState, app_state: &AppState, agent_id: AgentId) {
+    match get_subagent_provider(&app_state.agent_core) {
         Some(provider) => {
             open_agent_window_from(state, provider.registry(), provider.spool(), agent_id).await;
         }
@@ -164,6 +170,7 @@ pub async fn open_agent_window(state: &mut TuiState, agent_core: &AgentCore, age
             crate::adapters::tui::agent_window::open(state, agent_id);
         }
     }
+    super::agents_thread::refresh_offers(state, app_state).await;
 }
 
 fn refuse_read_only(state: &mut TuiState) {

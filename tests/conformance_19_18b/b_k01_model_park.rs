@@ -470,7 +470,10 @@ pub(super) fn answer(handle: &str, message: &str) -> Value {
     json!({ "continue": handle, "message": message })
 }
 
-/// The model rail's dispatch row for one sent `message/send` request.
+/// The model rail's dispatch row for one sent `message/send` request. Story `agents-thread`
+/// (author decision D6) moved the row's `content_hash` from `None` to the hash of the text the
+/// request sent — the bytes a typed `/team send` row hashes — so a delegation's own item is
+/// labelled and followed up by the same task-and-hash rule.
 pub(super) fn dispatched(
     spec: &A2aPeerSpec,
     request: &Value,
@@ -482,7 +485,7 @@ pub(super) fn dispatched(
         task: Some(message["messageId"].as_str().expect("messageId").to_owned()),
         bytes: message["parts"][0]["text"].as_str().expect("text").len(),
         act: DispatchAct::Task,
-        content_hash: None,
+        content_hash: Some(result_hash(&message["parts"][0]["text"])),
         endpoint,
         action: None,
         authorship: Authorship::AgentComposed,

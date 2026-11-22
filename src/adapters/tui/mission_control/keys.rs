@@ -79,6 +79,18 @@ pub(crate) fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction 
                 }
             }
         }
+        // The peer thread of a delegation row, only where the rail painted the hint whole (so
+        // only where the A2A owner verified an offer) and no lookup is already pending for it.
+        CommandId::Mission(MissionCmd::Thread) => {
+            if state.mission_control.tab == McTab::Agents
+                && state.mission_control.fit().thread
+                && !super::agents::thread_pending(state)
+                && super::agents::thread_offer(state).is_some()
+                && let Some(entry) = super::agents::selected(state)
+            {
+                return InputAction::OpenAgentThread(entry.agent_id.clone());
+            }
+        }
         CommandId::Mission(MissionCmd::Pause) => {
             let mission = &state.mission_control;
             if mission.fit().pause
@@ -245,7 +257,12 @@ fn scroll(state: &mut TuiState, command: ViewerCmd) {
                         fit.detail_viewport,
                     );
                 }
-                _ => mission.move_selection(command),
+                _ => {
+                    mission.move_selection(command);
+                    // A pending thread lookup belongs to the row it was pressed on: moving off
+                    // it voids it for good (coming back does not revive it).
+                    state.agent_threads.opening = None;
+                }
             }
         }
     }
@@ -294,5 +311,141 @@ pub(crate) fn ignores_raw_key(state: &TuiState, key: &crossterm::event::KeyEvent
             !plain && !(key.modifiers == KeyModifiers::CONTROL && "xpqcdu".contains(c))
         }
         _ => !key.modifiers.is_empty(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::tui::mission_control::{Fit, agents};
+    use crate::adapters::tui::state::AgentThreadOpening;
+    use crate::domain::models::subagent_view::{AgentRowView, OwnershipKind};
+    use crate::domain::models::{AgentId, NodeState, SentThreadOffer};
+
+    fn delegation_row() -> AgentRowView {
+        AgentRowView {
+            isolated: false,
+            agent_id: AgentId::new(),
+            parent_id: AgentId::root(),
+            subagent_type: "a2a-peer".to_owned(),
+            spawned_at: 0,
+            depth: 1,
+            current_status: NodeState::Running,
+            ownership: OwnershipKind::Peer,
+            effective_model: String::new(),
+            tools_summary: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            wait_reason: None,
+        }
+    }
+
+    /// What a paint that fitted `t Open thread` whole records.
+    fn painted_thread(state: &TuiState) {
+        let fit = Fit {
+            thread: true,
+            ..Fit::default()
+        };
+        state.mission_control.set_fit(fit);
+    }
+
+    /// Mission Control on Agents with two offered delegation rows, the first selected and its
+    /// hint painted.
+    fn agents_frame() -> (TuiState, AgentId, AgentId) {
+        let mut state = TuiState::new(80, 24);
+        let (a, b) = (delegation_row(), delegation_row());
+        let (first, second) = (a.agent_id.clone(), b.agent_id.clone());
+        for id in [&first, &second] {
+            let offer = SentThreadOffer {
+                peer: "marcus".to_owned(),
+                task: id.as_str().to_owned(),
+            };
+            state.agent_threads.offers.insert(id.clone(), offer);
+        }
+        state.agent_panel_state.cached_entries = vec![a, b];
+        agents::sync(&mut state);
+        reducer::open_mission_control(&mut state, McTab::Agents);
+        state.mission_control.move_selection(ViewerCmd::Top);
+        painted_thread(&state);
+        (state, first, second)
+    }
+
+    #[test]
+    fn agents_thread_t_needs_the_painted_hint_the_selected_offer_and_no_pending_lookup() {
+        let (mut state, a, b) = agents_frame();
+        assert_eq!(
+            on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::OpenAgentThread(a.clone())
+        );
+        // The key opens nothing by itself: the host owns the lookup and its generation.
+        assert_eq!(state.agent_threads.opening, None);
+        assert_eq!(
+            on_key(&mut state, Key::Char('t'), Host::Attached),
+            InputAction::Consumed
+        );
+        // A lookup pending for the selected row holds the key.
+        state.agent_threads.opening = Some(AgentThreadOpening {
+            agent: a.clone(),
+            generation: 1,
+        });
+        assert_eq!(
+            on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+        // Another row's lookup does not.
+        state.agent_threads.opening = Some(AgentThreadOpening {
+            agent: b,
+            generation: 2,
+        });
+        assert_eq!(
+            on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::OpenAgentThread(a.clone())
+        );
+        state.agent_threads.opening = None;
+        // The hint was not painted.
+        state.mission_control.set_fit(Fit::default());
+        assert_eq!(
+            on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+        // Painted, but the roster refresh withdrew the offer since.
+        painted_thread(&state);
+        assert!(state.agent_threads.offers.remove(&a).is_some());
+        assert_eq!(
+            on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+        // Another tab never opens a thread, whatever the fit says.
+        let (mut tasks, _, _) = agents_frame();
+        reducer::set_mission_tab(&mut tasks, McTab::Tasks);
+        painted_thread(&tasks);
+        assert_eq!(
+            on_key(&mut tasks, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+    }
+
+    #[test]
+    fn agents_thread_moving_the_selection_voids_a_pending_lookup_for_good() {
+        let (mut state, a, b) = agents_frame();
+        state.agent_threads.opening = Some(AgentThreadOpening {
+            agent: a.clone(),
+            generation: 1,
+        });
+        assert!(agents::thread_pending(&state));
+        assert_eq!(
+            on_key(&mut state, Key::Char('j'), Host::Local),
+            InputAction::Consumed
+        );
+        assert_eq!(state.mission_control.selected_id(), Some(b.as_str()));
+        assert_eq!(state.agent_threads.opening, None);
+        // Coming back does not revive it.
+        assert_eq!(
+            on_key(&mut state, Key::Char('k'), Host::Local),
+            InputAction::Consumed
+        );
+        assert_eq!(state.mission_control.selected_id(), Some(a.as_str()));
+        assert!(!agents::thread_pending(&state));
     }
 }

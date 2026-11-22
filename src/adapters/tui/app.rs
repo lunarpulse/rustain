@@ -50,6 +50,15 @@ pub enum InputAction {
         peer: String,
         item: String,
     },
+    /// `Enter` in the follow-up field of a local sent thread: the `/team followup <peer> <turn>
+    /// <text>` the frame stands for (story `agents-thread`). The host re-checks its authority
+    /// at dispatch (`transparency_bridge::follow_up_sent`); the field stays open until then.
+    ThreadFollowUp {
+        peer: String,
+        item: String,
+        turn: String,
+        text: String,
+    },
     /// Enter pressed with this text (buffer already cleared by handle_input).
     SubmitMessage(String),
     /// User wants to exit.
@@ -220,6 +229,9 @@ pub enum InputAction {
     TaskReorderCancel,
     /// `Enter` on an Agents row: open the agent's window (the host refreshes its transcript).
     OpenAgentWindow(crate::domain::models::AgentId),
+    /// `t` on an Agents row with a verified peer exchange: resolve and open its sent thread
+    /// (story `agents-thread`; the host owns the lookup and its generation).
+    OpenAgentThread(crate::domain::models::AgentId),
     /// `p` on an agent: pause it when running, resume it when suspended (one `Op`).
     AgentPauseResume(crate::domain::models::AgentId),
     /// `x` on an agent: ask to kill it (raises the confirmation decision; never a direct op).

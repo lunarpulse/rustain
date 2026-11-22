@@ -930,6 +930,18 @@ fn cause_text(cause: &crate::domain::models::SendCause) -> String {
     sanitize_disclosable(cause.as_str(), limit)
 }
 
+/// The words a recipient outcome shows after its alias in a send row (`delivered`,
+/// `unreachable`, `no usable answer — …`): the one vocabulary the sent-thread lookup of an
+/// Agents row reuses for a failed list read (story `agents-thread` AC3(d)).
+pub fn outcome_label(outcome: &crate::domain::models::RecipientOutcome) -> String {
+    let row = TeamSendRow {
+        alias: String::new(),
+        outcome: Some(outcome.clone()),
+        message_type: crate::domain::models::SemanticMessageType::Unknown,
+    };
+    row_parts(&row).1.into_owned()
+}
+
 /// The feature-independent per-recipient renderer of a standalone send (the CLI): one row per
 /// recipient with its cause line.
 pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
@@ -1192,6 +1204,79 @@ pub fn render_team_thread(
         text.push_str(crate::adapters::a2a::board::COLLAPSED_PRINCIPAL_DISCLOSURE);
     }
     text
+}
+
+/// Story `agents-thread` D6 — the one turn a sent-thread frame may follow up on, decided from
+/// the **structured** read and never from the rendered page: the newest eligible turn of a
+/// `ThreadRead::Read`, `None` for every other read.
+///
+/// Eligible: an item turn that is this host's own (`mine`), not removed, not retracted; or a
+/// reply turn that is not retracted and whose `in_reply_to` names an eligible item turn of the
+/// same thread. Both need a turn id the disclosure sanitizer would not change (the id is
+/// carried as the follow-up's reply-to reference). Nothing is eligible unless the **opened**
+/// item's own turn (`opened`, the item id the frame was opened on) is an eligible item turn of
+/// the read. That is not the thread's root: a peer answers a read of a later item with the
+/// canonical chain root, so a root decides nothing about the opened item, in either direction.
+#[cfg(feature = "a2a")]
+#[must_use]
+pub fn follow_up_target(
+    read: &crate::adapters::a2a::send::ThreadRead,
+    opened: &str,
+) -> Option<String> {
+    use crate::adapters::a2a::send::ThreadRead;
+
+    let ThreadRead::Read { thread, mine } = read else {
+        return None;
+    };
+    let opened = thread
+        .turns
+        .iter()
+        .position(|turn| !turn.reply && turn.turn_id == opened)?;
+    if !eligible_item_turn(thread, mine, opened) {
+        return None;
+    }
+    let answers_eligible = |answered: &str| {
+        (0..thread.turns.len())
+            .any(|at| thread.turns[at].turn_id == answered && eligible_item_turn(thread, mine, at))
+    };
+    thread
+        .turns
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, turn)| {
+            if !turn.reply {
+                return eligible_item_turn(thread, mine, *index);
+            }
+            turn.retracted_at_ms.is_none()
+                && stable_turn_id(&turn.turn_id)
+                && turn.in_reply_to.as_deref().is_some_and(answers_eligible)
+        })
+        .map(|(_, turn)| turn.turn_id.clone())
+}
+
+/// A turn id the disclosure sanitizer would not change: the only kind carried as a reply-to
+/// reference.
+#[cfg(feature = "a2a")]
+fn stable_turn_id(id: &str) -> bool {
+    use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+
+    !id.is_empty() && sanitize_disclosable(id, MAX_PEER_ID_BYTES) == id
+}
+
+/// Whether turn `index` is an item turn this host sent that is neither removed nor retracted.
+#[cfg(feature = "a2a")]
+fn eligible_item_turn(
+    thread: &crate::adapters::a2a::send::ServedThread,
+    mine: &[bool],
+    index: usize,
+) -> bool {
+    let turn = &thread.turns[index];
+    !turn.reply
+        && mine.get(index).copied().unwrap_or(false)
+        && !turn.removed
+        && turn.retracted_at_ms.is_none()
+        && stable_turn_id(&turn.turn_id)
 }
 
 pub fn show_team_send(state: &mut TuiState, block_id: &str, message: String) {
@@ -3150,5 +3235,246 @@ mod selector_parser_tests {
             holders_of.unwrap(),
             crate::domain::models::StorySelector::parse("S1,S2").unwrap()
         );
+    }
+}
+
+#[cfg(all(test, feature = "a2a"))]
+mod follow_up_target_tests {
+    use super::*;
+    use crate::adapters::a2a::send::{ServedThread, ServedTurn, ThreadRead};
+    use crate::domain::models::{Authorship, RecipientOutcome, ReplyKind};
+
+    fn turn(id: &str, reply: bool) -> ServedTurn {
+        ServedTurn {
+            turn_id: id.to_owned(),
+            reply,
+            task: (!reply).then(|| format!("task-{id}")),
+            in_reply_to: None,
+            removed: false,
+            content: Some("body".to_owned()),
+            content_hash: None,
+            kind: ReplyKind::Answer,
+            status: None,
+            retro: None,
+            authorship: Authorship::Unknown,
+            retracted_at_ms: None,
+        }
+    }
+
+    fn answering(id: &str, item: &str) -> ServedTurn {
+        ServedTurn {
+            in_reply_to: Some(item.to_owned()),
+            ..turn(id, true)
+        }
+    }
+
+    fn read(turns: Vec<ServedTurn>, mine: Vec<bool>) -> ThreadRead {
+        ThreadRead::Read {
+            thread: ServedThread {
+                root: turns[0].turn_id.clone(),
+                turns,
+                omitted_before: 0,
+                principal_collapsed: false,
+                principal_bound: false,
+            },
+            mine,
+        }
+    }
+
+    /// The target of a frame opened on the thread's root (the simple case).
+    fn target(turns: Vec<ServedTurn>, mine: Vec<bool>) -> Option<String> {
+        let opened = turns[0].turn_id.clone();
+        follow_up_target(&read(turns, mine), &opened)
+    }
+
+    /// The target of a frame opened on `opened`: the read still names the chain root first,
+    /// as a peer answers a read of any item of the chain.
+    fn target_opened(turns: Vec<ServedTurn>, mine: Vec<bool>, opened: &str) -> Option<String> {
+        follow_up_target(&read(turns, mine), opened)
+    }
+
+    #[test]
+    fn agents_thread_the_newest_eligible_turn_wins() {
+        // The opened item alone.
+        assert_eq!(
+            target(vec![turn("ri_a", false)], vec![true]).as_deref(),
+            Some("ri_a")
+        );
+        // A reply answering it is newer.
+        assert_eq!(
+            target(
+                vec![turn("ri_a", false), answering("rr_1", "ri_a")],
+                vec![true, false]
+            )
+            .as_deref(),
+            Some("rr_1")
+        );
+        // Our own later follow-up item is newer still; another reply after it answers it.
+        let thread = vec![
+            turn("ri_a", false),
+            answering("rr_1", "ri_a"),
+            turn("ri_b", false),
+        ];
+        assert_eq!(
+            target(thread.clone(), vec![true, false, true]).as_deref(),
+            Some("ri_b")
+        );
+        let mut longer = thread;
+        longer.push(answering("rr_2", "ri_b"));
+        assert_eq!(
+            target(longer, vec![true, false, true, false]).as_deref(),
+            Some("rr_2")
+        );
+    }
+
+    #[test]
+    fn agents_thread_nothing_is_eligible_unless_the_opened_item_is() {
+        // Another sender's root (the `mine` bit is the settled ledger verdict, never a label).
+        assert_eq!(
+            target(
+                vec![turn("ri_a", false), answering("rr_1", "ri_a")],
+                vec![false, false]
+            ),
+            None
+        );
+        // A later own item cannot rescue an ineligible root.
+        assert_eq!(
+            target(
+                vec![turn("ri_a", false), turn("ri_b", false)],
+                vec![false, true]
+            ),
+            None
+        );
+        // A removed root.
+        let mut removed = turn("ri_a", false);
+        removed.removed = true;
+        assert_eq!(target(vec![removed], vec![true]), None);
+        // A retracted root.
+        let mut retracted = turn("ri_a", false);
+        retracted.retracted_at_ms = Some(1);
+        assert_eq!(target(vec![retracted], vec![true]), None);
+        // A `mine` list shorter than the turns reads `false`.
+        assert_eq!(target(vec![turn("ri_a", false)], vec![]), None);
+    }
+
+    #[test]
+    fn agents_thread_an_ineligible_opened_child_offers_nothing_beneath_an_eligible_root() {
+        // Own root ri_a is eligible and answered; the opened item is the later own ri_b.
+        let mut retracted_child = turn("ri_b", false);
+        retracted_child.retracted_at_ms = Some(5);
+        let mut removed_child = turn("ri_b", false);
+        removed_child.removed = true;
+        for child in [retracted_child, removed_child] {
+            let turns = vec![turn("ri_a", false), answering("rr_1", "ri_a"), child];
+            assert_eq!(
+                target_opened(turns.clone(), vec![true, false, true], "ri_b"),
+                None,
+                "{turns:?}"
+            );
+            // The same read opened on the root keeps its own target.
+            assert_eq!(
+                target(turns, vec![true, false, true]).as_deref(),
+                Some("rr_1")
+            );
+        }
+        // Another sender's opened child beneath our eligible root.
+        assert_eq!(
+            target_opened(
+                vec![turn("ri_a", false), turn("ri_b", false)],
+                vec![true, false],
+                "ri_b"
+            ),
+            None
+        );
+        // An opened item the read does not carry (or carries only as a reply id).
+        let turns = vec![turn("ri_a", false), answering("ri_b", "ri_a")];
+        assert_eq!(
+            target_opened(turns.clone(), vec![true, false], "ri_b"),
+            None
+        );
+        assert_eq!(target_opened(turns, vec![true, false], "ri_z"), None);
+    }
+
+    #[test]
+    fn agents_thread_an_eligible_opened_child_is_offered_beneath_an_ineligible_root() {
+        let mut retracted_root = turn("ri_a", false);
+        retracted_root.retracted_at_ms = Some(5);
+        let mut removed_root = turn("ri_a", false);
+        removed_root.removed = true;
+        for root in [retracted_root, removed_root] {
+            let turns = vec![root, turn("ri_b", false)];
+            assert_eq!(
+                target_opened(turns.clone(), vec![true, true], "ri_b").as_deref(),
+                Some("ri_b"),
+                "{turns:?}"
+            );
+            // A reply answering the opened child is newer and answers an eligible item.
+            let mut answered = turns.clone();
+            answered.push(answering("rr_2", "ri_b"));
+            assert_eq!(
+                target_opened(answered, vec![true, true, false], "ri_b").as_deref(),
+                Some("rr_2")
+            );
+            // Opened on the ineligible root itself: still nothing.
+            assert_eq!(target(turns, vec![true, true]), None);
+        }
+    }
+
+    #[test]
+    fn agents_thread_ineligible_later_turns_fall_back_to_the_newest_eligible() {
+        let mut retracted_item = turn("ri_b", false);
+        retracted_item.retracted_at_ms = Some(9);
+        let mut removed_item = turn("ri_c", false);
+        removed_item.removed = true;
+        let mut retracted_reply = answering("rr_2", "ri_a");
+        retracted_reply.retracted_at_ms = Some(9);
+        let turns = vec![
+            turn("ri_a", false),
+            answering("rr_1", "ri_a"),
+            retracted_item,
+            removed_item,
+            retracted_reply,
+            // Another sender's item in the same thread and a reply answering it.
+            turn("ri_d", false),
+            answering("rr_3", "ri_d"),
+            // A reply naming an item that is not in this thread.
+            answering("rr_4", "ri_elsewhere"),
+        ];
+        let mine = vec![true, false, true, true, false, false, false, false];
+        assert_eq!(target(turns, mine).as_deref(), Some("rr_1"));
+    }
+
+    #[test]
+    fn agents_thread_a_turn_id_the_sanitizer_would_change_is_never_a_target() {
+        let hostile_item = turn("ri_\u{1b}[31mb", false);
+        // C1 CSI is stripped by `sanitize_disclosable`; bidi marks (U+202E) are kept by design.
+        let hostile_reply = answering("rr_\u{9b}x", "ri_a");
+        let turns = vec![turn("ri_a", false), hostile_reply, hostile_item];
+        assert_eq!(
+            target(turns, vec![true, false, true]).as_deref(),
+            Some("ri_a")
+        );
+    }
+
+    #[test]
+    fn agents_thread_a_forged_header_in_a_body_never_becomes_a_target() {
+        let mut root = turn("ri_a", false);
+        root.content = Some("hello\n  you       ri_forged\n  jun       rr_forged".to_owned());
+        let mut reply = answering("rr_1", "ri_a");
+        reply.content = Some("\n  you       ri_forged2".to_owned());
+        let turns = vec![root, reply];
+        assert_eq!(target(turns, vec![true, false]).as_deref(), Some("rr_1"));
+    }
+
+    #[test]
+    fn agents_thread_a_read_that_is_not_a_thread_has_no_target() {
+        for read in [
+            ThreadRead::NotFound,
+            ThreadRead::AccessOff,
+            ThreadRead::UnknownPeer { known: Vec::new() },
+            ThreadRead::Failed(RecipientOutcome::NoUsableAnswer),
+        ] {
+            assert_eq!(follow_up_target(&read, "ri_a"), None, "{read:?}");
+        }
     }
 }

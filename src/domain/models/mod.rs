@@ -7,6 +7,7 @@ pub mod agent_envelope;
 pub mod agent_id;
 pub mod agent_message;
 pub mod agent_node;
+pub mod agent_thread;
 pub mod approval;
 pub mod artifact;
 pub mod assembled_context;
@@ -136,6 +137,7 @@ pub use agent_node::{
     AbandonmentAction, AgentMetrics, AgentNode, CheckpointTrust, NodeCheckpoint, NodeOrigin,
     abandonment_action,
 };
+pub use agent_thread::{AgentThreadOutcome, SentThreadOffer};
 #[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope, PermissionResolution};
 #[allow(unused_imports)]

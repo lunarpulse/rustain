@@ -2752,6 +2752,7 @@ async fn k03_socket_defer_is_durable_and_does_not_consume_the_answer() {
         conversation_id,
         generation,
         message,
+        follow_up,
     } = viewed
     else {
         panic!("thread view publishes TeamThreadReady: {viewed:?}");
@@ -2761,6 +2762,7 @@ async fn k03_socket_defer_is_durable_and_does_not_consume_the_answer() {
         &conversation_id,
         generation,
         &message,
+        follow_up.as_deref(),
     );
     assert!(!state.feedback_blocks.contains_key("team-thread"));
     let rendered = &state

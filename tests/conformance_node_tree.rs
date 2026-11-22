@@ -615,7 +615,13 @@ fn test_import_site_count_pinned() {
     // (roster, spool tail, pause/resume and kill ops). It owns the registry access
     // the deleted inspector arms in `event_loop.rs` had, so the TUI widgets keep
     // consuming `AgentRowView` and never name the tree (section 7 below).
-    const EXPECTED: usize = 34;
+    // 34 -> 36 (Story agents-thread): `adapters/a2a/agent_thread.rs` and
+    // `infrastructure/runtime/agents_thread.rs` construct the real A2A delegation
+    // runtime (`A2aDelegationRuntime::new(NodeTree::new(), ..)`) only inside their
+    // `#[cfg(test)]` modules, to prove the Agents-row offer/open binding against real
+    // delegations and the bridge's lookup spawn. Production receives the composed
+    // runtime; no new tree instance, no domain/executor or TUI concrete-tree coupling.
+    const EXPECTED: usize = 36;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

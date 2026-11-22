@@ -244,7 +244,9 @@ pub fn route(
             _ => {}
         }
     }
-    // The reply field edits its own text; only `Enter`/`Esc` reach the attached host.
+    // The reply field edits its own text; only `Enter`/`Esc` reach the attached host. On the
+    // local host the same field is the sent frame's follow-up (story `agents-thread`): its own
+    // keys resolve to the follow-up executor, never to a daemon.
     if context == Context::ThreadReply {
         let own = matches!(
             keymap::resolve(context, host, &[key]),
@@ -252,10 +254,12 @@ pub fn route(
         );
         return Some(if own && host == Host::Attached {
             RouteEffect::Frame(context)
+        } else if own {
+            RouteEffect::Action(crate::adapters::tui::thread_inspector::on_follow_up_key(
+                state, key,
+            ))
         } else {
-            if !own {
-                app::dispatch_frame_key(state, context, key, host);
-            }
+            app::dispatch_frame_key(state, context, key, host);
             RouteEffect::Consumed
         });
     }

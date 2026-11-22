@@ -1713,11 +1713,18 @@ impl Sender {
             conversation_id,
             generation,
             message,
+            follow_up,
         } = event
         else {
             panic!("a thread read publishes TeamThreadReady, got {event:?}");
         };
-        team_thread_ready(state, &conversation_id, generation, &message);
+        team_thread_ready(
+            state,
+            &conversation_id,
+            generation,
+            &message,
+            follow_up.as_deref(),
+        );
         assert!(!state.feedback_blocks.contains_key("team-thread"));
         state
             .thread_inspector

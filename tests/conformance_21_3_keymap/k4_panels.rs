@@ -206,6 +206,7 @@ fn tasks_tab_rows_act_on_the_selected_task_by_ref() {
         w(&[Key::Tab], "Consumed | Tasks sel=plan-1#2 pane=Master top=Some(MissionControl) search=false reorder=0 leader=false"),
         wp(&[Key::Tab], "Consumed | Tasks sel=plan-1#2 pane=Detail top=Some(MissionControl) search=false reorder=0 leader=false", paint_wide),
         w(&[Key::Enter], r#"OpenTaskWindow(TaskRef { conversation_id: "conv-1", plan_id: "plan-1", number: 2 }) | Tasks sel=plan-1#2 pane=Master top=Some(MissionControl) search=false reorder=0 leader=false"#),
+        w(&[Key::Char('t')], "Consumed | Tasks sel=plan-1#2 pane=Master top=Some(MissionControl) search=false reorder=0 leader=false"),
         w(&[Key::Char('e')], "Consumed | Tasks sel=plan-1#2 pane=Master top=Some(MissionControl) search=false reorder=0 leader=false"),
         w(&[Key::Char('p')], r#"TaskPause(TaskRef { conversation_id: "conv-1", plan_id: "plan-1", number: 2 }) | Tasks sel=plan-1#2 pane=Master top=Some(MissionControl) search=false reorder=0 leader=false"#),
         w(&[Key::Char('x')], r#"TaskCancelPlan(TaskRef { conversation_id: "conv-1", plan_id: "plan-1", number: 2 }) | Tasks sel=plan-1#2 pane=Master top=Some(MissionControl) search=false reorder=0 leader=false"#),

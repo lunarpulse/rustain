@@ -106,6 +106,11 @@ pub struct SentThread {
     pub mine: bool,
     /// The read marks the opened item retracted.
     pub retracted: bool,
+    /// The newest turn of the completed local read a follow-up may answer (story
+    /// `agents-thread` D6), decided from the structured thread by
+    /// `thread_open::offer_follow_up`; `None` while loading, for an attached read (its text
+    /// arrives rendered over protocol v16) and for any read with no eligible turn.
+    pub follow_up: Option<String>,
 }
 
 /// What the opening host may do with the thread: act on it (attached writer), only read it
@@ -137,6 +142,9 @@ pub struct ThreadReplyField {
     pub field: crate::adapters::tui::presentation::text_field::TextField,
     /// `[d] Discuss` of a story list: the typed verdict is `--discuss`.
     pub discuss: bool,
+    /// The turn a follow-up field answers (story `agents-thread` AC7); `None` is a reply
+    /// field. A follow-up field is the local sent frame's own, never the attached reply's.
+    pub follow_up: Option<String>,
 }
 
 impl ThreadReplyField {
@@ -148,6 +156,61 @@ impl ThreadReplyField {
             format!("/team reply {item_id} ")
         }
     }
+}
+
+/// What the Agents tab knows about the peer exchanges of its rows (story `agents-thread`).
+/// Offers are computed by the A2A owner on every roster refresh and keyed by the row's
+/// `AgentId`; they never decide anything by label. Empty without the `a2a` feature.
+#[derive(Debug, Default)]
+pub struct AgentThreads {
+    pub offers: BTreeMap<crate::domain::models::AgentId, crate::domain::models::SentThreadOffer>,
+    /// The one lookup in flight (AC5): cleared when the selection or the tab changes and when
+    /// its completion applies.
+    pub opening: Option<AgentThreadOpening>,
+    /// Source of the lookup generations; only the completion carrying `opening`'s applies.
+    pub generation: u64,
+}
+
+/// A pending `t Open thread` lookup: the row it was pressed on and its generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentThreadOpening {
+    pub agent: crate::domain::models::AgentId,
+    pub generation: u64,
+}
+
+/// A frame follow-up in flight (story `agents-thread` AC9): which thread's outcome log gets
+/// its receipt, the turn it answers and the text to retain or clear when its row settles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowUpReceipt {
+    /// The roster alias the follow-up was sent to (its send row's alias).
+    pub peer: String,
+    /// The `outcome_key()` of the sent thread the follow-up was written in.
+    pub key: String,
+    pub turn: String,
+    pub text: String,
+    /// The draft stamp of this send on `key` (`ThreadOutcomes::stamp_send`): a failed
+    /// settlement restores `text` only while no newer draft of that thread exists.
+    pub draft: u64,
+}
+
+/// The outcome-log key of the thread of `item` sent to `peer`: `sent:<peer>:<item>`, with
+/// every `\` and `:` of the alias escaped by a `\`. Aliases and peer item ids may both contain
+/// `:`, so the plain concatenation would file `(p, q:r)` and `(p:q, r)` under one key; the
+/// escaped alias ends at the first unescaped `:`, which makes the key injective. An alias
+/// with neither character keys exactly as before.
+#[must_use]
+pub fn sent_outcome_key(peer: &str, item: &str) -> String {
+    let mut key = String::with_capacity("sent:".len() + peer.len() + 1 + item.len());
+    key.push_str("sent:");
+    for character in peer.chars() {
+        if matches!(character, '\\' | ':') {
+            key.push('\\');
+        }
+        key.push(character);
+    }
+    key.push(':');
+    key.push_str(item);
+    key
 }
 
 /// Rows laid out for one (width, content generation, retrospective overlay) and the footer
@@ -270,12 +333,13 @@ impl ThreadInspectorState {
         }
     }
 
-    /// The key of this target in the outcome log: the item id, or `node:<id>`.
+    /// The key of this target in the outcome log: the item id, `node:<id>`, or
+    /// [`sent_outcome_key`] of a sent thread.
     pub fn outcome_key(&self) -> String {
         match &self.target {
             ThreadTarget::Item(address) => address.item().as_str().to_owned(),
             ThreadTarget::Node(node) => format!("node:{node}"),
-            ThreadTarget::Sent { peer, item } => format!("sent:{peer}:{item}"),
+            ThreadTarget::Sent { peer, item } => sent_outcome_key(peer, item),
         }
     }
 
@@ -2108,6 +2172,11 @@ pub struct TuiState {
     pub team_send_next_id: u64,
     /// Source of the sent-thread read generations (`/team thread` and reopen).
     pub thread_read_generation: u64,
+    /// The Agents tab's verified peer-thread offers and its one pending lookup (story
+    /// `agents-thread`).
+    pub agent_threads: AgentThreads,
+    /// Frame follow-ups whose send block has not settled yet, by block id (AC9).
+    pub thread_follow_ups: BTreeMap<String, FollowUpReceipt>,
     /// The session decision queue (Story 21.6): every question the session asks,
     /// keyed `(kind, source, conversation)`; its items own the payloads the old
     /// per-kind slots held (a large image, a delete target).
@@ -2643,6 +2712,8 @@ impl TuiState {
             team_send_blocks: BTreeMap::new(),
             team_send_next_id: 0,
             thread_read_generation: 0,
+            agent_threads: AgentThreads::default(),
+            thread_follow_ups: BTreeMap::new(),
             decisions: Default::default(),
             last_printable_at: None,
             pending_z: false,

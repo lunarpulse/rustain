@@ -50,3 +50,6 @@ mod k16_retract;
 
 #[path = "conformance_21_8_thread_inspector/k18_summary.rs"]
 mod k18_summary;
+
+#[path = "conformance_21_8_thread_inspector/k19_follow_up.rs"]
+mod k19_follow_up;

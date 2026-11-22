@@ -132,6 +132,7 @@ pub fn render(frame: &mut Frame<'_>, rect: Rect, state: &TuiState, title: &str, 
         fit.search = painted.search;
         fit.export = painted.export;
         fit.open = painted.open;
+        fit.thread = painted.thread;
         fit.pause = painted.pause;
         fit.kill = painted.kill;
         fit.skip = painted.skip;
@@ -387,6 +388,7 @@ struct Painted {
     search: bool,
     export: bool,
     open: bool,
+    thread: bool,
     pause: bool,
     kill: bool,
     skip: bool,
@@ -399,6 +401,7 @@ enum Hint {
     Search,
     Export,
     Open,
+    Thread,
     Pause,
     Kill,
     Skip,
@@ -454,6 +457,21 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
             ),
             Some(Hint::Open),
         ));
+    }
+    // The peer thread of a delegation row follows `Enter Open` (so it outlives `p` and `x` on
+    // a narrow rail); while its lookup is pending the hint is plain text and the key is inert.
+    if mission.tab == McTab::Agents && host == Host::Local && mission.selected_id().is_some() {
+        if agents::thread_pending(state) {
+            items.push(("opening thread…".to_owned(), None));
+        } else if agents::thread_offer(state).is_some() {
+            items.push((
+                format!(
+                    "{} Open thread",
+                    rail(KeyContext::MissionControl, MissionCmd::Thread)
+                ),
+                Some(Hint::Thread),
+            ));
+        }
     }
     if mission.tab == McTab::Tasks
         && host == Host::Local
@@ -599,6 +617,7 @@ fn rail_text(state: &TuiState, fit: &Fit, host: Host, width: usize) -> (String, 
                     Some(Hint::Search) => painted.search = true,
                     Some(Hint::Export) => painted.export = true,
                     Some(Hint::Open) => painted.open = true,
+                    Some(Hint::Thread) => painted.thread = true,
                     Some(Hint::Pause) => painted.pause = true,
                     Some(Hint::Kill) => painted.kill = true,
                     Some(Hint::Skip) => painted.skip = true,
@@ -629,4 +648,157 @@ fn reorder_rail() -> String {
 
 fn search_open(state: &TuiState) -> bool {
     crate::adapters::tui::mission_control::search_editing(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::tui::app::InputAction;
+    use crate::adapters::tui::keymap::Key;
+    use crate::adapters::tui::mission_control::keys;
+    use crate::adapters::tui::presentation::reducer;
+    use crate::adapters::tui::state::AgentThreadOpening;
+    use crate::domain::models::subagent_view::{AgentRowView, OwnershipKind};
+    use crate::domain::models::{AgentId, NodeState, SentThreadOffer};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    const HEIGHT: u16 = 24;
+
+    /// A running delegation row (a peer node, as the model-rail delegation registers it).
+    fn delegation_row() -> AgentRowView {
+        AgentRowView {
+            isolated: false,
+            agent_id: AgentId::new(),
+            parent_id: AgentId::root(),
+            subagent_type: "a2a-peer".to_owned(),
+            spawned_at: 0,
+            depth: 1,
+            current_status: NodeState::Running,
+            ownership: OwnershipKind::Peer,
+            effective_model: String::new(),
+            tools_summary: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            wait_reason: None,
+        }
+    }
+
+    /// Mission Control on Agents with one running delegation row selected; `offered` gives the
+    /// row a verified peer exchange.
+    fn agents_frame(offered: bool) -> (TuiState, AgentId) {
+        let mut state = TuiState::new(80, HEIGHT);
+        let row = delegation_row();
+        let id = row.agent_id.clone();
+        state.agent_panel_state.cached_entries = vec![row];
+        agents::sync(&mut state);
+        reducer::open_mission_control(&mut state, McTab::Agents);
+        state.mission_control.move_selection(ViewerCmd::LineDown);
+        assert_eq!(state.mission_control.selected_id(), Some(id.as_str()));
+        if offered {
+            let offer = SentThreadOffer {
+                peer: "marcus".to_owned(),
+                task: "task-1".to_owned(),
+            };
+            state.agent_threads.offers.insert(id.clone(), offer);
+        }
+        (state, id)
+    }
+
+    /// The rail (the last inner row) of the frame painted at `outer` columns for `host`.
+    fn painted_rail(state: &TuiState, outer: u16, host: Host) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(outer, HEIGHT)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state, "Agents", host))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (1..outer - 1)
+            .map(|x| buffer[(x, HEIGHT - 2)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn agents_thread_the_rail_paints_open_thread_right_after_open_and_t_follows_it() {
+        for outer in [80, 130] {
+            let (mut state, id) = agents_frame(true);
+            let rail = painted_rail(&state, outer, Host::Local);
+            assert!(rail.contains("[Enter] Open  [t] Open thread"), "{rail}");
+            let thread = rail.find("[t] Open thread").unwrap();
+            let pause = rail.find("[p] Pause").unwrap();
+            assert!(thread < pause, "{rail}");
+            assert!(rail.contains("[x] Kill"), "{rail}");
+            assert!(state.mission_control.fit().thread);
+            assert_eq!(
+                keys::on_key(&mut state, Key::Char('t'), Host::Local),
+                InputAction::OpenAgentThread(id)
+            );
+        }
+    }
+
+    #[test]
+    fn agents_thread_a_row_without_a_verified_offer_paints_no_hint_and_t_is_inert() {
+        let (mut state, _) = agents_frame(false);
+        let rail = painted_rail(&state, 80, Host::Local);
+        assert!(!rail.contains("Open thread"), "{rail}");
+        assert!(rail.contains("[Enter] Open  [p] Pause"), "{rail}");
+        assert!(!state.mission_control.fit().thread);
+        assert_eq!(
+            keys::on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+    }
+
+    #[test]
+    fn agents_thread_a_pending_lookup_paints_opening_thread_and_t_is_inert() {
+        let (mut state, id) = agents_frame(true);
+        let opening = AgentThreadOpening {
+            agent: id,
+            generation: 1,
+        };
+        state.agent_threads.opening = Some(opening.clone());
+        let rail = painted_rail(&state, 80, Host::Local);
+        assert!(rail.contains("[Enter] Open  opening thread…"), "{rail}");
+        assert!(!rail.contains("[t]"), "{rail}");
+        assert!(!state.mission_control.fit().thread);
+        assert_eq!(
+            keys::on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+        assert_eq!(state.agent_threads.opening, Some(opening));
+    }
+
+    #[test]
+    fn agents_thread_a_rail_too_narrow_for_the_hint_leaves_t_inert() {
+        let (mut state, id) = agents_frame(true);
+        // 28 inner columns: `[Enter] Open  [Esc] Back` (24 cells) fits; with
+        // `[t] Open thread  ` (17 more) it would not, so the hint is dropped from the right.
+        let rail = painted_rail(&state, 30, Host::Local);
+        assert_eq!(rail, "[Enter] Open  [Esc] Back");
+        assert!(state.mission_control.fit().open);
+        assert!(!state.mission_control.fit().thread);
+        assert_eq!(
+            keys::on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::Consumed
+        );
+        // Painted whole again, the same key acts.
+        painted_rail(&state, 80, Host::Local);
+        assert_eq!(
+            keys::on_key(&mut state, Key::Char('t'), Host::Local),
+            InputAction::OpenAgentThread(id)
+        );
+    }
+
+    #[test]
+    fn agents_thread_the_attached_host_paints_no_thread_hint_and_has_no_t() {
+        let (mut state, _) = agents_frame(true);
+        let rail = painted_rail(&state, 80, Host::Attached);
+        assert!(!rail.contains("Open thread"), "{rail}");
+        assert!(!state.mission_control.fit().thread);
+        assert_eq!(
+            keys::on_key(&mut state, Key::Char('t'), Host::Attached),
+            InputAction::Consumed
+        );
+    }
 }

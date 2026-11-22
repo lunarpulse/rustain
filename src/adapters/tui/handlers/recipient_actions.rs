@@ -438,26 +438,40 @@ pub(crate) fn show_notice(
     message: String,
 ) {
     use crate::adapters::tui::notifications::{self, NoticeSource};
-    let open = state
-        .thread_inspector
-        .as_ref()
-        .map(|inspector| inspector.outcome_key());
     let key = match target {
         Some(target) => outcome_key(target),
-        None => open.clone(),
+        None => state
+            .thread_inspector
+            .as_ref()
+            .map(|inspector| inspector.outcome_key()),
     };
+    match key {
+        Some(key) => show_outcome(state, &key, message),
+        None => {
+            notifications::info(state, NoticeSource::Team, message);
+            state.needs_redraw = true;
+        }
+    }
+}
+
+/// One outcome line of the thread whose outcome-log key is `key` (the body of
+/// [`show_notice`], shared with the sent frame's follow-up receipts): it joins that key's log,
+/// repaints the open thread when it is that thread, and is also posted once as an ambient Info
+/// notice when that thread is not the window on top.
+pub(crate) fn show_outcome(state: &mut TuiState, key: &str, message: String) {
+    use crate::adapters::tui::notifications::{self, NoticeSource};
     let on_top = state.modal_stack.top().is_some_and(|frame| {
         frame.surface == crate::adapters::tui::presentation::Surface::ThreadInspector
-    }) && key.is_some()
-        && open == key;
-    if let Some(key) = &key {
-        state.thread_outcomes.push(key, message.clone());
-        if let Some(inspector) = state.thread_inspector.as_mut()
-            && &inspector.outcome_key() == key
-        {
-            inspector.invalidate();
-            inspector.scroll_to_end();
-        }
+    }) && state
+        .thread_inspector
+        .as_ref()
+        .is_some_and(|inspector| inspector.outcome_key() == key);
+    state.thread_outcomes.push(key, message.clone());
+    if let Some(inspector) = state.thread_inspector.as_mut()
+        && inspector.outcome_key() == key
+    {
+        inspector.invalidate();
+        inspector.scroll_to_end();
     }
     if !on_top {
         notifications::info(state, NoticeSource::Team, message);

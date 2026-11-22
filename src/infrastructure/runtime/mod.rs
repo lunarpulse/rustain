@@ -1,4 +1,5 @@
 pub mod agent_core;
+pub mod agents_thread;
 pub mod app_context;
 pub mod app_state;
 pub mod approval_bridge;

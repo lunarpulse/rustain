@@ -14,6 +14,7 @@ use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::agent_panel;
 use crate::domain::models::AgentId;
+use crate::domain::models::SentThreadOffer;
 use crate::domain::models::subagent_view::AgentRowView;
 
 /// What the tab shows: the rows and the words for an empty roster.
@@ -68,6 +69,27 @@ pub fn selected(state: &TuiState) -> Option<&AgentRowView> {
         .cached_entries
         .iter()
         .find(|entry| entry.agent_id.as_str() == id)
+}
+
+/// The verified peer exchange of the selected row (story `agents-thread` D2, D3): the offer
+/// the A2A owner computed for that very agent id at the last roster refresh, only while the
+/// row is still in the roster. Never a label, never a guess.
+#[must_use]
+pub fn thread_offer(state: &TuiState) -> Option<&SentThreadOffer> {
+    let entry = selected(state)?;
+    state.agent_threads.offers.get(&entry.agent_id)
+}
+
+/// A `t` lookup for the selected row is in flight (the rail says so and `t` is inert).
+#[must_use]
+pub fn thread_pending(state: &TuiState) -> bool {
+    selected(state).is_some_and(|entry| {
+        state
+            .agent_threads
+            .opening
+            .as_ref()
+            .is_some_and(|opening| opening.agent == entry.agent_id)
+    })
 }
 
 /// The registry changed (or the tab opened): rebuild the tab's rows and refresh an open agent
@@ -155,5 +177,60 @@ mod tests {
             selected(&state).map(|e| e.subagent_type.as_str()),
             Some("beta")
         );
+    }
+
+    #[test]
+    fn agents_thread_the_offer_follows_the_selected_row_by_id_never_by_label() {
+        use crate::adapters::tui::presentation::viewer::ViewerCmd;
+        use crate::adapters::tui::state::AgentThreadOpening;
+
+        let mut state = TuiState::new(80, 24);
+        // Two delegation rows carry the same label; only the second has an offer.
+        let (a, b) = (
+            entry("a2a-peer", NodeState::Running),
+            entry("a2a-peer", NodeState::Running),
+        );
+        state.agent_panel_state.cached_entries = vec![a.clone(), b.clone()];
+        state.agent_threads.offers.insert(
+            b.agent_id.clone(),
+            SentThreadOffer {
+                peer: "marcus".to_owned(),
+                task: "t-b".to_owned(),
+            },
+        );
+        sync(&mut state);
+        state.mission_control.switch_to(McTab::Agents);
+        // No explicit selection resolves to the first row (`a`), which has no offer.
+        assert!(thread_offer(&state).is_none(), "the first row has no offer");
+        state.mission_control.move_selection(ViewerCmd::Top);
+        assert_eq!(
+            state.mission_control.selected_id(),
+            Some(a.agent_id.as_str())
+        );
+        assert!(thread_offer(&state).is_none(), "the label decides nothing");
+        state.mission_control.move_selection(ViewerCmd::LineDown);
+        assert_eq!(
+            thread_offer(&state).map(|offer| offer.task.as_str()),
+            Some("t-b")
+        );
+        assert!(!thread_pending(&state));
+        state.agent_threads.opening = Some(AgentThreadOpening {
+            agent: a.agent_id.clone(),
+            generation: 1,
+        });
+        assert!(
+            !thread_pending(&state),
+            "another row's lookup is not this row's"
+        );
+        state.agent_threads.opening = Some(AgentThreadOpening {
+            agent: b.agent_id.clone(),
+            generation: 2,
+        });
+        assert!(thread_pending(&state));
+        // The row leaves the roster: the placeholder offers nothing though the map still holds it.
+        state.agent_panel_state.cached_entries = vec![a];
+        sync(&mut state);
+        assert!(thread_offer(&state).is_none());
+        assert!(!thread_pending(&state));
     }
 }

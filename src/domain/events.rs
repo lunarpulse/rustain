@@ -188,6 +188,21 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         generation: u64,
         message: String,
+        /// The newest eligible follow-up turn of the structured read (story `agents-thread`
+        /// D6); `None` for any read that is not an own, present, unretracted item. Read from
+        /// the structured thread, never from the rendered `message`.
+        follow_up: Option<String>,
+    },
+    /// Story `agents-thread` AC3 — the exact peer exchange of an Agents row was resolved
+    /// (opened, ambiguous or missing). Applied only while that row's lookup is still the
+    /// pending one. A view event — ⛔ never a `SystemNotice`, never a model turn. Produced
+    /// only by the spawn of `agents_thread::open`.
+    #[cfg(feature = "a2a")]
+    AgentThreadReady {
+        conversation_id: ConversationId,
+        generation: u64,
+        agent_id: crate::domain::models::AgentId,
+        outcome: crate::domain::models::AgentThreadOutcome,
     },
     /// Story 19.17: one independently settled row in a rail-three send block.
     #[cfg(feature = "a2a")]

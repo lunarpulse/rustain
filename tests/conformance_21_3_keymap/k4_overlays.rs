@@ -665,6 +665,7 @@ const THREAD: &[W] = &[
     w(&[Key::Char('/')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Enter], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Char('x')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
+    w(&[Key::Char('f')], "Consumed | frame=true focus=Chat top=20 pal=false leader=false"),
     w(&[Key::Ctrl('x')], "Consumed | frame=true focus=Chat top=20 pal=false leader=true"),
     w(&[Key::Ctrl('p')], "Consumed | frame=true focus=Chat top=20 pal=true leader=false"),
     w(&[Key::Ctrl('q')], "Quit | frame=true focus=Chat top=20 pal=false leader=false"),
@@ -830,8 +831,20 @@ fn thread_inspector_writer_rows_are_attached_only_and_viewer_rows_are_both_hosts
         resolve(Context::ThreadInspector, Host::Local, &[Key::Tab]),
         Resolved::Miss
     ));
+    // `f` Follow up is the one local-only own row (story `agents-thread`): it resolves on the
+    // local host only; the attached host keeps no `f`.
+    let follow_up = resolve(Context::ThreadInspector, Host::Local, &[Key::Char('f')]);
+    let Resolved::Hit(row) = follow_up else {
+        panic!("local: the follow-up row must resolve");
+    };
+    assert_eq!(row.context, Context::ThreadInspector);
+    assert_eq!(row.label, "Follow up");
+    assert!(matches!(
+        resolve(Context::ThreadInspector, Host::Attached, &[Key::Char('f')]),
+        Resolved::Miss
+    ));
     let own = |host| rows_of(Context::ThreadInspector, host).count();
-    assert_eq!(own(Host::Local), both.len());
+    assert_eq!(own(Host::Local), both.len() + 1);
     assert_eq!(own(Host::Attached), both.len() + writer.len() + 1);
 }
 

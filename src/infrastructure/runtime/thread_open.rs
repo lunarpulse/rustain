@@ -244,6 +244,9 @@ pub fn open_sent(
         crate::domain::models::SemanticMessageType::Unknown,
     );
     if let Some(old) = same {
+        // A follow-up being written in the frame this reopen replaces is kept for the next
+        // field of the same thread, never lost and never filed under another key.
+        thread_inspector::retain_follow_up(&mut state.thread_outcomes, &old);
         inspector.mode = old.mode;
         inspector.search = old.search;
     }
@@ -253,6 +256,7 @@ pub fn open_sent(
         loading: true,
         mine: false,
         retracted: false,
+        follow_up: None,
     });
     inspector.content =
         crate::adapters::tui::handlers::team_command::TEAM_THREAD_READING.to_owned();
@@ -292,4 +296,169 @@ pub fn fill_sent(state: &mut TuiState, origin: &str, generation: u64, message: &
     inspector.invalidate();
     state.needs_redraw = true;
     true
+}
+
+/// Record the follow-up target of a completed local sent-thread read (story `agents-thread`
+/// D6, AC6) on the frame that issued it. Guarded exactly like [`fill_sent`]: the frame must be
+/// open on a sent thread, issued from `origin` and carry exactly this `generation`; anything
+/// else is dropped. `target` comes from `follow_up_target` over the structured read, never
+/// from the rendered page; `None` clears any target. Returns whether it applied.
+pub fn offer_follow_up(
+    state: &mut TuiState,
+    origin: &str,
+    generation: u64,
+    target: Option<&str>,
+) -> bool {
+    let Some(inspector) = state.thread_inspector.as_mut() else {
+        return false;
+    };
+    if !matches!(inspector.target, ThreadTarget::Sent { .. }) {
+        return false;
+    }
+    let Some(sent) = inspector
+        .sent
+        .as_mut()
+        .filter(|sent| sent.generation == generation && sent.origin == origin)
+    else {
+        return false;
+    };
+    sent.follow_up = target.map(str::to_owned);
+    inspector.invalidate();
+    state.needs_redraw = true;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::tui::state::{SentThread, ThreadReplyField};
+
+    const ORIGIN: &str = "conv-1";
+    const SEVEN: &str = "sent:marcus:item-7";
+    const EIGHT: &str = "sent:marcus:item-8";
+
+    fn open_marcus(state: &mut TuiState, item: &str) -> u64 {
+        open_sent(state, ThreadAccess::Writer, "marcus", item, ORIGIN)
+    }
+
+    fn sent_facts(generation: u64) -> SentThread {
+        SentThread {
+            generation,
+            origin: ORIGIN.to_owned(),
+            loading: false,
+            mine: true,
+            retracted: false,
+            follow_up: None,
+        }
+    }
+
+    fn follow_up_field(text: &str) -> ThreadReplyField {
+        ThreadReplyField {
+            field: text.into(),
+            follow_up: Some("turn-3".to_owned()),
+            ..ThreadReplyField::default()
+        }
+    }
+
+    /// The follow-up target the open frame offers.
+    fn follow_up(state: &TuiState) -> Option<&str> {
+        let sent = state.thread_inspector.as_ref()?.sent.as_ref()?;
+        sent.follow_up.as_deref()
+    }
+
+    /// The paint generation of the open frame.
+    fn painted(state: &TuiState) -> Option<u64> {
+        let inspector = state.thread_inspector.as_ref()?;
+        Some(inspector.generation)
+    }
+
+    #[test]
+    fn agents_thread_offer_follow_up_is_guarded_exactly_like_fill_sent() {
+        let turn = Some("turn-3");
+        // No frame: dropped, nothing opens.
+        let mut closed = TuiState::new(80, 24);
+        assert!(!offer_follow_up(&mut closed, ORIGIN, 1, turn));
+        assert!(!fill_sent(&mut closed, ORIGIN, 1, "page"));
+        assert!(closed.thread_inspector.is_none());
+        // A received item's frame is no sent thread, whatever facts it carries.
+        let mut item = TuiState::new(80, 24);
+        let address = crate::domain::models::ItemAddress::from_a2a_ingress(
+            crate::domain::models::PeerId::from_public_key(&[5; 32]).unwrap(),
+            crate::domain::models::ItemId::from_replay("item-1"),
+        );
+        let mut inspector = ThreadInspectorState::new(
+            ThreadTarget::Item(address),
+            ThreadAccess::Writer,
+            crate::domain::models::SemanticMessageType::Consultation,
+        );
+        inspector.sent = Some(sent_facts(1));
+        reducer::open_thread(&mut item, inspector, "Thread".to_owned());
+        let before = painted(&item);
+        assert!(!offer_follow_up(&mut item, ORIGIN, 1, turn));
+        assert!(!fill_sent(&mut item, ORIGIN, 1, "page"));
+        assert_eq!(follow_up(&item), None);
+        assert_eq!(painted(&item), before);
+        // Another origin, or a generation this frame never issued: dropped, nothing changes.
+        let mut state = TuiState::new(80, 24);
+        let first = open_marcus(&mut state, "item-7");
+        let before = painted(&state);
+        for (origin, generation) in [("conv-2", first), (ORIGIN, first + 1)] {
+            assert!(!offer_follow_up(&mut state, origin, generation, turn));
+            assert!(!fill_sent(&mut state, origin, generation, "page"));
+        }
+        assert_eq!(follow_up(&state), None);
+        assert_eq!(painted(&state), before);
+        // A newer read of the same thread voids the older generation.
+        let second = open_marcus(&mut state, "item-7");
+        assert!(!offer_follow_up(&mut state, ORIGIN, first, turn));
+        assert!(!fill_sent(&mut state, ORIGIN, first, "page"));
+        assert!(fill_sent(&mut state, ORIGIN, second, "page"));
+        // The matching completion applies: the target is set and the rail repaints.
+        let before = painted(&state);
+        state.needs_redraw = false;
+        assert!(offer_follow_up(&mut state, ORIGIN, second, turn));
+        assert_eq!(follow_up(&state), Some("turn-3"));
+        assert_ne!(painted(&state), before);
+        assert!(state.needs_redraw);
+        // `None` clears the target.
+        assert!(offer_follow_up(&mut state, ORIGIN, second, None));
+        assert_eq!(follow_up(&state), None);
+    }
+
+    #[test]
+    fn agents_thread_a_reopen_retains_the_open_follow_up_text_under_its_own_key() {
+        let turn = Some("turn-3");
+        let mut state = TuiState::new(80, 24);
+        state.input_buffer = "main draft".to_owned();
+        let first = open_marcus(&mut state, "item-7");
+        assert!(fill_sent(&mut state, ORIGIN, first, "page"));
+        assert!(offer_follow_up(&mut state, ORIGIN, first, turn));
+        let inspector = state.thread_inspector.as_mut().unwrap();
+        inspector.mode = BodyMode::Source;
+        inspector.search.query.set("needle");
+        inspector.reply = Some(follow_up_field("draft 1"));
+        // The same thread again: the text is kept for its next field; mode and filter survive.
+        let second = open_marcus(&mut state, "item-7");
+        assert_eq!(second, first + 1);
+        assert_eq!(state.thread_outcomes.retained(SEVEN), Some("draft 1"));
+        let reopened = state.thread_inspector.as_ref().unwrap();
+        assert!(reopened.reply.is_none());
+        assert_eq!(reopened.mode, BodyMode::Source);
+        assert_eq!(reopened.search.query.as_str(), "needle");
+        let sent = reopened.sent.as_ref().unwrap();
+        assert!(sent.loading);
+        assert_eq!(sent.follow_up, None);
+        // Another thread (through `reducer::open_thread`): the text stays with item-7 only.
+        assert!(fill_sent(&mut state, ORIGIN, second, "page"));
+        assert!(offer_follow_up(&mut state, ORIGIN, second, turn));
+        state.thread_inspector.as_mut().unwrap().reply = Some(follow_up_field("draft 2"));
+        let other = open_marcus(&mut state, "item-8");
+        assert_eq!(other, second + 1);
+        assert_eq!(state.thread_outcomes.retained(SEVEN), Some("draft 2"));
+        assert_eq!(state.thread_outcomes.retained(EIGHT), None);
+        let retargeted = state.thread_inspector.as_ref().unwrap();
+        assert_eq!(retargeted.outcome_key(), EIGHT);
+        assert_eq!(retargeted.mode, BodyMode::Rendered, "fresh target");
+        assert_eq!(state.input_buffer, "main draft");
+    }
 }
