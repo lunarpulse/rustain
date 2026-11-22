@@ -858,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn visit_async_open_prepared_reader_can_cross_to_the_blocking_pool() {
+    fn visit_async_open_prepared_reader_can_cross_from_the_reader_thread() {
         fn send<T: Send>() {}
         send::<VisitWindowState>();
         send::<Theme>();

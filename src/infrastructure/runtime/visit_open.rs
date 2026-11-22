@@ -10,10 +10,11 @@
 //!
 //! The read itself is the unchanged `SessionHistory::resolve` on an owned snapshot of the
 //! conversation ([`snapshot`]); authority, revision, backing and expiry are rechecked against
-//! the live conversation before the first paint by `reauthorize_session_visit`.
+//! the live conversation before the first paint by `reauthorize_session_visit`. Every read,
+//! and the reader it prepares, runs on the one Visit reader thread (`READER`).
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -51,8 +52,8 @@ pub struct VisitOpenDone {
 /// The loop's private channel for finished reads.
 pub type VisitOpenSender = mpsc::Sender<VisitOpenDone>;
 
-/// A prepared Visit, or the read that was not readable.
-type Prepared = Result<Box<VisitWindowState>, VisitRead>;
+/// A prepared Visit, or the read that was not readable (boxed: `VisitRead` is large).
+type Prepared = Result<Box<VisitWindowState>, Box<VisitRead>>;
 
 struct Outcome {
     /// A related open only: the fresh read of the source the Visit already shows.
@@ -217,8 +218,44 @@ fn start(
     spawn(job, generation, frame_id, cancel, tx.clone())
 }
 
+/// Name of the one thread every Visit read runs on.
+const READER_THREAD: &str = "rustain-visit-reader";
+
+/// The one thread every Visit read and reader preparation runs on: a current-thread runtime
+/// on a named, detached thread, started by the first open and kept for the process.
+///
+/// An open allocates a few MiB (artifact bodies, parsed turns, the projected text, its search
+/// fold and first layout) that the loop frees when the Visit closes or a completion is
+/// dropped. glibc returns freed memory to the arena of the thread that allocated it. On the
+/// multi-threaded runtime a read moved between worker threads at its awaits and prepared on
+/// any blocking-pool thread, so each open spread its allocations over many arenas, each of
+/// which can keep its freed share resident. One thread keeps that memory in one arena, where
+/// the next open reuses it.
+/// Blocking steps inside the read (the journal projection's `flock`, file reads) still run on
+/// this runtime's own blocking pool, so a held lock never stalls the reader thread.
+static READER: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
+    let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel(1);
+    // Detached: the runtime drives Visit reads for the life of the process.
+    std::thread::Builder::new()
+        .name(READER_THREAD.into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build the Visit reader runtime");
+            let _ = handle_tx.send(runtime.handle().clone());
+            runtime.block_on(std::future::pending::<()>());
+        })
+        .expect("spawn the Visit reader thread");
+    handle_rx
+        .recv()
+        .expect("the Visit reader thread reports its runtime")
+});
+
 /// The read task: cooperative cancellation at the read's own await points, no timeout, no
-/// retry. A cancelled open never sends.
+/// retry. A cancelled open never sends. The returned task belongs to the caller's runtime
+/// (the loop never waits for the reader thread to start) and ends when the read on the
+/// reader thread ends; a panic there resumes here.
 fn spawn(
     job: Job,
     generation: u64,
@@ -227,14 +264,20 @@ fn spawn(
     tx: VisitOpenSender,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {}
-            () = async {
-                if let Some(outcome) = run(job).await {
+        let read = READER.spawn(async move {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {}
+                () = async {
+                    let outcome = run(job).await;
                     let _ = tx.send(VisitOpenDone { generation, frame_id, outcome }).await;
-                }
-            } => {}
+                } => {}
+            }
+        });
+        if let Err(error) = read.await
+            && let Ok(panic) = error.try_into_panic()
+        {
+            std::panic::resume_unwind(panic);
         }
     })
 }
@@ -260,23 +303,22 @@ async fn read_visit(job: &Job, key: &MainVisitKey) -> VisitRead {
 }
 
 /// Read the target and, when readable, build its reader (text, search fold, first layout)
-/// on the blocking pool. `None`: the preparation task did not finish.
-async fn read_prepared(job: &Job) -> Option<Prepared> {
+/// here on the reader thread, in the arena the next open reuses. A cancel during the build
+/// takes effect when it returns.
+async fn read_prepared(job: &Job) -> Prepared {
     let read = read_visit(job, &job.key).await;
     if !matches!(read, VisitRead::Available(_) | VisitRead::Partial(_)) {
-        return Some(Err(read));
+        return Err(Box::new(read));
     }
-    let key = job.key.clone();
-    let layout = job.layout.clone();
-    let window = tokio::task::spawn_blocking(move || VisitWindowState::prepare(key, read, layout))
-        .await
-        .ok()?;
-    Some(Ok(Box::new(window)))
+    #[cfg(test)]
+    tests::prepared_on_this_thread();
+    let window = VisitWindowState::prepare(job.key.clone(), read, job.layout.clone());
+    Ok(Box::new(window))
 }
 
 /// An Inspector origin reads its key once. A related origin reads the source the Visit shows
 /// first and the target only when that fresh read names it.
-async fn run(job: Job) -> Option<Outcome> {
+async fn run(job: Job) -> Outcome {
     let mut current = None;
     let mut wanted = true;
     if let Some(cursor_key) = &job.current {
@@ -285,11 +327,11 @@ async fn run(job: Job) -> Option<Outcome> {
         current = Some(read);
     }
     let target = if wanted {
-        Some(read_prepared(&job).await?)
+        Some(read_prepared(&job).await)
     } else {
         None
     };
-    Some(Outcome { current, target })
+    Outcome { current, target }
 }
 
 /// Whether `opening` may still be waited for in `state` under `ctx`.
@@ -350,7 +392,7 @@ fn take_live(state: &mut TuiState, generation: u64, frame_id: u64) -> Option<Vis
 fn finish(state: &mut TuiState, target: Option<Prepared>) {
     match target {
         Some(Ok(window)) => session_visit::open_visit(state, *window),
-        Some(Err(read)) => mission_bridge::visit_unavailable(state, read),
+        Some(Err(read)) => mission_bridge::visit_unavailable(state, *read),
         None => mission_bridge::visit_unavailable(state, VisitRead::Missing),
     }
 }
@@ -412,6 +454,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -432,6 +475,20 @@ mod tests {
     use crate::infrastructure::subagent::session_history::hash_body;
 
     const MISSING: &str = "No readable retained session for this exact source.";
+
+    /// Readers prepared on the reader thread and anywhere else, across every test of the
+    /// process (they all share the one reader thread).
+    static PREPARED_ON_READER: AtomicUsize = AtomicUsize::new(0);
+    static PREPARED_ELSEWHERE: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn prepared_on_this_thread() {
+        let counter = if std::thread::current().name() == Some(READER_THREAD) {
+            &PREPARED_ON_READER
+        } else {
+            &PREPARED_ELSEWHERE
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
 
     fn retained_deadline() -> i64 {
         let now = std::time::SystemTime::now()
@@ -1367,5 +1424,98 @@ mod tests {
         // Without a pending open the same chord is the ordinary Back.
         route_chord(&mut rig.state, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(rig.state.modal_stack.is_empty());
+    }
+
+    /// M6: the read and the reader preparation run on the one named reader thread, never on
+    /// the caller's runtime or an arbitrary blocking-pool thread, so their memory stays in one
+    /// allocator arena that the next open reuses.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_async_open_reads_and_prepares_on_the_one_reader_thread() {
+        let (reader, name) = READER
+            .spawn(async {
+                let thread = std::thread::current();
+                (thread.id(), thread.name().map(str::to_owned))
+            })
+            .await
+            .unwrap();
+        assert_eq!(name.as_deref(), Some(READER_THREAD));
+        assert_ne!(reader, std::thread::current().id());
+        let before = PREPARED_ON_READER.load(Ordering::SeqCst);
+        let mut rig = Rig::new().await;
+        for round in 0..2 {
+            rig.reset();
+            let handle = rig.begin().expect("the read starts");
+            let done = rig.done().await;
+            handle.await.unwrap();
+            assert!(
+                rig.applied(done),
+                "round {round}: the live completion applies"
+            );
+            assert!(rig.state.session_visit.is_some());
+        }
+        assert!(
+            PREPARED_ON_READER.load(Ordering::SeqCst) >= before + 2,
+            "both opens prepared their reader on the reader thread"
+        );
+        assert_eq!(
+            PREPARED_ELSEWHERE.load(Ordering::SeqCst),
+            0,
+            "no reader is prepared on any other thread"
+        );
+    }
+
+    /// AC9: a read's job (snapshot, history handle, token) is released when the read ends,
+    /// whether it applied, was cancelled with `Esc` while its journal step is still held, or
+    /// was superseded by a newer open; a closed Visit keeps no reader.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_async_open_applied_cancelled_and_superseded_reads_release_their_job() {
+        let mut rig = Rig::new().await;
+        assert_eq!(Arc::strong_count(&rig.history), 1);
+
+        let handle = rig.begin().expect("the read starts");
+        let done = rig.done().await;
+        joined(handle).await;
+        assert_eq!(
+            Arc::strong_count(&rig.history),
+            1,
+            "a finished read keeps no job"
+        );
+        assert!(rig.applied(done));
+        reducer::close(&mut rig.state, Surface::SessionVisit);
+        assert!(
+            rig.state.session_visit.is_none(),
+            "a closed Visit keeps no reader"
+        );
+
+        let hold = Hold::acquire(&rig.lock);
+        let handle = rig.begin().expect("the read starts");
+        rig.assert_held_read_blocked(&handle).await;
+        assert_eq!(
+            rig.key(KeyCode::Esc),
+            Some(RouteEffect::Action(InputAction::Consumed))
+        );
+        joined(handle).await;
+        assert_eq!(
+            Arc::strong_count(&rig.history),
+            1,
+            "a cancelled read keeps nothing while its held step finishes"
+        );
+        drop(hold);
+
+        let first = rig.begin().expect("the first read starts");
+        let stale = rig.done().await;
+        joined(first).await;
+        assert!(session_visit::cancel_opening(&mut rig.state));
+        let second = rig.begin().expect("the newer read starts");
+        let live = rig.done().await;
+        joined(second).await;
+        assert!(!rig.applied(stale), "the superseded completion is dropped");
+        assert!(rig.applied(live));
+        assert_eq!(
+            Arc::strong_count(&rig.history),
+            1,
+            "superseded and live reads keep no job"
+        );
     }
 }
