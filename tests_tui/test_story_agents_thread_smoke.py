@@ -101,14 +101,29 @@ def _peer_selected(inner):
 
 
 def _composer(tui, screen):
-    """(first composer row, caret cell, caret hidden) of the screen `tui` just painted; a paint
-    without a composer reads as a hidden caret on an empty row."""
+    """(first composer row, caret cell relative to the composer box's top-left corner, caret
+    hidden) of the screen `tui` just painted; a paint without a composer reads as a hidden
+    caret on an empty row. Relative, so a Stage that grew between two paints compares equal."""
     rows = screen.split("\n")
     top = harness.composer_top(rows)
     if top is None or top + 1 >= len(rows):
         return "", None, True
     cursor = tui._screen.cursor
-    return rows[top + 1].rstrip(), (cursor.x, cursor.y), cursor.hidden
+    return rows[top + 1].rstrip(), (cursor.x, cursor.y - top), cursor.hidden
+
+
+def _caret_in_composer(tui, screen):
+    """The painted caret is visible and sits inside the composer box (strictly between its
+    borders). A paint caught mid-frame leaves the terminal cursor wherever the renderer last
+    drew (a spinner or notice cell above the composer) — never a caret to capture or compare."""
+    rows = screen.split("\n")
+    top = harness.composer_top(rows)
+    bottom = max((i for i, line in enumerate(rows) if line.strip().startswith("└")), default=None)
+    if top is None or bottom is None:
+        return False
+    cursor = tui._screen.cursor
+    width = len(rows[top + 1])
+    return not cursor.hidden and top < cursor.y < bottom and 0 < cursor.x < width - 1
 
 
 def _field(screen, prompt):
@@ -272,8 +287,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         _until(a, lambda s: DRAFT in _composer(a, s)[0], "the Main draft typed", (b,), 15)
         _reopen_permission(a, (b,))
         a.send("y")
-        settled = _until(a, lambda s: SETTLED in s and DRAFT in _composer(a, s)[0] and not _composer(a, s)[2],
-                         "the delegation turn settled with the draft kept", (b,), 90)
+        settled = _until(a, lambda s: SETTLED in s and DRAFT in _composer(a, s)[0] and _caret_in_composer(a, s),
+                         "the delegation turn settled with the draft kept and the caret in it", (b,), 90)
         base = _composer(a, settled)
         (evidence / "01-stage-before.screen.txt").write_text(settled)
         delegated = _journal(lambda: [r for r in _received(b_ws) if r["address"]["item"] not in known],
@@ -333,7 +348,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         screen = _until(a, lambda s: _mc_top(s) and _peer_selected(_frame(s, MC)), "Agents with the row selected", (b,), 15)
         (evidence / "06-agents-return.screen.txt").write_text(screen)
         a.send(ESC)
-        screen = _until(a, lambda s: MC not in s and not _composer(a, s)[2], "the Stage restored", (b,), 15)
+        screen = _until(a, lambda s: MC not in s and _caret_in_composer(a, s), "the Stage restored", (b,), 15)
         assert _composer(a, screen) == base, (base, _composer(a, screen), screen)
         (evidence / "07-stage-after.screen.txt").write_text(screen)
         rows = stub.rows()
