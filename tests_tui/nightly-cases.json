@@ -40,6 +40,7 @@
     "tests_tui/test_story_19_20c_exact_approval.py::test_write_exact_review[standalone-80x24]",
     "tests_tui/test_story_19_21c_attached_parity.py::test_attached_thread_followup_retract_80x24",
     "tests_tui/test_story_19_22_scope_change.py::test_team_card_journey_80x24",
-    "tests_tui/test_story_21_6_decision_queue.py::test_leg_e_team_proposal_80x24"
+    "tests_tui/test_story_21_6_decision_queue.py::test_leg_e_team_proposal_80x24",
+    "tests_tui/test_story_agents_thread_smoke.py::test_agents_open_thread_and_follow_up_80x24"
   ]
 }

@@ -43,7 +43,7 @@ from decision_frame_helpers import _frame as _decision_frame
 from decision_frame_helpers import defer_frame, open_decision, wait_frame
 from test_story_10_4_subagent_panel import _send_chord_ctrl_x_s
 from test_story_19_18b_input_required_smoke import _tui, _world
-from test_story_19_20b_rap_one_way import _sha256, _stop
+from harness import sha256_file, stop_process_group
 from test_story_19_21_act1_distribution import _command, _events, _wait
 
 PEER = "recipient"
@@ -166,7 +166,7 @@ def _daemon(stack, binary, workspace, env, evidence):
     log = stack.enter_context(logfile.open("w"))
     process = subprocess.Popen([str(binary), f"--serve-a2a=127.0.0.1:{port}", "daemon", "start", "--foreground"],
                                cwd=workspace, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    stack.callback(_stop, process)
+    stack.callback(stop_process_group, process)
 
     def ready():
         assert process.poll() is None, logfile.read_text()
@@ -363,11 +363,11 @@ def test_agents_open_thread_and_follow_up_80x24(monkeypatch):
     try:
         binary = Path(os.environ["RUSTAIN_TUI_BINARY"]).resolve()
         assert binary.is_file() and "release" not in binary.parts, binary
-        manifest.update(binary=str(binary), binary_sha256=_sha256(binary))
+        manifest.update(binary=str(binary), binary_sha256=sha256_file(binary))
         identity.write_text(json.dumps(manifest, indent=2) + "\n")
         with tempfile.TemporaryDirectory(prefix="ragents-thread-", dir="/tmp") as root:
             _exercise(binary, evidence, Path(root), monkeypatch)
-        assert _sha256(binary) == manifest["binary_sha256"], "binary changed during smoke"
+        assert sha256_file(binary) == manifest["binary_sha256"], "binary changed during smoke"
         manifest["result"] = "PASS"
     except BaseException:
         manifest["result"] = "FAIL"
