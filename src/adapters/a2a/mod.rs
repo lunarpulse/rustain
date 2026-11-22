@@ -60,6 +60,8 @@ pub mod config;
 #[cfg(feature = "a2a")]
 pub mod admission;
 #[cfg(feature = "a2a")]
+pub mod agent_thread;
+#[cfg(feature = "a2a")]
 pub mod auth;
 #[cfg(feature = "a2a")]
 pub mod board;

@@ -140,24 +140,24 @@ fn thread_child_contexts_have_their_own_host_routes_and_parents() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
     assert_eq!(Context::ThreadReply.parents(), &[Context::CaretField]);
     assert_eq!(Context::BodyViewport.parents(), &[Context::MarkdownBody]);
-    for key in [
-        Key::Enter,
-        Key::Esc,
-        Key::Ctrl('c'),
-        Key::Ctrl('x'),
-        Key::Ctrl('p'),
-        Key::Ctrl('q'),
-    ] {
-        assert!(
-            matches!(resolve(Context::ThreadReply, Host::Attached, &[key]),
-            Resolved::Hit(row) if row.context == Context::ThreadReply),
-            "{key:?}"
-        );
-        assert!(
-            !matches!(resolve(Context::ThreadReply, Host::Local, &[key]),
-            Resolved::Hit(row) if row.context == Context::ThreadReply),
-            "{key:?}"
-        );
+    // The reply field (attached) and the follow-up field (local, story `agents-thread`) are
+    // the same text context: its rows resolve on both hosts; which host opens one is decided
+    // by the frame (`thread_inspector::offered`), not by the row.
+    for host in [Host::Local, Host::Attached] {
+        for key in [
+            Key::Enter,
+            Key::Esc,
+            Key::Ctrl('c'),
+            Key::Ctrl('x'),
+            Key::Ctrl('p'),
+            Key::Ctrl('q'),
+        ] {
+            assert!(
+                matches!(resolve(Context::ThreadReply, host, &[key]),
+                Resolved::Hit(row) if row.context == Context::ThreadReply),
+                "{host:?} {key:?}"
+            );
+        }
     }
     for host in [Host::Local, Host::Attached] {
         for key in [

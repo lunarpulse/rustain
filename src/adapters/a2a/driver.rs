@@ -18,7 +18,7 @@
 //! given the same transcript (proven by `both_trust_tiers_return_identical_content`).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -502,6 +502,18 @@ pub struct A2aDelegationRuntime {
     /// read), then kept current by this runtime's own appends — ⛔ never one
     /// read per call. `tokio::sync` because seeding spans the journal read.
     thread_ledger: Arc<tokio::sync::Mutex<Option<ThreadLedger>>>,
+    /// Story `agents-thread` AT-07 — the last seed of [`Self::thread_ledger`] failed.
+    /// Read and written only under that ledger's lock. Distinguishes "failed" from
+    /// "unseeded" so the Agents offer path (one call per row per roster refresh) never
+    /// re-reads a journal that just failed to load; the next thread read, follow-up or
+    /// capability resolution retries the seed.
+    ledger_seed_failed: Arc<AtomicBool>,
+    /// Story `agents-thread` AT-02 — the Peer nodes whose remote task id equals the
+    /// `messageId` the delegation that last materialized them submitted: the runtime's
+    /// proof that a node's task is *this delegation's* exchange, not merely some task this
+    /// host once dispatched to that peer (a peer answering a new delegation with an older
+    /// own task id). Per process: a node recovered after a restart carries no proof.
+    answered_submissions: Arc<parking_lot::Mutex<std::collections::HashSet<AgentId>>>,
     /// Story 19.18c `PQ1` — this host's item-capability key, loaded by the
     /// composition root and injected through `A2aEgress::compose` (`A3`).
     item_capability: ItemCapabilityKeyState,
@@ -520,8 +532,9 @@ pub struct A2aDelegationRuntime {
     clock: Arc<dyn crate::domain::clock::Clock>,
 }
 
-/// One own task dispatch: peer/origin correlation and the optional human-text
-/// hash. Model-rail rows grant task capability but never an own-content label.
+/// One own task dispatch: peer/origin correlation and the hash of the text it
+/// sent (`None` only for historical model-rail rows written before the model
+/// rail hashed its delegated text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnDispatch {
     peer: String,
@@ -535,7 +548,7 @@ struct ThreadLedger {
     /// `(peer identity, turn id)` of every `PeerReplyObserved` row.
     observed: std::collections::HashSet<(String, String)>,
     /// Story 19.18c `A11` — task → every `DispatchAct::Task` row that sent
-    /// it, the model rail's included (it carries no content hash).
+    /// it, the model rail's included.
     own_tasks: std::collections::HashMap<String, Vec<OwnDispatch>>,
     /// `(peer identity, reply-turn id)` → answered item and the binding
     /// observed at read time. An unpinned peer can later be renamed.
@@ -687,6 +700,10 @@ impl A2aDelegationRuntime {
             board_in_flight: Arc::new(tokio::sync::Mutex::new(())),
             last_board: Arc::new(tokio::sync::Mutex::new(None)),
             thread_ledger: Arc::new(tokio::sync::Mutex::new(None)),
+            ledger_seed_failed: Arc::new(AtomicBool::new(false)),
+            answered_submissions: Arc::new(parking_lot::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             item_capability: ItemCapabilityKeyState::Disabled,
             live_send_actions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             recorded_action_ids: Arc::new(tokio::sync::Mutex::new(None)),
@@ -756,14 +773,34 @@ impl A2aDelegationRuntime {
     }
 
     /// The per-process ledger, seeded from the sender journal on first use
-    /// (19.18 `A13`). `None` when the journal cannot be read.
+    /// (19.18 `A13`). `None` when the journal cannot be read; a seed that
+    /// failed before is attempted again here (a thread read, a follow-up, a
+    /// capability resolution), never by the Agents offer path.
     async fn seeded_ledger(&self) -> Option<tokio::sync::MutexGuard<'_, Option<ThreadLedger>>> {
+        self.seed_ledger(true).await
+    }
+
+    /// [`Self::seeded_ledger`]; with `retry_failed == false` a seed that already failed is
+    /// not attempted again (story `agents-thread` AT-07: the offer path runs once per Agents
+    /// row per roster refresh, and an unreadable journal must not cost one whole-journal
+    /// read and one warning per row).
+    async fn seed_ledger(
+        &self,
+        retry_failed: bool,
+    ) -> Option<tokio::sync::MutexGuard<'_, Option<ThreadLedger>>> {
         let mut guard = self.thread_ledger.lock().await;
         if guard.is_none() {
+            if !retry_failed && self.ledger_seed_failed.load(Ordering::Relaxed) {
+                return None;
+            }
             match self.journal_reader.as_ref() {
                 Some(reader) => match reader.load_entries().await {
-                    Ok(entries) => *guard = Some(ThreadLedger::from_entries(&entries)),
+                    Ok(entries) => {
+                        *guard = Some(ThreadLedger::from_entries(&entries));
+                        self.ledger_seed_failed.store(false, Ordering::Relaxed);
+                    }
                     Err(error) => {
+                        self.ledger_seed_failed.store(true, Ordering::Relaxed);
                         tracing::warn!(%error, "thread ledger unreadable; turns render as another sender, nothing is journaled and no capability is derived this read");
                         return None;
                     }
@@ -780,6 +817,7 @@ impl A2aDelegationRuntime {
     /// not own, or it is not a task this host could have minted. On a miss
     /// the journal is re-read once for this call: a sibling process sharing
     /// the key (the TUI or the daemon, `A3`) may have sent it after the seed.
+    /// One seed attempt per call: an unreadable journal is read once, not twice.
     pub(crate) async fn own_task_capability(
         &self,
         spec: &A2aPeerSpec,
@@ -788,9 +826,7 @@ impl A2aDelegationRuntime {
         let ItemCapabilityKeyState::Ready(key) = &self.item_capability else {
             return None;
         };
-        // A dispatch row holds the sanitized task; a served task that
-        // sanitization would change is not one this host minted.
-        if task.is_empty() || sanitize_disclosable(task, MAX_PEER_ID_BYTES) != task {
+        if !is_minted_task_form(task) {
             return None;
         }
         let origin_digest = self
@@ -809,6 +845,36 @@ impl A2aDelegationRuntime {
             own
         };
         own.then(|| derive_item_capability(key, task))
+    }
+
+    /// Story `agents-thread` D3 — the ownership half of [`Self::own_task_capability`],
+    /// without a capability key and without a journal re-read: whether `task` is a task this
+    /// host dispatched to `spec`'s current binding (the `PQ2` own-row rule) over the seeded
+    /// ledger. `false` for a task sanitization would change, for an unseedable ledger, and
+    /// for any task not yet in the ledger (an offer is recomputed on every roster refresh).
+    /// A seed that already failed is not attempted again here (AT-07).
+    pub(crate) async fn owns_task(&self, spec: &A2aPeerSpec, task: &str) -> bool {
+        if !is_minted_task_form(task) {
+            return false;
+        }
+        let origin_digest = self
+            .peer_binding(&spec.id)
+            .map(|(_, client)| client.origin_digest());
+        let Some(guard) = self.seed_ledger(false).await else {
+            return false;
+        };
+        guard
+            .as_ref()
+            .is_some_and(|ledger| ledger.owns(task, spec, origin_digest.as_deref()))
+    }
+
+    /// Story `agents-thread` AT-02 — whether the Peer node `node` answers the message this
+    /// host submitted for it: the remote task id it was minted from equals the `messageId`
+    /// of the delegation that last materialized it. `false` for a node a peer answered with
+    /// any other id (including an older task this host dispatched to that peer), and for a
+    /// node this process did not materialize.
+    pub(crate) fn node_answers_own_submission(&self, node: &AgentId) -> bool {
+        self.answered_submissions.lock().contains(node)
     }
 
     /// Story 19.18c `A10` step 1 — the item a reply turn `turn` served by
@@ -1042,17 +1108,45 @@ impl A2aDelegationRuntime {
         // Kept current by this path's own appends (`A13`): a send after the
         // ledger was seeded is a `you` source and an own task too. Before
         // seeding, the seed reads this row from the journal.
-        if let Some(ledger) = self.thread_ledger.lock().await.as_mut() {
-            ledger.record_own(
-                task,
-                OwnDispatch {
-                    peer: peer.as_str().to_owned(),
-                    endpoint,
-                    content_hash: Some(hash),
-                },
-            );
-        }
+        self.record_own_dispatch(Some(task), &peer, endpoint, Some(hash))
+            .await;
         Ok(())
+    }
+
+    /// Keep the live ledger current with one own `Task` dispatch row this runtime just
+    /// journaled (`A13`): the typed send, the fresh delegation and the continuation record
+    /// exactly the `(task, peer, endpoint, hash)` their row carries, so the live ledger and a
+    /// cold replay of the journal agree (story `agents-thread` NT-02). Before seeding, the
+    /// seed reads the row from the journal instead.
+    ///
+    /// Story `agents-thread` NT-03 — an append that just succeeded while a previous seed
+    /// failed re-arms exactly one seed attempt for the offer path: the next `owns_task`
+    /// tries the journal once more (and re-arms nothing if it fails again), so a transient
+    /// failure cannot hide Agents offers for the rest of the session, while a persistently
+    /// unreadable journal costs at most one load per successful dispatch, never one per row.
+    async fn record_own_dispatch(
+        &self,
+        task: Option<String>,
+        peer: &PeerId,
+        endpoint: Option<String>,
+        content_hash: Option<ContentHash>,
+    ) {
+        let mut guard = self.thread_ledger.lock().await;
+        match guard.as_mut() {
+            Some(ledger) => {
+                if let Some(task) = task {
+                    ledger.record_own(
+                        task,
+                        OwnDispatch {
+                            peer: peer.as_str().to_owned(),
+                            endpoint,
+                            content_hash,
+                        },
+                    );
+                }
+            }
+            None => self.ledger_seed_failed.store(false, Ordering::Relaxed),
+        }
     }
 
     /// Story 19.18 `AC6(b)`/`A13` — settle one served thread against the
@@ -1586,16 +1680,19 @@ impl A2aDelegationRuntime {
         // branch on content (R-D).
         tracing::info!(peer = %spec.id, ?trust, "dispatching A2A delegation");
 
-        let (submitted_task, submitted_bytes) = outbound_message_fact(&message);
+        let (submitted_task, submitted_bytes, submitted_hash) = outbound_message_fact(&message);
         let endpoint = self.dispatch_endpoint(&spec);
         self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
             peer: peer.clone(),
             task: submitted_task.clone(),
             bytes: submitted_bytes,
             act: crate::domain::models::DispatchAct::Task,
-            // The model rail carries no content hash (19.17 `AC3(e)`): no
-            // `you` label reads its rows. Story 19.18c: they are own tasks.
-            content_hash: None,
+            // Story `agents-thread` (D6): the hash of the delegated text, the same
+            // `text_content_hash` a typed `/team send` row carries, so the item this
+            // delegation sent is `you` by the one task-and-hash rule (19.18 `Q2`) and its
+            // thread can be followed up. Supersedes 19.17 `AC3(e)`'s hashless model-rail
+            // row. Story 19.18c: they are own tasks.
+            content_hash: submitted_hash,
             endpoint: endpoint.clone(),
             // The model rail records no operator send action (19.21 `AC1(i)`).
             action: None,
@@ -1603,18 +1700,8 @@ impl A2aDelegationRuntime {
             send_authorization,
         })
         .await?;
-        if let Some(task) = submitted_task.clone()
-            && let Some(ledger) = self.thread_ledger.lock().await.as_mut()
-        {
-            ledger.record_own(
-                task,
-                OwnDispatch {
-                    peer: peer.as_str().to_owned(),
-                    endpoint,
-                    content_hash: None,
-                },
-            );
-        }
+        self.record_own_dispatch(submitted_task.clone(), &peer, endpoint, submitted_hash)
+            .await;
 
         // The submit fact is durable before the POST. A first-hop transport
         // failure has no node yet, so journal the existing rejection vocabulary
@@ -1692,6 +1779,18 @@ impl A2aDelegationRuntime {
         let node_id = mint_node_id(&spec.id, &raw_task_id);
         tracing::info!(node = %node_id, ?trust, "A2A task dispatched");
 
+        // Story `agents-thread` AT-02 — the node's task is this delegation's exchange only
+        // when the peer answered with the `messageId` it submitted. Recorded (or revoked, for
+        // a node id a previous delegation proved) before the node becomes visible, so no
+        // roster refresh sees a stale proof.
+        {
+            let mut proven = self.answered_submissions.lock();
+            if submitted_task.as_deref() == Some(raw_task_id.as_str()) {
+                proven.insert(node_id.clone());
+            } else {
+                proven.remove(&node_id);
+            }
+        }
         let (node_cancel, command_rx) = self.materialize(&node_id).await?;
         self.node_tree
             .try_set_state(&node_id, NodeState::Running)
@@ -1985,19 +2084,25 @@ impl A2aDelegationRuntime {
                 return;
             }
             let dispatched = async {
-                let (submitted_task, bytes) = outbound_message_fact(&message);
+                let (submitted_task, bytes, submitted_hash) = outbound_message_fact(&message);
+                let endpoint = self.dispatch_endpoint(&spec);
                 self.emit_room(RoomEvent::RemoteEnvelopeDispatched {
                     peer: peer.clone(),
-                    task: submitted_task,
+                    task: submitted_task.clone(),
                     bytes,
                     act: crate::domain::models::DispatchAct::Task,
-                    content_hash: None,
-                    endpoint: self.dispatch_endpoint(&spec),
+                    // Every model-rail dispatch row hashes the text it sent (see
+                    // `delegate_inner`).
+                    content_hash: submitted_hash,
+                    endpoint: endpoint.clone(),
                     action: None,
                     authorship,
                     send_authorization,
                 })
                 .await?;
+                // NT-02: the live ledger records this row exactly as a cold replay would.
+                self.record_own_dispatch(submitted_task, &peer, endpoint, submitted_hash)
+                    .await;
                 self.node_tree
                     .try_set_state(&answer_node, NodeState::Running)
                     .await
@@ -2534,7 +2639,7 @@ impl A2aDelegationRuntime {
 /// id)` as three safe `AgentId` path segments. Both values cross configuration
 /// or network trust boundaries, so neither may be interpolated into an
 /// `AgentId` before encoding.
-fn mint_node_id(peer: &str, task_id: &str) -> AgentId {
+pub(crate) fn mint_node_id(peer: &str, task_id: &str) -> AgentId {
     let peer = URL_SAFE_NO_PAD.encode(peer.as_bytes());
     let task = URL_SAFE_NO_PAD.encode(task_id.as_bytes());
     AgentId::from_validated(format!("a2a/p-{peer}/t-{task}"))
@@ -2555,7 +2660,7 @@ pub(crate) fn disclosable_task_id(task_id: &str) -> String {
 
 /// Recover `(peer, task_id)` from a node id minted by [`mint_node_id`]. Returns
 /// `None` for malformed, empty, or non-A2A node ids.
-fn parse_a2a_node_id(node_id: &AgentId) -> Option<(String, String)> {
+pub(crate) fn parse_a2a_node_id(node_id: &AgentId) -> Option<(String, String)> {
     let rest = node_id.as_str().strip_prefix("a2a/")?;
     let (peer, task) = rest.split_once('/')?;
     if task.contains('/') {
@@ -2569,6 +2674,13 @@ fn parse_a2a_node_id(node_id: &AgentId) -> Option<(String, String)> {
         return None;
     }
     Some((peer, task))
+}
+
+/// Whether `task` has the form of a task id this host could have minted into a dispatch row:
+/// non-empty and unchanged by the disclosure sanitizer (a dispatch row holds the sanitized
+/// task, so a served task that sanitization would change is not one this host minted).
+pub(crate) fn is_minted_task_form(task: &str) -> bool {
+    !task.is_empty() && sanitize_disclosable(task, MAX_PEER_ID_BYTES) == task
 }
 
 /// Project a RAP task state onto the coarse node lifecycle. `input-required` /
@@ -2597,16 +2709,20 @@ pub(crate) fn text_content_hash(text: &str) -> ContentHash {
     content_hash(text)
 }
 
-fn outbound_message_fact(message: &serde_json::Value) -> (Option<String>, usize) {
+/// `(task, bytes, content hash)` of one outbound model-rail message: its `messageId` as a
+/// dispatch row holds it, and the size and [`text_content_hash`] of the text part it sends
+/// (the bytes a typed `/team send` row hashes for the same text).
+fn outbound_message_fact(
+    message: &serde_json::Value,
+) -> (Option<String>, usize, Option<ContentHash>) {
     let task = message
         .pointer("/message/messageId")
         .and_then(serde_json::Value::as_str)
         .map(disclosable_task_id);
-    let bytes = message
+    let text = message
         .pointer("/message/parts/0/text")
-        .and_then(serde_json::Value::as_str)
-        .map_or(0, str::len);
-    (task, bytes)
+        .and_then(serde_json::Value::as_str);
+    (task, text.map_or(0, str::len), text.map(text_content_hash))
 }
 
 /// Story 19.17: one process-wide source for both model delegation and
@@ -4696,6 +4812,394 @@ mod tests {
         assert_eq!(
             restarted.settle_thread(&other, &turns[..1]).await,
             vec![false]
+        );
+    }
+
+    /// Story `agents-thread` D3 — `owns_task` is the ownership half of `own_task_capability`:
+    /// both agree on a task before and after its own dispatch and on a task the sanitizer would
+    /// change, and only `own_task_capability` re-reads the journal on a miss (a roster refresh
+    /// over N rows reads the journal once, at the seed).
+    #[tokio::test]
+    async fn agents_thread_owns_task_matches_own_task_capability_and_never_rereads() {
+        use crate::adapters::a2a::item_capability::{ItemCapabilityKey, ItemCapabilityKeyState};
+        use crate::domain::models::JournalEntry;
+        use crate::domain::ports::{RoomJournalError, RoomJournalReader};
+
+        struct CountingReader {
+            inner: Arc<NodeJournal>,
+            loads: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl RoomJournalReader for CountingReader {
+            async fn load_entries(&self) -> Result<Vec<JournalEntry>, RoomJournalError> {
+                self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.inner.load_entries().await
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let reader = Arc::new(CountingReader {
+            inner: journal.clone(),
+            loads: loads.clone(),
+        });
+        let peer = spec("marcus", false);
+        let client = Arc::new(A2aClientAdapter::new(&peer, None).unwrap());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal.clone(), None));
+        let runtime = A2aDelegationRuntime::new(NodeTree::new(), room, tx)
+            .with_journal_reader(reader)
+            .with_peer_bindings(vec![(peer.clone(), client)].into())
+            .with_item_capability(ItemCapabilityKeyState::Ready(Arc::new(
+                ItemCapabilityKey::from_file_bytes(&[9u8; 32]),
+            )));
+        let loaded = || loads.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert!(!runtime.owns_task(&peer, "t-1").await);
+        assert_eq!(loaded(), 1, "the first use seeds the ledger once");
+        assert!(!runtime.owns_task(&peer, "t-1").await);
+        assert!(!runtime.owns_task(&peer, "t-2").await);
+        assert_eq!(
+            loaded(),
+            1,
+            "a miss in owns_task never re-reads the journal"
+        );
+        assert!(runtime.own_task_capability(&peer, "t-1").await.is_none());
+        assert_eq!(loaded(), 2, "own_task_capability re-reads once on a miss");
+
+        runtime
+            .journal_send_dispatch(
+                &peer,
+                "t-1",
+                "hello",
+                None,
+                crate::domain::models::Authorship::Unknown,
+                crate::domain::models::SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        assert!(runtime.owns_task(&peer, "t-1").await);
+        assert!(runtime.own_task_capability(&peer, "t-1").await.is_some());
+        assert!(!runtime.owns_task(&peer, "t-2").await);
+        assert_eq!(
+            loaded(),
+            2,
+            "an own dispatch is kept current without a re-read"
+        );
+
+        // A task the sanitizer would change, or an empty one, is never own.
+        for task in ["", "t-1\u{1b}[31m"] {
+            assert!(!runtime.owns_task(&peer, task).await, "{task:?}");
+            assert!(runtime.own_task_capability(&peer, task).await.is_none());
+        }
+    }
+
+    /// A journal reader that counts its loads and fails while `failing` is set.
+    struct FlakyReader {
+        inner: Arc<NodeJournal>,
+        loads: Arc<AtomicUsize>,
+        failing: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::RoomJournalReader for FlakyReader {
+        async fn load_entries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::JournalEntry>, RoomJournalError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(RoomJournalError::Read("unreadable".to_owned()));
+            }
+            crate::domain::ports::RoomJournalReader::load_entries(self.inner.as_ref()).await
+        }
+    }
+
+    /// A keyed runtime bound to peer `marcus`, appending to a real workspace journal and
+    /// reading it through a [`FlakyReader`].
+    struct Flaky {
+        runtime: A2aDelegationRuntime,
+        peer: A2aPeerSpec,
+        journal: Arc<NodeJournal>,
+        loads: Arc<AtomicUsize>,
+        failing: Arc<AtomicBool>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Flaky {
+        async fn new(failing: bool) -> Self {
+            use crate::adapters::a2a::item_capability::{
+                ItemCapabilityKey, ItemCapabilityKeyState,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+            let loads = Arc::new(AtomicUsize::new(0));
+            let failing = Arc::new(AtomicBool::new(failing));
+            let reader = Arc::new(FlakyReader {
+                inner: journal.clone(),
+                loads: loads.clone(),
+                failing: failing.clone(),
+            });
+            let peer = spec("marcus", false);
+            let client = Arc::new(A2aClientAdapter::new(&peer, None).unwrap());
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let room: Arc<dyn RoomJournal> = Arc::new(NodeRoomJournal::new(journal.clone(), None));
+            let runtime = A2aDelegationRuntime::new(NodeTree::new(), room, tx)
+                .with_journal_reader(reader)
+                .with_peer_bindings(vec![(peer.clone(), client)].into())
+                .with_item_capability(ItemCapabilityKeyState::Ready(Arc::new(
+                    ItemCapabilityKey::from_file_bytes(&[9u8; 32]),
+                )));
+            Self {
+                runtime,
+                peer,
+                journal,
+                loads,
+                failing,
+                _dir: dir,
+            }
+        }
+
+        fn loaded(&self) -> usize {
+            self.loads.load(Ordering::SeqCst)
+        }
+
+        /// One completed model delegation submitting and answered as `task`.
+        async fn delegate(&self, task: &str) {
+            self.runtime
+                .delegate(
+                    &self.peer,
+                    TrustTier::Unverified,
+                    "call-1",
+                    Arc::new(Scripted::with_task_id(task, &["completed"])),
+                    serde_json::json!({
+                        "message": {
+                            "messageId": task,
+                            "parts": [{ "kind": "text", "text": "ping" }]
+                        }
+                    }),
+                    CancellationToken::new(),
+                    Authorship::AgentComposed,
+                    crate::domain::models::SendAuthorization::Unknown,
+                )
+                .await
+                .expect("completed delegation");
+        }
+
+        /// `owns_task` over `rows` tasks, `refreshes` times: the Agents offer path.
+        async fn refresh(&self, rows: &[&str], refreshes: usize) -> Vec<bool> {
+            let mut owned = Vec::new();
+            for _ in 0..refreshes {
+                for task in rows {
+                    owned.push(self.runtime.owns_task(&self.peer, task).await);
+                }
+            }
+            owned
+        }
+    }
+
+    /// Story `agents-thread` AT-07 — with an unreadable journal the offer path (`owns_task`,
+    /// once per Agents row per roster refresh) attempts the seed once, not once per row and
+    /// refresh; `own_task_capability` attempts it once per call, not twice; once the journal
+    /// reads again, the next capability resolution seeds it.
+    #[tokio::test]
+    async fn agents_thread_a_failed_ledger_seed_is_not_reread_per_row() {
+        let f = Flaky::new(true).await;
+        let (runtime, peer) = (&f.runtime, &f.peer);
+
+        // Four roster refreshes over three Peer rows.
+        let owned = f.refresh(&["t-1", "t-2", "t-3"], 4).await;
+        assert!(owned.iter().all(|own| !own), "fails closed");
+        assert_eq!(
+            f.loaded(),
+            1,
+            "one failed seed, not one per row and refresh"
+        );
+
+        assert!(runtime.own_task_capability(peer, "t-1").await.is_none());
+        assert_eq!(f.loaded(), 2, "one seed attempt per capability resolution");
+        assert!(!runtime.owns_task(peer, "t-1").await);
+        assert_eq!(f.loaded(), 2, "the offer path still does not re-read");
+
+        // The journal reads again: the next capability resolution seeds the ledger.
+        f.failing.store(false, Ordering::SeqCst);
+        runtime
+            .journal_send_dispatch(
+                peer,
+                "t-1",
+                "hello",
+                None,
+                crate::domain::models::Authorship::Unknown,
+                crate::domain::models::SendAuthorization::Unknown,
+            )
+            .await
+            .unwrap();
+        assert!(runtime.own_task_capability(peer, "t-1").await.is_some());
+        assert_eq!(f.loaded(), 3, "seeded once, an own task needs no re-read");
+        assert!(runtime.owns_task(peer, "t-1").await);
+        assert!(!runtime.owns_task(peer, "t-2").await);
+        assert_eq!(f.loaded(), 3);
+    }
+
+    /// Story `agents-thread` NT-03 — Agents-only recovery from a transient seed failure: the
+    /// journal fails on the first roster refresh, then reads again; the next successful
+    /// delegation re-arms one seed attempt, so the following refresh seeds the ledger and the
+    /// delegation's row is offered — with no thread read, follow-up or capability call first.
+    #[tokio::test]
+    async fn agents_thread_a_successful_delegation_recovers_a_failed_seed() {
+        let f = Flaky::new(true).await;
+        assert_eq!(f.refresh(&["t-0"], 3).await, vec![false; 3]);
+        assert_eq!(f.loaded(), 1);
+
+        f.failing.store(false, Ordering::SeqCst);
+        assert_eq!(f.refresh(&["t-0"], 2).await, vec![false; 2]);
+        assert_eq!(
+            f.loaded(),
+            1,
+            "no trigger yet: the failed seed is not retried"
+        );
+
+        f.delegate("rustain-own-1").await;
+        let own = mint_node_id("marcus", "rustain-own-1");
+        assert!(f.runtime.node_answers_own_submission(&own));
+        assert_eq!(
+            f.refresh(&["rustain-own-1", "t-0"], 3).await,
+            [true, false].repeat(3),
+            "the delegation's row is offered again"
+        );
+        assert_eq!(f.loaded(), 2, "one seed attempt, then the seeded ledger");
+    }
+
+    /// Story `agents-thread` NT-03 — a persistently unreadable journal stays bounded: each
+    /// successful dispatch re-arms at most one seed attempt, however many rows and refreshes
+    /// follow, and nothing is ever offered.
+    #[tokio::test]
+    async fn agents_thread_a_persistent_seed_failure_costs_one_load_per_dispatch() {
+        let f = Flaky::new(true).await;
+        assert!(f.refresh(&["a", "b", "c"], 4).await.iter().all(|own| !own));
+        assert_eq!(f.loaded(), 1);
+        for (round, task) in ["rustain-own-1", "rustain-own-2"].into_iter().enumerate() {
+            f.delegate(task).await;
+            let owned = f.refresh(&[task, "b", "c"], 4).await;
+            assert!(owned.iter().all(|own| !own), "fails closed");
+            assert_eq!(f.loaded(), round + 2, "one re-armed attempt per dispatch");
+        }
+    }
+
+    /// Story `agents-thread` NT-02 — a continuation's dispatch row reaches the seeded live
+    /// ledger exactly as a cold replay of the journal reads it, so the process that answered
+    /// a parked question and a restarted one agree on every own task and its hash.
+    #[tokio::test]
+    async fn agents_thread_a_continuation_dispatch_is_in_the_live_ledger_as_in_replay() {
+        use crate::domain::ports::RoomJournalReader;
+
+        let f = Flaky::new(false).await;
+        assert_eq!(f.refresh(&["warm-up"], 1).await, vec![false]);
+        let transport = Arc::new(Scripted::new(&["input-required", "completed"]));
+        let parked = f
+            .runtime
+            .delegate(
+                &f.peer,
+                TrustTier::Unverified,
+                "clarify",
+                transport,
+                serde_json::json!({
+                    "message": {
+                        "messageId": "rustain-parked-1",
+                        "parts": [{ "kind": "text", "text": "ping" }]
+                    }
+                }),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                crate::domain::models::SendAuthorization::Unknown,
+            )
+            .await
+            .expect("input-required returns the question");
+        let handle = parked["continue"].as_str().expect("a continuation handle");
+        let answered = f
+            .runtime
+            .resume(
+                &f.peer,
+                serde_json::json!({ "continue": handle, "message": "main" }),
+                CancellationToken::new(),
+                Authorship::AgentComposed,
+                crate::domain::models::SendAuthorization::Unknown,
+            )
+            .await
+            .expect("the continuation completes");
+        assert_eq!(answered["status"]["state"], "completed");
+
+        let entries = f.journal.load_entries().await.unwrap();
+        let replay = ThreadLedger::from_entries(&entries);
+        assert_eq!(
+            replay.own_tasks.len(),
+            2,
+            "the delegation and its continuation"
+        );
+        let live = f.runtime.thread_ledger.lock().await;
+        let live = live.as_ref().expect("seeded before the delegation");
+        assert_eq!(live.own_tasks, replay.own_tasks);
+        assert_eq!(f.loaded(), 1, "kept current without a re-read");
+    }
+
+    /// Story `agents-thread` AT-01 + AT-02 — a model delegation's dispatch row carries the
+    /// hash of the text it delegated (the typed send's `text_content_hash`), and its node is
+    /// proven to answer this delegation only when the peer answered with the submitted
+    /// `messageId`; a peer answering with any other id — an older own task included — leaves
+    /// the node unproven, and revokes the proof of a node id it re-uses.
+    #[tokio::test]
+    async fn agents_thread_delegation_rows_hash_their_text_and_prove_only_their_own_task() {
+        let (rt, _tree, mut rx) = runtime();
+        let peer = spec("planets", false);
+        let delegate = |submitted: &'static str, answered: &'static str| {
+            let rt = rt.clone();
+            let peer = peer.clone();
+            async move {
+                rt.delegate(
+                    &peer,
+                    TrustTier::Unverified,
+                    "call-1",
+                    Arc::new(Scripted::with_task_id(answered, &["completed"])),
+                    serde_json::json!({
+                        "message": {
+                            "messageId": submitted,
+                            "parts": [{ "kind": "text", "text": "ping" }]
+                        }
+                    }),
+                    CancellationToken::new(),
+                    Authorship::AgentComposed,
+                    crate::domain::models::SendAuthorization::Unknown,
+                )
+                .await
+                .expect("completed delegation");
+            }
+        };
+
+        delegate("sender-own-1", "sender-own-1").await;
+        let hashes: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::DomainEvent(DomainEventPayload::Room(event)) => Some(event),
+                _ => None,
+            })
+            .filter_map(|event| match event {
+                RoomEvent::RemoteEnvelopeDispatched { content_hash, .. } => Some(content_hash),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hashes, vec![Some(text_content_hash("ping"))]);
+        let own = mint_node_id("planets", "sender-own-1");
+        assert!(rt.node_answers_own_submission(&own));
+
+        // A peer answering a new delegation with a task id other than its `messageId`.
+        delegate("sender-own-2", "task-of-the-peer").await;
+        let foreign = mint_node_id("planets", "task-of-the-peer");
+        let submitted = mint_node_id("planets", "sender-own-2");
+        assert!(!rt.node_answers_own_submission(&foreign));
+        assert!(!rt.node_answers_own_submission(&submitted));
+        assert!(
+            rt.node_answers_own_submission(&own),
+            "the first proof stands"
         );
     }
 }

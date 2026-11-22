@@ -32,6 +32,9 @@ struct Offers {
     viewport: bool,
     /// `x`: the words of the retract entry (`Retract`, `Retract auto-sent reply HH:MM`).
     retract: Option<String>,
+    /// `f`: the sent frame's follow-up field is offered (a loaded local sent thread with a
+    /// target on a writable tab).
+    follow_up: bool,
 }
 
 /// Everything the rail depends on besides the width: the offered actions, the access, the
@@ -48,7 +51,8 @@ fn rail_facts(
             | (u32::from(inspector.omitted_before > 0) << 29)
             | (u32::from(inspector.omitted_after > 0) << 28)
             | (u32::from(inspector.context_selected) << 27)
-            | (u32::from(redacted) << 22),
+            | (u32::from(redacted) << 22)
+            | (u32::from(offers.follow_up) << 23),
         |facts, action| facts | (1 << (*action as u8)),
     );
     let extra = u64::from(inspector.mode == BodyMode::Source)
@@ -138,6 +142,15 @@ fn footer_text(
                         action.label(inspector.context_selected, redacted),
                     ));
                 }
+            }
+            if offers.follow_up {
+                if !footer.is_empty() {
+                    footer.push_str("  ");
+                }
+                footer.push_str(&format!(
+                    "{} Follow up",
+                    rail(KeyContext::ThreadInspector, ThreadCmd::FollowUp)
+                ));
             }
             if let Some(label) = &offers.retract {
                 if !footer.is_empty() {
@@ -243,10 +256,13 @@ fn field_line(
     show_caret: bool,
 ) -> Option<Line<'static>> {
     if let Some(reply) = &inspector.reply {
-        let ThreadTarget::Item(address) = &inspector.target else {
-            return None;
+        let prompt = match (&inspector.target, reply.follow_up.as_deref()) {
+            (ThreadTarget::Sent { peer, .. }, Some(turn)) => {
+                thread_inspector::follow_up_prompt(peer, turn)
+            }
+            (ThreadTarget::Item(address), None) => reply.prompt(address.item().as_str()),
+            _ => return None,
         };
-        let prompt = reply.prompt(address.item().as_str());
         let used = crate::adapters::tui::text_geometry::cells(&prompt);
         let view = reply.field.view(width.saturating_sub(used).max(1));
         let normal = Style::default().fg(theme.colors.fg_primary);
@@ -318,6 +334,7 @@ pub fn render(
         open: thread_inspector::offered(state, conversation, ThreadCmd::OpenDecision),
         viewport: false,
         retract: thread_inspector::retract_plan(state, conversation).map(|plan| plan.label()),
+        follow_up: thread_inspector::offered(state, conversation, ThreadCmd::FollowUp),
     };
     let mut cache = inspector.layout.borrow_mut();
     let body_key = (
@@ -552,7 +569,7 @@ fn paint_lines(frame: &mut Frame<'_>, area: Rect, lines: &[Line<'static>]) {
 mod tests {
     use super::*;
     use crate::adapters::tui::presentation::reducer;
-    use crate::adapters::tui::state::ThreadTarget;
+    use crate::adapters::tui::state::{ThreadReplyField, ThreadTarget};
     use crate::domain::models::{ItemAddress, ItemId, PeerId, SemanticMessageType};
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -715,5 +732,75 @@ mod tests {
             expected[..],
             "after widening the retained end position paints the last rows, not a blank frame"
         );
+    }
+
+    /// A local sent-thread frame on `marcus`/`item-7` (this host's own item, not retracted)
+    /// whose read offered `follow_up`.
+    fn sent_frame(access: ThreadAccess, loading: bool, follow_up: Option<&str>) -> TuiState {
+        let mut state = TuiState::new(80, HEIGHT);
+        let mut inspector = ThreadInspectorState::new(
+            ThreadTarget::Sent {
+                peer: "marcus".to_owned(),
+                item: "item-7".to_owned(),
+            },
+            access,
+            SemanticMessageType::Unknown,
+        );
+        inspector.sent = Some(crate::adapters::tui::state::SentThread {
+            generation: 1,
+            origin: "conv-1".to_owned(),
+            loading,
+            mine: true,
+            retracted: false,
+            follow_up: follow_up.map(str::to_owned),
+        });
+        reducer::open_thread(&mut state, inspector, "Thread".to_owned());
+        state
+    }
+
+    #[test]
+    fn agents_thread_the_writer_rail_paints_follow_up_before_retract_only_where_it_applies() {
+        let turn = Some("turn-3");
+        let offered = sent_frame(ThreadAccess::Writer, false, turn);
+        let rail = paint(&offered, 80).join("\n");
+        assert!(rail.contains("[f] Follow up  [x] Retract"), "{rail}");
+        let no_target = sent_frame(ThreadAccess::Writer, false, None);
+        let rail = paint(&no_target, 80).join("\n");
+        assert!(rail.contains("[x] Retract"), "{rail}");
+        let loading = sent_frame(ThreadAccess::Writer, true, turn);
+        let reader = sent_frame(ThreadAccess::ReadOnly, false, turn);
+        let local_only = sent_frame(ThreadAccess::LocalOnly, false, turn);
+        let mut read_only_tab = sent_frame(ThreadAccess::Writer, false, turn);
+        read_only_tab.local_read_only = true;
+        for (label, state) in [
+            ("no target", no_target),
+            ("loading", loading),
+            ("read-only access", reader),
+            ("local-only access", local_only),
+            ("read-only tab", read_only_tab),
+        ] {
+            let rail = paint(&state, 80).join("\n");
+            assert!(!rail.contains("Follow up"), "{label}: {rail}");
+        }
+    }
+
+    #[test]
+    fn agents_thread_the_open_follow_up_field_paints_its_prompt_and_its_own_rail() {
+        let mut state = sent_frame(ThreadAccess::Writer, false, Some("turn-3"));
+        state.input_buffer = "main draft".to_owned();
+        state.thread_inspector.as_mut().unwrap().reply = Some(ThreadReplyField {
+            field: "hello".into(),
+            follow_up: Some("turn-3".to_owned()),
+            ..ThreadReplyField::default()
+        });
+        let rows = paint(&state, 80);
+        let prompt = "/team followup marcus turn-3 hello";
+        let painted = rows.iter().any(|row| row.starts_with(prompt));
+        assert!(painted, "{rows:#?}");
+        let rail = rows.join("\n");
+        assert!(rail.contains("[Enter] Send  [Esc] Clear"), "{rail}");
+        assert!(!rail.contains("Follow up"), "{rail}");
+        assert!(!rail.contains("Retract"), "{rail}");
+        assert_eq!(state.input_buffer, "main draft");
     }
 }

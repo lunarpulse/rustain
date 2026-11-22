@@ -1,13 +1,15 @@
 //! S-THREAD rows (Story 21.8, A6): the frame's own paging, copy, search, block-viewport and
 //! closing rows, the stack chords every frame declares, and the writer's action rows. The
-//! writer rows exist only in the attached host (`.attached()`); whether one can act on the
+//! writer rows exist only in the attached host (`.attached()`), except `f Follow up` of a local
+//! sent thread (`.local()`, story `agents-thread`); whether one can act on the
 //! opened item now is `thread_inspector::applies`, the one rule the generated rail and the
 //! dispatch share, so a key the rail does not paint is a consumed no-op (21-13 D12).
 //!
 //! `p` and `l` are the thread pager; `l` shadows the inherited `MarkdownBody` scroll-right at
 //! the root. Inside the block viewport (`BodyViewport`, whose chain excludes the thread rows)
-//! `h l 0 $` move the wide blocks' offset and `l` never pages. The reply field
-//! (`ThreadReply`) is a caret text field of its own: `Enter` sends, `Esc` clears and leaves it.
+//! `h l 0 $` move the wide blocks' offset and `l` never pages. The text field
+//! (`ThreadReply`) is a caret text field of its own, the attached reply field or the local
+//! follow-up field (its rows resolve on both hosts): `Enter` sends, `Esc` clears and leaves it.
 
 use super::model::{Binding, CommandId, Context, Key, bind};
 use super::table::GlobalCmd;
@@ -45,6 +47,9 @@ pub enum ThreadCmd {
     Context,
     /// `x`: retract the opened sent item, or the newest auto-sent reply of the opened item.
     Retract,
+    /// `f` (local sent frame): follow up on the frame's newest eligible turn in a field of this
+    /// window.
+    FollowUp,
 }
 
 const fn t(keys: &'static [Key], command: ThreadCmd, label: &'static str) -> Binding {
@@ -67,7 +72,6 @@ const fn r(keys: &'static [Key], command: ThreadCmd, label: &'static str) -> Bin
         CommandId::Thread(command),
         label,
     )
-    .attached()
     .te()
 }
 
@@ -106,12 +110,13 @@ pub const ROWS: &[Binding] = &[
     w(&[Key::Char('3')], ThreadCmd::LeaveOut(2), "Leave out").does("Leave the third retrospective field out of what is shared, or put it back"),
     w(&[Key::Char('u')], ThreadCmd::Context, "Use as context").does("Use the opened item as peer context for this conversation, or stop using it"),
     t(&[Key::Char('x')], ThreadCmd::Retract, "Retract").does("Retract the item you sent, or your newest auto-sent reply to this item (asks to confirm first)"),
-    r(&[Key::Enter], ThreadCmd::SendReply, "Send").does("Send the reply through /team reply and close the thread window"),
-    r(&[Key::Esc], ThreadCmd::ReplyBack, "Clear").does("Clear the reply and leave its field"),
-    r(&[Key::Ctrl('c')], ThreadCmd::ReplyBack, "").does("Clear the reply and leave its field"),
-    bind(Context::ThreadReply, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").attached().te().does("Open the menu above this reply field"),
-    bind(Context::ThreadReply, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").attached().te().does("Open the command palette above this reply field"),
-    bind(Context::ThreadReply, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").attached().te().does("Ask to quit without closing this reply field"),
+    t(&[Key::Char('f')], ThreadCmd::FollowUp, "Follow up").local().does("Follow up on the newest eligible turn of the sent thread in a field of this window (local host, writable tab; sends through /team followup)"),
+    r(&[Key::Enter], ThreadCmd::SendReply, "Send").does("Send the reply through /team reply and close the thread window (attached), or the follow-up through /team followup and keep the window open for its receipt (local)"),
+    r(&[Key::Esc], ThreadCmd::ReplyBack, "Clear").does("Clear the reply or follow-up and leave its field"),
+    r(&[Key::Ctrl('c')], ThreadCmd::ReplyBack, "").does("Clear the reply or follow-up and leave its field"),
+    bind(Context::ThreadReply, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").te().does("Open the menu above this reply or follow-up field"),
+    bind(Context::ThreadReply, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").te().does("Open the command palette above this reply or follow-up field"),
+    bind(Context::ThreadReply, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").te().does("Ask to quit without closing this reply or follow-up field"),
     v(&[Key::Esc], ThreadCmd::LeaveViewport, "Leave").does("Leave the block viewport, back to the thread"),
     v(&[Key::Ctrl('c')], ThreadCmd::LeaveViewport, "").does("Leave the block viewport, back to the thread"),
     bind(Context::BodyViewport, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").does("Open the menu above the block viewport"),

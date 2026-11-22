@@ -25,6 +25,9 @@ pub enum MissionCmd {
     Export,
     /// `Enter` (a list tab, local): open the selected row's window (Agents, Tasks, Artifacts).
     Open,
+    /// `t` (Agents, local): open the exact peer thread of the selected delegation row, where
+    /// the A2A owner verified it (story `agents-thread`).
+    Thread,
     /// `c` (artifact window, local): copy the artifact's original source bytes.
     CopySource,
     /// `c` (agent window, local): copy the agent transcript's original text.
@@ -122,6 +125,7 @@ pub const ROWS: &[Binding] = &[
     m(&[Key::Right], MissionCmd::NextTab, "Tab").does("Select the next Mission Control tab (inert while only one tab exists)"),
     m(&[Key::Tab], MissionCmd::Focus, "Detail").does("Move between the list and its detail preview (only where the frame shows both)"),
     m(&[Key::Enter], MissionCmd::Open, "Open").local().does("Open the selected row's window (Agents, Tasks, Artifacts)"),
+    m(&[Key::Char('t')], MissionCmd::Thread, "Open thread").local().does("Open the exact peer thread of the selected delegation (Agents; only where this host verified it)"),
     m(&[Key::Char('e')], MissionCmd::Export, "Export").local().does("Export the unfiltered A2A log snapshot the Messages view was read from"),
     m(&[Key::Char('p')], MissionCmd::Pause, "Pause/Resume").local().does("Pause the selected running agent or task, or resume a suspended agent or a paused task (Agents, Tasks)"),
     m(&[Key::Char('x')], MissionCmd::Kill, "Kill").local().does("Ask to kill the selected agent and its subtree (Agents), or to cancel the plan (Tasks); a decision confirms it"),

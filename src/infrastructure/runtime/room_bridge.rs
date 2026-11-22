@@ -141,7 +141,7 @@ pub async fn refresh_mission_tab(
 ) {
     match tab {
         McTab::Agents => {
-            super::mission_bridge::open_agents_tab(state, &app_state.agent_core).await;
+            super::mission_bridge::open_agents_tab(state, app_state).await;
         }
         McTab::Room => {
             refresh_panel(app_state, state).await;

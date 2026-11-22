@@ -92,7 +92,13 @@ async fn sent_loading_projection_safety_filter_and_back() {
     assert!(title_row(&rig.f).contains("Thread · sent · ada"));
     assert!(painted_body(&mut rig).join("\n").contains("reading…"));
     let hostile = PROJECTION.replace("opened body", "opened body \u{1b}[31mred\u{202e}tail");
-    transparency_bridge::team_thread_ready(&mut rig.f.h.state, "origin", generation, &hostile);
+    transparency_bridge::team_thread_ready(
+        &mut rig.f.h.state,
+        "origin",
+        generation,
+        &hostile,
+        None,
+    );
     let text = painted_body(&mut rig).join("\n");
     for part in [
         "thread · ada · root",
@@ -171,6 +177,7 @@ async fn stale_generation_completion_is_dropped() {
         "origin",
         second,
         "closed completion",
+        None,
     );
     assert!(rig.f.h.state.modal_stack.is_empty());
     assert_eq!(rig.f.h.state.feedback_blocks.len(), before);
@@ -188,14 +195,28 @@ async fn stale_generation_completion_is_dropped() {
         "origin",
         newest,
         "newest completion",
+        None,
     );
-    transparency_bridge::team_thread_ready(&mut rig.f.h.state, "origin", first, "stale first");
-    transparency_bridge::team_thread_ready(&mut rig.f.h.state, "origin", second, "stale second");
+    transparency_bridge::team_thread_ready(
+        &mut rig.f.h.state,
+        "origin",
+        first,
+        "stale first",
+        None,
+    );
+    transparency_bridge::team_thread_ready(
+        &mut rig.f.h.state,
+        "origin",
+        second,
+        "stale second",
+        None,
+    );
     transparency_bridge::team_thread_ready(
         &mut rig.f.h.state,
         "other-origin",
         newest,
         "wrong origin",
+        None,
     );
     let text = painted_body(&mut rig).join("\n");
     assert!(text.contains("newest completion"), "{text}");

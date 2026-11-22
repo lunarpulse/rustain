@@ -757,6 +757,74 @@ decision, not an immediate mutation; read-only and local-only item views do not
 offer the action. The result appears in the matching thread's outcomes, or as a
 notice when that thread is not on top.
 
+In a local session, `Mission Control · Agents` (`Ctrl+X s`) paints
+`[t] Open thread` right after `[Enter] Open` on a row this host delegated to a
+peer over A2A. A row is offered only when its id names a peer and a task, the
+peer is still a configured roster alias, the task is one of this host's own
+dispatches to that peer, and this process saw that delegation submit the
+message whose id the peer answered with as its task id. A server that minted
+its own task id or answered with another task's id, a row recovered after a
+restart, subagent rows and every other row get no hint, and `t` without the
+hint does nothing. Offers are recomputed on each roster refresh without network
+I/O. `t` re-checks the offer, reads the peer's item list once in this host's
+scope and keeps the items whose task equals the row's task exactly:
+
+- one item: `Thread · sent · <peer>` opens above Mission Control with the same
+  content as `/team thread <peer> <item-id>`; `Esc` returns to
+  `Mission Control · Agents` with the same row selected;
+- no item: `<peer>'s host lists no item for this agent's task — nothing was
+  opened`;
+- several items: `<peer>'s host lists <n> items for this agent's task: <id>,
+  <id> — open one with /team thread <peer> <item-id>` (list order, at most eight
+  ids, never a pick, no thread read);
+- a failed list read: `could not read <peer>'s items — <outcome>` in the peer
+  outcome words (`unreachable`, `no usable answer — '/team board' shows whether
+  it arrived`, …);
+- an offer that no longer verifies: `this agent's thread can no longer be
+  verified — nothing was opened`, with no request.
+
+While the read is pending the rail shows `opening thread…`; moving the
+selection, switching tab or closing Mission Control discards its result. A
+result that arrives while another window covers Mission Control is discarded
+too, without a window or a notice, and once Mission Control is back on top the
+row offers `[t] Open thread` again; pressing it reads afresh. With a
+thread window already open beneath Mission Control, `t` refuses with `a thread
+window is already open beneath Mission Control — close it first`. Opening is a
+read: no `message/send` or `tasks/*`, no dispatch row, no model turn, and the
+composer is unchanged. The attached host keeps its Agents refusal. No Agents row
+offers Reply to a received item; it stays where it is offered today (the
+attached thread window, transcript peer rows, `/team view`).
+
+A local sent thread, opened by `t` or `/team thread`, offers `[f] Follow up`
+before `[x] Retract` on a writable tab when its read has an eligible turn. The
+target is the newest one: an item turn this host sent that is neither removed
+nor retracted, or an unretracted reply turn answering such an item of the same
+thread; ids that disclosure sanitization would change never qualify (bidi and
+other format characters do not change them and are visibly escaped when
+painted), and nothing does unless the opened item itself qualifies. A model
+delegation's dispatch row carries the hash of the text it delegated, so the
+item a delegation sent is this host's own turn here. A window has one target;
+answer any other turn with the typed `/team followup`. `f` opens a field owned
+by the window with prompt `/team followup <peer> <turn-id> `, pre-filled
+with text kept for this thread; Enter sends nonempty text, Esc or Ctrl+C clears
+the field, and the composer is unchanged. At send a read-only tab refuses with
+its read-only warning, and a window no longer showing that thread and target
+answers `this thread changed since you opened the field — nothing was sent`;
+both keep the text and send nothing. Otherwise the field closes and the send
+takes the `/team followup` path (the same `team-send-N` block and journal rows)
+while the window stays open. Its outcomes show `follow-up answering <turn-id> ·
+<outcome>` in the existing peer outcome words, `sending…` first, then the
+settled words (also an Info notice when that thread is not on top). The text is
+kept for the next field after a refusal before sending, `declined`,
+`unreachable`, a question this verb cannot answer, `no usable answer` or
+`not sent`, and cleared after `delivered`,
+`accepted — this peer keeps no item id` or `awaiting their approval`. A
+settlement keeps its text only while it is still that thread's newest: text
+kept for the thread, or a follow-up sent from it, after the failed one stays and
+the late settlement's text is dropped. Nothing
+is resent: after `no usable answer`, `/team board` shows whether the one request
+arrived. The attached host has no `f`.
+
 `/team reply` records a reply turn on the answering host. When the item's
 pending peer-response card has a live process-owned controller, it resolves
 that card as the operator's own answer (`WriteOwn`) and records one turn;
@@ -1068,7 +1136,7 @@ content hash**. Its dispatch correlation uses the same PQ2 alias/origin rule:
 an unpinned rename at the same origin retains `you`; the same alias retains
 `you` after a move, including pin-add plus move. Historical same-identity rows
 without an endpoint retain exact task/hash correlation. Changed/missing hashes,
-model-rail rows without a human-text hash, and task/hash claims from an unrelated
+model-rail rows without a content hash, and task/hash claims from an unrelated
 origin under a different alias remain `another sender`. This is correlation of
 this host's sent bytes, not proof of host/personhood continuity. Reply-observation
 deduplication is unchanged; no rename-transparent observation-dedup claim.

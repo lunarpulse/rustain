@@ -869,11 +869,18 @@ async fn read_thread_block(
         conversation_id,
         generation,
         message,
+        follow_up,
     } = event
     else {
         panic!("a thread read publishes TeamThreadReady, got {event:?}");
     };
-    team_thread_ready(state, &conversation_id, generation, &message);
+    team_thread_ready(
+        state,
+        &conversation_id,
+        generation,
+        &message,
+        follow_up.as_deref(),
+    );
     assert!(!state.feedback_blocks.contains_key("team-thread"));
     state
         .thread_inspector
@@ -3083,16 +3090,31 @@ async fn k13_the_model_rail_polls_and_cancels_with_its_own_capability() {
         Some(stored_hash(&wire(&key, &item.task))),
         "the model rail's item is capability-bearing"
     );
-    // Story 19.19 K08: the real model-tool dispatch grants item capability,
-    // but its absent human-text hash must never label the delegated body you.
+    // Story 19.19 K08 pinned the model-tool dispatch as hashless, so its delegated body
+    // rendered `another sender`. Story `agents-thread` moved that contract (author decision D6:
+    // follow up only on our own turns, and a delegation this host dispatched IS its own
+    // turn): the dispatch row now carries the hash of the delegated text, so the SAME
+    // task-and-hash rule a typed `/team send` meets labels the body `you`. Task alone still
+    // never does (19.19 K08's changed/missing-hash cases).
     let mut sender = sender_over(vec![credentialed(&b, "b", A_ENV)], journal, keys).await;
     let mut state = TuiState::new(130, 30);
     let block = read_thread_block(&mut sender, &mut state, "b", &item.id).await;
+    // The label column is padded (`you       <item>`): compare the row's words, not its spacing.
+    let labelled = |label: &[&str]| {
+        block.lines().any(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words.len() == label.len() + 1
+                && words[..label.len()] == *label
+                && words[label.len()] == item.id
+        })
+    };
     assert!(
-        block
-            .lines()
-            .any(|line| line.trim() == format!("another sender  {}", item.id)),
-        "model-rail content has no own human-text hash: {block}"
+        labelled(&["you"]),
+        "the model rail's delegated text is this host's own turn: {block}"
+    );
+    assert!(
+        !labelled(&["another", "sender"]),
+        "the delegated item is never another sender's: {block}"
     );
     draft_shutdown.cancel();
 

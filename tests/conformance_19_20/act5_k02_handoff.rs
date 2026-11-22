@@ -209,12 +209,14 @@ async fn k02_bug_report_acknowledgement_and_fix_reply_cross_real_hosts_without_p
                     conversation_id,
                     generation,
                     message,
+                    follow_up,
                 }) => {
                     rustain::infrastructure::runtime::transparency_bridge::team_thread_ready(
                         &mut state,
                         &conversation_id,
                         generation,
                         &message,
+                        follow_up.as_deref(),
                     );
                     let frame = state.thread_inspector.as_ref().expect("sent thread frame");
                     assert!(matches!(

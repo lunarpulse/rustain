@@ -57,8 +57,11 @@ pub(crate) fn local_facts(
     // item can no longer be answered, so quitting leaves nothing unanswered for it.
     let large_images = state.decisions.count_live(DecisionKind::LargeImage);
     facts.pending_images = state.pending_images.len() + large_images;
+    // An open follow-up field of a local sent thread holds text quitting would lose (the
+    // attached guard counts the same field).
     facts.peer_compose =
-        crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
+        crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some()
+            || crate::adapters::tui::thread_inspector::reply_field_has_text(state);
     facts.pending_decisions = (state.decisions.undecided() - large_images)
         - settled_plan_cards(state, conversation, tabs);
     facts
@@ -966,5 +969,50 @@ mod tests {
         );
         dq::withdraw_agent_kill(&mut h.state, &gone);
         assert_eq!(pending(&h), 1, "the gone agent's kill confirmation");
+    }
+
+    fn peer_compose(h: &Host) -> bool {
+        local_facts(
+            &h.state,
+            &h.conversation,
+            &h.tabs,
+            &h.streaming,
+            &h.lifecycle,
+            &h.queue,
+        )
+        .peer_compose
+    }
+
+    /// A host whose open local sent-thread frame has a follow-up field holding `text`.
+    fn follow_up_host(text: &str) -> Host {
+        use crate::adapters::tui::presentation::reducer;
+        use crate::adapters::tui::state::{
+            ThreadAccess, ThreadInspectorState, ThreadReplyField, ThreadTarget,
+        };
+        let mut h = host();
+        let mut sent = ThreadInspectorState::new(
+            ThreadTarget::Sent {
+                peer: "marcus".to_owned(),
+                item: "item-7".to_owned(),
+            },
+            ThreadAccess::Writer,
+            crate::domain::models::SemanticMessageType::Unknown,
+        );
+        sent.reply = Some(ThreadReplyField {
+            field: text.into(),
+            follow_up: Some("turn-3".to_owned()),
+            ..ThreadReplyField::default()
+        });
+        reducer::open_thread(&mut h.state, sent, "Thread".to_owned());
+        h
+    }
+
+    #[test]
+    fn agents_thread_a_follow_up_field_with_text_is_an_unsent_composition() {
+        assert!(!peer_compose(&host()));
+        assert!(!peer_compose(&follow_up_host("")), "empty field");
+        let mut h = follow_up_host("follow-up text");
+        assert!(peer_compose(&h));
+        assert_eq!(ask(&mut h), QuitRequest::Confirming);
     }
 }

@@ -67,6 +67,12 @@ pub fn open_thread(
     payload: crate::adapters::tui::state::ThreadInspectorState,
     title: String,
 ) -> Opened {
+    // The sent thread this payload replaces keeps the text of its open follow-up field on its
+    // own outcome key (story `agents-thread` AC7); `open_sent` handles the same-target reopen
+    // before the payload reaches this point.
+    if let Some(old) = state.thread_inspector.as_ref() {
+        crate::adapters::tui::thread_inspector::retain_follow_up(&mut state.thread_outcomes, old);
+    }
     state.thread_inspector = Some(payload);
     let opened = open_frame(state, Surface::ThreadInspector, None, Some(title.clone()));
     state
@@ -89,6 +95,7 @@ pub fn open_mission_control(
     tab: crate::adapters::tui::mission_control::McTab,
 ) -> Opened {
     state.mission_control.switch_to(tab);
+    state.agent_threads.opening = None;
     let title = state.mission_control.title();
     let opened = open_frame(state, Surface::MissionControl, None, Some(title.clone()));
     set_mission_title(state, title);
@@ -104,6 +111,7 @@ pub fn set_mission_tab(state: &mut TuiState, tab: crate::adapters::tui::mission_
         return;
     }
     state.mission_control.switch_to(tab);
+    state.agent_threads.opening = None;
     let title = state.mission_control.title();
     set_mission_title(state, title);
     state.needs_redraw = true;
@@ -895,11 +903,18 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
             None
         }
         Surface::ThreadInspector => {
+            if let Some(old) = state.thread_inspector.as_ref() {
+                crate::adapters::tui::thread_inspector::retain_follow_up(
+                    &mut state.thread_outcomes,
+                    old,
+                );
+            }
             state.thread_inspector = None;
             None
         }
         Surface::MissionControl => {
             state.mission_control.closed();
+            state.agent_threads.opening = None;
             None
         }
         Surface::ArtifactWindow => {
@@ -1284,6 +1299,111 @@ mod tests {
             Some(&help),
             "global covering frame remains"
         );
+        assert!(consistent(&state));
+    }
+
+    /// A sent-thread payload on `marcus`/`item` with `field` as its open text field.
+    fn sent_payload(
+        item: &str,
+        field: Option<crate::adapters::tui::state::ThreadReplyField>,
+    ) -> crate::adapters::tui::state::ThreadInspectorState {
+        use crate::adapters::tui::state::{ThreadAccess, ThreadInspectorState, ThreadTarget};
+        let mut payload = ThreadInspectorState::new(
+            ThreadTarget::Sent {
+                peer: "marcus".to_owned(),
+                item: item.to_owned(),
+            },
+            ThreadAccess::Writer,
+            crate::domain::models::SemanticMessageType::Unknown,
+        );
+        payload.reply = field;
+        payload
+    }
+
+    /// An open follow-up field holding `text`.
+    fn follow_up(text: &str) -> Option<crate::adapters::tui::state::ThreadReplyField> {
+        Some(crate::adapters::tui::state::ThreadReplyField {
+            field: text.into(),
+            follow_up: Some("turn-1".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    /// The outcome key of the open thread payload.
+    fn open_key(state: &TuiState) -> Option<String> {
+        let inspector = state.thread_inspector.as_ref()?;
+        Some(inspector.outcome_key())
+    }
+
+    #[test]
+    fn agents_thread_a_replaced_or_released_sent_frame_files_its_follow_up_under_its_own_key() {
+        use crate::adapters::tui::state::ThreadReplyField;
+        let seven = "sent:marcus:item-7";
+        let eight = "sent:marcus:item-8";
+        let nine = "sent:marcus:item-9";
+        let title = || "Thread · sent · marcus".to_owned();
+        let mut state = TuiState::new(80, 24);
+        state.input_buffer = "main draft".to_owned();
+        open_thread(
+            &mut state,
+            sent_payload("item-7", follow_up("for seven")),
+            title(),
+        );
+        // Replaced by another item of the same peer: the text stays with item-7 only.
+        open_thread(&mut state, sent_payload("item-8", None), title());
+        assert_eq!(open_key(&state).as_deref(), Some(eight));
+        assert_eq!(state.thread_outcomes.retained(seven), Some("for seven"));
+        assert_eq!(state.thread_outcomes.retained(eight), None);
+        // Released by close: filed under the released payload's key.
+        state.thread_inspector.as_mut().unwrap().reply = follow_up("for eight");
+        close(&mut state, Surface::ThreadInspector);
+        assert!(state.thread_inspector.is_none());
+        assert_eq!(state.thread_outcomes.retained(eight), Some("for eight"));
+        assert_eq!(state.thread_outcomes.retained(seven), Some("for seven"));
+        // Released by back (`Esc`): the same rule.
+        let again = sent_payload("item-7", follow_up("again"));
+        open_thread(&mut state, again, title());
+        assert_eq!(back(&mut state), Some(Surface::ThreadInspector));
+        assert_eq!(state.thread_outcomes.retained(seven), Some("again"));
+        // An empty follow-up field and a reply field are never filed.
+        open_thread(&mut state, sent_payload("item-9", follow_up("")), title());
+        close(&mut state, Surface::ThreadInspector);
+        assert_eq!(state.thread_outcomes.retained(nine), None);
+        let reply = Some(ThreadReplyField {
+            field: "a reply".into(),
+            ..Default::default()
+        });
+        open_thread(&mut state, sent_payload("item-9", reply), title());
+        open_thread(&mut state, sent_payload("item-7", None), title());
+        assert_eq!(state.thread_outcomes.retained(nine), None);
+        assert_eq!(state.thread_outcomes.retained(seven), Some("again"));
+        assert_eq!(state.thread_outcomes.retained(eight), Some("for eight"));
+        assert_eq!(state.input_buffer, "main draft");
+        assert!(consistent(&state));
+    }
+
+    #[test]
+    fn agents_thread_opening_closing_or_retabbing_mission_control_voids_a_pending_lookup() {
+        use crate::adapters::tui::mission_control::McTab;
+        let opening = crate::adapters::tui::state::AgentThreadOpening {
+            agent: crate::domain::models::AgentId::new(),
+            generation: 7,
+        };
+        let mut state = TuiState::new(80, 24);
+        state.agent_threads.opening = Some(opening.clone());
+        open_mission_control(&mut state, McTab::Agents);
+        assert_eq!(state.agent_threads.opening, None);
+        // Opening it again on the same tab (a retarget in place) voids it too.
+        state.agent_threads.opening = Some(opening.clone());
+        open_mission_control(&mut state, McTab::Agents);
+        assert_eq!(state.agent_threads.opening, None);
+        state.agent_threads.opening = Some(opening.clone());
+        set_mission_tab(&mut state, McTab::Tasks);
+        assert_eq!(state.agent_threads.opening, None);
+        state.agent_threads.opening = Some(opening);
+        close(&mut state, Surface::MissionControl);
+        assert_eq!(state.agent_threads.opening, None);
+        assert!(!is_open(&state, Surface::MissionControl));
         assert!(consistent(&state));
     }
 }

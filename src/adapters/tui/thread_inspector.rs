@@ -7,6 +7,7 @@
 
 use crate::adapters::daemon::protocol::{ClientFrame, RecipientAction};
 use crate::adapters::tui::{
+    app::InputAction,
     handlers::recipient_actions::action_is_pending,
     keymap::{
         self, CommandId, Context, Host, Key, Resolved, table_block::BodyCmd,
@@ -28,6 +29,10 @@ struct OutcomeEntry {
     lines: std::collections::VecDeque<String>,
     last: u64,
     retained_reply: Option<String>,
+    /// The stamp (a value of the log's clock) of the newest draft of this target: the last
+    /// retained text or the last follow-up sent from it. A failed send restores its text only
+    /// while its own stamp is still the newest (story `agents-thread` AC9).
+    draft: u64,
 }
 
 /// The session-local outcome log (Story 21.8 A13): at most 32 targets with at most 16 lines
@@ -60,6 +65,7 @@ impl ThreadOutcomes {
                     lines: Default::default(),
                     last: 0,
                     retained_reply: None,
+                    draft: 0,
                 });
                 self.entries.len() - 1
             }
@@ -87,9 +93,39 @@ impl ThreadOutcomes {
             .flat_map(|entry| entry.lines.iter().map(String::as_str))
     }
 
-    /// Keep the text of a reply the daemon did not take, on its target.
+    /// Keep the text of a reply the daemon did not take, on its target: the newest draft.
     pub fn retain_reply(&mut self, key: &str, text: String) {
-        self.entry(key).retained_reply = Some(text);
+        let entry = self.entry(key);
+        entry.retained_reply = Some(text);
+        entry.draft = entry.last;
+    }
+
+    /// A follow-up written on `key` leaves now: it is that target's newest draft, and any text
+    /// still retained there is older (a field takes the retained text when it opens, so what
+    /// is left is a failure restored behind that field) and is retired. Returns the stamp its
+    /// settlement hands to [`Self::restore_failed`].
+    pub fn stamp_send(&mut self, key: &str) -> u64 {
+        let entry = self.entry(key);
+        entry.retained_reply = None;
+        entry.draft = entry.last;
+        entry.draft
+    }
+
+    /// The send stamped `draft` on `key` failed: keep its text for the next field unless a newer
+    /// draft of that target was retained or sent since (a late or out-of-order settlement never
+    /// destroys newer text). Whether the text was kept.
+    pub fn restore_failed(&mut self, key: &str, draft: u64, text: String) -> bool {
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.key == key && entry.draft > draft)
+        {
+            return false;
+        }
+        let entry = self.entry(key);
+        entry.retained_reply = Some(text);
+        entry.draft = draft;
+        true
     }
 
     /// The retained reply text of `key`, once.
@@ -348,7 +384,7 @@ pub(crate) fn node_title() -> String {
 
 /// A peer alias as painted in a title: sanitized, bounded and with bidi characters shown as
 /// visible escapes (the operator typed it, but an attached request can carry anything).
-fn painted_peer(peer: &str) -> String {
+pub(crate) fn painted_peer(peer: &str) -> String {
     use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
     crate::infrastructure::runtime::recipient_view::escape_disclosable(&sanitize_disclosable(
         peer,
@@ -368,6 +404,67 @@ pub(crate) fn reply_field_has_text(state: &TuiState) -> bool {
         .as_ref()
         .and_then(|inspector| inspector.reply.as_ref())
         .is_some_and(|reply| !reply.field.is_empty())
+}
+
+/// The prompt of a follow-up field: the typed verb it runs, peer and turn painted through the
+/// one sanitize-and-escape path (both are peer-influenced).
+pub(crate) fn follow_up_prompt(peer: &str, turn: &str) -> String {
+    format!(
+        "/team followup {} {} ",
+        painted_peer(peer),
+        painted_peer(turn)
+    )
+}
+
+/// A sent frame that goes away (replaced, retargeted or released) keeps the text of its open
+/// follow-up field on its own outcome key, for the next field of that same thread; never on
+/// another key, and never for a reply field.
+pub(crate) fn retain_follow_up(outcomes: &mut ThreadOutcomes, inspector: &ThreadInspectorState) {
+    if matches!(inspector.target, ThreadTarget::Sent { .. })
+        && let Some(reply) = inspector.reply.as_ref()
+        && reply.follow_up.is_some()
+        && !reply.field.is_empty()
+    {
+        outcomes.retain_reply(&inspector.outcome_key(), reply.field.as_str().to_owned());
+    }
+}
+
+/// A frame follow-up stamped `draft` on `key` failed: its text waits for the next field only
+/// while it is that thread's newest draft. A non-empty follow-up field open on the same thread
+/// is newer (it was opened after that send closed its own field), as is text retained or a
+/// follow-up sent after it ([`ThreadOutcomes::restore_failed`]); then the late failure's text
+/// is dropped. Whether the text was kept.
+pub(crate) fn restore_failed_follow_up(
+    state: &mut TuiState,
+    key: &str,
+    draft: u64,
+    text: String,
+) -> bool {
+    let newer_field_open = state.thread_inspector.as_ref().is_some_and(|inspector| {
+        matches!(inspector.target, ThreadTarget::Sent { .. })
+            && inspector
+                .reply
+                .as_ref()
+                .is_some_and(|reply| reply.follow_up.is_some() && !reply.field.is_empty())
+            && inspector.outcome_key() == key
+    });
+    !newer_field_open && state.thread_outcomes.restore_failed(key, draft, text)
+}
+
+/// What `f` would follow up on now (story `agents-thread` AC7): `(peer, item, turn)` of a
+/// loaded local sent frame with a writer's access, on a writable tab, whose completed read
+/// offered a target. `None` otherwise. The one rule the rail and the dispatch share.
+pub(crate) fn follow_up_plan(state: &TuiState) -> Option<(&str, &str, &str)> {
+    let inspector = state.thread_inspector.as_ref()?;
+    if inspector.access != ThreadAccess::Writer || state.local_read_only {
+        return None;
+    }
+    let ThreadTarget::Sent { peer, item } = &inspector.target else {
+        return None;
+    };
+    let sent = inspector.sent.as_ref().filter(|sent| !sent.loading)?;
+    let turn = sent.follow_up.as_deref()?;
+    Some((peer.as_str(), item.as_str(), turn))
 }
 
 /// Which writer actions the opened item offers now, in rail order (slot order): none unless
@@ -656,6 +753,7 @@ pub(crate) fn offered(
         ThreadCmd::OpenDecision => open_decision_key(state, conversation).is_some(),
         ThreadCmd::Viewport => inspector.wide_fit.get().0 > 0,
         ThreadCmd::Retract => retract_plan(state, conversation).is_some(),
+        ThreadCmd::FollowUp => follow_up_plan(state).is_some(),
         _ => actions(state, conversation)
             .into_iter()
             .flatten()
@@ -688,6 +786,10 @@ pub(crate) fn applies(
         // `x` is painted in the writer rail section: live when that section is.
         ThreadCmd::Retract => {
             inspector.rail_live.get().0 && offered(state, conversation, ThreadCmd::Retract)
+        }
+        // `f` is painted in the writer rail section beside `x`: live when that section is.
+        ThreadCmd::FollowUp => {
+            inspector.rail_live.get().0 && offered(state, conversation, ThreadCmd::FollowUp)
         }
         _ => action_for(state, conversation, cmd).is_some(),
     }
@@ -844,6 +946,12 @@ pub(crate) fn on_key(
                 Some(plan) => ThreadOutcome::Retract(plan),
                 None => ThreadOutcome::Consumed,
             }
+        }
+        CommandId::Thread(ThreadCmd::FollowUp) => {
+            if applies(state, conversation, ThreadCmd::FollowUp) {
+                open_follow_up(state);
+            }
+            ThreadOutcome::Consumed
         }
         CommandId::Thread(ThreadCmd::Toggle) => {
             if applies(state, conversation, ThreadCmd::Toggle) {
@@ -1058,6 +1166,83 @@ pub(crate) fn reply_sent(state: &mut TuiState) {
     state.needs_redraw = true;
 }
 
+/// `f`: open the frame-owned follow-up field on the offered turn (the composer is never read
+/// or written). Text retained for this frame's outcome key pre-fills it.
+fn open_follow_up(state: &mut TuiState) {
+    let Some(turn) = follow_up_plan(state).map(|(_, _, turn)| turn.to_owned()) else {
+        return;
+    };
+    let Some(key) = state
+        .thread_inspector
+        .as_ref()
+        .map(ThreadInspectorState::outcome_key)
+    else {
+        return;
+    };
+    let retained = state.thread_outcomes.take_retained(&key);
+    let Some(inspector) = state.thread_inspector.as_mut() else {
+        return;
+    };
+    let mut reply = ThreadReplyField {
+        follow_up: Some(turn),
+        ..ThreadReplyField::default()
+    };
+    if let Some(text) = retained {
+        reply.field.set(&text);
+    }
+    inspector.reply = Some(reply);
+    inspector.invalidate();
+    state.needs_redraw = true;
+}
+
+/// A key of the follow-up field that is not text editing (the local host's counterpart of
+/// [`on_reply_key`]): `Enter` yields the follow-up to dispatch, `Esc`/`Ctrl+C` clear the field
+/// and leave it. The field stays open after `Enter` until the dispatch decides
+/// (`transparency_bridge::follow_up_sent`).
+pub(crate) fn on_follow_up_key(state: &mut TuiState, key: Key) -> InputAction {
+    let Resolved::Hit(row) = keymap::resolve(Context::ThreadReply, Host::Local, &[key]) else {
+        return InputAction::Consumed;
+    };
+    state.needs_redraw = true;
+    match row.command {
+        CommandId::Thread(ThreadCmd::ReplyBack) => {
+            if let Some(inspector) = state.thread_inspector.as_mut() {
+                inspector.reply = None;
+                inspector.invalidate();
+            }
+            InputAction::Consumed
+        }
+        CommandId::Thread(ThreadCmd::SendReply) => follow_up_submission(state),
+        _ => InputAction::Consumed,
+    }
+}
+
+/// The follow-up the open field would send: this frame's peer, item and answered turn, and the
+/// text as typed. Empty text sends nothing.
+fn follow_up_submission(state: &TuiState) -> InputAction {
+    let Some(inspector) = state.thread_inspector.as_ref() else {
+        return InputAction::Consumed;
+    };
+    let (Some(reply), ThreadTarget::Sent { peer, item }) =
+        (inspector.reply.as_ref(), &inspector.target)
+    else {
+        return InputAction::Consumed;
+    };
+    let Some(turn) = reply.follow_up.as_ref() else {
+        return InputAction::Consumed;
+    };
+    let text = reply.field.as_str();
+    if text.trim().is_empty() {
+        return InputAction::Consumed;
+    }
+    InputAction::ThreadFollowUp {
+        peer: peer.clone(),
+        item: item.clone(),
+        turn: turn.clone(),
+        text: text.to_owned(),
+    }
+}
+
 /// `c`: copy the opened item's original body (never the escaped display, never turn rows)
 /// through the injectable copier. The bound is checked on the source length before anything
 /// is copied; nothing available is a notice, never an empty copy.
@@ -1119,7 +1304,7 @@ pub(crate) fn accept_search(state: &mut TuiState) {
 /// The writer action letters (and `o`): a Repeat, a Release or a modified variant of one
 /// never acts.
 const WRITER_LETTERS: &[char] = &[
-    'r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u', 'o', 'x',
+    'r', 'd', 'b', 'a', 'y', 's', 'n', '1', '2', '3', 'u', 'o', 'x', 'f',
 ];
 
 /// The raw press-only rule of the thread frame (PC-14): conversion discards kind and
@@ -1994,5 +2179,540 @@ mod tests {
         );
         reducer::open(&mut covered, Surface::Help);
         assert!(!ignores_raw_key(&covered, &repeat_r));
+    }
+
+    const PEER: &str = "marcus";
+    const SENT_ITEM: &str = "item-7";
+    const TURN: &str = "turn-3";
+    const SENT_KEY: &str = "sent:marcus:item-7";
+
+    fn sent(loading: bool, follow_up: Option<&str>) -> crate::adapters::tui::state::SentThread {
+        crate::adapters::tui::state::SentThread {
+            generation: 1,
+            origin: "conv-1".to_owned(),
+            loading,
+            mine: true,
+            retracted: false,
+            follow_up: follow_up.map(str::to_owned),
+        }
+    }
+
+    fn sent_inspector(access: ThreadAccess) -> ThreadInspectorState {
+        ThreadInspectorState::new(
+            ThreadTarget::Sent {
+                peer: PEER.to_owned(),
+                item: SENT_ITEM.to_owned(),
+            },
+            access,
+            SemanticMessageType::Unknown,
+        )
+    }
+
+    /// A state whose only frame is the sent thread `marcus`/`item-7`, opened through the
+    /// reducer, its read completed with `follow_up` as the offered turn.
+    fn sent_state(access: ThreadAccess, follow_up: Option<&str>) -> TuiState {
+        let mut state = TuiState::new(80, 24);
+        let mut inspector = sent_inspector(access);
+        inspector.sent = Some(sent(false, follow_up));
+        reducer::open_thread(&mut state, inspector, sent_title(PEER));
+        state
+    }
+
+    fn follow_up_field(text: &str) -> ThreadReplyField {
+        ThreadReplyField {
+            field: text.into(),
+            follow_up: Some(TURN.to_owned()),
+            ..ThreadReplyField::default()
+        }
+    }
+
+    /// The text of the open field, if one is open.
+    fn field_text(state: &TuiState) -> Option<&str> {
+        let reply = state.thread_inspector.as_ref()?.reply.as_ref()?;
+        Some(reply.field.as_str())
+    }
+
+    #[test]
+    fn agents_thread_follow_up_plan_is_a_loaded_local_sent_writer_frame_with_a_target() {
+        let state = sent_state(ThreadAccess::Writer, Some(TURN));
+        assert_eq!(follow_up_plan(&state), Some((PEER, SENT_ITEM, TURN)));
+        assert!(super::offered(&state, None, ThreadCmd::FollowUp));
+        assert!(applies(&state, None, ThreadCmd::FollowUp));
+
+        let mut cases: Vec<(&str, TuiState)> = vec![
+            ("no frame", TuiState::new(80, 24)),
+            (
+                "read-only access",
+                sent_state(ThreadAccess::ReadOnly, Some(TURN)),
+            ),
+            (
+                "local-only access",
+                sent_state(ThreadAccess::LocalOnly, Some(TURN)),
+            ),
+        ];
+        let mut read_only_tab = sent_state(ThreadAccess::Writer, Some(TURN));
+        read_only_tab.local_read_only = true;
+        cases.push(("read-only tab", read_only_tab));
+        let mut loading = sent_state(ThreadAccess::Writer, Some(TURN));
+        inspector(&mut loading).sent = Some(sent(true, Some(TURN)));
+        cases.push(("loading", loading));
+        cases.push(("no target", sent_state(ThreadAccess::Writer, None)));
+        let mut attached_style = sent_state(ThreadAccess::Writer, Some(TURN));
+        inspector(&mut attached_style).sent = None;
+        cases.push(("no local read (attached sent frame)", attached_style));
+        let mut item = thread_state(
+            ThreadAccess::Writer,
+            SemanticMessageType::Consultation,
+            Some("received"),
+        );
+        inspector(&mut item).sent = Some(sent(false, Some(TURN)));
+        cases.push(("item frame", item));
+        let mut node = TuiState::new(80, 24);
+        let mut node_inspector = ThreadInspectorState::new(
+            ThreadTarget::Node(NODE.to_owned()),
+            ThreadAccess::Writer,
+            SemanticMessageType::Consultation,
+        );
+        node_inspector.sent = Some(sent(false, Some(TURN)));
+        reducer::open_thread(&mut node, node_inspector, node_title());
+        cases.push(("node frame", node));
+        for (label, state) in &cases {
+            let offered = super::offered(state, None, ThreadCmd::FollowUp);
+            assert_eq!(follow_up_plan(state), None, "{label}");
+            assert!(!offered, "{label}");
+            assert!(!applies(state, None, ThreadCmd::FollowUp), "{label}");
+        }
+    }
+
+    #[test]
+    fn agents_thread_f_is_live_only_where_the_writer_rail_was_painted_whole() {
+        let mut state = sent_state(ThreadAccess::Writer, Some(TURN));
+        state.input_buffer = "main draft".to_owned();
+        state.cursor_position = 4;
+        inspector(&mut state).rail_live.set((false, true));
+        assert!(
+            super::offered(&state, None, ThreadCmd::FollowUp),
+            "offered by facts alone"
+        );
+        assert!(!applies(&state, None, ThreadCmd::FollowUp));
+        assert!(matches!(
+            on_key(&mut state, Key::Char('f'), Host::Local, None),
+            ThreadOutcome::Consumed
+        ));
+        assert!(inspector(&mut state).reply.is_none(), "unpainted: inert");
+        // The page rail being cut does not matter: `f` lives in the writer section.
+        inspector(&mut state).rail_live.set((true, false));
+        assert!(applies(&state, None, ThreadCmd::FollowUp));
+        assert!(matches!(
+            on_key(&mut state, Key::Char('f'), Host::Local, None),
+            ThreadOutcome::Consumed
+        ));
+        assert!(inspector(&mut state).reply.is_some());
+        assert_eq!(state.input_buffer, "main draft");
+        assert_eq!(state.cursor_position, 4);
+    }
+
+    #[test]
+    fn agents_thread_f_opens_the_follow_up_field_prefilled_from_this_frame_key_only() {
+        let mut state = sent_state(ThreadAccess::Writer, Some(TURN));
+        state.input_buffer = "main draft".to_owned();
+        state.cursor_position = 4;
+        state
+            .thread_outcomes
+            .retain_reply(SENT_KEY, "kept for seven".to_owned());
+        state
+            .thread_outcomes
+            .retain_reply("sent:marcus:item-8", "kept for eight".to_owned());
+        let before = inspector(&mut state).generation;
+        assert!(matches!(
+            on_key(&mut state, Key::Char('f'), Host::Local, None),
+            ThreadOutcome::Consumed
+        ));
+        let opened = state.thread_inspector.as_ref().unwrap();
+        assert_ne!(opened.generation, before, "the field repaints");
+        let reply = opened.reply.as_ref().expect("`f` opened the field");
+        assert_eq!(reply.follow_up.as_deref(), Some(TURN));
+        assert!(!reply.discuss);
+        assert_eq!(reply.field.as_str(), "kept for seven");
+        assert_eq!(frame_context(&state), Context::ThreadReply);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), None, "taken");
+        assert_eq!(
+            state.thread_outcomes.retained("sent:marcus:item-8"),
+            Some("kept for eight"),
+            "another item of the same peer keeps its own text"
+        );
+        assert_eq!(state.input_buffer, "main draft");
+        assert_eq!(state.cursor_position, 4);
+        // Nothing retained: the field opens empty.
+        let mut fresh = sent_state(ThreadAccess::Writer, Some(TURN));
+        on_key(&mut fresh, Key::Char('f'), Host::Local, None);
+        assert_eq!(field_text(&fresh), Some(""));
+    }
+
+    #[test]
+    fn agents_thread_f_is_a_consumed_no_op_where_no_follow_up_applies() {
+        let mut cases: Vec<(&str, TuiState, Host)> = vec![
+            (
+                "no target",
+                sent_state(ThreadAccess::Writer, None),
+                Host::Local,
+            ),
+            (
+                "read-only access",
+                sent_state(ThreadAccess::ReadOnly, Some(TURN)),
+                Host::Local,
+            ),
+            (
+                "local-only access",
+                sent_state(ThreadAccess::LocalOnly, Some(TURN)),
+                Host::Local,
+            ),
+            (
+                "attached host",
+                sent_state(ThreadAccess::Writer, Some(TURN)),
+                Host::Attached,
+            ),
+        ];
+        let mut read_only_tab = sent_state(ThreadAccess::Writer, Some(TURN));
+        read_only_tab.local_read_only = true;
+        cases.push(("read-only tab", read_only_tab, Host::Local));
+        let mut loading = sent_state(ThreadAccess::Writer, Some(TURN));
+        inspector(&mut loading).sent = Some(sent(true, Some(TURN)));
+        cases.push(("loading", loading, Host::Local));
+        for (label, mut state, host) in cases {
+            state.input_buffer = "main draft".to_owned();
+            state.cursor_position = 4;
+            state
+                .thread_outcomes
+                .retain_reply(SENT_KEY, "kept".to_owned());
+            assert!(
+                matches!(
+                    on_key(&mut state, Key::Char('f'), host, None),
+                    ThreadOutcome::Consumed
+                ),
+                "{label}"
+            );
+            assert!(inspector(&mut state).reply.is_none(), "{label}");
+            assert_eq!(
+                state.thread_outcomes.retained(SENT_KEY),
+                Some("kept"),
+                "{label}: nothing taken"
+            );
+            assert_eq!(state.input_buffer, "main draft", "{label}");
+            assert_eq!(state.cursor_position, 4, "{label}");
+        }
+    }
+
+    #[test]
+    fn agents_thread_the_follow_up_field_sends_on_enter_and_clears_on_esc_or_ctrl_c() {
+        let mut state = sent_state(ThreadAccess::Writer, Some(TURN));
+        state.input_buffer = "main draft".to_owned();
+        // Empty or blank text sends nothing and keeps the field.
+        for blank in ["", "  \n "] {
+            inspector(&mut state).reply = Some(follow_up_field(blank));
+            assert_eq!(
+                on_follow_up_key(&mut state, Key::Enter),
+                InputAction::Consumed
+            );
+            assert!(inspector(&mut state).reply.is_some());
+        }
+        // `Enter` yields the exact follow-up, text as typed; the field stays open until the
+        // dispatch decides.
+        inspector(&mut state).reply = Some(follow_up_field(" answer this "));
+        assert_eq!(
+            on_follow_up_key(&mut state, Key::Enter),
+            InputAction::ThreadFollowUp {
+                peer: PEER.to_owned(),
+                item: SENT_ITEM.to_owned(),
+                turn: TURN.to_owned(),
+                text: " answer this ".to_owned(),
+            }
+        );
+        assert_eq!(field_text(&state), Some(" answer this "));
+        // Keys that are not the field's own commands change nothing.
+        for key in [Key::Char('a'), Key::Tab, Key::Ctrl('x'), Key::Ctrl('q')] {
+            assert_eq!(
+                on_follow_up_key(&mut state, key),
+                InputAction::Consumed,
+                "{key:?}"
+            );
+            assert_eq!(field_text(&state), Some(" answer this "), "{key:?}");
+        }
+        // `Esc` and `Ctrl+C` clear the field and leave it; the text is discarded, not retained.
+        for key in [Key::Esc, Key::Ctrl('c')] {
+            inspector(&mut state).reply = Some(follow_up_field("discard me"));
+            assert_eq!(
+                on_follow_up_key(&mut state, key),
+                InputAction::Consumed,
+                "{key:?}"
+            );
+            assert!(inspector(&mut state).reply.is_none(), "{key:?}");
+            assert_eq!(state.thread_outcomes.retained(SENT_KEY), None, "{key:?}");
+            assert!(state.thread_inspector.is_some(), "{key:?}: frame stays");
+        }
+        // A reply field (no answered turn) on a sent frame sends nothing.
+        inspector(&mut state).reply = Some(ThreadReplyField {
+            field: "a reply".into(),
+            ..ThreadReplyField::default()
+        });
+        assert_eq!(
+            on_follow_up_key(&mut state, Key::Enter),
+            InputAction::Consumed
+        );
+        assert_eq!(state.input_buffer, "main draft");
+    }
+
+    #[test]
+    fn agents_thread_follow_up_prompt_sanitizes_and_escapes_peer_and_turn() {
+        assert_eq!(
+            follow_up_prompt(PEER, TURN),
+            "/team followup marcus turn-3 "
+        );
+        // Controls are dropped, bidi controls shown as visible escapes, a smuggled newline
+        // never splits the prompt.
+        assert_eq!(
+            follow_up_prompt("ev\u{1b}[31mil\u{202e}x", "t\nurn\u{2066}"),
+            "/team followup ev[31mil\\u{202e}x turn\\u{2066} "
+        );
+    }
+
+    #[test]
+    fn agents_thread_retain_follow_up_files_only_non_empty_follow_up_text_under_its_own_key() {
+        let with_reply = |target: ThreadTarget, reply: Option<ThreadReplyField>| {
+            let mut inspector = ThreadInspectorState::new(
+                target,
+                ThreadAccess::Writer,
+                SemanticMessageType::Unknown,
+            );
+            inspector.reply = reply;
+            inspector
+        };
+        let sent_target = || ThreadTarget::Sent {
+            peer: PEER.to_owned(),
+            item: SENT_ITEM.to_owned(),
+        };
+        let mut outcomes = ThreadOutcomes::default();
+        for (label, inspector) in [
+            ("no field", with_reply(sent_target(), None)),
+            (
+                "empty follow-up field",
+                with_reply(sent_target(), Some(follow_up_field(""))),
+            ),
+            (
+                "reply field",
+                with_reply(
+                    sent_target(),
+                    Some(ThreadReplyField {
+                        field: "a reply".into(),
+                        ..ThreadReplyField::default()
+                    }),
+                ),
+            ),
+            (
+                "item frame",
+                with_reply(
+                    ThreadTarget::Item(item_address()),
+                    Some(follow_up_field("text")),
+                ),
+            ),
+        ] {
+            retain_follow_up(&mut outcomes, &inspector);
+            assert!(outcomes.is_empty(), "{label}: nothing filed");
+        }
+        retain_follow_up(
+            &mut outcomes,
+            &with_reply(sent_target(), Some(follow_up_field("draft"))),
+        );
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes.retained(SENT_KEY), Some("draft"));
+        assert_eq!(outcomes.retained("sent:marcus:item-8"), None);
+    }
+
+    /// A state whose only frame is the loaded writer sent thread `peer`/`item` offering `TURN`.
+    fn sent_state_on(peer: &str, item: &str) -> TuiState {
+        let mut state = TuiState::new(80, 24);
+        let mut inspector = ThreadInspectorState::new(
+            ThreadTarget::Sent {
+                peer: peer.to_owned(),
+                item: item.to_owned(),
+            },
+            ThreadAccess::Writer,
+            SemanticMessageType::Unknown,
+        );
+        inspector.sent = Some(sent(false, Some(TURN)));
+        reducer::open_thread(&mut state, inspector, sent_title(peer));
+        state
+    }
+
+    #[test]
+    fn agents_thread_sent_outcome_keys_are_injective_over_delimiters() {
+        use crate::adapters::tui::state::sent_outcome_key;
+        assert_eq!(
+            sent_outcome_key(PEER, SENT_ITEM),
+            SENT_KEY,
+            "an alias without `\\` or `:` keys as before"
+        );
+        // Aliases and peer item ids may both carry `:`; the escape character itself too.
+        let threads = [
+            ("p", "q:r"),
+            ("p:q", "r"),
+            ("p\\", "q:r"),
+            ("p\\:q", "r"),
+            ("p", "\\:q:r"),
+            ("p:", "q:r"),
+            ("p", ":q:r"),
+            ("p\\\\", "q"),
+            ("p", "\\\\:q"),
+        ];
+        for (at, first) in threads.iter().enumerate() {
+            for second in &threads[at + 1..] {
+                assert_ne!(
+                    sent_outcome_key(first.0, first.1),
+                    sent_outcome_key(second.0, second.1),
+                    "{first:?} vs {second:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agents_thread_follow_up_text_and_receipts_never_cross_delimiter_colliding_threads() {
+        // `(p, q:r)` and `(p:q, r)`: the two threads a plain `sent:{peer}:{item}` filed as one.
+        let mut state = sent_state_on("p", "q:r");
+        inspector(&mut state).reply = Some(follow_up_field("only for p's q:r"));
+        let first = inspector(&mut state).outcome_key();
+        crate::adapters::tui::handlers::recipient_actions::show_outcome(
+            &mut state,
+            &first,
+            "follow-up answering turn-3 · receipt of p's q:r".to_owned(),
+        );
+        // Opening the other thread replaces the frame: its field text is filed on its own key.
+        let mut other = ThreadInspectorState::new(
+            ThreadTarget::Sent {
+                peer: "p:q".to_owned(),
+                item: "r".to_owned(),
+            },
+            ThreadAccess::Writer,
+            SemanticMessageType::Unknown,
+        );
+        other.sent = Some(sent(false, Some(TURN)));
+        reducer::open_thread(&mut state, other, sent_title("p:q"));
+        let second = inspector(&mut state).outcome_key();
+        assert_ne!(first, second);
+        assert_eq!(
+            state.thread_outcomes.retained(&first),
+            Some("only for p's q:r")
+        );
+        assert_eq!(state.thread_outcomes.retained(&second), None);
+        assert!(
+            state.thread_outcomes.lines(&second).next().is_none(),
+            "another thread's receipt is never this thread's"
+        );
+        on_key(&mut state, Key::Char('f'), Host::Local, None);
+        assert_eq!(
+            field_text(&state),
+            Some(""),
+            "never prefilled across threads"
+        );
+        assert_eq!(
+            state.thread_outcomes.retained(&first),
+            Some("only for p's q:r"),
+            "nothing of the first thread was taken"
+        );
+        // Back on the first thread, its own `f` takes its own text.
+        let mut back = sent_state_on("p", "q:r");
+        back.thread_outcomes = std::mem::take(&mut state.thread_outcomes);
+        on_key(&mut back, Key::Char('f'), Host::Local, None);
+        assert_eq!(field_text(&back), Some("only for p's q:r"));
+    }
+
+    #[test]
+    fn agents_thread_a_failed_send_restores_its_text_only_while_it_is_the_newest_draft() {
+        const OTHER: &str = "sent:marcus:item-8";
+        // The simple case: the one follow-up fails, its text waits for the next field, and an
+        // outcome line in between does not count as a draft.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        outcomes.push(SENT_KEY, "an outcome line".to_owned());
+        assert!(outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("A"));
+
+        // A newer draft B was retained (the frame went away with B in its field) before A's
+        // late failure: B stays.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        outcomes.retain_reply(SENT_KEY, "B".to_owned());
+        assert!(!outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("B"));
+        // ... and still once a field took B for editing.
+        assert_eq!(outcomes.take_retained(SENT_KEY).as_deref(), Some("B"));
+        assert!(!outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), None);
+
+        // Two follow-ups in flight settling out of order: B's failure is kept, A's later one
+        // never replaces it.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        let b = outcomes.stamp_send(SENT_KEY);
+        assert!(outcomes.restore_failed(SENT_KEY, b, "B".to_owned()));
+        assert!(!outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("B"));
+        // B was delivered (nothing restored), then A fails: no stale A prefills the next field.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        let _b = outcomes.stamp_send(SENT_KEY);
+        assert!(!outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), None);
+        // Both in flight, settling in order: B was sent after A, so A's failure is dropped and
+        // B's restores.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        let b = outcomes.stamp_send(SENT_KEY);
+        assert!(!outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert!(outcomes.restore_failed(SENT_KEY, b, "B".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("B"));
+        // One after the other: A is sent and fails, then B is sent and fails; the newer wins.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        assert!(outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("A"));
+        let b = outcomes.stamp_send(SENT_KEY);
+        assert!(outcomes.restore_failed(SENT_KEY, b, "B".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("B"));
+
+        // Another thread's newer draft never shields this one.
+        let mut outcomes = ThreadOutcomes::default();
+        let a = outcomes.stamp_send(SENT_KEY);
+        outcomes.retain_reply(OTHER, "other".to_owned());
+        assert!(outcomes.restore_failed(SENT_KEY, a, "A".to_owned()));
+        assert_eq!(outcomes.retained(SENT_KEY), Some("A"));
+        assert_eq!(outcomes.retained(OTHER), Some("other"));
+    }
+
+    #[test]
+    fn agents_thread_a_repeat_or_modified_f_is_ignored_at_the_frame_root_only() {
+        let key = |code, modifiers, kind| KeyEvent::new_with_kind(code, modifiers, kind);
+        let mut state = sent_state(ThreadAccess::Writer, Some(TURN));
+        let (none, shift) = (KeyModifiers::NONE, KeyModifiers::SHIFT);
+        let press = key(KeyCode::Char('f'), none, KeyEventKind::Press);
+        let repeat = key(KeyCode::Char('f'), none, KeyEventKind::Repeat);
+        let release = key(KeyCode::Char('f'), none, KeyEventKind::Release);
+        let shifted = key(KeyCode::Char('F'), shift, KeyEventKind::Press);
+        assert!(!ignores_raw_key(&state, &press));
+        assert!(ignores_raw_key(&state, &repeat));
+        assert!(ignores_raw_key(&state, &release));
+        assert!(ignores_raw_key(&state, &shifted));
+        for modifiers in [
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+        ] {
+            let chord = key(KeyCode::Char('f'), modifiers, KeyEventKind::Press);
+            assert!(ignores_raw_key(&state, &chord), "{modifiers:?}");
+        }
+        // Inside the open field `f` is text: the guard stands aside.
+        inspector(&mut state).reply = Some(follow_up_field(""));
+        assert!(!ignores_raw_key(&state, &repeat));
+        assert!(!ignores_raw_key(&state, &shifted));
     }
 }

@@ -567,7 +567,7 @@ pub async fn team_command(
             stories,
             holders_of,
         } => {
-            start_team_send(
+            let _ = start_team_send(
                 state,
                 conversation_id,
                 app_state,
@@ -583,28 +583,14 @@ pub async fn team_command(
         }
         // Story 19.18 `AC7` — a follow-up IS a 19.17 delivery, N = 1, with the
         // reply-to carrier: the same validation, block, settle handler, rows
-        // and outcome words. ⛔ No second send path (`M21`).
+        // and outcome words. ⛔ No second send path (`M21`): the sent frame's
+        // follow-up field calls the same `start_followup`.
         TeamCommandArgs::Followup {
             peer,
             turn_id,
             text,
         } => {
-            start_team_send(
-                state,
-                conversation_id,
-                app_state,
-                TeamSendPayload::Typed {
-                    recipients: vec![peer],
-                    text,
-                },
-                None,
-                Some(turn_id),
-                None,
-                None,
-                None,
-                crate::domain::models::Authorship::HumanWritten,
-            )
-            .await;
+            let _ = start_followup(state, conversation_id, app_state, peer, turn_id, text).await;
         }
         // Story 19.18 `AC6` — rail 3 SERVES the thread read: the only rail
         // holding this session's own A2A egress. Spawned, never awaited
@@ -798,7 +784,7 @@ pub(crate) async fn start_proposed_team_send(
     proposal: std::sync::Arc<crate::domain::models::TeamProposal>,
 ) {
     let message_type = Some(proposal.message_type);
-    start_team_send(
+    let _ = start_team_send(
         state,
         conversation_id,
         app_state,
@@ -811,6 +797,138 @@ pub(crate) async fn start_proposed_team_send(
         crate::domain::models::Authorship::AgentComposed,
     )
     .await;
+}
+
+/// Story `agents-thread` D7 — what starting a follow-up did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FollowupStart {
+    /// Rows were painted: the `team-send-N` block that carries the send.
+    Started(String),
+    /// Validation or a missing runtime refused before any row: the sentence the Stage shows.
+    Refused(String),
+}
+
+/// The one follow-up send (story 19.18 `AC7`, `M21`): a 19.17 delivery with N = 1 and the
+/// reply-to carrier, human-written. The typed `/team followup` arm and the sent frame's
+/// follow-up field both start it here, so the block, the rows, the settle handler and the
+/// outcome words are one path. `peer` and `turn_id` are carried whole, never reparsed.
+pub async fn start_followup(
+    state: &mut TuiState,
+    conversation_id: &str,
+    app_state: &AppState,
+    peer: String,
+    turn_id: String,
+    text: String,
+) -> FollowupStart {
+    match start_team_send(
+        state,
+        conversation_id,
+        app_state,
+        TeamSendPayload::Typed {
+            recipients: vec![peer],
+            text,
+        },
+        None,
+        Some(turn_id),
+        None,
+        None,
+        None,
+        crate::domain::models::Authorship::HumanWritten,
+    )
+    .await
+    {
+        Ok(block) => FollowupStart::Started(block),
+        Err(sentence) => FollowupStart::Refused(sentence),
+    }
+}
+
+/// The sentence a follow-up gets when the frame it was written in is no longer that thread.
+pub const FOLLOW_UP_CHANGED: &str =
+    "this thread changed since you opened the field — nothing was sent";
+
+/// Story `agents-thread` AC8 — the local host's effect of `Enter` in a sent frame's follow-up
+/// field (`InputAction::ThreadFollowUp`). The field is a convenience over the existing send
+/// entitlement: nothing is derived from the Agents row or the roster here, and authority is
+/// re-checked at the moment of sending (D8): a read-only tab refuses with the tab warning and
+/// keeps the text in the field; a frame that is no longer this loaded sent thread with this
+/// target refuses with its own sentence and retains the text under the frame's key. Otherwise
+/// the field closes and [`start_followup`] sends, with the receipt landing in the frame's
+/// outcome log (settled by [`team_send_settled`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn follow_up_sent(
+    state: &mut TuiState,
+    conversation_id: &str,
+    peer: &str,
+    item: &str,
+    turn: &str,
+    text: String,
+    read_only: bool,
+    app_state: &AppState,
+) {
+    use crate::adapters::tui::handlers::recipient_actions::show_outcome;
+    use crate::adapters::tui::handlers::team_command::render_team_send_summary;
+    use crate::adapters::tui::notifications::{self, NoticeSource};
+    use crate::adapters::tui::state::{FollowUpReceipt, sent_outcome_key};
+    use crate::adapters::tui::thread_inspector::{follow_up_plan, painted_peer};
+
+    if read_only {
+        notifications::warning(state, NoticeSource::Tabs, super::mission_bridge::READ_ONLY);
+        return;
+    }
+    let key = sent_outcome_key(peer, item);
+    let still_this_thread =
+        follow_up_plan(state).is_some_and(|(p, i, t)| p == peer && i == item && t == turn);
+    if !still_this_thread {
+        state.thread_outcomes.retain_reply(&key, text);
+        show_outcome(state, &key, FOLLOW_UP_CHANGED.to_owned());
+        return;
+    }
+    if let Some(inspector) = state.thread_inspector.as_mut() {
+        inspector.reply = None;
+        inspector.invalidate();
+    }
+    let painted = painted_peer(turn);
+    match start_followup(
+        state,
+        conversation_id,
+        app_state,
+        peer.to_owned(),
+        turn.to_owned(),
+        text.clone(),
+    )
+    .await
+    {
+        FollowupStart::Started(block) => {
+            let summary = state.team_send_blocks.get(&block).map_or_else(
+                || "sending…".to_owned(),
+                |rows| render_team_send_summary(rows),
+            );
+            let draft = state.thread_outcomes.stamp_send(&key);
+            state.thread_follow_ups.insert(
+                block,
+                FollowUpReceipt {
+                    peer: peer.to_owned(),
+                    key: key.clone(),
+                    turn: turn.to_owned(),
+                    text,
+                    draft,
+                },
+            );
+            show_outcome(
+                state,
+                &key,
+                format!("follow-up answering {painted} · {summary}"),
+            );
+        }
+        FollowupStart::Refused(sentence) => {
+            state.thread_outcomes.retain_reply(&key, text);
+            show_outcome(
+                state,
+                &key,
+                format!("follow-up answering {painted} · {sentence}"),
+            );
+        }
+    }
 }
 
 /// The rail-3 addressed send (Story 19.17), shared by `/team send` and Story
@@ -831,7 +949,7 @@ async fn start_team_send(
     stories: Option<crate::domain::models::StoryManifest>,
     holders_of: Option<crate::domain::models::StorySelector>,
     authorship: crate::domain::models::Authorship,
-) {
+) -> Result<String, String> {
     #[cfg(not(feature = "a2a"))]
     use crate::adapters::tui::handlers::team_command as handler;
     use crate::adapters::tui::handlers::team_command::show_team_send;
@@ -845,12 +963,9 @@ async fn start_team_send(
         };
         use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_summary};
         let Some(runtime) = app_state.a2a_send.clone() else {
-            show_team_send(
-                state,
-                &block_id,
-                "· A2A send runtime is not configured for this session.".to_owned(),
-            );
-            return;
+            let sentence = "· A2A send runtime is not configured for this session.".to_owned();
+            show_team_send(state, &block_id, sentence.clone());
+            return Err(sentence);
         };
         // Story 19.23: a holder selector resolves before validation, any row,
         // journal write or I/O; a refusal leaves no trace.
@@ -859,8 +974,9 @@ async fn start_team_send(
                 match crate::adapters::a2a::story_selection::resolve(&runtime, &selector).await {
                     Ok(selection) => Some(selection),
                     Err(refusal) => {
-                        show_team_send(state, &block_id, refusal.to_string());
-                        return;
+                        let sentence = refusal.to_string();
+                        show_team_send(state, &block_id, sentence.clone());
+                        return Err(sentence);
                     }
                 }
             }
@@ -895,8 +1011,9 @@ async fn start_team_send(
             Err(error) => Err(error),
         };
         if let Err(refusal) = refusal {
-            show_team_send(state, &block_id, refusal.to_string());
-            return;
+            let sentence = refusal.to_string();
+            show_team_send(state, &block_id, sentence.clone());
+            return Err(sentence);
         }
         let row_type = message_type.unwrap_or_default();
         let rows: Vec<_> = recipients
@@ -912,6 +1029,7 @@ async fn start_team_send(
         let event_bus = app_state.event_bus.clone();
         let conversation_id = conversation_id.to_owned();
         let cancel = app_state.session_cancel.child_token();
+        let settled_block = block_id.clone();
         tokio::spawn(async move {
             let (recipients, text) = payload.parts();
             let _ = coordinate_send(
@@ -934,7 +1052,7 @@ async fn start_team_send(
                         let _ = event_bus.emit_domain(
                             crate::domain::events::AppEvent::TeamSendSettled {
                                 conversation_id: conversation_id.clone(),
-                                block_id: block_id.clone(),
+                                block_id: settled_block.clone(),
                                 index,
                                 outcome,
                             },
@@ -944,6 +1062,7 @@ async fn start_team_send(
             )
             .await;
         });
+        Ok(block_id)
     }
     #[cfg(not(feature = "a2a"))]
     {
@@ -963,28 +1082,49 @@ async fn start_team_send(
             &block_id,
             handler::team_send_unavailable().to_owned(),
         );
+        Err(handler::team_send_unavailable().to_owned())
     }
 }
 
+/// A sent thread as the local frame needs it (story `agents-thread` D6): the rendered
+/// sender-side projection and the follow-up target decided from the **structured** read.
+#[cfg(feature = "a2a")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentThreadPage {
+    pub message: String,
+    pub follow_up: Option<String>,
+}
+
 /// Story 19.18 `AC6` — the thread spawn's body: read, settle against the
-/// ledger (journaling each peer turn once), render. `pub`: the front-door
-/// keystones await exactly what the operator's spawn awaits.
+/// ledger (journaling each peer turn once), render. The follow-up target comes
+/// from the same read, never from the rendered text.
+#[cfg(feature = "a2a")]
+pub async fn team_thread_page(
+    runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
+    peer: &str,
+    item_id: &str,
+) -> SentThreadPage {
+    use crate::adapters::tui::handlers::team_command::{follow_up_target, render_team_thread};
+
+    let credentialed = runtime
+        .peer_binding(peer)
+        .is_some_and(|(spec, _)| spec.auth.is_some());
+    let read = crate::adapters::a2a::send::read_thread(runtime, peer, item_id).await;
+    SentThreadPage {
+        follow_up: follow_up_target(&read, item_id),
+        message: render_team_thread(peer, item_id, &read, credentialed),
+    }
+}
+
+/// The rendered text of [`team_thread_page`]: the daemon's `/team thread` parity and the
+/// front-door keystones await exactly what the operator's spawn awaits.
 #[cfg(feature = "a2a")]
 pub async fn team_thread_message(
     runtime: &crate::adapters::a2a::driver::A2aDelegationRuntime,
     peer: &str,
     item_id: &str,
 ) -> String {
-    let credentialed = runtime
-        .peer_binding(peer)
-        .is_some_and(|(spec, _)| spec.auth.is_some());
-    let read = crate::adapters::a2a::send::read_thread(runtime, peer, item_id).await;
-    crate::adapters::tui::handlers::team_command::render_team_thread(
-        peer,
-        item_id,
-        &read,
-        credentialed,
-    )
+    team_thread_page(runtime, peer, item_id).await.message
 }
 
 /// Story 19.18 `AC6(a)` — the rail-3 thread spawn: session-scoped, and a
@@ -1002,10 +1142,10 @@ fn spawn_team_thread(
     cancel: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let message = tokio::select! {
+        let page = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            message = team_thread_message(&runtime, &peer, &item_id) => message,
+            page = team_thread_page(&runtime, &peer, &item_id) => page,
         };
         if cancel.is_cancelled() {
             return;
@@ -1013,22 +1153,27 @@ fn spawn_team_thread(
         let _ = event_bus.emit_domain(crate::domain::events::AppEvent::TeamThreadReady {
             conversation_id,
             generation,
-            message,
+            message: page.message,
+            follow_up: page.follow_up,
         });
     })
 }
 
 /// Story 19.18 `AC6(a)` — the `TeamThreadReady` arm: fill the sent-thread window that issued
-/// the read (21-8 A12). Only a window open on that read applies it: a closed, retargeted,
-/// other-origin or newer-generation frame drops the completion, which never reopens a window
-/// and never paints a Stage row in any tab.
+/// the read (21-8 A12) and, for the same frame, record its follow-up target (story
+/// `agents-thread` AC6, `offer_follow_up`, guarded exactly like the fill). Only a window open
+/// on that read applies it: a closed, retargeted, other-origin or newer-generation frame drops
+/// the completion, which never reopens a window and never paints a Stage row in any tab.
 pub fn team_thread_ready(
     state: &mut TuiState,
     conversation_id: &str,
     generation: u64,
     message: &str,
+    follow_up: Option<&str>,
 ) {
-    super::thread_open::fill_sent(state, conversation_id, generation, message);
+    if super::thread_open::fill_sent(state, conversation_id, generation, message) {
+        super::thread_open::offer_follow_up(state, conversation_id, generation, follow_up);
+    }
 }
 
 /// Apply the asynchronous board answer to its issuing conversation.
@@ -1497,6 +1642,11 @@ pub fn team_send_settled(
     index: usize,
     outcome: crate::domain::models::RecipientOutcome,
 ) {
+    // A frame follow-up (story `agents-thread` AC9) also reports to its thread's outcome log.
+    let receipt_outcome = state
+        .thread_follow_ups
+        .contains_key(block_id)
+        .then(|| outcome.clone());
     let settled = if conversation_id == active_conversation_id {
         settle_team_send_row(
             &mut state.team_send_blocks,
@@ -1521,6 +1671,61 @@ pub fn team_send_settled(
             state.needs_redraw = true;
         }
         post_send_notices(state, settled.notices);
+    }
+    if let Some(outcome) = receipt_outcome
+        && let Some(receipt) = state.thread_follow_ups.remove(block_id)
+    {
+        follow_up_settled(state, receipt, &outcome);
+    }
+}
+
+/// The settled receipt of a frame follow-up (story `agents-thread` AC9, D9): the line of its
+/// send row in the existing peer outcome words, filed under the thread's outcome key (and also
+/// an Info notice when that thread is not on top). The typed text stays retained for the next
+/// field when nothing proves the peer took it (`declined`, `unreachable`, a question this verb
+/// cannot answer, `no usable answer`, `not sent`) and is cleared for `delivered`,
+/// `accepted — this peer keeps no item id` and `awaiting their approval`. A failed send keeps
+/// its text only while it is still that thread's newest draft: a late or out-of-order
+/// settlement never replaces a non-empty field open on that thread, text retained after it or
+/// a follow-up sent after it (which retires any older retained text when it leaves). Nothing
+/// here sends: a lost answer is never redelivered.
+fn follow_up_settled(
+    state: &mut TuiState,
+    receipt: crate::adapters::tui::state::FollowUpReceipt,
+    outcome: &crate::domain::models::RecipientOutcome,
+) {
+    use crate::adapters::tui::handlers::recipient_actions::show_outcome;
+    use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_summary};
+    use crate::domain::models::{RecipientOutcome, SemanticMessageType};
+
+    let summary = render_team_send_summary(&[TeamSendRow {
+        alias: receipt.peer.clone(),
+        outcome: Some(outcome.clone()),
+        message_type: SemanticMessageType::Unknown,
+    }]);
+    let painted = crate::adapters::tui::thread_inspector::painted_peer(&receipt.turn);
+    show_outcome(
+        state,
+        &receipt.key,
+        format!("follow-up answering {painted} · {summary}"),
+    );
+    let keep = match outcome {
+        RecipientOutcome::Delivered
+        | RecipientOutcome::AcceptedWithoutItem
+        | RecipientOutcome::AwaitingApproval => false,
+        RecipientOutcome::Declined
+        | RecipientOutcome::Unreachable { .. }
+        | RecipientOutcome::AskedQuestion { .. }
+        | RecipientOutcome::NoUsableAnswer
+        | RecipientOutcome::NotSent => true,
+    };
+    if keep {
+        crate::adapters::tui::thread_inspector::restore_failed_follow_up(
+            state,
+            &receipt.key,
+            receipt.draft,
+            receipt.text,
+        );
     }
 }
 
@@ -2390,7 +2595,7 @@ mod tests {
         // A's own read completes while another tab is active: it fills A's window (origin and
         // generation match) and still writes no transcript row anywhere.
         let rows_before = state.feedback_blocks.clone();
-        team_thread_ready(&mut state, &issuing, generation_a, "late A");
+        team_thread_ready(&mut state, &issuing, generation_a, "late A", None);
         assert_eq!(state.feedback_blocks, rows_before);
         assert_eq!(state.thread_inspector.as_ref().unwrap().content, "late A");
         let generation_b = super::super::thread_open::open_sent(
@@ -2407,9 +2612,9 @@ mod tests {
             .unwrap()
             .feedback_blocks
             .clone();
-        team_thread_ready(&mut state, &issuing, generation_a, "stale A");
-        team_thread_ready(&mut state, &issuing, generation_b, "foreign origin");
-        team_thread_ready(&mut state, &active, generation_a, "stale generation");
+        team_thread_ready(&mut state, &issuing, generation_a, "stale A", None);
+        team_thread_ready(&mut state, &issuing, generation_b, "foreign origin", None);
+        team_thread_ready(&mut state, &active, generation_a, "stale generation", None);
         assert_eq!(
             state.thread_inspector.as_ref().unwrap().content,
             "  reading…"
@@ -2428,7 +2633,7 @@ mod tests {
                 .keys()
                 .any(|id| id.starts_with("team-thread"))
         );
-        team_thread_ready(&mut state, &active, generation_b, "right tab");
+        team_thread_ready(&mut state, &active, generation_b, "right tab", None);
         assert_eq!(
             state.thread_inspector.as_ref().unwrap().content,
             "right tab"
@@ -2442,16 +2647,16 @@ mod tests {
         let mut state = TuiState::new(120, 40);
         let old = open_sent(&mut state, ThreadAccess::Writer, "peer", "ri_x", "origin");
         let new = open_sent(&mut state, ThreadAccess::Writer, "peer", "ri_x", "origin");
-        team_thread_ready(&mut state, "origin", old, "stale");
-        team_thread_ready(&mut state, "other", new, "other origin");
+        team_thread_ready(&mut state, "origin", old, "stale", None);
+        team_thread_ready(&mut state, "other", new, "other origin", None);
         assert_eq!(
             state.thread_inspector.as_ref().unwrap().content,
             "  reading…"
         );
-        team_thread_ready(&mut state, "origin", new, "accepted");
+        team_thread_ready(&mut state, "origin", new, "accepted", None);
         assert_eq!(state.thread_inspector.as_ref().unwrap().content, "accepted");
         reducer::back(&mut state);
-        team_thread_ready(&mut state, "origin", new, "closed");
+        team_thread_ready(&mut state, "origin", new, "closed", None);
         assert!(state.thread_inspector.is_none());
         assert!(state.modal_stack.top().is_none());
         assert!(!state.feedback_blocks.contains_key("team-thread"));
@@ -2473,7 +2678,7 @@ mod tests {
             "origin",
         );
         let message = render_team_thread("peer", "ri_x", &ThreadRead::NotFound, false);
-        team_thread_ready(&mut state, "origin", generation, &message);
+        team_thread_ready(&mut state, "origin", generation, &message, None);
         assert_eq!(
             state.thread_inspector.as_ref().unwrap().content,
             "thread not found on peer's host"
@@ -2493,7 +2698,7 @@ mod tests {
             "origin",
         );
         let message = "thread · a\u{1b}\u{202e} · ri_root\n  another sender  ri_root\n      root\n  a\u{1b}\u{202e}  ri_mid\u{1b}\u{202e}\n      body\u{1b}\u{202e}\n  you  ri_open  [retracted 12:34]\n      opened";
-        team_thread_ready(&mut state, "origin", generation, message);
+        team_thread_ready(&mut state, "origin", generation, message, None);
         let page = state.thread_inspector.as_mut().unwrap();
         let expected = message
             .replace('\u{1b}', "\\u{1b}")
@@ -3097,6 +3302,627 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(node.load_entries().await.unwrap().len(), before);
+    }
+
+    /// The outcome-log key of the sent thread [`sent_follow_up_frame`] opens.
+    const SENT_KEY: &str = "sent:ada:ri_sent";
+
+    /// Story `agents-thread` — a loaded local sent frame on `ada`'s `ri_sent` whose read offered
+    /// `ri_turn` as the follow-up target: the frame `f` acts on.
+    fn sent_follow_up_frame(state: &mut TuiState) {
+        use super::super::thread_open::{fill_sent, offer_follow_up, open_sent};
+        use crate::adapters::tui::state::ThreadAccess;
+        let generation = open_sent(state, ThreadAccess::Writer, "ada", "ri_sent", "conv");
+        assert!(fill_sent(
+            state,
+            "conv",
+            generation,
+            "thread · ada · ri_sent"
+        ));
+        assert!(offer_follow_up(state, "conv", generation, Some("ri_turn")));
+        assert_eq!(
+            crate::adapters::tui::thread_inspector::follow_up_plan(state),
+            Some(("ada", "ri_sent", "ri_turn"))
+        );
+    }
+
+    /// The frame's open follow-up field, holding `text`.
+    fn open_follow_up_field(state: &mut TuiState, text: &str) {
+        let inspector = state.thread_inspector.as_mut().expect("a sent frame");
+        inspector.reply = Some(crate::adapters::tui::state::ThreadReplyField {
+            field: text.into(),
+            follow_up: Some("ri_turn".to_owned()),
+            ..Default::default()
+        });
+    }
+
+    /// The Info notices of `state`, oldest first.
+    fn info_notices(state: &TuiState) -> Vec<&str> {
+        use crate::adapters::tui::notifications::NoticeSeverity;
+        state
+            .notifications
+            .records()
+            .filter(|notice| notice.severity == NoticeSeverity::Info)
+            .map(|notice| notice.message.as_str())
+            .collect()
+    }
+
+    /// AC8/AC9 — a follow-up refused before any row (this session has no send runtime) closes
+    /// the field, keeps its text under the frame's own key and logs the refusal in the receipt
+    /// shape. Nothing is in flight, and with the frame on top no notice is posted.
+    #[tokio::test]
+    async fn agents_thread_refused_follow_up_retains_text_under_its_thread() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        open_follow_up_field(&mut state, "please confirm");
+        follow_up_sent(
+            &mut state,
+            "conv",
+            "ada",
+            "ri_sent",
+            "ri_turn",
+            "please confirm".to_owned(),
+            false,
+            &app,
+        )
+        .await;
+        #[cfg(feature = "a2a")]
+        let sentence = "· A2A send runtime is not configured for this session.";
+        #[cfg(not(feature = "a2a"))]
+        let sentence = crate::adapters::tui::handlers::team_command::team_send_unavailable();
+        assert!(state.thread_inspector.as_ref().unwrap().reply.is_none());
+        assert_eq!(
+            state.thread_outcomes.retained(SENT_KEY),
+            Some("please confirm")
+        );
+        let receipt = format!("follow-up answering ri_turn · {sentence}");
+        let lines: Vec<&str> = state.thread_outcomes.lines(SENT_KEY).collect();
+        assert_eq!(lines, [receipt.as_str()]);
+        assert_eq!(state.feedback_blocks["team-send-1"].message, sentence);
+        assert!(state.team_send_blocks.is_empty());
+        assert!(state.thread_follow_ups.is_empty());
+        assert!(state.notifications.is_empty());
+    }
+
+    /// AC8 (D8) — a read-only tab refuses at the moment of sending: the tab warning, nothing
+    /// started, and the field keeps its text exactly as typed.
+    #[tokio::test]
+    async fn agents_thread_read_only_follow_up_sends_nothing_and_keeps_the_field() {
+        use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource};
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        open_follow_up_field(&mut state, "keep me");
+        follow_up_sent(
+            &mut state,
+            "conv",
+            "ada",
+            "ri_sent",
+            "ri_turn",
+            "keep me".to_owned(),
+            true,
+            &app,
+        )
+        .await;
+        let inspector = state.thread_inspector.as_ref().unwrap();
+        let reply = inspector.reply.as_ref().expect("the field stays open");
+        assert_eq!(reply.field.as_str(), "keep me");
+        assert_eq!(reply.follow_up.as_deref(), Some("ri_turn"));
+        let notices: Vec<_> = state.notifications.records().collect();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, NoticeSeverity::Warning);
+        assert_eq!(notices[0].source, NoticeSource::Tabs);
+        assert_eq!(notices[0].message, super::super::mission_bridge::READ_ONLY);
+        assert_eq!(state.team_send_next_id, 0, "no send was started");
+        assert!(state.thread_follow_ups.is_empty());
+        assert!(state.thread_outcomes.lines(SENT_KEY).next().is_none());
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), None);
+    }
+
+    /// AC8 (D8) — a field whose frame is no longer its thread (retargeted to another sent item
+    /// offering the same turn id, then closed) sends nothing: the text and the changed-thread
+    /// sentence land under the original thread's key, never under the new one.
+    #[tokio::test]
+    async fn agents_thread_follow_up_from_a_changed_thread_sends_nothing() {
+        use super::super::thread_open::{fill_sent, offer_follow_up, open_sent};
+        use crate::adapters::tui::{presentation::reducer, state::ThreadAccess};
+        const OTHER_KEY: &str = "sent:ada:ri_other";
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        let other = open_sent(&mut state, ThreadAccess::Writer, "ada", "ri_other", "conv");
+        assert!(fill_sent(
+            &mut state,
+            "conv",
+            other,
+            "thread · ada · ri_other"
+        ));
+        assert!(offer_follow_up(&mut state, "conv", other, Some("ri_turn")));
+        follow_up_sent(
+            &mut state,
+            "conv",
+            "ada",
+            "ri_sent",
+            "ri_turn",
+            "first".to_owned(),
+            false,
+            &app,
+        )
+        .await;
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("first"));
+        let lines: Vec<&str> = state.thread_outcomes.lines(SENT_KEY).collect();
+        assert_eq!(lines, [FOLLOW_UP_CHANGED]);
+        assert!(state.thread_outcomes.lines(OTHER_KEY).next().is_none());
+        assert_eq!(state.thread_outcomes.retained(OTHER_KEY), None);
+        assert_eq!(info_notices(&state), [FOLLOW_UP_CHANGED]);
+
+        reducer::back(&mut state);
+        assert!(state.thread_inspector.is_none());
+        follow_up_sent(
+            &mut state,
+            "conv",
+            "ada",
+            "ri_sent",
+            "ri_turn",
+            "second".to_owned(),
+            false,
+            &app,
+        )
+        .await;
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("second"));
+        let lines: Vec<&str> = state.thread_outcomes.lines(SENT_KEY).collect();
+        assert_eq!(lines, [FOLLOW_UP_CHANGED, FOLLOW_UP_CHANGED]);
+        assert_eq!(state.team_send_next_id, 0, "no send was started");
+        assert!(state.thread_follow_ups.is_empty());
+        assert!(
+            !state
+                .feedback_blocks
+                .keys()
+                .any(|id| id.starts_with("team-send"))
+        );
+    }
+
+    /// AC9 (D9) — a frame follow-up's settled row is reported to its thread's outcome log in the
+    /// row's own words; the typed text is retained exactly when nothing proves the peer took it;
+    /// the receipt is consumed; and an Info notice is posted exactly when that thread is not the
+    /// frame on top (closed, or another thread opened over it).
+    #[test]
+    fn agents_thread_follow_up_receipt_settles_by_outcome() {
+        use super::super::thread_open::open_sent;
+        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_summary};
+        use crate::adapters::tui::presentation::reducer;
+        use crate::adapters::tui::state::{FollowUpReceipt, ThreadAccess};
+        use crate::domain::models::{
+            FeedbackBlock, FeedbackLevel, RecipientOutcome, SemanticMessageType,
+        };
+
+        const BLOCK_ID: &str = "team-send-7";
+        #[derive(Clone, Copy)]
+        enum Top {
+            Frame,
+            Closed,
+            Other,
+        }
+        let settle = |outcome: RecipientOutcome, top: Top| {
+            let mut tabs = crate::domain::models::tab::TabManager::default();
+            let conversation = tabs.active_tab().conversation.id.clone();
+            let mut state = TuiState::new(120, 40);
+            sent_follow_up_frame(&mut state);
+            let row = TeamSendRow {
+                alias: "ada".to_owned(),
+                outcome: None,
+                message_type: SemanticMessageType::Unknown,
+            };
+            state.feedback_blocks.insert(
+                BLOCK_ID.to_owned(),
+                FeedbackBlock {
+                    id: BLOCK_ID.to_owned(),
+                    level: FeedbackLevel::Info,
+                    message: render_team_send_summary(std::slice::from_ref(&row)),
+                    seq: 0,
+                },
+            );
+            state
+                .team_send_blocks
+                .insert(BLOCK_ID.to_owned(), vec![row]);
+            let draft = state.thread_outcomes.stamp_send(SENT_KEY);
+            state.thread_follow_ups.insert(
+                BLOCK_ID.to_owned(),
+                FollowUpReceipt {
+                    peer: "ada".to_owned(),
+                    key: SENT_KEY.to_owned(),
+                    turn: "ri_turn".to_owned(),
+                    text: "typed text".to_owned(),
+                    draft,
+                },
+            );
+            match top {
+                Top::Frame => {}
+                Top::Closed => {
+                    reducer::back(&mut state);
+                }
+                Top::Other => {
+                    open_sent(
+                        &mut state,
+                        ThreadAccess::Writer,
+                        "ada",
+                        "ri_other",
+                        &conversation,
+                    );
+                }
+            }
+            team_send_settled(
+                &conversation,
+                &mut state,
+                &mut tabs,
+                &conversation,
+                BLOCK_ID,
+                0,
+                outcome,
+            );
+            state
+        };
+        let cases = [
+            (RecipientOutcome::Delivered, false),
+            (RecipientOutcome::Declined, true),
+            (RecipientOutcome::AwaitingApproval, false),
+            (RecipientOutcome::AcceptedWithoutItem, false),
+            (RecipientOutcome::Unreachable { cause: None }, true),
+            (RecipientOutcome::NoUsableAnswer, true),
+            (RecipientOutcome::NotSent, true),
+            (
+                RecipientOutcome::AskedQuestion {
+                    task_id: "task-q".to_owned(),
+                },
+                true,
+            ),
+        ];
+        for (outcome, keeps) in cases {
+            let summary = render_team_send_summary(&[TeamSendRow {
+                alias: "ada".to_owned(),
+                outcome: Some(outcome.clone()),
+                message_type: SemanticMessageType::Unknown,
+            }]);
+            assert!(summary.starts_with("Send · ") && summary.contains("ada"));
+            let line = format!("follow-up answering ri_turn · {summary}");
+            for top in [Top::Frame, Top::Closed, Top::Other] {
+                let state = settle(outcome.clone(), top);
+                assert_eq!(
+                    state.feedback_blocks[BLOCK_ID].message, summary,
+                    "the receipt speaks the settled row's own words: {outcome:?}"
+                );
+                let lines: Vec<&str> = state.thread_outcomes.lines(SENT_KEY).collect();
+                assert_eq!(lines, [line.as_str()], "{outcome:?}");
+                assert_eq!(
+                    state.thread_outcomes.retained(SENT_KEY),
+                    keeps.then_some("typed text"),
+                    "{outcome:?}"
+                );
+                assert!(state.thread_follow_ups.is_empty(), "{outcome:?}");
+                assert!(!state.team_send_blocks.contains_key(BLOCK_ID));
+                let expected: Vec<&str> = match top {
+                    Top::Frame => Vec::new(),
+                    Top::Closed | Top::Other => vec![line.as_str()],
+                };
+                assert_eq!(info_notices(&state), expected, "{outcome:?}");
+            }
+        }
+    }
+
+    /// A frame follow-up of `text` on [`sent_follow_up_frame`]'s thread whose `block` row is in
+    /// flight, recorded exactly as [`follow_up_sent`] records a started one.
+    fn follow_up_in_flight(state: &mut TuiState, block: &str, text: &str) {
+        use crate::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_summary};
+        use crate::adapters::tui::state::FollowUpReceipt;
+        use crate::domain::models::{FeedbackBlock, FeedbackLevel, SemanticMessageType};
+        let row = TeamSendRow {
+            alias: "ada".to_owned(),
+            outcome: None,
+            message_type: SemanticMessageType::Unknown,
+        };
+        state.feedback_blocks.insert(
+            block.to_owned(),
+            FeedbackBlock {
+                id: block.to_owned(),
+                level: FeedbackLevel::Info,
+                message: render_team_send_summary(std::slice::from_ref(&row)),
+                seq: 0,
+            },
+        );
+        state.team_send_blocks.insert(block.to_owned(), vec![row]);
+        let draft = state.thread_outcomes.stamp_send(SENT_KEY);
+        state.thread_follow_ups.insert(
+            block.to_owned(),
+            FollowUpReceipt {
+                peer: "ada".to_owned(),
+                key: SENT_KEY.to_owned(),
+                turn: "ri_turn".to_owned(),
+                text: text.to_owned(),
+                draft,
+            },
+        );
+    }
+
+    /// AC9 (D9) — a failed follow-up's text is restored only while it is still its thread's
+    /// newest draft: a late failure never destroys text retained after it, and two follow-ups
+    /// settling out of order keep the newer one. The simple failure still restores.
+    #[test]
+    fn agents_thread_a_late_failed_receipt_never_replaces_a_newer_draft() {
+        use crate::adapters::tui::presentation::reducer;
+        use crate::domain::models::RecipientOutcome;
+        let mut tabs = crate::domain::models::tab::TabManager::default();
+        let conversation = tabs.active_tab().conversation.id.clone();
+        let mut settle = |state: &mut TuiState, block: &str, outcome: RecipientOutcome| {
+            team_send_settled(
+                &conversation,
+                state,
+                &mut tabs,
+                &conversation,
+                block,
+                0,
+                outcome,
+            );
+            assert!(!state.thread_follow_ups.contains_key(block), "consumed");
+        };
+
+        // A is sent; the operator writes B and releases the frame (B is retained); A then
+        // settles `declined`: B stays for the next field.
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        open_follow_up_field(&mut state, "B");
+        reducer::back(&mut state);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("B"));
+        settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("B"));
+        assert_eq!(state.thread_outcomes.lines(SENT_KEY).count(), 1, "receipt");
+
+        // Two follow-ups in flight settle out of order: B fails first, A after it.
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        follow_up_in_flight(&mut state, "team-send-2", "B");
+        settle(
+            &mut state,
+            "team-send-2",
+            RecipientOutcome::Unreachable { cause: None },
+        );
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("B"));
+        settle(&mut state, "team-send-1", RecipientOutcome::NoUsableAnswer);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("B"));
+        // B delivered, A fails after it: no stale A waits for the next field.
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        follow_up_in_flight(&mut state, "team-send-2", "B");
+        settle(&mut state, "team-send-2", RecipientOutcome::Delivered);
+        settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), None);
+        assert_eq!(state.thread_outcomes.lines(SENT_KEY).count(), 2, "receipts");
+
+        // Unchanged: in order, each failure restores; the newer text is the one kept.
+        let mut state = TuiState::new(120, 40);
+        sent_follow_up_frame(&mut state);
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("A"));
+        follow_up_in_flight(&mut state, "team-send-2", "B");
+        settle(&mut state, "team-send-2", RecipientOutcome::NotSent);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("B"));
+    }
+
+    /// AC9/AC10 (NT-01) — a failure of an older follow-up never resurfaces behind or after a
+    /// newer one: it is dropped while a newer non-empty field is open on its thread, a newer
+    /// send retires whatever it left retained, and the next `f` pre-fills only the newest text
+    /// the peer did not take. Another thread's field or send never shields or retires it.
+    #[test]
+    fn agents_thread_an_older_failure_never_prefills_after_a_newer_follow_up() {
+        use super::super::thread_open::{fill_sent, offer_follow_up, open_sent};
+        use crate::adapters::tui::keymap::{Host, Key};
+        use crate::adapters::tui::state::ThreadAccess;
+        use crate::adapters::tui::thread_inspector::on_key;
+        use crate::domain::models::RecipientOutcome;
+        let mut tabs = crate::domain::models::tab::TabManager::default();
+        let conversation = tabs.active_tab().conversation.id.clone();
+        let mut settle = |state: &mut TuiState, block: &str, outcome: RecipientOutcome| {
+            team_send_settled(
+                &conversation,
+                state,
+                &mut tabs,
+                &conversation,
+                block,
+                0,
+                outcome,
+            );
+        };
+        // `Enter` on the open field as `follow_up_sent` starts it: the field closes and the
+        // send is stamped.
+        let submit = |state: &mut TuiState, block: &str| {
+            let inspector = state.thread_inspector.as_mut().expect("a sent frame");
+            let reply = inspector.reply.take().expect("an open field");
+            follow_up_in_flight(state, block, reply.field.as_str());
+        };
+        // The text the next `f` pre-fills (the field is closed again afterwards).
+        let next_f = |state: &mut TuiState| {
+            on_key(state, Key::Char('f'), Host::Local, None);
+            let inspector = state.thread_inspector.as_mut().expect("a sent frame");
+            let reply = inspector.reply.take().expect("`f` opened the field");
+            reply.field.as_str().to_owned()
+        };
+        let fresh = || {
+            let mut state = TuiState::new(120, 40);
+            sent_follow_up_frame(&mut state);
+            state
+        };
+
+        for cleared in [
+            RecipientOutcome::Delivered,
+            RecipientOutcome::AcceptedWithoutItem,
+            RecipientOutcome::AwaitingApproval,
+        ] {
+            // A in flight; B typed in a new field; A fails behind it; B is sent and taken.
+            let mut state = fresh();
+            follow_up_in_flight(&mut state, "team-send-1", "A");
+            open_follow_up_field(&mut state, "B");
+            settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+            assert_eq!(
+                state.thread_outcomes.retained(SENT_KEY),
+                None,
+                "{cleared:?}"
+            );
+            submit(&mut state, "team-send-2");
+            settle(&mut state, "team-send-2", cleared.clone());
+            assert_eq!(next_f(&mut state), "", "{cleared:?}");
+            // The newer field still empty when A fails: A waits behind it, and B's send
+            // retires it.
+            let mut state = fresh();
+            follow_up_in_flight(&mut state, "team-send-1", "A");
+            open_follow_up_field(&mut state, "");
+            settle(&mut state, "team-send-1", RecipientOutcome::NoUsableAnswer);
+            assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("A"));
+            open_follow_up_field(&mut state, "B");
+            submit(&mut state, "team-send-2");
+            assert_eq!(
+                state.thread_outcomes.retained(SENT_KEY),
+                None,
+                "{cleared:?}"
+            );
+            settle(&mut state, "team-send-2", cleared.clone());
+            assert_eq!(next_f(&mut state), "", "{cleared:?}");
+            // B sent and taken first, A fails after it.
+            let mut state = fresh();
+            follow_up_in_flight(&mut state, "team-send-1", "A");
+            open_follow_up_field(&mut state, "B");
+            submit(&mut state, "team-send-2");
+            settle(&mut state, "team-send-2", cleared.clone());
+            settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+            assert_eq!(next_f(&mut state), "", "{cleared:?}");
+        }
+
+        // Control: A fails behind the open B, then B fails too: B is what `f` offers.
+        let mut state = fresh();
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        open_follow_up_field(&mut state, "B");
+        settle(&mut state, "team-send-1", RecipientOutcome::NoUsableAnswer);
+        submit(&mut state, "team-send-2");
+        settle(&mut state, "team-send-2", RecipientOutcome::Declined);
+        assert_eq!(next_f(&mut state), "B");
+        // B sent, then A fails, then B fails: B wins.
+        let mut state = fresh();
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        open_follow_up_field(&mut state, "B");
+        submit(&mut state, "team-send-2");
+        settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), None);
+        settle(
+            &mut state,
+            "team-send-2",
+            RecipientOutcome::Unreachable { cause: None },
+        );
+        assert_eq!(next_f(&mut state), "B");
+
+        // Two threads are independent: a field open on, and a follow-up sent from, another
+        // thread neither drops nor retires this thread's failed text.
+        let mut state = fresh();
+        follow_up_in_flight(&mut state, "team-send-1", "A");
+        let other = open_sent(&mut state, ThreadAccess::Writer, "ada", "ri_other", "conv");
+        assert!(fill_sent(
+            &mut state,
+            "conv",
+            other,
+            "thread · ada · ri_other"
+        ));
+        assert!(offer_follow_up(&mut state, "conv", other, Some("ri_turn")));
+        let other_key = state.thread_inspector.as_ref().unwrap().outcome_key();
+        open_follow_up_field(&mut state, "other draft");
+        settle(&mut state, "team-send-1", RecipientOutcome::Declined);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("A"));
+        state.thread_outcomes.stamp_send(&other_key);
+        assert_eq!(state.thread_outcomes.retained(SENT_KEY), Some("A"));
+        assert_eq!(state.thread_outcomes.retained(&other_key), None);
+        let field = state.thread_inspector.as_ref().unwrap().reply.as_ref();
+        assert_eq!(field.map(|reply| reply.field.as_str()), Some("other draft"));
+    }
+
+    /// AC7/AC9 — a follow-up refused in the thread of `(p, q:r)` files its text and receipt under
+    /// that thread alone, never under `(p:q, r)` (which a plain `sent:{peer}:{item}` key named
+    /// identically): the other thread's field opens empty and its log stays empty.
+    #[tokio::test]
+    async fn agents_thread_follow_up_retention_and_receipts_never_cross_colliding_threads() {
+        use super::super::thread_open::{fill_sent, offer_follow_up, open_sent};
+        use crate::adapters::tui::state::ThreadAccess;
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        let open = |state: &mut TuiState, peer: &str, item: &str| {
+            let generation = open_sent(state, ThreadAccess::Writer, peer, item, "conv");
+            assert!(fill_sent(state, "conv", generation, "thread"));
+            assert!(offer_follow_up(state, "conv", generation, Some("ri_turn")));
+            state.thread_inspector.as_ref().unwrap().outcome_key()
+        };
+        let first = open(&mut state, "p", "q:r");
+        open_follow_up_field(&mut state, "only for p's q:r");
+        follow_up_sent(
+            &mut state,
+            "conv",
+            "p",
+            "q:r",
+            "ri_turn",
+            "only for p's q:r".to_owned(),
+            false,
+            &app,
+        )
+        .await;
+        assert_eq!(
+            state.thread_outcomes.retained(&first),
+            Some("only for p's q:r")
+        );
+        assert_eq!(state.thread_outcomes.lines(&first).count(), 1);
+        let second = open(&mut state, "p:q", "r");
+        assert_ne!(first, second);
+        assert_eq!(state.thread_outcomes.retained(&second), None);
+        assert!(state.thread_outcomes.lines(&second).next().is_none());
+    }
+
+    /// AC8 `M19` — the frame's follow-up and the typed `/team followup` arm are one send path:
+    /// refused the same way (no send runtime), they paint the same `team-send-N` block text and
+    /// start no rows.
+    #[tokio::test]
+    async fn agents_thread_frame_and_typed_followup_share_one_send_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _rx) = bridge_app_state(workspace.path());
+        let mut state = TuiState::new(120, 40);
+        let started = start_followup(
+            &mut state,
+            "conv",
+            &app,
+            "ada".to_owned(),
+            "ri_turn".to_owned(),
+            "hello there".to_owned(),
+        )
+        .await;
+        team_command(
+            &mut state,
+            "conv",
+            Some("followup ada ri_turn hello there"),
+            &app,
+        )
+        .await;
+        #[cfg(feature = "a2a")]
+        let sentence = "· A2A send runtime is not configured for this session.";
+        #[cfg(not(feature = "a2a"))]
+        let sentence = crate::adapters::tui::handlers::team_command::team_send_unavailable();
+        assert_eq!(started, FollowupStart::Refused(sentence.to_owned()));
+        let frame = &state.feedback_blocks["team-send-1"];
+        let typed = &state.feedback_blocks["team-send-2"];
+        assert_eq!(frame.message, sentence);
+        assert_eq!((&typed.message, typed.level), (&frame.message, frame.level));
+        assert!(state.team_send_blocks.is_empty());
+        assert!(state.thread_follow_ups.is_empty());
     }
 }
 

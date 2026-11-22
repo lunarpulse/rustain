@@ -131,6 +131,9 @@ pub struct Fit {
     pub export: bool,
     /// The rail painted `Enter Open` whole (a list tab with a selected row).
     pub open: bool,
+    /// The rail painted `t Open thread` whole (an Agents row whose peer exchange the A2A owner
+    /// verified, with no lookup pending for it).
+    pub thread: bool,
     /// The rail painted `p Pause/Resume` whole (an agent or task that can be paused or resumed).
     pub pause: bool,
     /// The rail painted `x Kill` / `x Cancel plan` whole (an agent that can be killed, a plan

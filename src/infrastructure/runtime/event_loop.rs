@@ -1131,6 +1131,7 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::ThreadRetract { peer, item } => crate::infrastructure::runtime::transparency_bridge::retract_sent(&mut state, &conversation.id, &peer, &item, tab_manager.active_tab().read_only, &app_state).await,
+                                InputAction::ThreadFollowUp { peer, item, turn, text } => crate::infrastructure::runtime::transparency_bridge::follow_up_sent(&mut state, &conversation.id, &peer, &item, &turn, text, tab_manager.active_tab().read_only, &app_state).await,
                                 InputAction::SubmitMessage(text) => {
                                     // Resolve any file mentions from autocomplete selections
                                     let mut mention_images: Vec<ImageAttachment> = Vec::new();
@@ -1793,7 +1794,7 @@ pub async fn run(
                                             } else {
                                                 notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
                                             }
-                                            mission_bridge::refresh_roster(&mut state, &app_state.agent_core).await;
+                                            mission_bridge::refresh_roster(&mut state, &app_state).await;
                                         }
                                         DecisionEffect::SkillTrustAccept | DecisionEffect::SkillTrustDecline | DecisionEffect::SkillTrustInspect
                                         | DecisionEffect::PlanApproveNormal | DecisionEffect::PlanApproveAutoEdit | DecisionEffect::PlanReject | DecisionEffect::PlanRevise
@@ -2644,7 +2645,8 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                InputAction::OpenAgentWindow(agent_id) => mission_bridge::open_agent_window(&mut state, &app_state.agent_core, agent_id).await,
+                                InputAction::OpenAgentWindow(agent_id) => mission_bridge::open_agent_window(&mut state, &app_state, agent_id).await,
+                                InputAction::OpenAgentThread(agent_id) => crate::infrastructure::runtime::agents_thread::open(&mut state, &conversation.id, &app_state, agent_id),
                                 InputAction::AgentPauseResume(agent_id) => mission_bridge::pause_resume_agent(&mut state, &app_state.agent_core, tab_manager.active_tab().read_only, &agent_id).await,
                                 InputAction::AgentKill(agent_id) => mission_bridge::kill(&mut state, &conversation.id, tab_manager.active_tab().read_only, agent_id),
                                 InputAction::OpenAdapters => mission_bridge::open_adapters(&mut state, &app_state.agent_core),
@@ -4421,7 +4423,11 @@ pub async fn run(
                     // ⛔ never route through the turn-fatal Warning path.
                     AppEvent::TeamRetractPreviewReady { conversation_id: c, preview } => crate::infrastructure::runtime::transparency_bridge::team_retract_preview_ready(conversation.id.clone(), &mut state, &mut tab_manager, c, preview),
                     AppEvent::TeamRetractAnswered { conversation_id: c, message, board } => crate::infrastructure::runtime::transparency_bridge::team_retract_answered(conversation.id.clone(), &mut state, &mut tab_manager, c, message, board),
-                    AppEvent::TeamThreadReady { conversation_id: c, generation, message } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&mut state, &c, generation, &message),
+                    AppEvent::TeamThreadReady { conversation_id: c, generation, message, follow_up } => crate::infrastructure::runtime::transparency_bridge::team_thread_ready(&mut state, &c, generation, &message, follow_up.as_deref()),
+                    #[cfg(feature = "a2a")]
+                    AppEvent::AgentThreadReady { conversation_id: c, generation, agent_id, outcome } => {
+                        crate::infrastructure::runtime::agents_thread::ready(&mut state, &c, generation, &agent_id, outcome);
+                    }
                     AppEvent::TeamBoardReady { conversation_id: c, message } => crate::infrastructure::runtime::transparency_bridge::team_board_ready(&conversation.id, &mut state, &mut tab_manager, &c, message),
                     #[cfg(feature = "a2a")]
                     AppEvent::TeamBoardObserved(rows) => crate::adapters::tui::decision_queue::reply::observe_board(&mut state, rows),
@@ -5821,7 +5827,7 @@ pub async fn run(
                             crate::domain::events::CapabilityEvent::Updated { id, .. } => &id.protocol,
                         };
                         if protocol == "subagent" {
-                            mission_bridge::refresh_roster(&mut state, &app_state.agent_core).await;
+                            mission_bridge::refresh_roster(&mut state, &app_state).await;
                             if let crate::domain::events::CapabilityEvent::Updated { id, .. } = ev {
                                 if !id.tool.is_empty() {
                                     mission_bridge::refresh_spool_tail(&mut state, &app_state.agent_core, &id.tool).await;
