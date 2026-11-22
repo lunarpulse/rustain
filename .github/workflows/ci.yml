@@ -1,27 +1,51 @@
 name: CI
 
+# `gate/**` is the pre-merge gate: the integrator pushes a candidate SHA to
+# gate/<row> and lands it when every job is green (a re-run pushes the same SHA
+# to gate/<row>-r2). `main` stays: a tag needs a green run on its own commit.
 on:
   push:
-    branches: [main]
+    branches: [main, "gate/**"]
   pull_request:
     branches: [main]
+
+# A newer push to the same gate branch or pull request cancels the older run.
+# Each `main` run gets its own group (run_id), so a `main` run is never queued
+# behind, superseded by or cancelled for another one.
+concurrency:
+  group: ci-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
 
+# Every Swatinem/rust-cache step saves only on `main`. The repository cache sits
+# at its 10 GB limit with the `main` caches alone, so caches saved from gate or
+# pull-request refs (usable by no other branch) would evict them; those runs
+# still restore the `main` caches.
 jobs:
-  check:
-    name: Check
+  lint:
+    name: Lint (fmt, clippy, script controls)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       # Toolchain is pinned by rust-toolchain.toml (Grand Plan P0-5); the action ref
       # matches it so the runner installs exactly one toolchain. Bump both together.
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Event loop invariant check
+        run: |
+          if grep -nP '^\s*let\s+\w+\s*=\s*rx\.await' src/infrastructure/runtime/event_loop.rs; then
+              echo "ERROR: rx.await inside event_loop.rs — see module invariant docs"
+              exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -53,12 +77,6 @@ jobs:
           sys.exit(0 if result.wasSuccessful() else 1)
           PY
 
-      - name: Cross-target compile check (macOS cfg branches)
-        if: false
-        run: |
-          rustup target add aarch64-apple-darwin
-          cargo check --target aarch64-apple-darwin
-
       # Clippy is BLOCKING again (Grand Plan P0-5). It was advisory while
       # rust-toolchain.toml floated on `stable` and the runner's lint set drifted
       # from local; the exact pin removes that drift. vector-search clippy lives in
@@ -75,15 +93,28 @@ jobs:
       - name: Clippy (p2p)
         run: cargo clippy --all-targets --features p2p -- -D warnings
 
-      - name: Format
-        run: cargo fmt --check
+  test:
+    name: Test (default suite + test-instrumentation)
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the baseline-integrity tests in tests/conformance.rs run
+      # `git show <SHA>:<path>` against pinned commits.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Event loop invariant check
-        run: |
-          if grep -nP '^\s*let\s+\w+\s*=\s*rx\.await' src/infrastructure/runtime/event_loop.rs; then
-              echo "ERROR: rx.await inside event_loop.rs — see module invariant docs"
-              exit 1
-          fi
+      # The suite executes tests/conformance.rs, including its fail-closed metric
+      # and authentication-boundary checker.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned source-metric parser
+        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
 
       # The whole default suite, not an enumeration (Grand Plan P0-3/P0-5). Integration
       # tests are area binaries (tests/<area>/main.rs, Cargo.toml [[test]]); the lib
@@ -103,6 +134,7 @@ jobs:
       - name: Annotate test failures
         if: failure()
         run: python3 .github/scripts/annotate-test-failures.py test-output.log
+
   skills-validation:
     name: Skills Validation Feature
     runs-on: ubuntu-latest
@@ -111,6 +143,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test with skills-validation feature (lib only)
         run: cargo test --lib --features skills-validation
@@ -123,6 +157,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Telegram and cron tests
         run: |
           set -o pipefail
@@ -139,6 +175,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-python@v5
         with:
@@ -200,6 +238,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -215,7 +255,7 @@ jobs:
           cargo install --locked cargo-deny
           cargo deny check bans
 
-      # The default Check job never enables this non-default transport feature.
+      # The default test job never enables this non-default transport feature.
       # The p2p-gated roots live in the `p2p` area binary (tests/p2p/main.rs); the
       # relay targets additionally need `p2p-test-utils` (hermetic relay fixture,
       # `bind_without_direct_paths` — `debug_assertions`-gated, so this stays a
@@ -238,6 +278,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -246,7 +288,7 @@ jobs:
         run: python3 -m pip install -r tools/ci/requirements-metrics.txt
 
       # Story 17.5a: MCP integration targets must execute, not merely compile.
-      # MCP itself is a default feature, so the Check job's whole-suite run already
+      # MCP itself is a default feature, so the test job's whole-suite run already
       # covers the surface WITHOUT the fake server; this lane adds `test-fake-mcp`,
       # which turns on the fake-server-backed roots in the `mcp` area binary
       # (tests/mcp/main.rs) and the fake-backed cases in `cli`/`orchestration`.
@@ -268,6 +310,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Compiles fastembed/ort + reqwest + bm25 and runs the vector-search lib
       # tests plus the `memory` area binary, which owns tests/vector_search.rs
@@ -280,7 +324,7 @@ jobs:
       # tests/wasm_execution_sandbox.rs (module of `orchestration`) is gated on
       # `wasm-sandbox` and, until Grand Plan P0-3, ran in no workflow at all — a
       # false green the lib guard now refuses. wasmtime is heavy, so it rides this
-      # already-heavy lane rather than Check.
+      # already-heavy lane rather than the test job.
       - name: Test with wasm-sandbox feature
         run: "cargo test --features wasm-sandbox --test orchestration wasm_execution_sandbox::"
   macos-unit:
@@ -296,6 +340,8 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Detect daemon-related path changes
         uses: dorny/paths-filter@v3
@@ -336,12 +382,13 @@ jobs:
   tui-tests:
     name: Python TUI Tests
     runs-on: ubuntu-latest
-    needs: [check]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build rustain binary
         run: cargo build
@@ -410,6 +457,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build A2A release capture binary
         run: cargo build --release --features a2a
       - uses: actions/setup-python@v5
@@ -459,6 +508,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build shipped release set capture binary
         run: cargo build --release --features self-update,relay-server,a2a,p2p,telegram,cron
       - uses: actions/setup-python@v5
@@ -571,6 +622,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build shipped release set capture binary
         run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron
       - name: Size ratchet
