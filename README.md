@@ -158,7 +158,7 @@ rustain daemon stop        # shut down
 ```
 
 Daemon mode enables always-on channels and scheduled tasks across TUI sessions.
-Telegram, Slack and cron ship in release assets from the next tag. Systemd and launchd
+Telegram and cron ship in release assets from v0.5.0; Slack ships from the next tag. Systemd and launchd
 service templates are in `dist/`.
 
 **Authentication** (credential management):
@@ -257,7 +257,7 @@ cargo build --features a2a,p2p                             # federation from sou
 ```
 
 A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** — source builds need `--features a2a,p2p`. `rustain --version` lists the protocols and features compiled into the binary. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
-Release assets from the next tag also include `telegram,cron,slack`; source builds
+Release assets from v0.5.0 also include `telegram,cron` (Slack ships from the next tag as `telegram,cron,slack`); source builds
 must enable them. These adapters run under the daemon; local sessions use no-ops
 with a notice.
 
@@ -535,8 +535,8 @@ assets carry the `self-update`, `relay-server`, `a2a`, `p2p`, `telegram`,
 | **v1.5 (early phase)** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18); release assets carry `a2a,p2p` from `v0.2.0` |
 | **v0.4.0** | OAuth sign-in (Epic 20), federation features in release assets, TUI layered modals (Epic 21) | Shipped |
 | **v0.4.1** | Patch: `--version` prints the real features and protocol versions; the OpenAI-compatible stream decoder accepts GitHub Copilot Chat chunks without an `object` field and reports empty, error and non-stream replies; clearer Copilot login and model-refusal messages; macOS install guide; TUI test-suite refinement | Shipped |
-| **v0.5.0** | Completion lane: Telegram and cron in the release assets; persona loaded from the profile's `config.file`; config-resolved MCP servers in the daemon; Tier-1 skill catalog in the TUI and ACP system prompts; turn, duration and cost limits for `rustain ask`; usage counted once and recorded for `ask` and ACP; signed `install.sh` installer; per-session write authority and owned rewind; provider credentials kept out of MCP server and bash tool environments; whole-plan cancel; Agents-tab delegation rows open the peer thread for follow-ups | Current release |
-| **v0.6.0** | Slack channel; startup sweep of orphaned session temp files | Planned |
+| **v0.5.0** | Completion lane: Telegram and cron in the release assets; persona loaded from the profile's `config.file`; config-resolved MCP servers in the daemon; Tier-1 skill catalog in the TUI and ACP system prompts; turn, duration and cost limits for `rustain ask`; usage counted once and recorded for `ask` and ACP; signed `install.sh` installer; per-session write authority and owned rewind; provider credentials kept out of MCP server and bash tool environments; whole-plan cancel; Agents-tab delegation rows open the peer thread for follow-ups | Current release (shipped 2026-11-24) |
+| **v0.6.0** | Slack channel (C-12); startup sweep of orphaned session temp files (d-24b) | Planned |
 | **v1.0** | Hardening: containment and cost control | Planned |
 | **v2.0** | Dynamic adapter loading, community hub | Planned |
 

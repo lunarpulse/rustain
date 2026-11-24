@@ -36,7 +36,7 @@ Developer ID signing and notarization are a deferred decision: the owner deferre
 
 ## Federation Features in Published Assets
 
-A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram, Slack and cron are included in release assets from the next tag; source builds require their features. Slack is never in Cargo `default`. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron,slack`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram and cron are included in release assets from `v0.5.0` (Slack from the next tag); source builds require their features. Slack is never in Cargo `default`. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron,slack`.
 
 ⛔ **After cutting a tag:** name the actual version at the four federation-feature doc sites — this file, `README.md`, `docs/a2a.md`, `docs/p2p.md`. They state the boundary they can prove (`v0.1.3` and earlier do not carry the features) because the next tag is not derivable from the tree; the tagger is the first person who knows it.
 

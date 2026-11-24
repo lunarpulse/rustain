@@ -277,7 +277,7 @@ the PID file is written.
    The profile still needs `[channels] adapter = "telegram"` and
    `allowed_chat_ids = [...]`; the environment variable only overrides `bot_token`.
 
-Release assets from the next tag carry Telegram; source builds must enable it:
+Release assets from v0.5.0 carry Telegram; source builds must enable it:
 
 ```sh
 cargo install --path . --features telegram
@@ -370,7 +370,7 @@ credentials.
 Cron is a **daemon-only** scheduler. Outside the daemon the local session uses
 `none` and shows a notice. The daemon surfaces completed results to attached clients
 with `[cron]` origin and an inline `[cron: job-name]` label. Release assets from
-the next tag carry cron; source builds must enable it:
+v0.5.0 carry cron; source builds must enable it:
 
 ```sh
 cargo install --path . --features cron
