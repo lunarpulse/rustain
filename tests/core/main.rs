@@ -43,6 +43,15 @@ mod conformance_cancellation;
 #[path = "../conformance_provider.rs"]
 mod conformance_provider;
 
+#[path = "../conformance_q6_confinement.rs"]
+mod conformance_q6_confinement;
+
+#[path = "../conformance_q6_denial.rs"]
+mod conformance_q6_denial;
+
+#[path = "../conformance_q6_plan_cancel.rs"]
+mod conformance_q6_plan_cancel;
+
 #[path = "../conformance_reducer_interleaving.rs"]
 mod conformance_reducer_interleaving;
 

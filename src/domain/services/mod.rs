@@ -1,8 +1,10 @@
 pub mod adapter_catalog;
 pub mod adapter_overlay;
+pub mod app_credentials;
 pub mod approval_presentation;
 pub mod approval_runtime;
 pub mod authority_ledger;
+pub mod authority_recovery;
 pub mod budget_gate;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;

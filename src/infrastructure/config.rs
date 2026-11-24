@@ -323,6 +323,7 @@ pub fn try_load_with_config_overrides(
             reason: e.to_string(),
         })
     })?;
+    register_configured_credential_names(&config);
 
     // models.dev live pricing: overlay the cached snapshot onto the bundled +
     // user-merged `config.pricing` (config wins, models.dev fills gaps). No
@@ -417,7 +418,7 @@ pub fn load_from_explicit_layers(
     cli_config_overrides: Option<&Value>,
     env: &Value,
 ) -> Result<AppConfig, DomainError> {
-    layered_figment(
+    let config: AppConfig = layered_figment(
         cli,
         layers,
         profile_resolver,
@@ -429,7 +430,19 @@ pub fn load_from_explicit_layers(
         DomainError::Config(ConfigError::Extract {
             reason: e.to_string(),
         })
-    })
+    })?;
+    register_configured_credential_names(&config);
+    Ok(config)
+}
+
+/// Q-6 AC1: the resolved provider selectors' credential variable names join the
+/// one app-credential policy, so a nonstandard `api_key_env` is omitted from
+/// child environments and refused as an explicit MCP stdio reference exactly
+/// like a default name. Every production load path funnels through here.
+fn register_configured_credential_names(config: &AppConfig) {
+    crate::domain::services::app_credentials::register_configured_credential_names(
+        config.provider.values().map(|cfg| cfg.api_key_env.as_str()),
+    );
 }
 
 fn merge_layers(

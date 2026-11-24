@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub mod authority_trust;
 pub mod node_handle;
 pub mod node_journal;
 pub mod node_recovery;

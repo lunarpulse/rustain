@@ -9,15 +9,6 @@ use crate::domain::models::{
 use crate::domain::ports::{AuthorityProvider, CapabilityProvider};
 use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
 
-/// Story 10.7 — per-turn context for subagent dispatch. Tool restrictions are
-/// not part of it: they travel per call (Story 19.29).
-#[derive(Clone, Debug)]
-pub struct TaskToolContext {
-    pub conversation_id: String,
-    pub parent_ctx_tokens: u32,
-    pub parent_trace: Option<TraceContext>,
-}
-
 pub struct SubagentProvider {
     runner: Arc<dyn crate::domain::ports::SubagentRunner>,
     registry: Arc<crate::infrastructure::subagent::NodeTree>,
@@ -237,7 +228,8 @@ impl SubagentProvider {
                 images: Vec::new(),
             });
         }
-        // D1 fix: extract per-turn context from input JSON (injected by CompositeToolsetAdapter)
+        // Q-6 AC3: the per-call context in the input JSON is written only by
+        // `CompositeToolsetAdapter::invoke_subagent` from the call's own invocation.
         let parent_ctx_tokens = input
             .get("__parent_ctx_tokens")
             .and_then(|v| v.as_u64())

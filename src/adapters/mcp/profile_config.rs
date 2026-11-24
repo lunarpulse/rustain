@@ -1,6 +1,8 @@
 //! Extract `[tools.config.mcp.<server>]` tables from a `ResolvedProfile`.
 
-use crate::domain::models::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
+use crate::domain::models::{
+    McpServerSource, McpServerSpec, McpTransport, expand_env_vars, expand_stdio_env_vars,
+};
 use std::collections::BTreeMap;
 
 /// Walk a profile's `[tools.config]` TOML value and extract any `[tools.config.mcp.*]`
@@ -75,32 +77,22 @@ pub fn extract_profile_mcp_servers(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Expand env vars
-        let command = command.map(|c| {
-            let (expanded, warnings) = expand_env_vars(&c);
-            for w in &warnings {
+        // Stdio fields refuse an app-owned credential reference before any
+        // lookup (Q-6 AC1, `mcp_app_credentials=deny`); `url` is not a stdio field.
+        let stdio_field = |raw: &str| {
+            let expansion = expand_stdio_env_vars(raw);
+            for w in &expansion.warnings {
                 tracing::warn!("MCP server '{server_name}': {w}");
             }
-            expanded
-        });
-        let args: Vec<String> = args
-            .into_iter()
-            .map(|a| {
-                let (expanded, warnings) = expand_env_vars(&a);
-                for w in &warnings {
-                    tracing::warn!("MCP server '{server_name}': {w}");
-                }
-                expanded
-            })
-            .collect();
+            expansion.value
+        };
+        let command = command.map(|c| stdio_field(&c));
+        let args: Vec<String> = args.into_iter().map(|a| stdio_field(&a)).collect();
         let env: BTreeMap<String, String> = env
             .into_iter()
             .map(|(k, v)| {
-                let (expanded, warnings) = expand_env_vars(&v);
-                for w in &warnings {
-                    tracing::warn!("MCP server '{server_name}': {w}");
-                }
-                (k, expanded)
+                let value = stdio_field(&v);
+                (k, value)
             })
             .collect();
         let url = url.map(|raw| {

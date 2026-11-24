@@ -174,16 +174,4 @@ pub trait ToolSetPort: Send + Sync {
         _activation_depth: u8,
     ) {
     }
-
-    /// Story 10.7 — pass parent context token count and trace context to adapters
-    /// that need them for subagent launch budget guards and distributed tracing.
-    /// Default is a no-op so existing implementors compile unchanged. Tool
-    /// restrictions are NOT carried here: they travel per call on
-    /// [`ToolInvocation`](crate::domain::models::ToolInvocation) (Story 19.29).
-    async fn set_parent_context(
-        &self,
-        _parent_ctx_tokens: u32,
-        _parent_trace: Option<crate::domain::models::TraceContext>,
-    ) {
-    }
 }

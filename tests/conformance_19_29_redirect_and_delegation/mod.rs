@@ -13,6 +13,9 @@
 //!   restriction through the composite adapter and provider to the child spec.
 //! - `plan_delegation` — AC11 (owner ruling CR-7): the plan a call proposes
 //!   carries that call's restrictions; YOLO and the cards narrow its children.
+//! - `task_context` — Story Q-6 AC3 (K3): the trusted budget input and parent trace
+//!   ride each call's `ToolInvocation`; overlapping turns sharing one composite
+//!   never read each other's, and a model-supplied value has no authority.
 //! - `rail_harness` — the production `task` stack, shared with
 //!   `conformance_19_28_parent_restriction_rail` (the `a2a` area binary).
 
@@ -21,3 +24,4 @@ mod foreground;
 mod plan_delegation;
 mod rail_harness;
 mod redirect;
+mod task_context;

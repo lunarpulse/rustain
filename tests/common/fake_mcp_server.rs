@@ -687,6 +687,34 @@ async fn pass_init_gate(dir: &std::path::Path) {
     .await;
 }
 
+/// Q-6 AC1 witness: `FAKE_MCP_ENV_PROBE=<case>:<VAR>,...` with
+/// `FAKE_MCP_ENV_PROBE_FILE=<path>` records, per case ID, only whether the
+/// variable is present in THIS child's environment (`<case>=present|absent`).
+/// No value, name or digest is ever written, so a receipt carries case IDs and
+/// status only.
+fn write_env_probe() {
+    let (Some(cases), Some(path)) = (
+        std::env::var_os("FAKE_MCP_ENV_PROBE"),
+        std::env::var_os("FAKE_MCP_ENV_PROBE_FILE"),
+    ) else {
+        return;
+    };
+    let report: String = cases
+        .to_string_lossy()
+        .split(',')
+        .filter_map(|case| case.split_once(':'))
+        .map(|(case_id, var)| {
+            let status = if std::env::var_os(var).is_some() {
+                "present"
+            } else {
+                "absent"
+            };
+            format!("{case_id}={status}\n")
+        })
+        .collect();
+    let _ = std::fs::write(path, report);
+}
+
 #[tokio::main]
 async fn main() {
     if let Some(delay) = duration_env("FAKE_MCP_DROP_AFTER_MS") {
@@ -696,6 +724,7 @@ async fn main() {
         });
     }
 
+    write_env_probe();
     let fake = FakeServer::from_env();
     fake.start_list_changed_timer();
     let service = FakeService(fake);

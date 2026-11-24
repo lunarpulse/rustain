@@ -754,7 +754,7 @@ pub fn build_channels(
                 name: "telegram".into(),
                 missing_field: "bot_token and allowed_chat_ids required in [channels.config]".into(),
             })?;
-            let token = crate::infrastructure::utils::env_var_trimmed("TELEGRAM_BOT_TOKEN")
+            let token = crate::infrastructure::utils::env_var_trimmed(crate::domain::services::app_credentials::TELEGRAM_BOT_TOKEN_ENV)
                 .or_else(|| {
                     conf.get("bot_token")
                         .and_then(|v| v.as_str())

@@ -381,6 +381,8 @@ pub struct Env {
     pub home: PathBuf,
     pub log_path: PathBuf,
     stub_url: String,
+    /// Extra variables for the isolated parent environment (`set_extra_env`).
+    extra_env: Vec<(String, String)>,
 }
 
 impl Env {
@@ -403,7 +405,14 @@ impl Env {
             log_path: base.join("product.log"),
             _root: root,
             stub_url: stub.url().to_owned(),
+            extra_env: Vec::new(),
         }
+    }
+
+    /// Add one variable to the isolated environment every `rustain` command and
+    /// daemon of this `Env` inherits (a synthetic placeholder for a witness).
+    pub fn set_extra_env(&mut self, name: &str, value: &str) {
+        self.extra_env.push((name.to_owned(), value.to_owned()));
     }
 
     /// `<config_dir>/personas`
@@ -454,6 +463,9 @@ impl Env {
             .env("ANTHROPIC_API_KEY", STUB_API_KEY)
             .env("ANTHROPIC_BASE_URL", &self.stub_url)
             .env("RUSTAIN_MODELS_DEV_URL", &self.stub_url);
+        for (name, value) in &self.extra_env {
+            command.env(name, value);
+        }
     }
 
     /// A `rustain` invocation with the isolated environment, cwd = workspace,

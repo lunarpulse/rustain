@@ -211,10 +211,14 @@ impl ToolScheduler {
             provenance,
             route,
             None,
+            crate::domain::models::TaskCallContext::default(),
         )
         .await
     }
 
+    /// The production entry: `task_context` is THIS batch's trusted parent
+    /// context (Story Q-6 AC3), owned by the call so overlapping turns that
+    /// share one tool adapter can never read each other's.
     pub(crate) async fn schedule_with_provenance_and_restriction_until(
         self: Arc<Self>,
         source: ApprovalSource,
@@ -225,6 +229,7 @@ impl ToolScheduler {
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
         bound: Option<ToolExecutionBound>,
+        task_context: crate::domain::models::TaskCallContext,
     ) -> Vec<ToolCall> {
         let all_parallel = batch
             .iter()
@@ -240,9 +245,20 @@ impl ToolScheduler {
                 let c = cancel.child_token();
                 let skill = skill_owned.clone();
                 let agent = agent_owned.clone();
+                let task_context = task_context.clone();
                 futures.push_back(async move {
-                    s.run_one(src, req, c, skill, agent, provenance, route, bound)
-                        .await
+                    s.run_one(
+                        src,
+                        req,
+                        c,
+                        skill,
+                        agent,
+                        provenance,
+                        route,
+                        bound,
+                        task_context,
+                    )
+                    .await
                 });
             }
             let mut out = Vec::with_capacity(futures.len());
@@ -265,6 +281,7 @@ impl ToolScheduler {
                             provenance,
                             route,
                             bound,
+                            task_context.clone(),
                         )
                         .await,
                 );
@@ -294,6 +311,7 @@ impl ToolScheduler {
         provenance: crate::domain::models::ProvenanceTag,
         route: Option<crate::domain::models::turn::TurnRoute>,
         bound: Option<ToolExecutionBound>,
+        task_context: crate::domain::models::TaskCallContext,
     ) -> ToolCall {
         #[cfg(any(test, feature = "test-instrumentation"))]
         let mut req = req;
@@ -512,6 +530,8 @@ impl ToolScheduler {
             // against — they travel with the call, never through shared state.
             agent_restriction: agent_restriction.as_ref(),
             skill_restriction: skill_restriction.as_ref(),
+            parent_ctx_tokens: task_context.parent_ctx_tokens,
+            parent_trace: task_context.parent_trace.as_ref(),
         };
         let progress_tx = self.progress_tx.read().await.clone();
         let input = req.input.clone();
@@ -791,6 +811,128 @@ mod tests {
         );
     }
 
+    /// Story Q-6 AC3: each batch stamps ITS OWN trusted task context on its calls'
+    /// `ToolInvocation`; overlapping batches sharing one scheduler and one tool
+    /// adapter never see each other's, and a batch without one gets none.
+    #[tokio::test]
+    async fn each_batch_stamps_its_own_task_context_on_its_calls() {
+        struct ContextCapture(std::sync::Mutex<Vec<(String, u32, Option<String>)>>);
+        #[async_trait]
+        impl ToolSetPort for ContextCapture {
+            fn available_tools(&self) -> Vec<ToolDefinition> {
+                MockToolSet {
+                    parallel_safe: false,
+                    delay_ms: 0,
+                }
+                .available_tools()
+            }
+            async fn execute(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: CancellationToken,
+            ) -> Result<ToolResult, ToolError> {
+                unreachable!("every call is dispatched with its invocation")
+            }
+            async fn execute_invocation(
+                &self,
+                _: &str,
+                tool_use_id: &str,
+                _: serde_json::Value,
+                _: CancellationToken,
+                _: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
+                invocation: &crate::domain::models::ToolInvocation<'_>,
+            ) -> Result<ToolResult, ToolError> {
+                self.0.lock().unwrap().push((
+                    tool_use_id.to_string(),
+                    invocation.parent_ctx_tokens,
+                    invocation.parent_trace.map(|trace| trace.trace_id.clone()),
+                ));
+                Ok(ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "ok".into(),
+                    is_error: false,
+                    images: vec![],
+                })
+            }
+        }
+        let tools = Arc::new(ContextCapture(std::sync::Mutex::new(Vec::new())));
+        let scheduler = ToolScheduler::new(
+            Arc::new(MockSecurity {
+                mode: crate::domain::models::PermissionMode::Yolo,
+            }),
+            tools.clone(),
+            ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence)),
+            16,
+        );
+        let batch = |id: &str| {
+            vec![ToolCallRequest {
+                id: id.into(),
+                tool_name: "Mock".into(),
+                input: serde_json::json!({}),
+            }]
+        };
+        let source = |conversation: &str| ApprovalSource::ForegroundTurn {
+            conversation_id: conversation.into(),
+        };
+        let context = |tokens: u32, fill: char| crate::domain::models::TaskCallContext {
+            parent_ctx_tokens: tokens,
+            parent_trace: Some(
+                crate::domain::models::TraceContext::new(
+                    fill.to_string().repeat(32),
+                    fill.to_string().repeat(16),
+                    1,
+                )
+                .unwrap(),
+            ),
+        };
+        let run = |id: &'static str, conversation: &'static str, ctx| {
+            let scheduler = scheduler.clone();
+            let (batch, source) = (batch(id), source(conversation));
+            async move {
+                scheduler
+                    .schedule_with_provenance_and_restriction_until(
+                        source,
+                        batch,
+                        CancellationToken::new(),
+                        None,
+                        None,
+                        crate::domain::models::ProvenanceTag::UserOriginated,
+                        None,
+                        None,
+                        ctx,
+                    )
+                    .await
+            }
+        };
+        let (a, b, bare) = tokio::join!(
+            run("call-a", "conv-a", context(111, 'a')),
+            run("call-b", "conv-b", context(222, 'b')),
+            run(
+                "call-bare",
+                "conv-c",
+                crate::domain::models::TaskCallContext::default()
+            ),
+        );
+        assert!(
+            [a, b, bare]
+                .iter()
+                .flatten()
+                .all(|call| matches!(call, ToolCall::Success { .. }))
+        );
+
+        let mut seen = tools.0.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("call-a".into(), 111, Some("a".repeat(32))),
+                ("call-b".into(), 222, Some("b".repeat(32))),
+                ("call-bare".into(), 0, None),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn run_one_happy_path_yolo() {
         let sched = make_scheduler(crate::domain::models::PermissionMode::Yolo, false, 0);
@@ -813,6 +955,7 @@ mod tests {
                 crate::domain::models::ProvenanceTag::UserOriginated,
                 None,
                 None,
+                crate::domain::models::TaskCallContext::default(),
             )
             .await;
         assert!(result.is_terminal());
@@ -861,6 +1004,7 @@ mod tests {
                 crate::domain::models::ProvenanceTag::UserOriginated,
                 None,
                 None,
+                crate::domain::models::TaskCallContext::default(),
             )
             .await;
         assert!(matches!(result, ToolCall::Cancelled { reason, .. } if reason == "pre-schedule"));
@@ -890,6 +1034,7 @@ mod tests {
                     crate::domain::models::ProvenanceTag::UserOriginated,
                     None,
                     None,
+                    crate::domain::models::TaskCallContext::default(),
                 )
                 .await
         });
@@ -926,6 +1071,7 @@ mod tests {
             Some(ToolExecutionBound {
                 deadline: Some(deadline),
             }),
+            crate::domain::models::TaskCallContext::default(),
         ));
         tokio::time::timeout(Duration::from_secs(10), async {
             while !matches!(

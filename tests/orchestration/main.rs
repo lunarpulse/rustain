@@ -37,6 +37,9 @@ mod conformance_agent_message_bus_wiring;
 #[path = "../conformance_authority_provider.rs"]
 mod conformance_authority_provider;
 
+#[path = "../conformance_q6_authority.rs"]
+mod conformance_q6_authority;
+
 #[path = "../conformance_capability_registry.rs"]
 mod conformance_capability_registry;
 

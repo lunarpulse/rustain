@@ -57,6 +57,11 @@ struct AuthorityState {
     /// awaiting a write-ahead flush through the `LedgerJournalSink`. Drained by
     /// `journal_head`. Never pushed when no sink is attached.
     outbox: Vec<LedgerConservationRecord>,
+    /// Story Q-6 AC6: whether staged heads are numbered (`ledger_seq`) — true
+    /// once an `AuthorityTrust` is attached.
+    sequence_heads: bool,
+    /// Story Q-6 AC6: the last assigned conservation sequence (0 = none yet).
+    next_ledger_seq: u64,
 }
 
 /// Synchronous authority ledger for Story 14.2.
@@ -75,6 +80,13 @@ pub struct AuthorityLedger {
     /// `with_journal_sink` at the composition root. A `domain/ports` trait, so
     /// `domain/services` still imports nothing from `infrastructure/`.
     sink: Option<Arc<dyn crate::domain::ports::LedgerJournalSink>>,
+    /// Story Q-6 AC6: the independent trust that signs each flushed head and
+    /// holds the freshness anchor. `Some` only on a verified or newly
+    /// established authority; the journal is never believed without it.
+    trust: Option<Arc<dyn crate::domain::ports::AuthorityTrust>>,
+    /// Orders concurrent `journal_head` flushes so sequence order is journal
+    /// order and the anchor only ever advances past durable records.
+    flush_gate: tokio::sync::Mutex<()>,
     /// Test-only ledger-lock acquisition counter. Deterministically proves RC-3
     /// mutant (b) ("validate-then-mutate across two lock acquisitions") RED:
     /// every mutator acquires `lock_state()` exactly once, so a two-acquisition
@@ -150,6 +162,8 @@ impl AuthorityLedger {
             state: Mutex::new(state),
             clock,
             sink: None,
+            trust: None,
+            flush_gate: tokio::sync::Mutex::new(()),
             #[cfg(any(test, feature = "test-instrumentation"))]
             lock_acquisitions: std::sync::atomic::AtomicU64::new(0),
         }
@@ -168,6 +182,21 @@ impl AuthorityLedger {
         self
     }
 
+    /// Story Q-6 AC6: bind the independent trust. Heads staged from now on are
+    /// numbered and signed at flush, and the anchor advances after each flush.
+    #[must_use]
+    pub fn with_authority_trust(
+        mut self,
+        trust: Arc<dyn crate::domain::ports::AuthorityTrust>,
+    ) -> Self {
+        self.trust = Some(trust);
+        self.state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sequence_heads = true;
+        self
+    }
+
     fn snapshot_of(entry: &LedgerEntry, authority_time_ms: u64) -> LedgerConservationRecord {
         LedgerConservationRecord {
             token: entry.token.id,
@@ -178,6 +207,8 @@ impl AuthorityLedger {
             settled: entry.settled,
             revoked: entry.revoked,
             authority_time_ms,
+            ledger_seq: 0,
+            authority_sig: None,
         }
     }
 
@@ -198,6 +229,11 @@ impl AuthorityLedger {
                 None => break,
             };
             current = parent;
+            let mut snapshot = snapshot;
+            if state.sequence_heads {
+                state.next_ledger_seq += 1;
+                snapshot.ledger_seq = state.next_ledger_seq;
+            }
             state.outbox.push(snapshot);
         }
     }
@@ -213,12 +249,21 @@ impl AuthorityLedger {
         let Some(sink) = self.sink.clone() else {
             return Ok(());
         };
+        // One flush at a time: sequence order is journal order, and the anchor
+        // below only ever covers records that are already durable.
+        let _flush = self.flush_gate.lock().await;
         let mut pending = {
             let mut state = self.lock_state();
             std::mem::take(&mut state.outbox).into_iter()
         };
+        let mut reached = crate::domain::ports::AuthorityAnchor::default();
         while let Some(record) = pending.next() {
-            if let Err(error) = sink.journal_conservation(record.clone()).await {
+            let mut signed = record.clone();
+            if let Some(trust) = &self.trust {
+                signed.authority_sig =
+                    Some(trust.sign(&super::authority_recovery::signing_bytes(&signed)));
+            }
+            if let Err(error) = sink.journal_conservation(signed).await {
                 let mut unflushed = Vec::with_capacity(pending.len() + 1);
                 unflushed.push(record);
                 unflushed.extend(pending);
@@ -227,7 +272,46 @@ impl AuthorityLedger {
                 state.outbox = unflushed;
                 return Err(error);
             }
+            reached.ledger_seq = reached.ledger_seq.max(record.ledger_seq);
+            reached.authority_time_ms = reached.authority_time_ms.max(record.authority_time_ms);
         }
+        // Crash-consistent ordering: the anchor is raised only AFTER the records
+        // it covers are durable, so it never exceeds the journal.
+        if let Some(trust) = &self.trust
+            && reached.ledger_seq > 0
+        {
+            let trust = Arc::clone(trust);
+            tokio::task::spawn_blocking(move || trust.advance_anchor(reached))
+                .await
+                .map_err(|error| crate::domain::ports::LedgerJournalError(error.to_string()))?
+                .map_err(|error| crate::domain::ports::LedgerJournalError(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Verified recovery (Story Q-6 AC6): admit a pre-existing authority only
+    /// from conservation heads that the independent `trust` verifies and that are
+    /// at least as fresh as its anchor. On refusal NOTHING is restored — the
+    /// ledger keeps its fresh state and the caller must not hand out spendable
+    /// authority from it. On success the heads are replayed (the inner
+    /// [`recover_conservation`](Self::recover_conservation)), the sequence
+    /// continues from the verified history, and the anchor catches up to a
+    /// journal that was ahead of it after a crash.
+    pub fn recover_verified(
+        &self,
+        records: Vec<LedgerConservationRecord>,
+        trust: &dyn crate::domain::ports::AuthorityTrust,
+    ) -> Result<(), super::authority_recovery::RecoveryRefusal> {
+        let verified = super::authority_recovery::verify_history(records, trust)?;
+        if verified.reached.ledger_seq > trust.anchor().ledger_seq
+            || verified.reached.authority_time_ms > trust.anchor().authority_time_ms
+        {
+            trust
+                .advance_anchor(verified.reached)
+                .map_err(|_| super::authority_recovery::RecoveryRefusal::UnverifiableAnchor)?;
+        }
+        self.recover_conservation(verified.records);
+        self.lock_state().next_ledger_seq = verified.last_seq;
         Ok(())
     }
 

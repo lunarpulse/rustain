@@ -3,7 +3,9 @@
 //! Uses the existing `figment::providers::Json` (Story 8.1 7-layer chain)
 //! but this module is a standalone helper that can be called with any path.
 
-use crate::domain::models::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
+use crate::domain::models::{
+    McpServerSource, McpServerSpec, McpTransport, expand_env_vars, expand_stdio_env_vars,
+};
 use std::collections::BTreeMap;
 
 /// Keep each entry as raw JSON until the per-entry loop. Deserializing the
@@ -82,30 +84,19 @@ pub fn parse_workspace_mcp_config(path: &std::path::Path) -> Result<Vec<McpServe
         // Expand env vars in command, args, env values — and now `url` too, via
         // the SAME helper with the same unset-variable semantics (the literal is
         // preserved plus a warning; never an error).
-        let command = server.command.as_deref().map(|raw| {
-            let (expanded, cmd_warnings) = expand_env_vars(raw);
-            warnings.extend(cmd_warnings);
-            expanded
-        });
-
-        let args: Vec<String> = server
-            .args
-            .iter()
-            .map(|a| {
-                let (expanded, ws) = expand_env_vars(a);
-                warnings.extend(ws);
-                expanded
-            })
-            .collect();
-
+        // Stdio fields refuse an app-owned credential reference before any
+        // lookup (Q-6 AC1, `mcp_app_credentials=deny`); `url` is not a stdio field.
+        let mut stdio_field = |raw: &str| {
+            let expansion = expand_stdio_env_vars(raw);
+            warnings.extend(expansion.warnings);
+            expansion.value
+        };
+        let command = server.command.as_deref().map(&mut stdio_field);
+        let args: Vec<String> = server.args.iter().map(|a| stdio_field(a)).collect();
         let env: BTreeMap<String, String> = server
             .env
             .iter()
-            .map(|(k, v)| {
-                let (expanded, ws) = expand_env_vars(v);
-                warnings.extend(ws);
-                (k.clone(), expanded)
-            })
+            .map(|(k, v)| (k.clone(), stdio_field(v)))
             .collect();
 
         let url = server.url.as_deref().map(|raw| {

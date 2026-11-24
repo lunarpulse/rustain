@@ -559,6 +559,9 @@ impl McpClientAdapter {
 
                 let mut cmd = Command::new(command);
                 cmd.args(&self.spec.args);
+                // Q-6 AC1: inherited app-owned credentials are omitted first;
+                // the server's own explicit `env` entries are applied after.
+                crate::adapters::child_env::omit_app_credentials(&mut cmd);
                 for (k, v) in &self.spec.env {
                     cmd.env(k, v);
                 }
@@ -571,7 +574,13 @@ impl McpClientAdapter {
                 // task-shaped payloads so they arrive as `CustomResult` and decode
                 // through our own serde types. Non-task traffic is byte-identical.
                 let spawned = TaskGuardTransport::spawn(&mut cmd).map_err(|e| {
-                    let reason = format!("failed to spawn {command}: {e}");
+                    // Q-6 AC1: the expanded command may carry the value of a
+                    // dedicated server-scoped variable; report the server and
+                    // the OS error kind only.
+                    let reason = format!(
+                        "failed to spawn the command of MCP server '{}': {e}",
+                        self.spec.id
+                    );
                     self.record_failure_class(FailureClass::Generic);
                     self.handle_connection_failure(&reason);
                     McpError::SpawnFailed(reason)

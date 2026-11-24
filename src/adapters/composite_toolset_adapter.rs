@@ -92,11 +92,24 @@ pub struct CompositeToolsetAdapter {
     #[cfg(feature = "a2a")]
     team_proposal_tool:
         std::sync::OnceLock<Arc<crate::adapters::a2a::team_proposal_tool::TeamProposalTool>>,
-    /// D1 fix: per-turn context stored here, injected into subagent input JSON at dispatch.
-    parent_ctx: Arc<
-        tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>,
-    >,
-    conversation_id: Arc<tokio::sync::RwLock<String>>,
+}
+
+/// The trusted, per-call context `invoke_subagent` forwards (Story Q-6 AC3).
+/// Borrowed from the call's own [`ToolInvocation`](crate::domain::models::ToolInvocation);
+/// [`Self::NONE`] is a call that has none — it never falls back to another call's.
+#[derive(Clone, Copy)]
+struct SubagentCallContext<'a> {
+    conversation_id: &'a str,
+    parent_ctx_tokens: u32,
+    parent_trace: Option<&'a crate::domain::models::TraceContext>,
+}
+
+impl SubagentCallContext<'_> {
+    const NONE: SubagentCallContext<'static> = SubagentCallContext {
+        conversation_id: "",
+        parent_ctx_tokens: 0,
+        parent_trace: None,
+    };
 }
 
 impl CompositeToolsetAdapter {
@@ -144,8 +157,6 @@ impl CompositeToolsetAdapter {
             a2a_provider: std::sync::OnceLock::new(),
             #[cfg(feature = "a2a")]
             team_proposal_tool: std::sync::OnceLock::new(),
-            parent_ctx: Arc::new(tokio::sync::RwLock::new(None)),
-            conversation_id: Arc::new(tokio::sync::RwLock::new(String::new())),
         }
     }
 
@@ -166,10 +177,11 @@ impl CompositeToolsetAdapter {
             .map(|cap| (provider.clone(), cap.id))
     }
 
-    /// Dispatch a subagent capability. The per-turn context is injected from
-    /// the slot; the two restriction rail keys come ONLY from the arguments
-    /// (the call's own invocation) and are always written — `null` when
-    /// absent — so a model-supplied key never reaches the provider.
+    /// Dispatch a subagent capability. Every internal key the provider reads is
+    /// written HERE from the call's own trusted context (`ctx`), always — `null`/
+    /// zero when the call has none — so a value the model put in the tool
+    /// arguments, or a previous call's context, can never reach the provider
+    /// (Story Q-6 AC3; the two restriction rail keys follow the same rule).
     async fn invoke_subagent(
         &self,
         provider: &crate::adapters::subagent::SubagentProvider,
@@ -178,6 +190,7 @@ impl CompositeToolsetAdapter {
         cancel: CancellationToken,
         agent_restriction: Option<&crate::domain::models::AgentToolRestriction>,
         skill_restriction: Option<&crate::domain::models::SkillToolRestriction>,
+        ctx: SubagentCallContext<'_>,
     ) -> Result<ToolResult, ToolError> {
         crate::domain::models::DelegationRestrictions::write_to_rail(
             &mut input,
@@ -185,15 +198,15 @@ impl CompositeToolsetAdapter {
             skill_restriction,
         );
         if let Some(obj) = input.as_object_mut() {
-            if let Some(ctx) = &*self.parent_ctx.read().await {
-                obj.insert(
-                    "__parent_ctx_tokens".into(),
-                    serde_json::json!(ctx.parent_ctx_tokens),
-                );
-                obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
-            }
-            let conv_id = self.conversation_id.read().await;
-            obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
+            obj.insert(
+                "__parent_ctx_tokens".into(),
+                serde_json::json!(ctx.parent_ctx_tokens),
+            );
+            obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
+            obj.insert(
+                "__conversation_id".into(),
+                serde_json::json!(ctx.conversation_id),
+            );
         }
         provider
             .invoke(capability_id, input, cancel)
@@ -859,7 +872,15 @@ impl ToolSetPort for CompositeToolsetAdapter {
         // are written `null`, overwriting anything the model supplied.
         if let Some((provider, capability_id)) = self.subagent_target(tool_name) {
             return self
-                .invoke_subagent(&provider, &capability_id, input, cancel, None, None)
+                .invoke_subagent(
+                    &provider,
+                    &capability_id,
+                    input,
+                    cancel,
+                    None,
+                    None,
+                    SubagentCallContext::NONE,
+                )
                 .await;
         }
 
@@ -924,7 +945,15 @@ impl ToolSetPort for CompositeToolsetAdapter {
         // are written `null`, overwriting anything the model supplied.
         if let Some((provider, capability_id)) = self.subagent_target(tool_name) {
             return self
-                .invoke_subagent(&provider, &capability_id, input, cancel, None, None)
+                .invoke_subagent(
+                    &provider,
+                    &capability_id,
+                    input,
+                    cancel,
+                    None,
+                    None,
+                    SubagentCallContext::NONE,
+                )
                 .await;
         }
 
@@ -993,6 +1022,11 @@ impl ToolSetPort for CompositeToolsetAdapter {
                     cancel,
                     invocation.agent_restriction,
                     invocation.skill_restriction,
+                    SubagentCallContext {
+                        conversation_id: invocation.conversation_id,
+                        parent_ctx_tokens: invocation.parent_ctx_tokens,
+                        parent_trace: invocation.parent_trace,
+                    },
                 )
                 .await;
         }
@@ -1154,30 +1188,8 @@ impl ToolSetPort for CompositeToolsetAdapter {
         checkpoint: CheckpointId,
         activation_depth: u8,
     ) {
-        // P3 fix: store conversation_id on CTA for subagent context injection
-        *self.conversation_id.write().await = conversation_id.clone();
         self.builtin
             .set_execution_context(conversation_id, checkpoint, activation_depth)
-            .await;
-    }
-
-    async fn set_parent_context(
-        &self,
-        parent_ctx_tokens: u32,
-        parent_trace: Option<crate::domain::models::TraceContext>,
-    ) {
-        // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time.
-        // Tool restrictions are deliberately absent: they travel per call on
-        // `ToolInvocation` (Story 19.29), so this shared slot cannot carry one.
-        *self.parent_ctx.write().await = Some(
-            crate::adapters::subagent::subagent_provider::TaskToolContext {
-                conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
-                parent_ctx_tokens,
-                parent_trace: parent_trace.clone(),
-            },
-        );
-        self.builtin
-            .set_parent_context(parent_ctx_tokens, parent_trace)
             .await;
     }
 }

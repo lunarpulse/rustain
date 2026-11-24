@@ -364,6 +364,10 @@ impl ToolSetAdapter {
             }
         }
 
+        // Q-6 AC1: the final command-construction boundary. The child never
+        // inherits an app-owned credential, whatever the permission mode.
+        crate::adapters::child_env::omit_app_credentials(&mut child);
+
         let mut child = child
             .spawn()
             .map_err(|e| ToolError::ExecutionFailed(format!("spawn: {e}")))?;
@@ -542,6 +546,22 @@ impl ToolSetAdapter {
         })
     }
 
+    /// The `Write`/`Edit` executor's confinement gate: the same
+    /// `path_confinement::confine` rule `SecurityAdapter` applies at the
+    /// permission boundary, for a model-suggested write target.
+    fn confine_write_target(&self, file_path: &str) -> Result<(), ToolError> {
+        crate::adapters::path_confinement::confine(
+            &self.workspace_path,
+            crate::adapters::path_confinement::DEFAULT_BLOCKED_PATH_PREFIXES,
+            std::path::Path::new(file_path),
+            crate::domain::models::FileOperation::Write,
+            crate::domain::models::FileContextProvenance::ModelSuggested,
+            &|_| false,
+        )
+        .map(|_| ())
+        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))
+    }
+
     async fn execute_write(
         &self,
         input: &serde_json::Value,
@@ -557,6 +577,11 @@ impl ToolSetAdapter {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'content' parameter".into()))?;
+
+        // Q-6 AC2: the executor applies the permission boundary's own
+        // confinement rule to the path it will actually use, before the write
+        // lock, the checkpoint snapshot's pre-read, or any mutation.
+        self.confine_write_target(file_path)?;
 
         let path = if std::path::Path::new(file_path).is_absolute() {
             PathBuf::from(file_path)
@@ -756,6 +781,9 @@ impl ToolSetAdapter {
                 "old_string and new_string must differ for Edit".into(),
             ));
         }
+
+        // Q-6 AC2: confine before the initial read, not only before the write.
+        self.confine_write_target(file_path)?;
 
         let path = if std::path::Path::new(file_path).is_absolute() {
             PathBuf::from(file_path)

@@ -968,3 +968,124 @@ async fn ac7_env_and_argument_canaries_reach_neither_the_log_nor_the_provider() 
         }
     }
 }
+
+// ───────────────────── Q-6 AC1 / K1c — ambient credentials ─────────────────────
+
+/// The daemon's first-activity compose spawns each stdio child through the one
+/// `McpClientAdapter::connect` door. Parent: a default name (`ANTHROPIC_API_KEY`,
+/// the stub's key, is already in the daemon environment), an alias, the Telegram
+/// channel name, a parent-only MCP auth name and a configured custom provider
+/// name (declared in the user-global `config.toml`). The child reports only
+/// `case=present|absent`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn q6_k1c_daemon_stdio_children_omit_ambient_credentials_and_refuse_explicit_references() {
+    const PLACEHOLDER: &str = "q6-k1c-synthetic-placeholder";
+    let tag = Tag::new();
+    let (stub, mut env) = world().await;
+    for name in [
+        "GEMINI_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "RUSTAIN_MCP_HTTP_AUTH_TOKEN_Q6K1C",
+        "Q6_K1C_CUSTOM_PROVIDER_KEY",
+        "Q6_K1C_ORDINARY_RUNTIME",
+    ] {
+        env.set_extra_env(name, PLACEHOLDER);
+    }
+    env.set_extra_env("Q6_K1C_DEDICATED_PARENT", "dedicated-synthetic");
+    std::fs::write(
+        env.config_dir.join("config.toml"),
+        "[provider.q6custom]\n\
+         provider_id = \"q6custom\"\n\
+         model_id = \"q6-model\"\n\
+         api_key_env = \"Q6_K1C_CUSTOM_PROVIDER_KEY\"\n\
+         enabled = false\n",
+    )
+    .expect("write user-global config");
+    let probe_file = env.workspace.join("q6-k1c-probe");
+    let cases = [
+        ("default-name", "ANTHROPIC_API_KEY"),
+        ("default-alias", "GEMINI_API_KEY"),
+        ("channel-telegram", "TELEGRAM_BOT_TOKEN"),
+        ("mcp-auth-parent-only", "RUSTAIN_MCP_HTTP_AUTH_TOKEN_Q6K1C"),
+        ("configured-custom", "Q6_K1C_CUSTOM_PROVIDER_KEY"),
+        ("ordinary-runtime", "Q6_K1C_ORDINARY_RUNTIME"),
+        ("path", "PATH"),
+        ("dedicated-server-scoped", "Q6_K1C_DEDICATED"),
+    ]
+    .map(|(case, name)| format!("{case}:{name}"))
+    .join(",");
+    let probe_env = json!({
+        "FAKE_MCP_ENV_PROBE": cases,
+        "FAKE_MCP_ENV_PROBE_FILE": probe_file.to_string_lossy(),
+        "Q6_K1C_DEDICATED": "${Q6_K1C_DEDICATED_PARENT}",
+    });
+    // Three refused declarations (one per field) beside the healthy probe
+    // server; the refused ones point at the fixture where a launch would show.
+    let refused = |field: &str| match field {
+        "command" => json!({ "command": "${GEMINI_API_KEY}" }),
+        "args" => entry(
+            &tag,
+            "refused-args",
+            json!({}),
+            &["--k=$TELEGRAM_BOT_TOKEN"],
+        ),
+        _ => entry(
+            &tag,
+            "refused-env",
+            json!({ "SCOPED": "${Q6_K1C_CUSTOM_PROVIDER_KEY}" }),
+            &[],
+        ),
+    };
+    write_mcp_json(
+        &env,
+        vec![
+            ("good", entry(&tag, "good", probe_env, &[])),
+            ("refused-command", refused("command")),
+            ("refused-args", refused("args")),
+            ("refused-env", refused("env")),
+        ],
+    );
+    stub.script(0, Reply::text("Q6-K1C-DONE\n"));
+    let mut daemon = spawn_daemon_ready(&env, "coding", START).await;
+
+    let (attach, request) = first_turn(&env, &stub, "q6 k1c probe").await;
+    // Positive control: the healthy server composed and handshook; the refused
+    // three contributed no tools.
+    assert_eq!(
+        mcp_tool_names(&request),
+        vec![ADD.to_owned(), ECHO.to_owned()]
+    );
+    expect_line(&attach, "Q6-K1C-DONE").await;
+    detach(attach).await;
+
+    let report = std::fs::read_to_string(&probe_file).expect("the child wrote its status");
+    assert_eq!(
+        report,
+        "default-name=absent\ndefault-alias=absent\nchannel-telegram=absent\n\
+         mcp-auth-parent-only=absent\nconfigured-custom=absent\n\
+         ordinary-runtime=present\npath=present\ndedicated-server-scoped=present\n"
+    );
+    for refused_server in ["refused-args", "refused-env"] {
+        assert!(
+            tag.pids_of(refused_server).is_empty(),
+            "{refused_server}: a refused declaration launched a child"
+        );
+    }
+    stop(&env, &mut daemon).await;
+
+    let lines = log_lines(&env);
+    assert!(
+        !lines.iter().any(|line| line.contains(PLACEHOLDER)),
+        "no synthetic value reached the daemon log"
+    );
+    for name in [
+        "GEMINI_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "Q6_K1C_CUSTOM_PROVIDER_KEY",
+    ] {
+        assert!(
+            !lines.iter().any(|line| line.contains(name)),
+            "a refused reference name reached the daemon log: {lines:?}"
+        );
+    }
+}

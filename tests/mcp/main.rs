@@ -19,6 +19,9 @@ mod conformance_acp_mcp;
 #[path = "../conformance_daemon_mcp.rs"]
 mod conformance_daemon_mcp;
 
+#[path = "../conformance_q6_credentials.rs"]
+mod conformance_q6_credentials;
+
 #[path = "../conformance_mcp_lifecycle.rs"]
 mod conformance_mcp_lifecycle;
 

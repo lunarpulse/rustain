@@ -249,6 +249,24 @@ pub fn all_providers() -> &'static [ProviderMeta] {
 mod tests {
     use super::*;
 
+    /// Q-6 AC1 drift guard: every credential variable the provider catalog (and
+    /// the Anthropic alias list) reads is app-owned in the one policy, so a new
+    /// provider cannot ship a credential name the child-environment filter and
+    /// the MCP stdio refusal do not know.
+    #[test]
+    fn every_catalog_credential_name_is_app_owned() {
+        use crate::domain::services::app_credentials::is_app_credential_name;
+        for id in all_provider_ids() {
+            let meta = lookup(id).unwrap();
+            for name in crate::adapters::cli::auth::env_vars_for(id, meta.api_key_env) {
+                assert!(
+                    name.is_empty() || is_app_credential_name(name),
+                    "provider `{id}`: credential variable is not in the app-credential policy"
+                );
+            }
+        }
+    }
+
     #[test]
     fn lookup_known_provider() {
         let meta = lookup("anthropic").unwrap();

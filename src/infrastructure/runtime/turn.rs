@@ -689,9 +689,13 @@ pub async fn run_turn(
                                 caller_depth,
                             )
                             .await;
-                        tools
-                            .set_parent_context(parent_ctx_tokens, parent_trace.clone())
-                            .await;
+                        // Story Q-6 AC3: the parent context travels with each call (the
+                        // scheduler stamps it on the call's `ToolInvocation`), never
+                        // through a slot the adapter shares between turns.
+                        let task_context = crate::domain::models::TaskCallContext {
+                            parent_ctx_tokens,
+                            parent_trace: parent_trace.clone(),
+                        };
 
                         let indexed: Vec<(usize, ToolCallInfo)> =
                             tool_calls.drain(..).enumerate().collect();
@@ -847,6 +851,7 @@ pub async fn run_turn(
                                                 provenance,
                                                 Some(turn_origin.route()),
                                                 tool_bound,
+                                                task_context.clone(),
                                             )
                                             .await
                                     };
@@ -888,6 +893,7 @@ pub async fn run_turn(
                                         provenance,
                                         Some(turn_origin.route()),
                                         tool_bound,
+                                        task_context.clone(),
                                     )
                                     .await
                             };

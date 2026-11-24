@@ -43,16 +43,10 @@ impl SecurityAdapter {
             "sudo dd".to_string(),
         ];
 
-        let blocked_paths = vec![
-            "/etc/".to_string(),
-            "/bin/".to_string(),
-            "/usr/".to_string(),
-            "/sys/".to_string(),
-            "/proc/".to_string(),
-            "/dev/".to_string(),
-            "/boot/".to_string(),
-            "/root/".to_string(),
-        ];
+        let blocked_paths = crate::adapters::path_confinement::DEFAULT_BLOCKED_PATH_PREFIXES
+            .iter()
+            .map(|prefix| (*prefix).to_string())
+            .collect();
 
         Self {
             workspace_path,
@@ -69,9 +63,10 @@ impl SecurityAdapter {
 
         for blocked in &self.blocked_commands {
             if command_lower.contains(&blocked.to_lowercase()) {
+                // `PermissionError::Blocked` owns the one `Command blocked:`
+                // prefix; this reason must not repeat it (Q-6 AC5).
                 return Err(PermissionError::Blocked(format!(
-                    "Command blocked: dangerous pattern '{}'",
-                    blocked
+                    "dangerous pattern '{blocked}'"
                 )));
             }
         }
@@ -100,140 +95,28 @@ impl SecurityAdapter {
     }
 
     /// Validate a file path against workspace boundaries and blocklist.
+    ///
+    /// The classification itself is `path_confinement::confine`, shared with the
+    /// `Write`/`Edit` executors; only the active-skill-directory read exemption
+    /// is this adapter's own state.
     fn validate_path(
         &self,
         path: &Path,
         op: FileOperation,
         provenance: FileContextProvenance,
     ) -> Result<PathAccessType, PermissionError> {
-        if path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(PermissionError::WorkspaceViolation(
-                "Path traversal not allowed".to_string(),
-            ));
-        }
-
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_path.join(path)
-        };
-
-        let workspace_canonical = std::fs::canonicalize(&self.workspace_path)
-            .unwrap_or_else(|_| self.workspace_path.clone());
-
-        // Apply blocklist to the requested path even before canonicalization so
-        // user-provided paths cannot name blocked prefixes by a non-existent path.
-        let absolute_str = absolute.to_string_lossy();
-        for blocked in &self.blocked_paths {
-            if absolute_str.starts_with(blocked) {
-                return Err(PermissionError::WorkspaceViolation(format!(
-                    "Access to {} is not allowed",
-                    blocked
-                )));
-            }
-        }
-
-        let resolved = match std::fs::canonicalize(&absolute) {
-            Ok(p) => p,
-            Err(_) => {
-                if provenance == FileContextProvenance::UserProvided {
-                    return Ok(PathAccessType::External);
-                }
-                if provenance == FileContextProvenance::RemoteProvided {
-                    return Err(PermissionError::WorkspaceViolation(
-                        "Remote-provided path must exist and resolve within workspace".to_string(),
-                    ));
-                }
-                if let Some(parent) = absolute.parent() {
-                    match std::fs::canonicalize(parent) {
-                        Ok(canon_parent) => {
-                            if !canon_parent.starts_with(&workspace_canonical) {
-                                return Err(PermissionError::WorkspaceViolation(
-                                    "Parent directory resolves outside workspace".to_string(),
-                                ));
-                            }
-                            if let Some(file_name) = absolute.file_name() {
-                                let resolved = canon_parent.join(file_name);
-                                if !resolved.starts_with(&canon_parent) {
-                                    return Err(PermissionError::WorkspaceViolation(
-                                        "Path traversal detected via symlink".to_string(),
-                                    ));
-                                }
-                                match std::fs::canonicalize(&resolved) {
-                                    Ok(final_resolved) => {
-                                        if !final_resolved.starts_with(&workspace_canonical) {
-                                            return Err(PermissionError::WorkspaceViolation(
-                                                "Symlink escape detected".to_string(),
-                                            ));
-                                        }
-                                        final_resolved
-                                    }
-                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => resolved,
-                                    Err(_) => {
-                                        return Err(PermissionError::WorkspaceViolation(
-                                            "Path resolution failed — rejecting for safety"
-                                                .to_string(),
-                                        ));
-                                    }
-                                }
-                            } else {
-                                canon_parent
-                            }
-                        }
-                        Err(_) => {
-                            return Err(PermissionError::WorkspaceViolation(format!(
-                                "Path '{}' not in workspace — parent does not exist",
-                                path.display()
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(PermissionError::WorkspaceViolation(format!(
-                        "Path '{}' not in workspace — no parent directory",
-                        path.display()
-                    )));
-                }
-            }
-        };
-
-        let resolved_str = resolved.to_string_lossy();
-
-        for blocked in &self.blocked_paths {
-            if resolved_str.starts_with(blocked) {
-                return Err(PermissionError::WorkspaceViolation(format!(
-                    "Access to {} is not allowed",
-                    blocked
-                )));
-            }
-        }
-
-        if resolved.starts_with(&workspace_canonical) {
-            Ok(PathAccessType::Workspace)
-        } else if provenance == FileContextProvenance::RemoteProvided {
-            Err(PermissionError::WorkspaceViolation(
-                "Remote-provided path resolves outside workspace".to_string(),
-            ))
-        } else if provenance == FileContextProvenance::UserProvided && op == FileOperation::Read {
-            Ok(PathAccessType::External)
-        } else if op == FileOperation::Read {
-            if let Ok(dirs) = self.active_skill_dirs.read() {
-                for skill_dir in dirs.iter() {
-                    if resolved.starts_with(skill_dir) {
-                        return Ok(PathAccessType::Workspace);
-                    }
-                }
-            }
-            Err(PermissionError::WorkspaceViolation(
-                "Path outside workspace".to_string(),
-            ))
-        } else {
-            Err(PermissionError::WorkspaceViolation(
-                "Path outside workspace".to_string(),
-            ))
-        }
+        crate::adapters::path_confinement::confine(
+            &self.workspace_path,
+            &self.blocked_paths,
+            path,
+            op,
+            provenance,
+            &|resolved| {
+                self.active_skill_dirs
+                    .read()
+                    .is_ok_and(|dirs| dirs.iter().any(|dir| resolved.starts_with(dir)))
+            },
+        )
     }
 }
 

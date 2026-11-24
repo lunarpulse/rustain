@@ -1641,19 +1641,7 @@ pub async fn run(
                                             .map(|p| p.tasks.iter().any(|t| t.status == PlanTaskStatus::Running))
                                             .unwrap_or(false);
                                         if has_running {
-                                            plan_runtime.mark_whole_plan_cancel_pending(&plan_id).await;
-                                            if let Some(snapshot) = plan_runtime.snapshot(&plan_id).await {
-                                                for (task_n, token) in &snapshot.task_cancels {
-                                                    let is_running = conversation.plans.get(&plan_id)
-                                                        .and_then(|p| p.tasks.get((task_n.saturating_sub(1)) as usize))
-                                                        .map(|t| t.status == PlanTaskStatus::Running)
-                                                        .unwrap_or(false);
-                                                    if is_running {
-                                                        token.cancel();
-                                                        break;
-                                                    }
-                                                }
-                                            }
+                                            plan_runtime.confirm_whole_plan_cancel(&plan_id).await;
                                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: NoticeLevel::Info,

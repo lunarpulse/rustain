@@ -102,6 +102,15 @@ pub struct LedgerConservationRecord {
     /// so a clock rolled back after a restart cannot revive expired authority.
     #[serde(default)]
     pub authority_time_ms: u64,
+    /// Story Q-6 AC6: the position of this head in the authority's conservation
+    /// sequence (`1`-based, contiguous). `0` is the legacy, unsequenced format.
+    #[serde(default)]
+    pub ledger_seq: u64,
+    /// Story Q-6 AC6: the local authority key's signature over this record's
+    /// authority-bearing fields (`authority_recovery::signing_bytes`). `None` is
+    /// the legacy, unsigned format; recovery refuses it rather than trusting it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_sig: Option<Vec<u8>>,
 }
 
 #[non_exhaustive]

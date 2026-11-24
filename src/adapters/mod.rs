@@ -13,6 +13,7 @@ pub mod builtin;
 pub mod builtin_commands;
 #[cfg(feature = "telegram")]
 pub mod channel;
+pub mod child_env;
 pub mod cli;
 pub mod clipboard_adapter;
 pub mod command_registry;
@@ -37,6 +38,7 @@ pub mod noop;
 pub mod p2p_config;
 pub mod p2p_reach;
 pub mod palette_registry;
+pub mod path_confinement;
 pub mod pem_tls;
 pub mod persona_adapter;
 pub mod persona_file;

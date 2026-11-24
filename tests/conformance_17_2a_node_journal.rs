@@ -136,6 +136,8 @@ async fn pre_watermark_conservation_record_remains_readable() {
             settled: false,
             revoked: false,
             authority_time_ms: 900,
+            ledger_seq: 0,
+            authority_sig: None,
         }),
         0,
     );

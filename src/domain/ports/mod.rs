@@ -13,6 +13,7 @@ mod artifact_store;
 mod auth_store;
 #[allow(unused_imports)]
 mod authority_provider;
+mod authority_trust;
 #[allow(unused_imports)]
 mod capability_provider;
 #[allow(unused_imports)]
@@ -112,6 +113,7 @@ pub use artifact_sink::{ArtifactSink, ArtifactSinkError};
 pub use artifact_store::{ArtifactError, ArtifactStore};
 pub use auth_store::{AuthStorePort, RefreshLease};
 pub use authority_provider::{AuthorityError, AuthorityProvider};
+pub use authority_trust::{AuthorityAnchor, AuthorityTrust, AuthorityTrustError};
 pub use capability_provider::CapabilityProvider;
 pub use catalog_observer::CatalogObserver;
 pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};

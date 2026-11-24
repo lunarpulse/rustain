@@ -335,7 +335,10 @@ pub use doc_key::DocKey;
 pub use filtered_catalog::FilteredCatalog;
 pub use filtered_skill_catalog::FilteredSkillCatalog;
 pub use launch_spec::AgentLaunchSpec;
-pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
+pub use mcp_server_spec::{
+    McpServerSource, McpServerSpec, McpTransport, REFUSED_REFERENCE, StdioExpansion,
+    expand_env_vars, expand_stdio_env_vars,
+};
 pub use mcp_server_state::McpConnectionState;
 #[allow(unused_imports)]
 pub use memory_entry::MemoryEntry;
@@ -392,7 +395,9 @@ pub use tool_call::{
     status_chip,
 };
 pub use tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
-pub use tools::{ToolCallInfo, ToolDefinition, ToolInvocation, ToolResult, ToolResultInfo};
+pub use tools::{
+    TaskCallContext, ToolCallInfo, ToolDefinition, ToolInvocation, ToolResult, ToolResultInfo,
+};
 #[allow(unused_imports)]
 pub use turn::{
     InvocationStatus, PartId, ResponseMark, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart,

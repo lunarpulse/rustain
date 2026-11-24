@@ -228,7 +228,7 @@ fn decode_guarded_message(body: &str) -> Result<ServerJsonRpcMessage, serde_json
 
 /// Process-wide fallback for the static auth token (scope cut ①: an env var,
 /// not OAuth). The token is the bare credential — rmcp prepends `Bearer `.
-pub const AUTH_TOKEN_ENV: &str = "RUSTAIN_MCP_HTTP_AUTH_TOKEN";
+pub const AUTH_TOKEN_ENV: &str = crate::domain::services::app_credentials::MCP_AUTH_ENV_PREFIX;
 
 /// Per-server override: `RUSTAIN_MCP_HTTP_AUTH_TOKEN_<ID>`, where `<ID>` is the
 /// server id upper-cased with every non-alphanumeric byte replaced by `_`.

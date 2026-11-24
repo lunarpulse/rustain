@@ -1951,9 +1951,6 @@ pub async fn run() -> Result<()> {
                 crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),
             ));
 
-            let root_authority = crate::domain::models::CapabilityToken::r1_root(
-                crate::domain::models::AgentId::root(),
-            );
             let node_journal = Arc::new(
                 crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace_path)
                     .await
@@ -1963,32 +1960,38 @@ pub async fn run() -> Result<()> {
                 Some(node_journal.clone() as Arc<dyn crate::domain::ports::RoomJournalReader>);
             let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
                 as Arc<dyn crate::domain::clock::Clock>;
-            let authority_ledger = Arc::new(
-                crate::domain::services::authority_ledger::AuthorityLedger::new(
-                    root_authority.clone(),
-                    orchestration_clock.clone(),
-                )
-                .with_journal_sink(
-                    node_journal.clone() as Arc<dyn crate::domain::ports::LedgerJournalSink>
-                ),
-            );
-            // Story 17.2c (D4): restore the ledger conservation head from the
-            // durable journal so spent budget cannot silently reappear and a
-            // grant cannot be double-counted across a restart.
-            {
-                let records = node_journal
-                    .load()
+            // Story Q-6 AC6: admit the workspace's delegation authority only from
+            // verified, fresh conservation history (or establish a new authority
+            // for a workspace that has none). A refusal leaves an unspendable
+            // root: delegated work is disabled, never reset to a spendable one.
+            let admission = match crate::infrastructure::paths::data_dir() {
+                Ok(data_dir) => {
+                    crate::infrastructure::subagent::authority_trust::admit_workspace_authority(
+                        &workspace_path,
+                        &data_dir,
+                        node_journal.clone(),
+                        orchestration_clock.clone(),
+                    )
                     .await
-                    .expect("NodeJournal load for ledger recovery failed")
-                    .into_iter()
-                    .filter_map(|entry| match entry.record {
-                        crate::domain::models::JournalRecord::LedgerConservation(record) => {
-                            Some(record)
-                        }
-                        _ => None,
-                    });
-                authority_ledger.recover_conservation(records);
+                }
+                Err(_) => crate::infrastructure::subagent::authority_trust::AuthorityAdmission::refused(
+                    orchestration_clock.clone(),
+                    crate::infrastructure::subagent::authority_trust::AdmissionRefusal::StoreUnavailable,
+                ),
+            };
+            if let crate::infrastructure::subagent::authority_trust::AdmissionStatus::Refused(why) =
+                admission.status
+            {
+                let message = why.diagnostic();
+                tracing::error!("{message}");
+                let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: None,
+                    level: NoticeLevel::Warning,
+                    message,
+                });
             }
+            let root_authority = admission.root;
+            let authority_ledger = admission.ledger;
             // Construct subagent infrastructure first so trust-drop revoke can
             // route into cascade_kill (AC5): the provider holds an Arc<NodeTree>.
             let now_fn = {

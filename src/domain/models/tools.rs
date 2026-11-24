@@ -26,6 +26,22 @@ pub struct ToolInvocation<'a> {
     pub agent_restriction: Option<&'a super::agent::AgentToolRestriction>,
     /// The skill-origin restriction this call was judged against.
     pub skill_restriction: Option<&'a super::skill_restriction::SkillToolRestriction>,
+    /// Story Q-6 AC3: the originating turn's context-token count, the trusted
+    /// input of the delegated-launch budget guard. Travels with THIS call; `0`
+    /// is "no parent context", never another call's value.
+    pub parent_ctx_tokens: u32,
+    /// Story Q-6 AC3: the originating turn's trace, `None` when it has none.
+    pub parent_trace: Option<&'a super::trace_context::TraceContext>,
+}
+
+/// The trusted per-call context a turn hands the scheduler for the calls of one
+/// batch (Story Q-6 AC3). Immutable and owned by the call: nothing shares it
+/// across turns, and a call without one runs with [`Default`] — no parent
+/// context and no trace.
+#[derive(Debug, Clone, Default)]
+pub struct TaskCallContext {
+    pub parent_ctx_tokens: u32,
+    pub parent_trace: Option<super::trace_context::TraceContext>,
 }
 
 /// Tracking info for an in-progress or completed tool call.

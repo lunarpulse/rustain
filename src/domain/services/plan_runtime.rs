@@ -69,6 +69,8 @@ pub enum TaskTurnOutcome {
 pub enum DelegateTaskError {
     #[error("subagent runner failed: {0}")]
     LaunchFailed(#[from] crate::domain::models::SubagentError),
+    #[error("plan {plan_id} is being cancelled; no further task is launched")]
+    PlanCancelling { plan_id: String },
     #[error("plan {plan_id} or task {task_number} not found at delegate_task call site")]
     NotFound { plan_id: String, task_number: u32 },
 }
@@ -300,16 +302,18 @@ impl PlanRuntime {
             if plan.status == PlanStatus::Cancelled {
                 return; // already cancelled; ignore stale TurnComplete
             }
-            let running_num = plan
-                .tasks
-                .iter()
-                .find(|t| t.status == PlanTaskStatus::Running)
-                .map(|t| t.number);
-            if running_num != Some(task_number) {
+            // Q-6 AC4: an outcome belongs to the execution it names, not to
+            // "the first row marked Running" — parallel delegated tasks may
+            // acknowledge in any order. A row that is not Running (terminal,
+            // pending, paused, out of range) is a stale or duplicate outcome.
+            let names_a_running_task = task_number
+                .checked_sub(1)
+                .and_then(|i| plan.tasks.get(i as usize))
+                .is_some_and(|t| t.status == PlanTaskStatus::Running);
+            if !names_a_running_task {
                 tracing::warn!(
-                    "PlanRuntime::on_turn_complete: task_number {} does not match running task {:?}; ignoring",
+                    "PlanRuntime::on_turn_complete: task_number {} is not a running task; ignoring",
                     task_number,
-                    running_num
                 );
                 return;
             }
@@ -394,32 +398,15 @@ impl PlanRuntime {
                         .unwrap_or(false)
                 };
                 if is_whole_cancel {
-                    if let Some(plan) = conversation.plans.get_mut(plan_id) {
-                        for task in &mut plan.tasks {
-                            if task.number == task_number {
-                                continue;
-                            }
-                            if !is_terminal(task.status) {
-                                task.status = PlanTaskStatus::Cancelled;
-                                task.completed_at_ms = Some(now_ms);
-                                task.error = Some("Plan cancelled by user".to_string());
-                                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
-                                    conversation_id: conversation_id.clone(),
-                                    plan_id: plan_id.to_string(),
-                                    task_number: task.number,
-                                    status: PlanTaskStatus::Cancelled,
-                                });
-                            }
-                        }
-                        plan.status = PlanStatus::Cancelled;
-                    }
-                    event_emitter.emit(AppEvent::PlanCancelled {
-                        conversation_id: conversation_id.clone(),
-                        plan_id: plan_id.to_string(),
-                        cancelled_at_task: None,
-                    });
-                    finish_plan(conversation_id, plan_id, conversation, event_emitter);
-                    self.plans.write().unwrap().remove(plan_id);
+                    // The genuine outcome stands; the plan finalizes only once
+                    // every other live execution has settled.
+                    self.settle_whole_plan_cancel(
+                        conversation_id,
+                        plan_id,
+                        conversation,
+                        event_emitter,
+                        now_ms,
+                    );
                     return;
                 }
 
@@ -467,32 +454,15 @@ impl PlanRuntime {
                         .unwrap_or(false)
                 };
                 if is_whole_cancel {
-                    if let Some(plan) = conversation.plans.get_mut(plan_id) {
-                        for task in &mut plan.tasks {
-                            if task.number == task_number {
-                                continue;
-                            }
-                            if !is_terminal(task.status) {
-                                task.status = PlanTaskStatus::Cancelled;
-                                task.completed_at_ms = Some(now_ms);
-                                task.error = Some("Plan cancelled by user".to_string());
-                                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
-                                    conversation_id: conversation_id.clone(),
-                                    plan_id: plan_id.to_string(),
-                                    task_number: task.number,
-                                    status: PlanTaskStatus::Cancelled,
-                                });
-                            }
-                        }
-                        plan.status = PlanStatus::Cancelled;
-                    }
-                    event_emitter.emit(AppEvent::PlanCancelled {
-                        conversation_id: conversation_id.clone(),
-                        plan_id: plan_id.to_string(),
-                        cancelled_at_task: None,
-                    });
-                    finish_plan(conversation_id, plan_id, conversation, event_emitter);
-                    self.plans.write().unwrap().remove(plan_id);
+                    // The genuine outcome stands; the plan finalizes only once
+                    // every other live execution has settled.
+                    self.settle_whole_plan_cancel(
+                        conversation_id,
+                        plan_id,
+                        conversation,
+                        event_emitter,
+                        now_ms,
+                    );
                     return;
                 }
 
@@ -571,6 +541,37 @@ impl PlanRuntime {
                         .unwrap_or((false, false))
                 };
 
+                if is_whole_cancel {
+                    // Q-6 AC4: this execution acknowledged the whole-plan
+                    // stop. Record it; the plan finalizes once the LAST tracked
+                    // execution settles (a latched cancel supersedes a pause).
+                    {
+                        let plan = match conversation.plans.get_mut(plan_id) {
+                            Some(p) => p,
+                            None => return,
+                        };
+                        if idx < plan.tasks.len() {
+                            plan.tasks[idx].status = PlanTaskStatus::Cancelled;
+                            plan.tasks[idx].completed_at_ms = Some(now_ms);
+                            plan.tasks[idx].error = Some(reason);
+                        }
+                    }
+                    event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        task_number,
+                        status: PlanTaskStatus::Cancelled,
+                    });
+                    self.settle_whole_plan_cancel(
+                        conversation_id,
+                        plan_id,
+                        conversation,
+                        event_emitter,
+                        now_ms,
+                    );
+                    return;
+                }
+
                 if is_pause_pending {
                     // AC1: pause-pending path — flip to Paused, plan stays Executing
                     {
@@ -596,44 +597,6 @@ impl PlanRuntime {
                         s.pause_pending_tasks.remove(&task_number);
                     }
                     // Do NOT call skip_blocked_tasks or advance_after_task — runtime idles
-                    return;
-                }
-
-                if is_whole_cancel {
-                    // AC6: whole-plan-cancel-pending path — cancel all non-terminal
-                    {
-                        let plan = match conversation.plans.get_mut(plan_id) {
-                            Some(p) => p,
-                            None => return,
-                        };
-                        if idx < plan.tasks.len() {
-                            plan.tasks[idx].status = PlanTaskStatus::Cancelled;
-                            plan.tasks[idx].completed_at_ms = Some(now_ms);
-                            plan.tasks[idx].error = Some(reason);
-                        }
-                        for task in &mut plan.tasks {
-                            if is_terminal(task.status) {
-                                continue;
-                            }
-                            task.status = PlanTaskStatus::Cancelled;
-                            task.completed_at_ms = Some(now_ms);
-                            task.error = Some("Plan cancelled by user".to_string());
-                            event_emitter.emit(AppEvent::PlanTaskStatusChanged {
-                                conversation_id: conversation_id.clone(),
-                                plan_id: plan_id.to_string(),
-                                task_number: task.number,
-                                status: PlanTaskStatus::Cancelled,
-                            });
-                        }
-                        plan.status = PlanStatus::Cancelled;
-                    }
-                    event_emitter.emit(AppEvent::PlanCancelled {
-                        conversation_id: conversation_id.clone(),
-                        plan_id: plan_id.to_string(),
-                        cancelled_at_task: None,
-                    });
-                    finish_plan(conversation_id, plan_id, conversation, event_emitter);
-                    self.plans.write().unwrap().remove(plan_id);
                     return;
                 }
 
@@ -666,6 +629,56 @@ impl PlanRuntime {
                 self.plans.write().unwrap().remove(plan_id);
             }
         }
+    }
+
+    /// Q-6 AC4: one tracked execution of a latched whole-plan cancellation has
+    /// settled (its row already carries its genuine outcome). While any other
+    /// execution is still `Running` nothing else happens: no terminal
+    /// presentation, no removal, no follow-on dispatch. When the last one has
+    /// settled, every still-open row (pending, paused) is cancelled and the plan
+    /// finalizes exactly once.
+    fn settle_whole_plan_cancel(
+        &self,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: &dyn EventEmitter,
+        now_ms: i64,
+    ) {
+        {
+            let Some(plan) = conversation.plans.get_mut(plan_id) else {
+                return;
+            };
+            if plan
+                .tasks
+                .iter()
+                .any(|t| t.status == PlanTaskStatus::Running)
+            {
+                return;
+            }
+            for task in &mut plan.tasks {
+                if is_terminal(task.status) {
+                    continue;
+                }
+                task.status = PlanTaskStatus::Cancelled;
+                task.completed_at_ms = Some(now_ms);
+                task.error = Some("Plan cancelled by user".to_string());
+                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                    conversation_id: conversation_id.clone(),
+                    plan_id: plan_id.to_string(),
+                    task_number: task.number,
+                    status: PlanTaskStatus::Cancelled,
+                });
+            }
+            plan.status = PlanStatus::Cancelled;
+        }
+        event_emitter.emit(AppEvent::PlanCancelled {
+            conversation_id: conversation_id.clone(),
+            plan_id: plan_id.to_string(),
+            cancelled_at_task: None,
+        });
+        finish_plan(conversation_id, plan_id, conversation, event_emitter);
+        self.plans.write().unwrap().remove(plan_id);
     }
 
     /// Story 10.6: apply a turn outcome to the active sub-task of `parent_number`,
@@ -755,6 +768,46 @@ impl PlanRuntime {
             if let Some(state) = plans.get_mut(plan_id) {
                 state.active_sub_tasks.remove(&parent_number);
             }
+        }
+
+        // Q-6 AC4: a latched whole-plan cancel starts no further sub-task. The
+        // parent's remaining open sub-tasks are cancelled, the parent settles as
+        // cancelled, and the plan finalizes once its last execution has settled.
+        let whole_cancel = {
+            let plans = self.plans.read().unwrap();
+            plans
+                .get(plan_id)
+                .is_some_and(|s| s.whole_plan_cancel_pending)
+        };
+        if whole_cancel {
+            {
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                let parent = &mut plan.tasks[parent_idx];
+                for st in parent.sub_tasks.iter_mut() {
+                    if !is_terminal(st.status) {
+                        st.status = PlanTaskStatus::Cancelled;
+                        st.completed_at_ms = Some(now_ms);
+                        st.error = Some("Plan cancelled by user".to_string());
+                    }
+                }
+                parent.status = PlanTaskStatus::Cancelled;
+                parent.completed_at_ms = Some(now_ms);
+                parent.error = Some("Plan cancelled by user".to_string());
+            }
+            event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                conversation_id: conversation_id.clone(),
+                plan_id: plan_id.to_string(),
+                task_number: parent_number,
+                status: PlanTaskStatus::Cancelled,
+            });
+            self.settle_whole_plan_cancel(
+                conversation_id,
+                plan_id,
+                conversation,
+                event_emitter,
+                now_ms,
+            );
+            return;
         }
 
         // Check if all sub-tasks are terminal
@@ -868,6 +921,10 @@ impl PlanRuntime {
         mode: crate::domain::models::PermissionMode,
         force_task_number: Option<u32>,
     ) {
+        // Q-6 AC4: pending work must not start once a whole-plan cancel is latched.
+        if self.whole_plan_cancel_latched(plan_id) {
+            return;
+        }
         if let Some(task_number) = force_task_number {
             self.dispatch_single_task(
                 conversation_id,
@@ -1273,6 +1330,12 @@ impl PlanRuntime {
         event_emitter: Arc<dyn EventEmitter>,
         default_model: &str,
     ) -> Result<(), DelegateTaskError> {
+        // Q-6 AC4: a latched whole-plan cancel launches nothing further.
+        if self.whole_plan_cancel_latched(plan_id) {
+            return Err(DelegateTaskError::PlanCancelling {
+                plan_id: plan_id.to_string(),
+            });
+        }
         // Story 10.6: check if this task_number has an active sub-task
         let active_sub = {
             let plans = self.plans.read().unwrap();
@@ -1565,6 +1628,37 @@ impl PlanRuntime {
         if let Some(state) = plans.get_mut(plan_id) {
             state.whole_plan_cancel_pending = true;
         }
+    }
+
+    /// Q-6 AC4: a confirmed whole-plan cancellation. Latches the intent for
+    /// exactly this plan before any further dispatch, supersedes pending pause
+    /// intents, and signals EVERY live token the plan tracks (not just the
+    /// first). Returns the number of tokens signalled; an unknown plan signals
+    /// nothing and changes nothing. The plan finalizes later, in
+    /// `settle_whole_plan_cancel`, once the last tracked execution has
+    /// acknowledged.
+    pub async fn confirm_whole_plan_cancel(&self, plan_id: &str) -> usize {
+        let tokens: Vec<CancellationToken> = {
+            let mut plans = self.plans.write().unwrap();
+            let Some(state) = plans.get_mut(plan_id) else {
+                return 0;
+            };
+            state.whole_plan_cancel_pending = true;
+            state.pause_pending_tasks.clear();
+            state.task_cancels.values().cloned().collect()
+        };
+        for token in &tokens {
+            token.cancel();
+        }
+        tokens.len()
+    }
+
+    fn whole_plan_cancel_latched(&self, plan_id: &str) -> bool {
+        self.plans
+            .read()
+            .unwrap()
+            .get(plan_id)
+            .is_some_and(|s| s.whole_plan_cancel_pending)
     }
 
     pub async fn mark_deviation_pending(&self, plan_id: &str, kind: PlanDeviationKind) {

@@ -112,9 +112,9 @@ impl StreamingProvider for ScriptProvider {
     }
 }
 
-/// A transparent driver-side port gate. Both context setters still reach the
-/// same real composite; the gate only pauses after that composite has accepted
-/// each context and before the scheduler dispatches the corresponding tool.
+/// A transparent driver-side port gate. The execution-context setter still
+/// reaches the same real composite; the gate only pauses after that composite
+/// has accepted each context and before the scheduler dispatches the tool.
 struct InterleaveGate {
     first_ready: Notify,
     release_first: Notify,
@@ -168,16 +168,10 @@ impl ToolSetPort for GatedCompositePort {
         self.composite
             .set_execution_context(conversation_id, checkpoint, activation_depth)
             .await;
-    }
-
-    async fn set_parent_context(
-        &self,
-        parent_ctx_tokens: u32,
-        parent_trace: Option<rustain::domain::models::TraceContext>,
-    ) {
-        self.composite
-            .set_parent_context(parent_ctx_tokens, parent_trace)
-            .await;
+        // The per-turn parent-context setter is gone (Q-6 AC3: the context rides
+        // each call), so the gate pauses at the other per-turn port call the
+        // driver makes right before scheduling — still after the real composite
+        // accepted this turn's context and before its tool dispatches.
         match self.gate.contexts_seen.fetch_add(1, Ordering::SeqCst) {
             0 => {
                 self.gate.first_ready.notify_one();
