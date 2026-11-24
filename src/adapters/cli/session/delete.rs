@@ -388,6 +388,8 @@ async fn delete_single(
         return Ok(());
     }
 
+    // D-24 B: the delete is confirmed; reclaim this root's abandoned write scratch first.
+    storage.sweep_session_scratch().await;
     storage
         .delete_conversation(&target.id)
         .await
@@ -726,6 +728,8 @@ async fn execute_bulk(
     out: &mut dyn Write,
 ) -> Result<()> {
     let mut results = Vec::with_capacity(targets.len());
+    // Roots already swept in this run: one sweep per selected root, only before a real delete.
+    let mut swept: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for target in targets {
         match holder.live_holder(&target.workspace).await {
@@ -749,6 +753,9 @@ async fn execute_bulk(
             results.push(DeleteResult::WouldDelete(target));
         } else {
             let storage = storage_for(&target.workspace);
+            if swept.insert(target.workspace.clone()) {
+                storage.sweep_session_scratch().await;
+            }
             match storage.delete_conversation(&target.id).await {
                 Ok(()) => results.push(DeleteResult::Deleted(target)),
                 Err(e) => results.push(DeleteResult::Refused(

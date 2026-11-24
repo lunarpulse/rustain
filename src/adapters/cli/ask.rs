@@ -930,6 +930,12 @@ pub async fn run_ask_core(
         );
     }
 
+    // D-24 B: a writable `ask` (fresh or resumed) reclaims abandoned write scratch before it
+    // loads or pre-saves anything. A dry run takes no session write path, so it never sweeps.
+    if !opts.dry_run {
+        storage.sweep_session_scratch().await;
+    }
+
     let mut conversation = if let Some(ref sid) = opts.session_id {
         match storage.load_conversation(sid).await {
             Ok(Some(conv)) => conv,

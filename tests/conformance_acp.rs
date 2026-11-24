@@ -5984,3 +5984,144 @@ async fn acp_final_save_is_refused_when_another_writer_was_accepted_during_the_t
         "the refused final save appended nothing derived from the older history"
     );
 }
+
+// ── D-24 B: scratch sweep at the ACP session-open boundary ───────────────────
+
+/// One ACP request over the in-memory transport and its response frame (notifications skipped).
+async fn acp_call(
+    write: &mut tokio::io::DuplexStream,
+    read: &mut tokio::io::BufReader<tokio::io::DuplexStream>,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    let id = request["id"].clone();
+    write
+        .write_all(line(request.to_string()).as_bytes())
+        .await
+        .expect("write request");
+    write.flush().await.expect("flush request");
+    loop {
+        let mut raw = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), read.read_line(&mut raw))
+            .await
+            .expect("timed out waiting for the ACP response")
+            .expect("read ACP response");
+        let frame: serde_json::Value = serde_json::from_str(&raw).expect("json line");
+        if frame.get("id") == Some(&id) {
+            return frame;
+        }
+    }
+}
+
+/// The ACP session-open paths reclaim only the request cwd's abandoned write scratch: `new_session`
+/// and a successful `session/resume` sweep the root they open; an orphan or cross-cwd id and
+/// `session/list` sweep nothing; another cwd's root is never touched.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_session_open_sweeps_only_the_request_cwd_root() {
+    use std::rc::Rc;
+
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::domain::models::AppConfig;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = std::fs::canonicalize(workspace.path()).unwrap();
+    let sub = ws.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let root_of = |cwd: &Path| cwd.join(".rustain").join("sessions");
+    let (root_ws, root_sub) = (root_of(&ws), root_of(&sub));
+    std::fs::create_dir_all(&root_ws).unwrap();
+    std::fs::create_dir_all(&root_sub).unwrap();
+    let orphan = |root: &Path, n: u32| root.join(format!(".rustain-424242-{n}.tmp"));
+    for root in [&root_ws, &root_sub] {
+        std::fs::write(orphan(root, 1), b"abandoned").unwrap();
+    }
+    // A saved session in the workspace root: the resume target.
+    let seeded = FileSystemStorage::with_workspace_root(root_ws.clone(), ws.clone());
+    let mut conv = rustain::domain::models::Conversation {
+        id: "seeded".into(),
+        title: "t".into(),
+        created_at: 1,
+        updated_at: 1,
+        ..Default::default()
+    };
+    conv.messages.push(rustain::domain::models::ChatMessage {
+        id: "u1".into(),
+        role: rustain::domain::models::MessageRole::User,
+        content: "earlier".into(),
+        ..Default::default()
+    });
+    seeded.save_conversation(&conv).await.unwrap();
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(64 * 1024);
+    let (client_read, server_outgoing) = tokio::io::duplex(64 * 1024);
+    let mut client_reader = tokio::io::BufReader::new(client_read);
+    let core_factory: CoreFactory = Rc::new(|cwd: &Path, _| Ok(make_core(cwd)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        ws.clone(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        let init: serde_json::Value = serde_json::from_str(ACP_INITIALIZE_REQ).unwrap();
+        acp_call(&mut client_write, &mut client_reader, init).await;
+
+        // session/list is an observation: it sweeps nothing.
+        let listed = acp_call(
+            &mut client_write,
+            &mut client_reader,
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/list","params":{"cwd": sub}}),
+        )
+        .await;
+        assert!(listed.get("error").is_none(), "{listed}");
+        assert!(orphan(&root_sub, 1).exists() && orphan(&root_ws, 1).exists());
+
+        // new_session opens the sub root for writing: that root is swept, the other is not.
+        let created = acp_call(
+            &mut client_write,
+            &mut client_reader,
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd": sub,"mcpServers":[]}}),
+        )
+        .await;
+        assert!(created.get("error").is_none(), "{created}");
+        assert!(!orphan(&root_sub, 1).exists(), "the opened root was swept");
+        assert!(
+            orphan(&root_ws, 1).exists(),
+            "another cwd's root is untouched"
+        );
+
+        // An id the request-cwd root does not hold fails closed without sweeping it.
+        let ghost = acp_call(
+            &mut client_write,
+            &mut client_reader,
+            serde_json::json!({"jsonrpc":"2.0","id":4,"method":"session/resume","params":{"sessionId":"acp-ghost","cwd": ws,"mcpServers":[]}}),
+        )
+        .await;
+        assert!(ghost.get("error").is_some(), "{ghost}");
+        assert!(orphan(&root_ws, 1).exists(), "a failed open sweeps nothing");
+
+        // A real resume of a saved session sweeps its root before any prompt can persist.
+        let resumed = acp_call(
+            &mut client_write,
+            &mut client_reader,
+            serde_json::json!({"jsonrpc":"2.0","id":5,"method":"session/resume","params":{"sessionId":"acp-seeded","cwd": ws,"mcpServers":[]}}),
+        )
+        .await;
+        assert!(resumed.get("error").is_none(), "{resumed}");
+        assert!(!orphan(&root_ws, 1).exists(), "the resumed root was swept");
+    };
+
+    tokio::select! {
+        result = server => panic!("ACP server exited before the sweep assertions: {result:?}"),
+        _ = drive => {}
+    }
+    let loaded = seeded.load_conversation("seeded").await.unwrap().unwrap();
+    assert_eq!(loaded.messages.len(), 1, "accepted history is untouched");
+}

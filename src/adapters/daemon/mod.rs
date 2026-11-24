@@ -1885,6 +1885,9 @@ async fn load_or_new_conversation(
     storage: &dyn crate::domain::ports::StoragePort,
 ) -> crate::domain::models::Conversation {
     use crate::domain::models::Conversation;
+    // D-24 B: reclaim abandoned write scratch before the first restore or save; the scheduler
+    // and the socket come up after this returns.
+    storage.sweep_session_scratch().await;
     if let Ok(mut summaries) = storage.list_conversations().await {
         summaries.sort_by_key(|s| s.updated_at);
         if let Some(latest) = summaries.last() {
@@ -1914,6 +1917,87 @@ async fn load_or_new_conversation(
         tracing::warn!(error = %e, "daemon: persisting fresh conversation failed");
     }
     conv
+}
+
+/// D-24 B: the daemon's foreground start reclaims abandoned session scratch before it restores
+/// or saves its per-process conversation.
+#[cfg(all(test, unix))]
+mod d24b_sweep_tests {
+    use super::load_or_new_conversation;
+    use crate::adapters::filesystem::FileSystemStorage;
+    use crate::domain::errors::StorageError;
+    use crate::domain::models::{Conversation, ConversationSummary};
+    use crate::domain::ports::StoragePort;
+    use parking_lot::Mutex;
+    use std::path::PathBuf;
+
+    /// Real store; records whether the planted orphan still existed at the first restore
+    /// lookup and at the first save.
+    struct Probe {
+        inner: FileSystemStorage,
+        orphan: PathBuf,
+        at_first_list: Mutex<Option<bool>>,
+        at_first_save: Mutex<Option<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StoragePort for Probe {
+        async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError> {
+            self.at_first_list
+                .lock()
+                .get_or_insert(self.orphan.exists());
+            self.inner.list_conversations().await
+        }
+        async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError> {
+            self.inner.load_conversation(id).await
+        }
+        async fn save_conversation(&self, conv: &Conversation) -> Result<(), StorageError> {
+            self.at_first_save
+                .lock()
+                .get_or_insert(self.orphan.exists());
+            self.inner.save_conversation(conv).await
+        }
+        async fn read_snapshot(
+            &self,
+            id: &str,
+            checkpoint: crate::domain::models::checkpoint::CheckpointId,
+            path: &std::path::Path,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.read_snapshot(id, checkpoint, path).await
+        }
+        async fn sweep_session_scratch(&self) {
+            self.inner.sweep_session_scratch().await
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_start_sweeps_before_restore_and_before_the_first_save() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let orphan = sessions.join(".rustain-424242-1.tmp");
+        std::fs::write(&orphan, b"abandoned").unwrap();
+        let probe = Probe {
+            inner: FileSystemStorage::new(sessions.clone()),
+            orphan: orphan.clone(),
+            at_first_list: Mutex::new(None),
+            at_first_save: Mutex::new(None),
+        };
+
+        // Fresh start: no session yet, so the fresh conversation is persisted.
+        let fresh = load_or_new_conversation(&probe).await;
+        assert_eq!(*probe.at_first_list.lock(), Some(false));
+        assert_eq!(*probe.at_first_save.lock(), Some(false));
+        assert!(!orphan.exists());
+
+        // Restart with a new orphan: the latest session is restored, nothing is saved.
+        std::fs::write(&orphan, b"abandoned again").unwrap();
+        *probe.at_first_list.lock() = None;
+        let restored = load_or_new_conversation(&probe).await;
+        assert_eq!(*probe.at_first_list.lock(), Some(false));
+        assert!(!orphan.exists());
+        assert_eq!(restored.id, fresh.id);
+    }
 }
 
 #[cfg(all(test, unix, feature = "cron"))]

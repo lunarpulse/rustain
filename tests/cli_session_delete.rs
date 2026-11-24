@@ -1116,3 +1116,199 @@ async fn p0_6c_count_drift_correct_count_deletes_all() {
     let summaries = storage.list_conversations_read_only().await.unwrap();
     assert!(summaries.is_empty(), "all sessions must be deleted");
 }
+
+// ---------------------------------------------------------------------------
+// D-24 B: a confirmed delete reclaims abandoned write scratch in each selected root
+// ---------------------------------------------------------------------------
+
+/// An orphan a dead writer left: a pid nobody holds a scratch guard for.
+fn plant_orphan(sessions_dir: &Path) -> std::path::PathBuf {
+    let orphan = sessions_dir.join(".rustain-424242-1.tmp");
+    std::fs::write(&orphan, b"abandoned").unwrap();
+    orphan
+}
+
+#[tokio::test]
+#[serial(session_cli)]
+async fn d24b_confirmed_single_delete_sweeps_the_selected_root_only() {
+    let ws_a = tempfile::tempdir().unwrap();
+    let ws_b = tempfile::tempdir().unwrap();
+    let sessions_a = ws_a.path().join(".claude").join("sessions");
+    let sessions_b = ws_b.path().join(".claude").join("sessions");
+    tokio::fs::create_dir_all(&sessions_a).await.unwrap();
+    tokio::fs::create_dir_all(&sessions_b).await.unwrap();
+    write_dir_session(&sessions_a, "victim", &meta("victim", "Alpha", 300, 2)).await;
+    write_dir_session(&sessions_a, "keeper", &meta("keeper", "Beta", 400, 2)).await;
+    let (orphan_a, orphan_b) = (plant_orphan(&sessions_a), plant_orphan(&sessions_b));
+
+    let mut input = Cursor::new("");
+    let mut output = Vec::new();
+    run_session_delete(
+        Some("victim".to_string()),
+        false,
+        false,
+        None,
+        true,
+        false,
+        false,
+        ws_a.path(),
+        storage_for_path,
+        &no_daemon(),
+        &EmptyWorkspaceReader,
+        false,
+        &mut input,
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    assert!(!orphan_a.exists(), "the selected root was swept");
+    assert!(orphan_b.exists(), "an unselected root is untouched");
+    let left = storage_for_path(ws_a.path())
+        .list_conversations_read_only()
+        .await
+        .unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, "keeper", "only the confirmed id was deleted");
+}
+
+#[tokio::test]
+#[serial(session_cli)]
+async fn d24b_preview_and_refusal_leave_the_whole_tree_alone() {
+    let ws = tempfile::tempdir().unwrap();
+    let sessions = ws.path().join(".claude").join("sessions");
+    tokio::fs::create_dir_all(&sessions).await.unwrap();
+    write_dir_session(&sessions, "victim", &meta("victim", "Alpha", 300, 2)).await;
+    let orphan = plant_orphan(&sessions);
+    let before = snapshot_dir(&sessions);
+
+    // --dry-run
+    let mut output = Vec::new();
+    run_session_delete(
+        Some("victim".to_string()),
+        false,
+        false,
+        None,
+        true,
+        true,
+        false,
+        ws.path(),
+        storage_for_path,
+        &no_daemon(),
+        &EmptyWorkspaceReader,
+        false,
+        &mut Cursor::new(""),
+        &mut output,
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot_dir(&sessions), before, "dry run changed nothing");
+
+    // Unconfirmed (not a tty, no --force): refused before any mutation.
+    let mut output = Vec::new();
+    let refused = run_session_delete(
+        Some("victim".to_string()),
+        false,
+        false,
+        None,
+        false,
+        false,
+        false,
+        ws.path(),
+        storage_for_path,
+        &no_daemon(),
+        &EmptyWorkspaceReader,
+        false,
+        &mut Cursor::new(""),
+        &mut output,
+    )
+    .await;
+    assert!(refused.is_err());
+    assert_eq!(snapshot_dir(&sessions), before, "a refusal changed nothing");
+
+    // `session list` is read-only too.
+    let _ = storage_for_path(ws.path())
+        .list_conversations_read_only()
+        .await
+        .unwrap();
+    assert!(orphan.exists());
+    assert_eq!(snapshot_dir(&sessions), before);
+}
+
+#[tokio::test]
+#[serial(session_cli)]
+async fn d24b_all_workspaces_sweeps_each_selected_root_and_no_other() {
+    let ws_a = tempfile::tempdir().unwrap();
+    let ws_b = tempfile::tempdir().unwrap();
+    let ws_c = tempfile::tempdir().unwrap();
+    let sessions = |ws: &tempfile::TempDir| ws.path().join(".claude").join("sessions");
+    for ws in [&ws_a, &ws_b, &ws_c] {
+        tokio::fs::create_dir_all(sessions(ws)).await.unwrap();
+    }
+    write_dir_session(&sessions(&ws_a), "a1", &meta("a1", "A", 300, 1)).await;
+    write_dir_session(&sessions(&ws_b), "b1", &meta("b1", "B", 400, 1)).await;
+    // Workspace C is registered but holds no session: nothing is selected there.
+    let orphans: Vec<_> = [&ws_a, &ws_b, &ws_c]
+        .iter()
+        .map(|ws| plant_orphan(&sessions(ws)))
+        .collect();
+    let reader = FakeMultiWorkspaceReader {
+        entries: vec![
+            WorkspaceEntry {
+                path: ws_b.path().to_path_buf(),
+                last_seen: 200,
+            },
+            WorkspaceEntry {
+                path: ws_c.path().to_path_buf(),
+                last_seen: 100,
+            },
+        ],
+    };
+
+    let mut output = Vec::new();
+    run_session_delete(
+        None,
+        false,
+        true,
+        None,
+        true,
+        true, // preview first
+        false,
+        ws_a.path(),
+        storage_for_path,
+        &no_daemon(),
+        &reader,
+        false,
+        &mut Cursor::new(""),
+        &mut output,
+    )
+    .await
+    .unwrap();
+    assert!(
+        orphans.iter().all(|o| o.exists()),
+        "the preview swept nothing"
+    );
+
+    let mut output = Vec::new();
+    run_session_delete(
+        None,
+        false,
+        true,
+        None,
+        true,
+        false,
+        false,
+        ws_a.path(),
+        storage_for_path,
+        &no_daemon(),
+        &reader,
+        false,
+        &mut Cursor::new(""),
+        &mut output,
+    )
+    .await
+    .unwrap();
+    assert!(!orphans[0].exists(), "selected root A swept");
+    assert!(!orphans[1].exists(), "selected root B swept");
+    assert!(orphans[2].exists(), "an unselected root is untouched");
+}

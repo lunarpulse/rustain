@@ -383,4 +383,16 @@ pub trait StoragePort: Send + Sync {
     async fn reconcile_pending_txns(&self) -> Result<(), StorageError> {
         Ok(())
     }
+
+    /// Startup sweep of abandoned session-write scratch (D-24 B): remove only the exact
+    /// temporary files a writer that died after creating them left in the sessions root or in a
+    /// session directory, and only when the adapter can prove no live writer owns them.
+    ///
+    /// Called by each writable startup entry (standalone TUI, daemon foreground, ACP session
+    /// open, writable `ask`, accepted `migrate`, confirmed `session delete`) before recovery or
+    /// its first session write, never by a read-only or preview path. Best-effort: failures
+    /// and retained candidates are logged, never returned.
+    ///
+    /// Default: no-op (a store without scratch files).
+    async fn sweep_session_scratch(&self) {}
 }

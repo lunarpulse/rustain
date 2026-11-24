@@ -474,6 +474,8 @@ enum Open {
     Existing,
     /// Recovery sweep: use it only if it exists and nobody holds it right now.
     TryExisting,
+    /// Scratch sweep: create the authority files if need be, but never wait for a holder.
+    TryWrite,
 }
 
 /// Exclusive hold on one session's authority, with its record loaded.
@@ -517,13 +519,14 @@ pub(crate) enum Opened {
 }
 
 async fn open(sessions_dir: &Path, id: &str, how: Open) -> Result<Opened, StorageError> {
-    let create = how == Open::Write;
+    let create = matches!(how, Open::Write | Open::TryWrite);
     let Some(key) = key_for(sessions_dir, id, create).await? else {
         return Ok(Opened::Absent);
     };
     let mutex = shared(&MUTEXES, &key, || Ok(tokio::sync::Mutex::new(())))
         .map_err(|e| io_err("authority registry", e))?;
-    let guard = if how == Open::TryExisting {
+    let wait = matches!(how, Open::Write | Open::Existing);
+    let guard = if !wait {
         match mutex.try_lock_owned() {
             Ok(guard) => guard,
             Err(_) => return Ok(Opened::Busy),
@@ -532,7 +535,6 @@ async fn open(sessions_dir: &Path, id: &str, how: Open) -> Result<Opened, Storag
         mutex.lock_owned().await
     };
     let lock_path = key.0.join(AUTHORITY_DIR).join(format!("{}.lock", key.1));
-    let wait = how != Open::TryExisting;
     let locked = tokio::task::spawn_blocking(move || flock(&lock_path, create, wait))
         .await
         .map_err(|e| io_err("authority lock task", e))?
@@ -571,6 +573,11 @@ pub(crate) async fn acquire_existing(
         Opened::Held(held) => Some(held),
         _ => None,
     })
+}
+
+/// Acquire the authority (creating its files) only if no operation holds it right now.
+pub(crate) async fn try_acquire(sessions_dir: &Path, id: &str) -> Result<Opened, StorageError> {
+    open(sessions_dir, id, Open::TryWrite).await
 }
 
 /// Acquire an existing authority only if no operation holds it right now.
@@ -623,7 +630,7 @@ impl Held {
     pub(crate) async fn write_record(&mut self, record: Record) -> Result<(), StorageError> {
         let bytes = serde_json::to_vec(&record)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        super::FileSystemStorage::atomic_write(self.record_path(), bytes)
+        super::FileSystemStorage::atomic_write(&self.root, self.record_path(), bytes)
             .await
             .map_err(|(_, e)| io_err("write authority record", e))?;
         self.record = Some(record);
@@ -700,9 +707,13 @@ impl Held {
                             .await
                             .map_err(|e| io_err("create effect dir", e))?;
                     }
-                    super::FileSystemStorage::atomic_write(target, content.clone().into_bytes())
-                        .await
-                        .map_err(|(_, e)| io_err("write effect", e))?;
+                    super::FileSystemStorage::atomic_write(
+                        &self.root,
+                        target,
+                        content.clone().into_bytes(),
+                    )
+                    .await
+                    .map_err(|(_, e)| io_err("write effect", e))?;
                 }
                 Effect::Remove { path } => {
                     match tokio::fs::remove_file(self.resolve(path)?).await {

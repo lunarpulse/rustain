@@ -193,7 +193,7 @@ impl FileSystemStorage {
                     StorageError::IoError(format!("Failed to create session dir: {e}"))
                 })?;
             }
-            Self::atomic_write(target, plan.bytes)
+            Self::atomic_write(&self.sessions_dir, target, plan.bytes)
                 .await
                 .map_err(|(stage, e)| match stage {
                     WriteStage::Write => {
@@ -527,7 +527,7 @@ impl FileSystemStorage {
             }
             SessionLayout::Flat | SessionLayout::Missing => self.session_meta_path(id),
         };
-        Self::atomic_write(target, json.into_bytes())
+        Self::atomic_write(&self.sessions_dir, target, json.into_bytes())
             .await
             .map_err(|(stage, e)| match stage {
                 WriteStage::Write => {
@@ -928,7 +928,7 @@ impl FileSystemStorage {
             .map_err(|e| StorageError::IoError(format!("Failed to create session dir: {}", e)))?;
         let content = serde_json::to_vec_pretty(txn)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        Self::atomic_write(self.rewind_txn_path(id), content)
+        Self::atomic_write(&self.sessions_dir, self.rewind_txn_path(id), content)
             .await
             .map_err(|(_, e)| StorageError::IoError(format!("rewind_txn write: {}", e)))
     }

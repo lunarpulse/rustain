@@ -1177,6 +1177,10 @@ impl RustainAcpAgent {
             Ok(Some(conv)) => conv,
             _ => return Err(acp::Error::resource_not_found(None)),
         };
+        // D-24 B: a request-cwd root that holds this session is about to be written by it;
+        // reclaim its abandoned write scratch before any prompt can persist. An orphan or
+        // cross-cwd id fails above without touching the root.
+        core.storage.sweep_session_scratch().await;
 
         // Idempotent on re-load: if the id is already live, cancel and remove
         // the old state before replacing it. Otherwise an in-flight old prompt
@@ -1452,6 +1456,7 @@ impl acp::Agent for RustainAcpAgent {
                 return Err(e);
             }
         };
+        let storage = core.storage.clone();
         let selected =
             Self::initial_model_selection(&core.provider, self.model_override.as_deref());
         if let Some((provider_id, _)) = selected.as_ref() {
@@ -1481,6 +1486,13 @@ impl acp::Agent for RustainAcpAgent {
                 selected,
             },
         );
+        // D-24 B: reclaim the request-cwd root's abandoned write scratch before the response
+        // tells the client the session id, so a prompt that follows it cannot persist first.
+        // The session is registered before this await on purpose: tests (and any client that
+        // pipelines `session/new` with a deterministic id) send the prompt without waiting, and
+        // a yield before registration would make that prompt unknown. The sweep is proof-based,
+        // so a write that did start concurrently is safe either way.
+        storage.sweep_session_scratch().await;
         let mut response = acp::NewSessionResponse::new(session_id.clone());
         if let Some(config_options) = config_options {
             response = response.config_options(config_options);

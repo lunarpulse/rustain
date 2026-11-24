@@ -58,6 +58,48 @@ both transcript layouts and outside the deletable `<id>/` directory.
 - The first upgraded write of an existing session adopts it: its transcript is
   kept and a new authority record starts at version 1.
 
+### Abandoned write scratch
+
+Every session write goes through a short temporary file next to its target
+(`.rustain-<pid>-<n>.tmp` in the sessions directory or in `<id>/`) that is renamed
+into place. A process killed between the two leaves that file behind. A writable
+Rustain removes such leftovers once, when it opens the store, and only when it can
+prove nobody can still write them:
+
+- **When.** The standalone TUI (default restore, `--session` and `--new`), the
+  foreground daemon (before it restores or saves its conversation and before the
+  scheduler and socket start), a writable `ask` (new or `--session`, never
+  `--dry-run`), ACP `session/new` and a successful `session/load` or
+  `session/resume` (the request's workspace only), `migrate` after you accept
+  the import (never for `--dry-run` or a declined prompt) and a confirmed
+  `session delete` (each selected workspace once, never `--dry-run` or an
+  unconfirmed run) run the sweep before recovery or their first session write.
+  `session list`, `daemon status`, `attach` and every preview write and remove
+  nothing.
+- **What.** Only an exact regular file named `.rustain-<pid>-<n>.tmp` in the
+  sessions directory or directly inside a session directory (an incomplete first
+  migration included), or one of the fixed names an older Rustain used:
+  `<id>.meta.json.tmp`, `<id>.session.json.tmp` in the sessions directory and
+  `conversation.json.tmp`, `meta.json.tmp`, `checkpoints.json.tmp`,
+  `rewind_txn.json.tmp` inside `<id>/`. Symlinks, directories, malformed names,
+  `snapshots/`, `images/`, the authority directory and everything else stay.
+- **Proof.** The pid in a name is never trusted. Each write holds a shared lock on
+  `.rustain-authority/.scratch-<pid>.guard` from before it creates its temporary
+  file until it has renamed or removed it; the sweep removes a name only while it
+  holds that guard exclusively, so a live writer (or a reused pid that is writing)
+  keeps its file, and a dead one's lock is gone with the process. Fixed legacy
+  names are removed only while the sweep holds that session's authority; a
+  session an upgraded writer holds right now keeps them. The directory and file
+  are pinned and checked again just before removal (no symlink is followed, a
+  replaced file stays). A kept leftover is logged and retried by the next
+  startup.
+- **Upgrade.** An old Rustain takes neither lock, so the upgrade rule above is what
+  makes the sweep safe: no old writer may run on the store when an upgraded one
+  opens it. A leftover from an old crash is reclaimed by the first upgraded
+  startup after the old processes are stopped.
+- Not removed: leftovers inside `snapshots/` and the authority directory, and
+  anything on a platform without `flock` (Windows).
+
 ## Temporary TUI displays
 
 Cancelled local replies and standalone plan cards remain visible in their

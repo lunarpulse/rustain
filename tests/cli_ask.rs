@@ -30,6 +30,9 @@ mod eval5_interruption;
 #[path = "cli_ask/d24_session_store.rs"]
 mod d24_session_store;
 
+#[path = "cli_ask/d24b_scratch_sweep.rs"]
+mod d24b_scratch_sweep;
+
 fn default_config() -> rustain::domain::models::AppConfig {
     rustain::domain::models::AppConfig::default()
 }

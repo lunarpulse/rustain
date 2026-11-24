@@ -14,11 +14,14 @@ use crate::domain::errors::StorageError;
 use crate::domain::models::{Conversation, ConversationSummary, ImageReference, SessionMeta};
 use crate::domain::ports::{StoragePort, WorkspaceRegistrarPort};
 
+mod scratch;
 mod session_authority;
 mod txn;
 
 #[cfg(test)]
 mod fence_tests;
+#[cfg(test)]
+mod scratch_tests;
 
 use session_authority::Intent;
 use txn::Cut;
@@ -729,19 +732,57 @@ impl FileSystemStorage {
         ))
     }
 
+    /// Create the temporary file of one write exclusively: an existing name (an orphan of a
+    /// dead process whose pid this one reuses) is never reused or truncated.
+    fn create_scratch(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+        Self::create_scratch_named(|| Self::unique_tmp(target))
+    }
+
+    /// [`Self::create_scratch`] over an explicit name source (a test plants collisions).
+    fn create_scratch_named(
+        mut next_name: impl FnMut() -> PathBuf,
+    ) -> std::io::Result<(PathBuf, std::fs::File)> {
+        for _ in 0..1024 {
+            let tmp = next_name();
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(file) => return Ok((tmp, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::other("no free temporary file name"))
+    }
+
     /// Write `bytes` to a unique temporary file and rename it over `target`, as ONE
     /// blocking unit that runs to completion even if the caller is dropped, and removes
     /// its temporary file on every failure path.
+    ///
+    /// The unit runs under this process's scratch guard for `root` (the sessions root `target`
+    /// lives in): the startup sweep (`scratch`) may reclaim an orphaned temporary only while
+    /// it holds that guard exclusively, i.e. while no write is between create and rename.
     async fn atomic_write(
+        root: &Path,
         target: PathBuf,
         bytes: Vec<u8>,
     ) -> Result<(), (WriteStage, std::io::Error)> {
+        let root = root.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let tmp = Self::unique_tmp(&target);
-            if let Err(e) = std::fs::write(&tmp, &bytes) {
+            use std::io::Write;
+            let _guard = scratch::hold_creator(&root).map_err(|e| (WriteStage::Write, e))?;
+            let (tmp, mut file) =
+                Self::create_scratch(&target).map_err(|e| (WriteStage::Write, e))?;
+            let written = file.write_all(&bytes);
+            drop(file);
+            if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
                 return Err((WriteStage::Write, e));
             }
+            #[cfg(test)]
+            scratch::hook::fire(&root, &tmp);
             if let Err(e) = std::fs::rename(&tmp, &target) {
                 let _ = std::fs::remove_file(&tmp);
                 return Err((WriteStage::Rename, e));
@@ -750,6 +791,14 @@ impl FileSystemStorage {
         })
         .await
         .unwrap_or_else(|e| Err((WriteStage::Write, std::io::Error::other(e.to_string()))))
+    }
+
+    /// Startup sweep of abandoned session-write scratch under the configured sessions root
+    /// (D-24 B): removes only the exact orphans `scratch` proves nobody can still write, and
+    /// reports what it kept. Called by every writable startup entry before recovery or its first
+    /// session write; never by a read-only or preview path. A missing root is left missing.
+    pub async fn sweep_scratch(&self) -> Result<scratch::SweepReport, StorageError> {
+        scratch::sweep(&self.sessions_dir).await
     }
 }
 
@@ -1629,6 +1678,25 @@ impl StoragePort for FileSystemStorage {
     async fn reconcile_pending_txns(&self) -> Result<(), crate::domain::errors::StorageError> {
         self.reconcile_journals().await
     }
+
+    async fn sweep_session_scratch(&self) {
+        match self.sweep_scratch().await {
+            Ok(report) => {
+                tracing::info!(
+                    removed = report.removed.len(),
+                    retained = report.retained.len(),
+                    "session scratch sweep"
+                );
+                for path in &report.removed {
+                    tracing::info!(path = %path.display(), "session scratch sweep: removed orphan");
+                }
+                for (path, why) in &report.retained {
+                    tracing::warn!(path = %path.display(), ?why, "session scratch sweep: kept");
+                }
+            }
+            Err(e) => tracing::warn!("session scratch sweep failed: {e}"),
+        }
+    }
 }
 
 // ── Private serde structs for checkpoint persistence ─────────────────────────
@@ -1871,15 +1939,17 @@ impl FileSystemStorage {
         let dest = self.checkpoints_file(id);
         let content = serde_json::to_vec_pretty(log)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        // Atomic write: write to a temp file then rename.
-        let tmp_path = dest.with_extension("json.tmp");
-        tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
-            StorageError::IoError(format!("Failed to write checkpoints tmp: {}", e))
-        })?;
-        tokio::fs::rename(&tmp_path, &dest).await.map_err(|e| {
-            StorageError::IoError(format!("Failed to rename checkpoints file: {}", e))
-        })?;
-        Ok(())
+        // Atomic write: guarded unique temp file then rename (D-24 B: no fixed scratch name).
+        Self::atomic_write(&self.sessions_dir, dest, content)
+            .await
+            .map_err(|(stage, e)| match stage {
+                WriteStage::Write => {
+                    StorageError::IoError(format!("Failed to write checkpoints tmp: {}", e))
+                }
+                WriteStage::Rename => {
+                    StorageError::IoError(format!("Failed to rename checkpoints file: {}", e))
+                }
+            })
     }
 
     /// Prune oldest checkpoints so the log stays within `retention` entries (DF-106, AC1).
@@ -3685,6 +3755,7 @@ mod unique_tmp_tests {
         {
             let _entered = runtime.enter();
             let mut save = Box::pin(FileSystemStorage::atomic_write(
+                &sessions,
                 session.clone(),
                 json.clone().into_bytes(),
             ));
@@ -3725,7 +3796,8 @@ mod unique_tmp_tests {
         // The target is a non-empty directory: the rename must fail.
         let target = sessions.join("blocked.meta.json");
         std::fs::create_dir_all(target.join("inner")).unwrap();
-        let failed = FileSystemStorage::atomic_write(target.clone(), b"{}".to_vec()).await;
+        let failed =
+            FileSystemStorage::atomic_write(&sessions, target.clone(), b"{}".to_vec()).await;
         assert!(failed.is_err());
         assert!(
             temp_files(&sessions).is_empty(),

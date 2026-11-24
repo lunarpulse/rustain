@@ -29,10 +29,10 @@ use super::{default_config, make_dry_run_opts, make_opts};
 
 /// First call: optionally a tool use; every later call: a final text answer. Before the first
 /// call returns, `competitor` (a second adapter on the same store) commits a newer row.
-struct Scripted {
-    calls: AtomicUsize,
-    ask_for_tool: bool,
-    competitor: Option<(Arc<FileSystemStorage>, String)>,
+pub(super) struct Scripted {
+    pub(super) calls: AtomicUsize,
+    pub(super) ask_for_tool: bool,
+    pub(super) competitor: Option<(Arc<FileSystemStorage>, String)>,
 }
 
 #[async_trait]
@@ -101,7 +101,10 @@ impl StreamingProvider for Scripted {
     }
 }
 
-fn core_over(provider: Arc<dyn StreamingProvider>, storage: Arc<dyn StoragePort>) -> CliCore {
+pub(super) fn core_over(
+    provider: Arc<dyn StreamingProvider>,
+    storage: Arc<dyn StoragePort>,
+) -> CliCore {
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let security: Arc<dyn rustain::domain::ports::SecurityPort> = Arc::new(NoOpSecurity);
     let tools: Arc<dyn rustain::domain::ports::ToolSetPort> = Arc::new(NoOpToolSet);
@@ -121,14 +124,14 @@ fn core_over(provider: Arc<dyn StreamingProvider>, storage: Arc<dyn StoragePort>
     }
 }
 
-fn store_in(dir: &TempDir) -> Arc<FileSystemStorage> {
+pub(super) fn store_in(dir: &TempDir) -> Arc<FileSystemStorage> {
     Arc::new(FileSystemStorage::with_workspace_root(
         dir.path().join(".claude").join("sessions"),
         dir.path().to_path_buf(),
     ))
 }
 
-async fn seeded(store: &FileSystemStorage, id: &str) {
+pub(super) async fn seeded(store: &FileSystemStorage, id: &str) {
     let mut conv = Conversation {
         id: id.into(),
         title: "t".into(),
@@ -146,7 +149,7 @@ async fn seeded(store: &FileSystemStorage, id: &str) {
 }
 
 /// Every file under `root` with its bytes' digest, sequence counters included.
-fn tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+pub(super) fn tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -169,7 +172,7 @@ fn tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     out
 }
 
-async fn run(
+pub(super) async fn run(
     provider: Arc<dyn StreamingProvider>,
     storage: Arc<dyn StoragePort>,
     opts: rustain::adapters::cli::ask::AskOpts,

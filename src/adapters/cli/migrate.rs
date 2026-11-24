@@ -159,6 +159,10 @@ pub async fn run_migrate_with(
         }
     };
 
+    // D-24 B: the operator accepted the import. Reclaim abandoned write scratch before the
+    // importer's first session or sidecar write. Preview, decline and cancel returned above.
+    storage.sweep_session_scratch().await;
+
     // Run imports
     let mut imported = 0usize;
     let mut already_imported_in_batch = 0usize;
@@ -469,5 +473,159 @@ mod tests {
 
         assert_eq!(already_count, 1);
         assert_eq!(new_candidates.len(), 1);
+    }
+
+    /// Forwards to the real store and records, at the importer's first session write, whether
+    /// the planted orphan was still there.
+    struct OrderProbe {
+        inner: FileSystemStorage,
+        orphan: PathBuf,
+        orphan_at_first_write: parking_lot::Mutex<Option<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StoragePort for OrderProbe {
+        async fn save_conversation(
+            &self,
+            conv: &crate::domain::models::Conversation,
+        ) -> Result<(), StorageError> {
+            self.orphan_at_first_write
+                .lock()
+                .get_or_insert(self.orphan.exists());
+            self.inner.save_conversation(conv).await
+        }
+        async fn load_conversation(
+            &self,
+            id: &str,
+        ) -> Result<Option<crate::domain::models::Conversation>, StorageError> {
+            self.inner.load_conversation(id).await
+        }
+        async fn list_conversations(
+            &self,
+        ) -> Result<Vec<crate::domain::models::ConversationSummary>, StorageError> {
+            self.inner.list_conversations().await
+        }
+        async fn load_session_meta(
+            &self,
+            id: &str,
+        ) -> Result<Option<crate::domain::models::session_meta::SessionMeta>, StorageError>
+        {
+            self.inner.load_session_meta(id).await
+        }
+        async fn save_session_meta(
+            &self,
+            id: &str,
+            meta: &crate::domain::models::session_meta::SessionMeta,
+        ) -> Result<(), StorageError> {
+            self.inner.save_session_meta(id, meta).await
+        }
+        async fn list_conversations_read_only(
+            &self,
+        ) -> Result<Vec<crate::domain::models::ConversationSummary>, StorageError> {
+            self.inner.list_conversations_read_only().await
+        }
+        async fn read_snapshot(
+            &self,
+            id: &str,
+            checkpoint: crate::domain::models::checkpoint::CheckpointId,
+            path: &std::path::Path,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.read_snapshot(id, checkpoint, path).await
+        }
+        async fn sweep_session_scratch(&self) {
+            self.inner.sweep_session_scratch().await
+        }
+    }
+
+    /// Every file under `root` with its bytes.
+    fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(base, &p, out);
+                } else {
+                    let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                    out.push((rel, std::fs::read(&p).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    fn one_source_session(tmp: &Path) -> PathBuf {
+        let source_dir = tmp.join("projects");
+        let ws_dir = source_dir.join("ws-hash");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let fixture = r#"{"type":"user","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","message":{"role":"user","content":"Hello"}}"#;
+        std::fs::write(ws_dir.join("session-one.jsonl"), fixture).unwrap();
+        source_dir
+    }
+
+    /// An orphan a dead writer left (a pid nobody holds a scratch guard for).
+    fn plant_orphan(sessions: &Path) -> PathBuf {
+        let orphan = sessions.join(".rustain-424242-1.tmp");
+        std::fs::write(&orphan, b"abandoned").unwrap();
+        orphan
+    }
+
+    #[tokio::test]
+    async fn accepted_import_reclaims_abandoned_scratch_before_its_first_write() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage = make_storage(tmp.path());
+        let sessions = tmp.path().join("sessions");
+        let orphan = plant_orphan(&sessions);
+        let source = one_source_session(tmp.path());
+        let probe = OrderProbe {
+            inner: storage,
+            orphan: orphan.clone(),
+            orphan_at_first_write: parking_lot::Mutex::new(None),
+        };
+        let importer = crate::adapters::importers::claude_code::ClaudeCodeImporter::with_root(
+            PathBuf::from("/nonexistent"),
+        );
+
+        run_migrate_with(&importer, &probe, Some(source), true, false, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *probe.orphan_at_first_write.lock(),
+            Some(false),
+            "the orphan was gone before the importer's first write"
+        );
+        assert!(!orphan.exists());
+        assert_eq!(
+            probe
+                .inner
+                .list_conversations_read_only()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_never_sweeps_or_writes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage = make_storage(tmp.path());
+        let sessions = tmp.path().join("sessions");
+        let orphan = plant_orphan(&sessions);
+        let source = one_source_session(tmp.path());
+        let before = tree(&sessions);
+        let importer = crate::adapters::importers::claude_code::ClaudeCodeImporter::with_root(
+            PathBuf::from("/nonexistent"),
+        );
+
+        run_migrate_with(&importer, &storage, Some(source), false, false, true)
+            .await
+            .unwrap();
+
+        assert!(orphan.exists(), "a dry run does not sweep");
+        assert_eq!(tree(&sessions), before, "the whole tree is byte-identical");
     }
 }

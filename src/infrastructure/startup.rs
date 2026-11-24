@@ -206,6 +206,85 @@ mod a2a_feature_tests {
     }
 }
 
+/// Writable standalone-TUI startup on the sessions store, in the order D-24 B fixes: reclaim
+/// abandoned write scratch first, then recover interrupted rewind transactions, both before
+/// any session is restored or saved (`--new` is a real writer too, so it also runs this).
+pub(crate) async fn recover_sessions_store(storage: &dyn StoragePort) {
+    storage.sweep_session_scratch().await;
+    // DF-109 (AC3): reconcile rewind transactions interrupted by a crash, so recovered
+    // conversations are consistent when session restoration loads them.
+    if let Err(e) = storage.reconcile_pending_txns().await {
+        tracing::warn!("Failed to reconcile pending rewind transactions: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod d24b_recovery_order_tests {
+    use super::recover_sessions_store;
+    use crate::adapters::filesystem::FileSystemStorage;
+    use crate::domain::errors::StorageError;
+    use crate::domain::ports::StoragePort;
+    use parking_lot::Mutex;
+
+    struct Order(Mutex<Vec<&'static str>>);
+
+    #[async_trait::async_trait]
+    impl StoragePort for Order {
+        async fn save_conversation(
+            &self,
+            _: &crate::domain::models::Conversation,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn load_conversation(
+            &self,
+            _: &str,
+        ) -> Result<Option<crate::domain::models::Conversation>, StorageError> {
+            Ok(None)
+        }
+        async fn list_conversations(
+            &self,
+        ) -> Result<Vec<crate::domain::models::ConversationSummary>, StorageError> {
+            Ok(Vec::new())
+        }
+        async fn read_snapshot(
+            &self,
+            _: &str,
+            _: crate::domain::models::checkpoint::CheckpointId,
+            _: &std::path::Path,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(None)
+        }
+        async fn sweep_session_scratch(&self) {
+            self.0.lock().push("sweep");
+        }
+        async fn reconcile_pending_txns(&self) -> Result<(), StorageError> {
+            self.0.lock().push("reconcile");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_scratch_sweep_runs_before_rewind_recovery() {
+        let order = Order(Mutex::new(Vec::new()));
+        recover_sessions_store(&order).await;
+        assert_eq!(*order.0.lock(), ["sweep", "reconcile"]);
+    }
+
+    #[tokio::test]
+    async fn the_real_store_loses_its_orphan_at_standalone_startup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(sessions.join("s1")).unwrap();
+        let root_orphan = sessions.join(".rustain-424242-1.tmp");
+        let dir_orphan = sessions.join("s1").join(".rustain-424242-2.tmp");
+        std::fs::write(&root_orphan, b"abandoned").unwrap();
+        std::fs::write(&dir_orphan, b"abandoned").unwrap();
+        recover_sessions_store(&FileSystemStorage::new(sessions)).await;
+        assert!(!root_orphan.exists() && !dir_orphan.exists());
+    }
+}
+
 /// Ordered startup sequence.
 /// 1. Parse CLI args
 /// 2. Initialize logging (so config warnings are captured)
@@ -2562,13 +2641,10 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    // DF-109 (AC3): Reconcile any rewind transactions that were interrupted by a crash.
-    // Must run before session restoration so that recovered conversations are in a
-    // consistent state when we attempt to load them.
-    use crate::domain::ports::StoragePort as _;
-    if let Err(e) = storage.reconcile_pending_txns().await {
-        tracing::warn!("Failed to reconcile pending rewind transactions: {}", e);
-    }
+    // D-24 B scratch sweep, then DF-109 (AC3) reconciliation of rewind transactions
+    // interrupted by a crash. Both must run before session restoration so that recovered
+    // conversations are in a consistent state when we attempt to load them.
+    recover_sessions_store(&storage).await;
 
     // Session restoration: --new skips restore, --session <id> loads specific session
     // recovery_prompt: Some((title, token_count)) if crash detected
