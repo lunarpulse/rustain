@@ -616,7 +616,7 @@ impl DaemonTurnRuntime {
         let tool_scheduler = self.tool_scheduler.clone();
         let conversation_id = conversation.id.clone();
         let storage = self.storage.clone();
-        let conversation = conversation.clone();
+        let conversation = conversation.capture();
         let usage_ledger = self.usage_ledger.clone();
 
         tokio::spawn(async move {

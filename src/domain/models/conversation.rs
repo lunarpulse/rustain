@@ -268,12 +268,34 @@ pub struct Conversation {
     pub peer_row_controls: std::collections::BTreeMap<String, PeerRowControl>,
     #[serde(default, skip_serializing_if = "peer_row_revision_is_zero")]
     pub peer_row_revision: u64,
+    /// Persistence fence (D-24): the base a store last accepted for this conversation and
+    /// the stamp bound at each clone. Never serialized.
+    #[serde(skip)]
+    pub persist: super::persist_fence::PersistTag,
     // v0.5+: pub active_agent: Option<AgentDefinition>,
     // v1.0+: pub enabled_mcp_servers: Vec<String>,
     // v1.0+: pub external_context_paths: Vec<String>,
 }
 
 impl Conversation {
+    /// A copy to hand across a spawn or an await (a turn producer, a background save): its
+    /// persistence stamp (loaded base, writer operation, capture sequence) is bound now, so the
+    /// store can refuse it if anything newer was accepted by the time it is delivered. A plain
+    /// `clone()` is a holder of the same live state and stamps at write time instead.
+    pub fn capture(&self) -> Self {
+        let mut captured = self.clone();
+        captured.persist = self.persist.bind();
+        captured
+    }
+
+    /// Back every assistant row that has no turn of its own id with a turn (the legacy-load
+    /// migration), so the next `rebuild_messages_mirror` keeps the row instead of removing it
+    /// as a zombie. A turn-less durable row (the plan summary) must be backed the moment it is
+    /// pushed; its content blocks (the summary marker) survive the rebuild.
+    pub fn back_unbacked_rows(&mut self) {
+        migrate_unbacked_rows(self);
+    }
+
     /// Translate a live mirror index to its durable transcript index.
     pub fn durable_message_index(&self, live_index: usize) -> Option<usize> {
         let message = self.messages.get(live_index)?;
@@ -744,6 +766,7 @@ impl PersistedConversation {
             compaction: self.compaction,
             peer_row_controls: self.peer_row_controls,
             peer_row_revision: self.peer_row_revision,
+            persist: Default::default(),
         };
         // Discard marked rows before either migration, including externally
         // supplied persisted data, and clear only hosts known to be temporary.
@@ -1358,6 +1381,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let plan = Plan {
             id: "p1".to_string(),
@@ -1417,6 +1441,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let persisted = PersistedConversation::from_conversation(&conversation);
         let restored = persisted.to_conversation();

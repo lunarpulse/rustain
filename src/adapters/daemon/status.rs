@@ -184,7 +184,7 @@ fn count_persisted_conversations(workspace: &std::path::Path) -> u64 {
     std::fs::read_dir(&dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
+                .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'))
                 .count() as u64
         })
         .unwrap_or(0)

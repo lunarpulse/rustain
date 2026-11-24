@@ -588,7 +588,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileSystemStorage::new(dir.path().to_path_buf());
         let conversation = conversation_with_one_message();
-        let result = handle_rewind_confirm(&storage, &conversation, 0).await;
+        // The rewind flushes the live transcript first, so the session exists when the
+        // truncation starts; an unreadable checkpoint log is what makes it fail.
+        std::fs::create_dir_all(dir.path().join("conv-1").join("checkpoints.json")).unwrap();
+        let result = handle_rewind_confirm(&storage, &mut None, &conversation, 0).await;
         let detail = match &result {
             Err(RewindFailure::Truncate(error)) => error.to_string(),
             other => panic!(
@@ -628,7 +631,7 @@ mod tests {
         .unwrap();
         let storage = FileSystemStorage::new(not_a_directory);
         let conversation = conversation_with_one_message();
-        let result = handle_rewind_confirm(&storage, &conversation, 0).await;
+        let result = handle_rewind_confirm(&storage, &mut None, &conversation, 0).await;
         let detail = match &result {
             Err(RewindFailure::Begin(error)) => error.to_string(),
             other => panic!("expected a journal failure, got {:?}", other.as_ref().err()),

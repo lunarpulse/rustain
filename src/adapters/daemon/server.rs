@@ -1113,7 +1113,7 @@ async fn commit_peer_rows_serialized(
         return Ok(());
     }
     if let Err(error) = storage.save_conversation(&conversation).await {
-        rollback_peer_rows(&mut conversation, undo, starting_revision);
+        peer_rows::rollback_unless_persisted(&error, &mut conversation, undo, starting_revision);
         return Err(error.to_string());
     }
     drop(conversation);
@@ -1203,9 +1203,8 @@ async fn clear_conversation_rows(
     let controls = std::mem::take(&mut conversation.peer_row_controls);
     conversation.peer_row_revision = revision;
     if let Err(error) = storage.save_conversation(&conversation).await {
-        conversation.messages = messages;
-        conversation.peer_row_controls = controls;
-        conversation.peer_row_revision = starting_revision;
+        let cleared = (messages, controls);
+        peer_rows::restore_unless_persisted(&error, &mut conversation, cleared, starting_revision);
         return Err(error.to_string());
     }
     drop(conversation);

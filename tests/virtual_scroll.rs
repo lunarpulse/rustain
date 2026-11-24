@@ -50,6 +50,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -413,6 +414,7 @@ fn test_virtual_scroll_only_user_messages() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -524,6 +526,7 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 

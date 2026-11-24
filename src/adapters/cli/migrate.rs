@@ -257,7 +257,9 @@ async fn filter_already_imported(
     storage: &dyn StoragePort,
     source_id: &str,
 ) -> (Vec<ImportCandidate>, usize) {
-    let summaries = match storage.list_conversations().await {
+    // Discovery before confirmation never backfills a sidecar: a declined or previewed
+    // migration writes nothing.
+    let summaries = match storage.list_conversations_read_only().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
@@ -427,6 +429,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         storage.save_conversation(&existing_conv).await.unwrap();
         let mut existing_meta = storage

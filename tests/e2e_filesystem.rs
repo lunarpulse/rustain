@@ -66,55 +66,62 @@ fn make_simple_conversation(id: &str) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
-// ── E1.2: save_directory_layout rollback ─────────────────────────────────────
+// ── E1.2: sidecar rename failure after the transcript was published ─────────
 
-/// E1.2 (DF-096b): When the `meta.json` atomic rename fails after
-/// `conversation.json` was successfully renamed, `save_directory_layout` must
-/// roll back by removing the newly-written `conversation.json` so the session
-/// directory is left in a clean (empty-of-conversation-data) state.
+/// E1.2 (DF-096b, superseded by D-24 / AC2): when the `meta.json` rename fails after
+/// `conversation.json` was renamed into place, the transcript rename is the publication point.
+/// The save reports a *partial commit*, the accepted transcript stays (the pre-D-24 rollback
+/// removed the only copy of the session), and the pending sidecar effect stays recorded.
 ///
-/// We simulate the failure by creating a DIRECTORY named `meta.json` inside the
-/// session directory — on Linux/macOS, renaming a regular file over a
-/// directory path fails with EISDIR, which triggers the rollback path.
+/// We simulate the failure by placing a DIRECTORY at the `meta.json` path of a directory-layout
+/// session: renaming a regular file over a directory fails with EISDIR.
 #[tokio::test]
 async fn test_save_conversation_rollback_on_meta_rename_failure() {
     let tmp = TempDir::new().unwrap();
     let sessions_dir = tmp.path().join("sessions");
-    tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
-
     let conv_id = "rollback-test-conv";
     let session_dir = sessions_dir.join(conv_id);
     let conv_path = session_dir.join("conversation.json");
     let meta_path = session_dir.join("meta.json");
 
-    // Step 1: pre-create the session directory with an initial conversation.json
-    // so that detect_layout returns Directory for this ID.
-    tokio::fs::create_dir_all(&session_dir).await.unwrap();
-    tokio::fs::write(&conv_path, b"{}").await.unwrap();
-
-    // Step 2: place a DIRECTORY at the meta.json path to cause the rename to fail.
-    tokio::fs::create_dir_all(&meta_path).await.unwrap();
-
-    // Step 3: build storage and try to save.
+    // An image reference forces the directory layout on the first save.
     let storage = FileSystemStorage::new(sessions_dir.clone());
-    let conv = make_simple_conversation(conv_id);
+    let mut conv = make_simple_conversation(conv_id);
+    conv.messages[0].images = vec![rustain::domain::models::ImageReference {
+        file_name: "0123456789abcdef.png".into(),
+        media_type: "image/png".into(),
+        original_size: 1,
+    }];
+    storage.save_conversation(&conv).await.unwrap();
+    assert!(conv_path.exists(), "precondition: directory layout");
 
+    // Block the sidecar rename, then save again.
+    tokio::fs::remove_file(&meta_path).await.unwrap();
+    tokio::fs::create_dir_all(&meta_path).await.unwrap();
+    conv.messages
+        .push(make_simple_conversation(conv_id).messages.remove(1));
     let result = storage.save_conversation(&conv).await;
 
-    // The save must fail (meta.json rename was blocked by the directory).
     assert!(
-        result.is_err(),
-        "save_conversation must return an error when meta.json rename fails"
+        matches!(
+            result,
+            Err(rustain::domain::errors::StorageError::PartialCommit(_))
+        ),
+        "the blocked sidecar is a partial commit, not an unchanged failure: {result:?}"
     );
-
-    // After rollback: conversation.json should NOT exist —
-    // the rollback removed the newly-written file.
     assert!(
-        !conv_path.exists(),
-        "conversation.json must be removed during rollback after meta.json rename failure"
+        conv_path.exists(),
+        "the published transcript is never removed by a later sidecar failure"
+    );
+    let loaded = storage.load_conversation(conv_id).await.unwrap().unwrap();
+    assert_eq!(
+        loaded.messages.len(),
+        3,
+        "the new transcript is what a reader sees"
     );
 }
 

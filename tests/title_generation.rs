@@ -120,6 +120,7 @@ fn make_conversation() -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -455,6 +456,7 @@ fn test_title_guard_skips_when_title_exists() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     let trigger_title_generation = true;
@@ -480,6 +482,7 @@ fn test_title_guard_allows_when_title_empty() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     let trigger_title_generation = true;

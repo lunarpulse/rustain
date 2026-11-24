@@ -698,7 +698,7 @@ pub async fn run(
     // Mark session as in-flight (clean_exit = false) for crash detection
     if !conversation.messages.is_empty() {
         let fs_ref = fs_storage.clone();
-        let conv_clone = conversation.clone();
+        let conv_clone = conversation.capture();
         if let Err(e) = fs_ref.save_conversation_with_exit(&conv_clone, false).await {
             tracing::warn!("Failed to mark session in-flight: {}", e);
         }
@@ -1729,7 +1729,7 @@ pub async fn run(
                                             // Persist the fresh conversation with clean_exit = true
                                             // (avoids phantom crash detection on next startup)
                                             let fs_ref = fs_storage.clone();
-                                            let conv_clone = conversation.clone();
+                                            let conv_clone = conversation.capture();
                                             if let Some(prev) = _pending_save.take() {
                                                 let _ = prev.await;
                                             }
@@ -1960,7 +1960,7 @@ pub async fn run(
                                                 let _ = prev.await;
                                             }
                                             let fs_ref = fs_storage.clone();
-                                            let conv_clone = conversation.clone();
+                                            let conv_clone = conversation.capture();
                                             _pending_save = Some(tokio::spawn(async move {
                                                 match tokio::time::timeout(
                                                     BACKGROUND_TASK_TIMEOUT,
@@ -1989,6 +1989,7 @@ pub async fn run(
                                             compaction: None,
                                             peer_row_controls: Default::default(),
                                             peer_row_revision: 0,
+                                            persist: Default::default(),
                                         };
                                         reset_stage_conversation(&mut tab_manager, &mut conversation, &mut state, replacement);
                                         skill_activator.on_new_conversation(&conversation.id).await;
@@ -2403,7 +2404,7 @@ pub async fn run(
                                     if !conversation.messages.is_empty() {
                                         conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                         let fs_ref = fs_storage.clone();
-                                        let conv_clone = conversation.clone();
+                                        let conv_clone = conversation.capture();
                                         if let Some(prev) = _pending_save.take() {
                                             let _ = prev.await;
                                         }
@@ -2451,7 +2452,7 @@ pub async fn run(
                                         if !conversation.messages.is_empty() {
                                             conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                             let fs_ref = fs_storage.clone();
-                                            let conv_clone = conversation.clone();
+                                            let conv_clone = conversation.capture();
                                             if let Some(prev) = _pending_save.take() {
                                                 let _ = prev.await;
                                             }
@@ -2934,7 +2935,7 @@ pub async fn run(
                                             target_msg_idx, conversation.id
                                         );
 
-                                        let result = handlers::transcript_target::handle_rewind_confirm(&*storage, &conversation, target_msg_idx).await;
+                                        let result = handlers::transcript_target::handle_rewind_confirm(&*storage, &mut _pending_save, &conversation, target_msg_idx).await;
                                         let Some(outcome) = super::error_notices::rewind_result(&mut state, result) else {
                                             state.needs_redraw = true;
                                             continue;
@@ -4195,7 +4196,7 @@ pub async fn run(
                                             let _ = prev.await;
                                         }
                                         let storage_ref = storage.clone();
-                                        let conv_clone = conversation.clone();
+                                        let conv_clone = conversation.capture();
                                         _pending_save = Some(tokio::spawn(async move {
                                             match tokio::time::timeout(
                                                 BACKGROUND_TASK_TIMEOUT,
@@ -4298,7 +4299,7 @@ pub async fn run(
                                         let _ = prev.await;
                                     }
                                     let storage_ref = storage.clone();
-                                    let conv_clone = tab.conversation.clone();
+                                    let conv_clone = tab.conversation.capture();
                                     _pending_save = Some(tokio::spawn(async move {
                                         match tokio::time::timeout(
                                             BACKGROUND_TASK_TIMEOUT,
@@ -5031,7 +5032,7 @@ pub async fn run(
                                 let _ = prev.await;
                             }
                             let storage_ref = storage.clone();
-                            let conv_clone = conversation.clone();
+                            let conv_clone = conversation.capture();
                             _pending_save = Some(tokio::spawn(async move {
                                 match tokio::time::timeout(
                                     BACKGROUND_TASK_TIMEOUT,
@@ -5049,7 +5050,7 @@ pub async fn run(
                                 let _ = prev.await;
                             }
                             let storage_ref = storage.clone();
-                            let conv_clone = tab.conversation.clone();
+                            let conv_clone = tab.conversation.capture();
                             _pending_save = Some(tokio::spawn(async move {
                                 match tokio::time::timeout(
                                     BACKGROUND_TASK_TIMEOUT,
@@ -5124,7 +5125,7 @@ pub async fn run(
                                         let _ = prev.await;
                                     }
                                     let storage_ref = storage.clone();
-                                    let conv_clone = conv.clone();
+                                    let conv_clone = conv.capture();
                                     _pending_save = Some(tokio::spawn(async move {
                                         match tokio::time::timeout(
                                             BACKGROUND_TASK_TIMEOUT,
@@ -6209,7 +6210,7 @@ pub async fn run(
     let active_conv_id = conversation.id.clone();
     for tab in tab_manager.tabs() {
         if tab.conversation.id != active_conv_id && !tab.conversation.messages.is_empty() {
-            let mut bg_conv = tab.conversation.clone();
+            let mut bg_conv = tab.conversation.capture();
             bg_conv.updated_at = crate::domain::models::session_meta::now_unix();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
@@ -8411,6 +8412,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         }
     }
 

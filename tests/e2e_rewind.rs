@@ -100,6 +100,7 @@ fn make_conversation_5_messages() -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -125,6 +126,7 @@ fn make_conversation_5_messages_with_id(id: String) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -366,6 +368,7 @@ async fn test_rewind_decision_confirm_and_cancel_effects() {
             let outcome =
                 rustain::adapters::tui::handlers::transcript_target::handle_rewind_confirm(
                     &storage,
+                    &mut None,
                     &conv,
                     payload.preview.target_message_index,
                 )
@@ -434,6 +437,7 @@ async fn rewind_retires_deferred_fork_before_regrowth() {
     .unwrap();
     let mut regrown = rustain::adapters::tui::handlers::transcript_target::handle_rewind_confirm(
         &storage,
+        &mut None,
         &conv,
         payload.preview.target_message_index,
     )
@@ -769,8 +773,10 @@ async fn test_e2e_rewind_all_conflicts_truncates_only() {
         .unwrap();
 
     // Restore full conversation.
-    let conv_full = make_conversation_5_messages_with_id(conv_id.clone());
-    storage.save_conversation(&conv_full).await.unwrap();
+    // The same conversation object grows back (D-24: a never-loaded object with the same id is
+    // not a continuation of the stored session).
+    conv.messages = make_conversation_5_messages_with_id(conv_id.clone()).messages;
+    storage.save_conversation(&conv).await.unwrap();
 
     // Tool writes both files, then finalize_snapshot records post-write hashes.
     let tool_content1 = b"tool written 1";
@@ -1173,8 +1179,10 @@ async fn test_storage_revert_to_checkpoint_basic() {
     let cp = storage.create_checkpoint(&conv_id).await.unwrap();
 
     // Now save full 5-message version
-    let conv_full = make_conversation_5_messages_with_id(conv_id.clone());
-    storage.save_conversation(&conv_full).await.unwrap();
+    // The same conversation object grows back (D-24: a never-loaded object with the same id is
+    // not a continuation of the stored session).
+    conv.messages = make_conversation_5_messages_with_id(conv_id.clone()).messages;
+    storage.save_conversation(&conv).await.unwrap();
 
     // Verify full version is on disk
     let full_loaded = storage.load_conversation(&conv_id).await.unwrap().unwrap();
@@ -1530,8 +1538,10 @@ async fn test_storage_revert_updates_session_meta_atomically() {
     let cp = storage.create_checkpoint(&conv_id).await.unwrap();
 
     // Save full 5-message version
-    let conv_full = make_conversation_5_messages_with_id(conv_id.clone());
-    storage.save_conversation(&conv_full).await.unwrap();
+    // The same conversation object grows back (D-24: a never-loaded object with the same id is
+    // not a continuation of the stored session).
+    conv.messages = make_conversation_5_messages_with_id(conv_id.clone()).messages;
+    storage.save_conversation(&conv).await.unwrap();
 
     // Verify meta shows 5 messages
     let meta_before = storage.load_session_meta(&conv_id).await.unwrap();
@@ -1571,8 +1581,10 @@ async fn test_storage_revert_preserves_session_meta_extra() {
 
     // Save 5-message version BEFORE injecting extra fields, so save_conversation
     // doesn't overwrite the extra fields we're about to inject.
-    let conv_full = make_conversation_5_messages_with_id(conv_id.clone());
-    storage.save_conversation(&conv_full).await.unwrap();
+    // The same conversation object grows back (D-24: a never-loaded object with the same id is
+    // not a continuation of the stored session).
+    conv.messages = make_conversation_5_messages_with_id(conv_id.clone()).messages;
+    storage.save_conversation(&conv).await.unwrap();
 
     // Inject extra fields into meta.json directly (simulates a future schema version)
     let meta_path = tmp.path().join("sessions").join(&conv_id).join("meta.json");
@@ -1636,6 +1648,7 @@ fn make_mixed_conversation_n(n_messages: usize) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 

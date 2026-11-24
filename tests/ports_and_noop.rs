@@ -82,6 +82,7 @@ async fn test_noop_storage_operations() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
     assert!(storage.save_conversation(&conv).await.is_ok());
     // load returns None

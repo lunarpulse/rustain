@@ -811,7 +811,7 @@ impl LocalTurnDriver {
             tool_scheduler.clone(),
             conversation.id.clone(),
             storage.clone(),
-            conversation.clone(),
+            conversation.capture(),
             activation_set,
             agent_restriction,
             turn_cancel,

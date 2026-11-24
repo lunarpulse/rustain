@@ -25,6 +25,7 @@ fn make_conversation_with_messages() -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     // Add 3 user messages and 2 assistant messages (≥ 2 turns of history)
@@ -189,6 +190,7 @@ fn test_first_kept_message_id_less_than_two_turns() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     // Only 1 user message

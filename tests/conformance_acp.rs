@@ -32,7 +32,10 @@ use tokio::sync::mpsc;
 
 use rustain::adapters::cli::commands::{Cli, Command};
 use rustain::domain::events::AppEvent;
-use rustain::domain::ports::{SecurityPort, StoragePort, ToolSetPort, UsageLedgerPort};
+use rustain::domain::models::{CompletionOptions, Message, StreamChunk};
+use rustain::domain::ports::{
+    SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
+};
 use rustain::infrastructure::composition::CliCore;
 
 #[cfg(feature = "test-instrumentation")]
@@ -258,6 +261,13 @@ mod scripted {
 /// field below is read by `RustainAcpAgent::run_prompt` + `turn::run_turn`, so
 /// they must all be live (not just shape-present).
 fn make_core(workspace: &Path) -> CliCore {
+    make_core_with(
+        workspace,
+        scripted::ScriptedProvider::text_turn(GOLDEN_AGENT_TEXT).into_provider(),
+    )
+}
+
+fn make_core_with(workspace: &Path, provider: Arc<dyn StreamingProvider>) -> CliCore {
     use rustain::adapters::filesystem::FileSystemStorage;
     use rustain::adapters::noop::{
         NoOpApprovalPersistence, NoOpSecurity, NoOpToolSet, NoOpUsageLedger,
@@ -265,7 +275,6 @@ fn make_core(workspace: &Path) -> CliCore {
     use rustain::domain::services::approval_runtime::ApprovalRuntime;
     use rustain::domain::services::tool_scheduler::ToolScheduler;
 
-    let provider = scripted::ScriptedProvider::text_turn(GOLDEN_AGENT_TEXT).into_provider();
     let security: Arc<dyn SecurityPort> = Arc::new(NoOpSecurity);
     let tools: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
     let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
@@ -5797,4 +5806,181 @@ async fn fr41_acp_turn_lists_only_the_trusted_skill_through_build_acp_core() {
         .clone()
         .expect("the prompt reached the provider");
     assert_eq!(prompt, expected);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D-24 A — the final save uses the turn's admitted history
+// ─────────────────────────────────────────────────────────────────────
+
+/// A provider that, before it streams, has a second adapter commit a newer row to the very
+/// session the ACP turn is running on (another process accepted between pre-save and final save).
+struct CommitsFirst {
+    inner: Arc<dyn StreamingProvider>,
+    workspace: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for CommitsFirst {
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        use rustain::adapters::filesystem::FileSystemStorage;
+        let competitor = FileSystemStorage::with_workspace_root(
+            self.workspace.join(".rustain").join("sessions"),
+            self.workspace.clone(),
+        );
+        let listed = competitor
+            .list_conversations_read_only()
+            .await
+            .expect("list");
+        let mut conv = competitor
+            .load_conversation(&listed[0].id)
+            .await
+            .expect("load")
+            .expect("the pre-save created the session");
+        conv.messages.push(rustain::domain::models::ChatMessage {
+            id: "a-competitor".into(),
+            role: rustain::domain::models::MessageRole::Assistant,
+            content: "a newer accepted row".into(),
+            ..Default::default()
+        });
+        competitor
+            .save_conversation(&conv)
+            .await
+            .expect("the competitor is accepted");
+        self.inner.stream_completion(messages, options).await
+    }
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+    fn provider_id(&self) -> String {
+        "commits-first".into()
+    }
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        Vec::new()
+    }
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+}
+
+/// The ACP prompt streams its reply either way (rendering does not depend on persistence), but
+/// its final save is the turn's own admitted history: with another writer accepted in between,
+/// the save is refused instead of a reload-and-append turning output derived from older history
+/// into a valid append.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_final_save_is_refused_when_another_writer_was_accepted_during_the_turn() {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+    use rustain::domain::ports::StoragePort;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws_for_factory = workspace.path().to_path_buf();
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        let provider: Arc<dyn StreamingProvider> = Arc::new(CommitsFirst {
+            inner: scripted::ScriptedProvider::text_turn(GOLDEN_AGENT_TEXT).into_provider(),
+            workspace: ws_for_factory.clone(),
+        });
+        Ok(make_core_with(&ws_for_factory, provider))
+    });
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .unwrap();
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .unwrap();
+        client_write
+            .write_all(line(acp_prompt_req(serde_json::json!(3), "acp-1")).as_bytes())
+            .await
+            .unwrap();
+        client_write.flush().await.unwrap();
+        let mut lines = tokio::io::BufReader::new(&mut client_read).lines();
+        let (mut streamed, mut ended) = (false, false);
+        loop {
+            let raw = match tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                _ => break,
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            if v["method"] == serde_json::json!("session/update")
+                && v["params"]["update"]["content"]["text"] == serde_json::json!(GOLDEN_AGENT_TEXT)
+            {
+                streamed = true;
+            }
+            if v["id"] == serde_json::json!(3) {
+                ended = v["result"]["stopReason"] == serde_json::json!("end_turn");
+                break;
+            }
+        }
+        (streamed, ended)
+    };
+    let (streamed, ended) = tokio::select! {
+        outcome = drive => outcome,
+        server_res = server => panic!("ACP server exited early: {server_res:?}"),
+    };
+    assert!(
+        streamed && ended,
+        "the reply is rendered and the prompt resolves either way"
+    );
+
+    let store = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        workspace.path().join(".rustain").join("sessions"),
+        workspace.path().to_path_buf(),
+    );
+    let listed = store.list_conversations_read_only().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    let disk = store
+        .load_conversation(&listed[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        disk.messages.iter().any(|m| m.id == "a-competitor"),
+        "the accepted history stands"
+    );
+    assert!(
+        !disk.messages.iter().any(|m| m.content == GOLDEN_AGENT_TEXT),
+        "the refused final save appended nothing derived from the older history"
+    );
 }

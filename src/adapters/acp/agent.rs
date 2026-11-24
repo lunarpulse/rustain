@@ -689,6 +689,7 @@ impl RustainAcpAgent {
                     compaction: None,
                     peer_row_controls: Default::default(),
                     peer_row_revision: 0,
+                    persist: Default::default(),
                 }
             }
         };
@@ -783,7 +784,7 @@ impl RustainAcpAgent {
             tool_scheduler.clone(),
             conversation.id.clone(),
             storage.clone(),
-            conversation,
+            conversation.capture(),
             activation_set,
             // Story 19.28 AC5 / A16 item 1 — proven-correct `None`, stated
             // rather than left silent. Measured at implementation and
@@ -1116,14 +1117,16 @@ impl RustainAcpAgent {
         let should_save =
             !assistant_messages.is_empty() || stop_reason.is_some() || turn_cancel.is_cancelled();
         if should_save {
+            // The turn's own admitted history (not a fresh reload) takes the reply: if another
+            // writer was accepted since, this save is refused instead of appending output
+            // derived from older history to newer history.
             let now = now_unix();
-            if let Ok(Some(mut conv)) = storage.load_conversation(&conversation_id).await {
-                conv.messages.extend(assistant_messages);
-                conv.updated_at = now;
-                conv.last_response_at = Some(now);
-                if let Err(e) = storage.save_conversation(&conv).await {
-                    tracing::warn!(error = %e, "ACP: persisting assistant turn failed");
-                }
+            let mut conv = conversation;
+            conv.messages.extend(assistant_messages);
+            conv.updated_at = now;
+            conv.last_response_at = Some(now);
+            if let Err(e) = storage.save_conversation(&conv).await {
+                tracing::warn!(error = %e, "ACP: persisting assistant turn failed");
             }
         }
 
@@ -1286,7 +1289,7 @@ impl RustainAcpAgent {
         let core = (self.core_factory)(&cwd, &[]).map(SessionCore::from)?;
         let all_summaries = core
             .storage
-            .list_conversations()
+            .list_conversations_read_only()
             .await
             .map_err(|_| acp::Error::internal_error())?;
         let mut summaries = Vec::with_capacity(all_summaries.len());

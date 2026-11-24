@@ -460,6 +460,7 @@ const SKIPPED_TEST_FILES: &[&str] = &[
     "src/adapters/daemon/approval_lifecycle_tests.rs",
     "src/adapters/daemon/server/attach_audience_tests.rs",
     "src/adapters/daemon/server/turn_interrupt/tests.rs",
+    "src/adapters/filesystem/fence_tests.rs",
     "src/adapters/responses/tests.rs",
     "src/adapters/tui/auth_outcome_tests.rs",
     "src/adapters/tui/decision_queue/cards_tests.rs",

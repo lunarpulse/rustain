@@ -1908,6 +1908,9 @@ pub(crate) fn finish_plan(
         history_source: Default::default(),
     };
     conversation.messages.push(msg);
+    // The summary has no turn: back it now, or the next committed turn's mirror rebuild
+    // removes it as a zombie before that turn's save (DF-19-30-PLAN-SUMMARY-DROPPED).
+    conversation.back_unbacked_rows();
 
     event_emitter.emit(AppEvent::PlanCompleted {
         conversation_id: conversation_id.clone(),

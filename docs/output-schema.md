@@ -173,7 +173,7 @@ The domain `Plan` type serializes with `camelCase` internally (for TUI/storage c
 
 ### `--dry-run` behavior
 
-- The run saves no reply and prints no resume hint. Its provider calls are still recorded in the usage ledger (`<data dir>/usage/`), as for every run. The prompt is still saved once before the first provider call (a known defect).
+- The run saves no reply and prints no resume hint. Its provider calls are still recorded in the usage ledger (`<data dir>/usage/`), as for every run. The prompt is not saved, and no checkpoint, snapshot or session authority entry is written: the session store is read-only for the run.
 - `--dry-run --yolo` is rejected by clap (`conflicts_with`) — `--yolo` is the literal inverse of `--dry-run`.
 - In `text` mode, stdout renders the plan (title, numbered tasks, estimated effort, attempted-tools line). When no `propose_plan` call was made, falls back to assistant prose + attempted-tools line.
 - The no-mutate guarantee is **model-independent** — even a model that ignores the plan-mode nudge and emits `Write`/`Bash` cannot mutate state, because the `permission_chain` gate denies them. Safe-risk tools (e.g. `read_file`, `propose_plan`) still execute.
@@ -237,7 +237,11 @@ the budget day but cannot be parsed, or usage that cannot be proved and
 priced block further work. A reported zero at a known price is valid;
 an absent counter or synthesized zero is not. A stop cancels blocked
 work and waits for call settlement; it does not undo side effects that
-already started.
+already started. A bounded stop writes no final session save. A session write
+that had already started keeps running to completion, or, if `ask` exits first,
+is finished or discarded by the next process that opens the session (the
+process-exit recovery described in `docs/sessions.md`); a limited stop never
+leaves a session another process cannot open.
 Unproved or unpriceable usage from an admitted call also blocks an
 invocation that uses `--max-cost` without a daily budget.
 

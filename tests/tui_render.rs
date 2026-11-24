@@ -26,6 +26,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
     let streaming = StreamingState::default();
 

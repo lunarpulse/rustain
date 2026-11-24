@@ -328,6 +328,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let p1 = make_plan(
             PlanStatus::Completed,
@@ -361,6 +362,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let p2 = make_plan(
             PlanStatus::Executing,

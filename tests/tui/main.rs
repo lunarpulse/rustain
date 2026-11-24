@@ -118,6 +118,9 @@ mod e2e_fork_sidebar;
 #[path = "../e2e_fork_tail_after_plan.rs"]
 mod e2e_fork_tail_after_plan;
 
+#[path = "../e2e_d24_ordering.rs"]
+mod e2e_d24_ordering;
+
 #[path = "../e2e_harness.rs"]
 pub mod e2e_harness;
 

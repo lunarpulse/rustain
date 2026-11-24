@@ -3636,6 +3636,7 @@ mod parts_aware_tests {
                 compaction: None,
                 peer_row_controls: Default::default(),
                 peer_row_revision: 0,
+                persist: Default::default(),
             };
             let mut tab = TabRenderState::default();
             for withheld in [
@@ -4686,6 +4687,7 @@ mod parts_aware_tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let theme = Theme::dark();
         let streaming = StreamingState::default();
@@ -4868,6 +4870,7 @@ mod parts_aware_tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let view_state = ViewState::default();
         let mut trs = TabRenderState::default();
@@ -4916,6 +4919,7 @@ mod parts_aware_tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let view_state = ViewState::default();
         let mut trs = TabRenderState::default();
@@ -4973,6 +4977,7 @@ mod parts_aware_tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let mut view_state = ViewState::default();
         view_state.set_focused_turn(Some(turn2.id.clone()));
@@ -5257,6 +5262,7 @@ mod parts_aware_tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         }
     }
 

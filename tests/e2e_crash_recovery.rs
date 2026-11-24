@@ -602,6 +602,7 @@ async fn test_e2e_crash_detection_full_cycle() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     // Step 1: Mark session in-flight (event loop start)
@@ -661,6 +662,7 @@ async fn test_e2e_recovery_n_saves_clean_exit() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     // Fix #8: should use save_conversation_with_exit(true)

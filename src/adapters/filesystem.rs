@@ -14,6 +14,15 @@ use crate::domain::errors::StorageError;
 use crate::domain::models::{Conversation, ConversationSummary, ImageReference, SessionMeta};
 use crate::domain::ports::{StoragePort, WorkspaceRegistrarPort};
 
+mod session_authority;
+mod txn;
+
+#[cfg(test)]
+mod fence_tests;
+
+use session_authority::Intent;
+use txn::Cut;
+
 /// Compute a content-addressed hash of image bytes for filename generation.
 ///
 /// Uses SHA-256 and takes the first 16 hex chars (8 bytes). Collision probability
@@ -59,6 +68,18 @@ pub enum SessionLayout {
     Missing,
 }
 
+/// DF-095 backfill, narrowed: mirror the transcript's fork source into the sidecar the
+/// authority hold just read, so a concurrent writer's other sidecar fields survive.
+fn mirror_fork_source(
+    mut current: SessionMeta,
+    mirrored: &Option<crate::domain::models::ForkSource>,
+) -> SessionMeta {
+    if current.fork_source.is_none() {
+        current.fork_source.clone_from(mirrored);
+    }
+    current
+}
+
 /// Which half of an atomic write failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteStage {
@@ -73,6 +94,10 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// Stores each conversation as `{sessions_dir}/{id}.meta.json` (flat) or
 /// `{sessions_dir}/{id}/` (directory layout, used when images are attached).
+///
+/// Every writer runs under the per-session authority in `session_authority` (D-24); clones
+/// share the same physical authority, as do separate instances on one root.
+#[derive(Clone)]
 pub struct FileSystemStorage {
     sessions_dir: PathBuf,
     /// Workspace root used by `snapshot_file` for path-traversal validation.
@@ -321,8 +346,8 @@ impl FileSystemStorage {
                 None => continue,
             };
 
-            // Skip temp files from in-flight atomic renames.
-            if file_name.ends_with(".tmp") {
+            // Skip temp files from in-flight atomic renames and the authority directory.
+            if file_name.ends_with(".tmp") || file_name == session_authority::AUTHORITY_DIR {
                 continue;
             }
 
@@ -359,7 +384,13 @@ impl FileSystemStorage {
                                 && p.fork_source.is_some()
                             {
                                 meta.fork_source = p.fork_source.clone();
-                                if let Err(e) = self.save_session_meta(&id, &meta).await {
+                                let mirrored = meta.fork_source.clone();
+                                if let Err(e) = self
+                                    .update_meta(&id, &|current| {
+                                        mirror_fork_source(current, &mirrored)
+                                    })
+                                    .await
+                                {
                                     tracing::warn!(
                                         "Failed to backfill fork_source into sidecar for {}: {}",
                                         id,
@@ -457,7 +488,11 @@ impl FileSystemStorage {
                             && p.fork_source.is_some()
                         {
                             meta.fork_source = p.fork_source.clone();
-                            if let Err(e) = self.save_session_meta(&id, &meta).await {
+                            let mirrored = meta.fork_source.clone();
+                            if let Err(e) = self
+                                .update_meta(&id, &|current| mirror_fork_source(current, &mirrored))
+                                .await
+                            {
                                 tracing::warn!(
                                     "Failed to backfill fork_source into sidecar for {}: {}",
                                     id,
@@ -531,7 +566,7 @@ impl FileSystemStorage {
         conv: &Conversation,
         clean_exit: bool,
     ) -> Result<(), StorageError> {
-        self.save_conversation_inner(conv, clean_exit).await
+        self.save_captured(conv, clean_exit, Intent::Save).await
     }
 
     /// Load a conversation and return its `clean_exit` flag for crash detection.
@@ -539,201 +574,7 @@ impl FileSystemStorage {
         &self,
         id: &str,
     ) -> Result<Option<(Conversation, bool)>, StorageError> {
-        let layout = self.detect_layout(id).await;
-        let path = match layout {
-            SessionLayout::Directory => self.conversation_file(id),
-            SessionLayout::Flat => self.session_path(id),
-            SessionLayout::Missing => return Ok(None),
-        };
-
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "Failed to read session file: {}",
-                    e
-                )));
-            }
-        };
-
-        let persisted: PersistedConversation = serde_json::from_str(&content)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-        let clean_exit = persisted.clean_exit;
-        Ok(Some((persisted.to_conversation(), clean_exit)))
-    }
-
-    /// Shared layout-aware save implementation. Any message carrying `images` forces
-    /// the directory layout (migrating from flat if needed); otherwise the
-    /// pre-existing flat format is preserved.
-    async fn save_conversation_inner(
-        &self,
-        conv: &Conversation,
-        clean_exit: bool,
-    ) -> Result<(), StorageError> {
-        self.ensure_dir().await?;
-
-        let persisted = PersistedConversation::from_conversation_with_exit(conv, clean_exit);
-        let has_images = persisted.messages.iter().any(|m| !m.images.is_empty());
-        let json = serde_json::to_string_pretty(&persisted)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        let mut meta = match self.load_session_meta(&conv.id).await {
-            Ok(Some(meta)) => meta,
-            Ok(None) => SessionMeta::from_conversation(conv),
-            Err(error) => {
-                tracing::warn!(
-                    "Failed to load session meta sidecar for {}: {}",
-                    conv.id,
-                    error
-                );
-                SessionMeta::from_conversation(conv)
-            }
-        };
-        meta.title = conv.title.clone();
-        meta.created_at = conv.created_at;
-        meta.updated_at = conv.updated_at;
-        meta.message_count = persisted.messages.len();
-        meta.fork_source = conv.fork_source.clone();
-
-        let current_layout = self.detect_layout(&conv.id).await;
-
-        if has_images || current_layout == SessionLayout::Directory {
-            // Write using directory layout.
-            self.save_directory_layout(&conv.id, &json, &meta).await?;
-
-            // Clean up any stale flat files. `detect_layout` returns `Directory`
-            // whenever `{sessions_dir}/{id}/` exists — which can happen if
-            // `save_image` ran first and created the session directory while
-            // the original flat files still linger on disk. Treat cleanup as
-            // unconditional-but-best-effort: missing files are ignored.
-            self.finish_flat_to_directory_migration(&conv.id).await?;
-        } else {
-            // Flat layout: legacy behaviour.
-            self.save_flat_layout(&conv.id, &json).await?;
-            if let Err(e) = self.save_session_meta(&conv.id, &meta).await {
-                tracing::warn!(
-                    "Failed to write session meta sidecar for {}: {}",
-                    conv.id,
-                    e
-                );
-            }
-        }
-        self.maybe_note_workspace().await;
-        Ok(())
-    }
-
-    /// Atomic write of PersistedConversation JSON using the flat layout.
-    async fn save_flat_layout(&self, id: &str, json: &str) -> Result<(), StorageError> {
-        let path = self.session_path(id);
-        Self::atomic_write(path, json.as_bytes().to_vec())
-            .await
-            .map_err(|(stage, e)| match stage {
-                WriteStage::Write => {
-                    StorageError::IoError(format!("Failed to write session file: {}", e))
-                }
-                WriteStage::Rename => {
-                    StorageError::IoError(format!("Failed to rename session file: {}", e))
-                }
-            })
-    }
-
-    /// Atomic write of PersistedConversation + SessionMeta using the directory layout.
-    ///
-    /// Creates `{sessions_dir}/{id}/`, then writes `conversation.json` and `meta.json`
-    /// via temp-file-and-rename for crash safety.
-    async fn save_directory_layout(
-        &self,
-        id: &str,
-        conversation_json: &str,
-        meta: &SessionMeta,
-    ) -> Result<(), StorageError> {
-        let dir = self.session_dir(id);
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| StorageError::IoError(format!("Failed to create session dir: {}", e)))?;
-
-        // Write conversation.json atomically.
-        let conv_path = self.conversation_file(id);
-        Self::atomic_write(conv_path.clone(), conversation_json.as_bytes().to_vec())
-            .await
-            .map_err(|(stage, e)| match stage {
-                WriteStage::Write => {
-                    StorageError::IoError(format!("Failed to write conversation.json: {}", e))
-                }
-                WriteStage::Rename => {
-                    StorageError::IoError(format!("Failed to rename conversation.json: {}", e))
-                }
-            })?;
-
-        // Write meta.json atomically.
-        let meta_json = serde_json::to_string_pretty(meta)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        let meta_path = self.meta_file_in_dir(id);
-        if let Err((stage, e)) = Self::atomic_write(meta_path, meta_json.into_bytes()).await {
-            if stage == WriteStage::Write {
-                return Err(StorageError::IoError(format!(
-                    "Failed to write meta.json: {}",
-                    e
-                )));
-            }
-            // DF-096: conversation.json was already renamed — roll it back so
-            // the flat files remain the authoritative copy.
-            if let Err(rb) = tokio::fs::remove_file(&conv_path).await {
-                tracing::warn!(
-                    id = %id,
-                    rollback_error = %rb,
-                    "save_directory_layout: meta.json rename failed; rollback of conversation.json also failed — session may be inconsistent"
-                );
-            } else {
-                tracing::info!(
-                    id = %id,
-                    "save_directory_layout: meta.json rename failed; rolled back conversation.json — flat files remain authoritative"
-                );
-            }
-            return Err(StorageError::IoError(format!(
-                "Failed to rename meta.json: {}",
-                e
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Delete the flat-format files after a successful directory-layout save.
-    /// Called only when migrating a previously-flat session to the new layout.
-    async fn finish_flat_to_directory_migration(&self, id: &str) -> Result<(), StorageError> {
-        let flat_main = self.session_path(id);
-        let flat_sidecar = self.session_meta_path(id);
-
-        // Delete old flat files (best-effort; missing = already done).
-        match tokio::fs::remove_file(&flat_main).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "Failed to delete legacy flat session file during migration: {}",
-                    e
-                )));
-            }
-        }
-        match tokio::fs::remove_file(&flat_sidecar).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "Failed to delete legacy flat sidecar during migration: {}",
-                    e
-                )));
-            }
-        }
-
-        tracing::info!(
-            conversation_id = %id,
-            "Migrated session from flat to directory layout (first image save)"
-        );
-
-        Ok(())
+        self.load_with_base(id).await
     }
 
     /// Save raw image bytes to `{sessions_dir}/{id}/images/{image_ref.file_name}`.
@@ -761,6 +602,13 @@ impl FileSystemStorage {
                 data.len(),
                 Self::MAX_IMAGE_BYTES
             )));
+        }
+        // Staging an image writes into the session's directory layout: serialized with every
+        // other writer of the session, and refused once the session is deleted.
+        let mut held = session_authority::acquire(&self.sessions_dir, conversation_id).await?;
+        self.recover(&mut held).await?;
+        if held.live().is_some_and(|r| r.tombstone) {
+            return Err(StorageError::Stale("the session was deleted".into()));
         }
         let dir = self.images_dir(conversation_id);
         tokio::fs::create_dir_all(&dir)
@@ -908,72 +756,15 @@ impl FileSystemStorage {
 #[async_trait]
 impl StoragePort for FileSystemStorage {
     async fn save_conversation(&self, conv: &Conversation) -> Result<(), StorageError> {
-        self.save_conversation_inner(conv, false).await
+        self.save_conversation_with_exit(conv, false).await
+    }
+
+    async fn create_conversation(&self, conv: &Conversation) -> Result<(), StorageError> {
+        self.save_captured(conv, false, Intent::Create).await
     }
 
     async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError> {
-        let layout = self.detect_layout(id).await;
-        let path = match layout {
-            SessionLayout::Directory => self.conversation_file(id),
-            SessionLayout::Flat => self.session_path(id),
-            SessionLayout::Missing => return Ok(None),
-        };
-
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "Failed to read session file: {}",
-                    e
-                )));
-            }
-        };
-
-        let persisted: PersistedConversation = serde_json::from_str(&content)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-        let conv = persisted.to_conversation();
-
-        // Story 4-3a.1 AC4: validate image references on load. Missing files
-        // log a warning but never fail the load — the ImageReference entry is
-        // preserved so later fixes (restore from backup, etc.) can re-populate.
-        //
-        // DF-098: single read_dir pass to build a HashSet of present filenames,
-        // then O(1) membership check per image — eliminates N separate
-        // metadata() syscalls (one per image in the old implementation).
-        if layout == SessionLayout::Directory {
-            let images_dir = self.images_dir(&conv.id);
-            let present: std::collections::HashSet<String> = {
-                let mut set = std::collections::HashSet::new();
-                if let Ok(mut rd) = tokio::fs::read_dir(&images_dir).await {
-                    while let Ok(Some(e)) = rd.next_entry().await {
-                        if let Ok(ft) = e.file_type().await {
-                            if ft.is_file() {
-                                if let Some(name) = e.file_name().to_str() {
-                                    set.insert(name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                set
-            };
-            for msg in &conv.messages {
-                for img in &msg.images {
-                    if !present.contains(&img.file_name) {
-                        tracing::warn!(
-                            conversation_id = %conv.id,
-                            message_id = %msg.id,
-                            file_name = %img.file_name,
-                            "Image file missing on load (graceful degradation)"
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(Some(conv))
+        Ok(self.load_with_base(id).await?.map(|(conv, _)| conv))
     }
 
     async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError> {
@@ -985,98 +776,23 @@ impl StoragePort for FileSystemStorage {
     }
 
     async fn delete_conversation(&self, id: &str) -> Result<(), StorageError> {
-        let layout = self.detect_layout(id).await;
-        let mut errors = Vec::new();
-
-        match layout {
-            SessionLayout::Directory => {
-                let dir = self.session_dir(id);
-                match tokio::fs::remove_dir_all(&dir).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => errors.push(format!("Failed to delete session directory: {}", e)),
-                }
-            }
-            SessionLayout::Flat | SessionLayout::Missing => {
-                let path = self.session_path(id);
-                let meta_path = self.session_meta_path(id);
-
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => errors.push(format!("Failed to delete session file: {}", e)),
-                }
-                match tokio::fs::remove_file(&meta_path).await {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => errors.push(format!("Failed to delete session meta file: {}", e)),
-                }
-            }
-        }
-
-        if !errors.is_empty() {
-            return Err(StorageError::IoError(errors.join("; ")));
-        }
-
-        tracing::debug!("Deleted conversation {}", id);
-        Ok(())
+        self.delete_session(id).await
     }
 
     async fn save_session_meta(&self, id: &str, meta: &SessionMeta) -> Result<(), StorageError> {
-        self.ensure_dir().await?;
+        self.write_meta(id, meta).await
+    }
 
-        let json = serde_json::to_string_pretty(meta)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-        let layout = self.detect_layout(id).await;
-        let target = match layout {
-            SessionLayout::Directory => {
-                let dir = self.session_dir(id);
-                tokio::fs::create_dir_all(&dir).await.map_err(|e| {
-                    StorageError::IoError(format!("Failed to create session dir: {}", e))
-                })?;
-                self.meta_file_in_dir(id)
-            }
-            SessionLayout::Flat | SessionLayout::Missing => self.session_meta_path(id),
-        };
-        Self::atomic_write(target, json.into_bytes())
-            .await
-            .map_err(|(stage, e)| match stage {
-                WriteStage::Write => {
-                    StorageError::IoError(format!("Failed to write session meta file: {}", e))
-                }
-                WriteStage::Rename => {
-                    StorageError::IoError(format!("Failed to rename session meta file: {}", e))
-                }
-            })
+    async fn update_session_meta(
+        &self,
+        id: &str,
+        update: &(dyn Fn(SessionMeta) -> SessionMeta + Send + Sync),
+    ) -> Result<(), StorageError> {
+        self.update_meta(id, update).await
     }
 
     async fn load_session_meta(&self, id: &str) -> Result<Option<SessionMeta>, StorageError> {
-        let layout = self.detect_layout(id).await;
-        let path = match layout {
-            SessionLayout::Directory => self.meta_file_in_dir(id),
-            // Flat and Missing both read from the flat sidecar — "Missing"
-            // just means the main conversation file isn't written yet, but
-            // the sidecar may still exist (e.g., unit tests that only
-            // exercise `save_session_meta`).
-            SessionLayout::Flat | SessionLayout::Missing => self.session_meta_path(id),
-        };
-
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "Failed to read session meta file: {}",
-                    e
-                )));
-            }
-        };
-
-        let meta: SessionMeta = serde_json::from_str(&content)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-        Ok(Some(meta))
+        self.read_meta_inner(id).await
     }
 
     // ── Checkpoint Protocol (Amendment 1, Story 4-3b) ─────────────────────────────
@@ -1085,91 +801,21 @@ impl StoragePort for FileSystemStorage {
         &self,
         conversation_id: &str,
     ) -> Result<crate::domain::models::checkpoint::CheckpointId, StorageError> {
-        use crate::domain::models::checkpoint::{CheckpointId, CheckpointMeta};
-        use crate::domain::models::session_meta::now_unix;
+        self.checkpoint_for_stamp(conversation_id, None).await
+    }
 
-        // Load conversation to determine the current message count.
-        let conv = match self.load_conversation(conversation_id).await? {
-            Some(c) => c,
-            None => {
-                return Err(StorageError::NotFound(format!(
-                    "conversation not found: {}",
-                    conversation_id
-                )));
-            }
-        };
-
-        // Ensure the session directory exists so we can write checkpoints.json.
-        tokio::fs::create_dir_all(self.session_dir(conversation_id))
-            .await
-            .map_err(|e| StorageError::IoError(format!("create session dir: {}", e)))?;
-
-        // Migrate the conversation to directory format now that the session dir exists.
-        // Without this, `load_conversation` would fail to find `{id}/conversation.json`.
-        //
-        // Note: we call `save_directory_layout` directly instead of `save_conversation_inner`
-        // because `detect_layout` (called inside `save_conversation_inner`) now requires BOTH
-        // `{id}/` directory AND `{id}/conversation.json` to classify as Directory (DF-112 fix).
-        // The first time we create the session dir, `conversation.json` doesn't exist yet, so
-        // `detect_layout` would return Flat and `save_conversation_inner` would incorrectly save
-        // to the flat format rather than migrating.
-        let conv_file = self.conversation_file(conversation_id);
-        if !tokio::fs::try_exists(&conv_file).await.unwrap_or(false) {
-            let persisted = PersistedConversation::from_conversation_with_exit(&conv, false);
-            let json = serde_json::to_string_pretty(&persisted)
-                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-            let meta = self
-                .load_session_meta(conversation_id)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| crate::domain::models::SessionMeta::from_conversation(&conv));
-            self.save_directory_layout(conversation_id, &json, &meta)
-                .await?;
-            // Clean up stale flat-format files (best-effort).
-            self.finish_flat_to_directory_migration(conversation_id)
-                .await?;
+    async fn create_checkpoint_for(
+        &self,
+        conv: &Conversation,
+    ) -> Result<crate::domain::models::checkpoint::CheckpointId, StorageError> {
+        let stamp = conv.persist.capture();
+        let result = self
+            .checkpoint_for_stamp(&conv.id, Some(stamp.clone()))
+            .await;
+        if matches!(result, Ok(_) | Err(StorageError::PartialCommit(_))) {
+            conv.persist.advance(&stamp);
         }
-
-        let mut log = self.load_checkpoint_log(conversation_id).await?;
-
-        // Next id is max existing + 1, or 1 for the first checkpoint.
-        let next_id = log.entries.iter().map(|e| e.id.0).max().unwrap_or(0) + 1;
-
-        // message_index is the index of the last message currently present.
-        // The checkpoint captures the conversation state *before* the assistant turn
-        // whose tool calls triggered this checkpoint.
-        let message_index = conv.messages.len().saturating_sub(1);
-
-        let meta = CheckpointMeta {
-            id: CheckpointId(next_id),
-            message_index,
-            created_at: now_unix(),
-        };
-        log.entries.push(meta.clone());
-        self.save_checkpoint_log(conversation_id, &log).await?;
-
-        // DF-106 (AC1): Opportunistic snapshot retention — prune oldest checkpoints
-        // after recording the new one so the log stays within the configured limit.
-        if let Some(retention) = self.snapshot_retention_count {
-            if log.entries.len() > retention {
-                if let Err(e) = self
-                    .prune_old_snapshots(conversation_id, &log, retention)
-                    .await
-                {
-                    // Non-fatal: log and continue. Disk space grows but no data is lost.
-                    let _ = e; // warning already emitted inside prune_old_snapshots
-                }
-            }
-        }
-
-        tracing::debug!(
-            "Created checkpoint {} for conversation {} at message_index {}",
-            next_id,
-            conversation_id,
-            message_index
-        );
-        Ok(meta.id)
+        result
     }
 
     async fn list_checkpoints(
@@ -1186,91 +832,8 @@ impl StoragePort for FileSystemStorage {
         conversation_id: &str,
         checkpoint: crate::domain::models::checkpoint::CheckpointId,
     ) -> Result<crate::domain::models::Conversation, StorageError> {
-        use crate::domain::models::session_meta::{SessionMeta, now_unix};
-
-        let log = self.load_checkpoint_log(conversation_id).await?;
-
-        // Find the entry for the requested checkpoint.
-        let meta = log
-            .entries
-            .iter()
-            .find(|e| e.id == checkpoint)
-            .ok_or_else(|| {
-                StorageError::NotFound(format!(
-                    "checkpoint {} not found for conversation {}",
-                    checkpoint.0, conversation_id
-                ))
-            })?
-            .clone();
-
-        // Load conversation.
-        let mut conv = match self.load_conversation(conversation_id).await? {
-            Some(c) => c,
-            None => {
-                return Err(StorageError::NotFound(format!(
-                    "conversation not found: {}",
-                    conversation_id
-                )));
-            }
-        };
-
-        // Truncate messages: keep messages[0..=meta.message_index].
-        let keep_until = (meta.message_index + 1).min(conv.messages.len());
-        conv.messages.truncate(keep_until);
-        conv.updated_at = now_unix();
-
-        // Load the existing SessionMeta BEFORE save_conversation_inner overwrites it,
-        // so we can preserve the `extra` flatten map (DF-088 round-trip invariant).
-        let pre_save_meta = self.load_session_meta(conversation_id).await.ok().flatten();
-
-        // 1. Atomically save the truncated conversation.
-        self.save_conversation_inner(&conv, false).await?;
-
-        // 2. Atomically update SessionMeta, preserving extra fields from the pre-save load.
-        let session_meta_result = match pre_save_meta {
-            Some(mut existing_meta) => {
-                existing_meta.message_count = conv.messages.len();
-                existing_meta.updated_at = conv.updated_at;
-                self.save_session_meta(conversation_id, &existing_meta)
-                    .await
-            }
-            None => {
-                // Legacy session without sidecar: build a fresh one.
-                let fresh = SessionMeta::from_conversation(&conv);
-                self.save_session_meta(conversation_id, &fresh).await
-            }
-        };
-        if let Err(e) = session_meta_result {
-            // Step 5 succeeded but step 6 failed. The next load_session_meta will
-            // reconcile by re-reading the actual message count from the conversation file.
-            tracing::error!(
-                conversation_id = conversation_id,
-                checkpoint = checkpoint.0,
-                error = %e,
-                "INCONSISTENT STATE: conversation truncated but meta.json update failed. \
-                 Will be reconciled on next load."
-            );
-        }
-
-        // 3. Truncate the checkpoint log: remove entries with id > checkpoint.
-        let mut updated_log = CheckpointLog {
-            entries: log
-                .entries
-                .into_iter()
-                .filter(|e| e.id <= checkpoint)
-                .collect(),
-        };
-        updated_log.entries.sort_by_key(|e| e.id);
-        self.save_checkpoint_log(conversation_id, &updated_log)
-            .await?;
-
-        tracing::debug!(
-            "Rewound conversation {} to checkpoint {} (message_index {})",
-            conversation_id,
-            checkpoint.0,
-            meta.message_index
-        );
-        Ok(conv)
+        self.rewrite(conversation_id, Cut::Checkpoint(checkpoint), None)
+            .await
     }
 
     async fn truncate_conversation(
@@ -1278,98 +841,27 @@ impl StoragePort for FileSystemStorage {
         conversation_id: &str,
         target_message_index: usize,
     ) -> Result<crate::domain::models::Conversation, StorageError> {
-        use crate::domain::models::session_meta::{SessionMeta, now_unix};
+        self.rewrite(conversation_id, Cut::Message(target_message_index), None)
+            .await
+    }
 
-        // Load conversation.
-        let mut conv = match self.load_conversation(conversation_id).await? {
-            Some(c) => c,
-            None => {
-                return Err(StorageError::NotFound(format!(
-                    "conversation not found: {}",
-                    conversation_id
-                )));
-            }
-        };
-
-        // Truncate to the user's selected message index. Pure message-level
-        // operation — no dependency on the checkpoint log. Works for text-only
-        // conversations where no checkpoint was ever created.
-        let keep_until = (target_message_index + 1).min(conv.messages.len());
-        conv.messages.truncate(keep_until);
-        conv.updated_at = now_unix();
-
-        let surviving_ids: std::collections::HashSet<String> =
-            conv.messages.iter().map(|m| m.id.clone()).collect();
-        // The mirror must not resurrect turns whose durable rows were rewound.
-        conv.turns.retain(|turn| surviving_ids.contains(&turn.id.0));
-        conv.plans.retain(|_, plan| {
-            plan.host_message_id
-                .as_ref()
-                .is_none_or(|id| surviving_ids.contains(id))
-        });
-
-        // Preserve sidecar-only fields while reconciling rewind metadata.
-        let pre_save_meta = self.load_session_meta(conversation_id).await.ok().flatten();
-
-        // 1. Atomically save the truncated conversation.
-        self.save_conversation_inner(&conv, false).await?;
-
-        // 2. Atomically update SessionMeta, preserving extra fields.
-        let session_meta_result = match pre_save_meta {
-            Some(mut existing_meta) => {
-                existing_meta.message_count = conv.messages.len();
-                existing_meta.updated_at = conv.updated_at;
-                self.save_session_meta(conversation_id, &existing_meta)
-                    .await
-            }
-            None => {
-                let fresh = SessionMeta::from_conversation(&conv);
-                self.save_session_meta(conversation_id, &fresh).await
-            }
-        };
-        if let Err(e) = session_meta_result {
-            tracing::error!(
-                conversation_id = conversation_id,
-                target_message_index = target_message_index,
-                error = %e,
-                "INCONSISTENT STATE: conversation truncated but meta.json update failed. \
-                 Will be reconciled on next load."
-            );
+    async fn truncate_conversation_for(
+        &self,
+        conv: &Conversation,
+        target_message_index: usize,
+    ) -> Result<crate::domain::models::Conversation, StorageError> {
+        let stamp = conv.persist.capture();
+        let result = self
+            .rewrite(
+                &conv.id,
+                Cut::Message(target_message_index),
+                Some(stamp.clone()),
+            )
+            .await;
+        if matches!(result, Ok(_) | Err(StorageError::PartialCommit(_))) {
+            conv.persist.advance(&stamp);
         }
-
-        // 3. Prune the checkpoint log: remove entries whose message_index is
-        //    beyond the truncation point. Unlike `revert_to_checkpoint`, the
-        //    filter is on `message_index`, not on checkpoint id — the target
-        //    is user-selected and may fall between adjacent checkpoints.
-        //
-        //    DF-112 (AC6): `detect_layout` now requires BOTH the directory AND
-        //    `conversation.json` to return `Directory`. Creating the checkpoint
-        //    dir via `save_checkpoint_log → create_dir_all` no longer silently
-        //    flips the layout, so the Amendment 2 `try_exists` guard is removed.
-        //    We call `save_checkpoint_log` only when the log file actually exists
-        //    (text-only conversations never created one — no-op is the right behaviour).
-        let cp_file = self.checkpoints_file(conversation_id);
-        if tokio::fs::try_exists(&cp_file).await.unwrap_or(false) {
-            let log = self.load_checkpoint_log(conversation_id).await?;
-            let mut updated_log = CheckpointLog {
-                entries: log
-                    .entries
-                    .into_iter()
-                    .filter(|e| e.message_index <= target_message_index)
-                    .collect(),
-            };
-            updated_log.entries.sort_by_key(|e| e.id);
-            self.save_checkpoint_log(conversation_id, &updated_log)
-                .await?;
-        }
-
-        tracing::debug!(
-            "Truncated conversation {} to message_index {} ({} messages kept)",
-            conversation_id,
-            target_message_index,
-            conv.messages.len()
-        );
-        Ok(conv)
+        result
     }
 
     async fn snapshot_file(
@@ -2047,225 +1539,23 @@ impl StoragePort for FileSystemStorage {
         source_conversation_id: &str,
         checkpoint: crate::domain::models::checkpoint::CheckpointId,
     ) -> Result<String, StorageError> {
-        use crate::domain::models::conversation::{ForkSource, generate_conversation_id};
-        use crate::domain::models::session_meta::now_unix;
-
-        // Platform precondition: CheckpointId is u64, usize is platform-dependent.
-        // On 64-bit targets (current support matrix) this is lossless. On 32-bit
-        // targets the cast would silently truncate the high bits, so guard in
-        // debug builds. See party-mode review 2026-04-12 (P1).
+        // CheckpointId is u64 and usize is platform-dependent; 64-bit targets are lossless.
         debug_assert!(
             checkpoint.0 <= usize::MAX as u64,
             "CheckpointId {} exceeds usize::MAX on this platform",
             checkpoint.0
         );
-        let message_index = checkpoint.0 as usize;
+        self.fork_from(source_conversation_id, checkpoint.0 as usize, None)
+            .await
+    }
 
-        // Load source conversation
-        let source = match self.load_conversation(source_conversation_id).await? {
-            Some(c) => c,
-            None => {
-                return Err(StorageError::NotFound(format!(
-                    "conversation not found: {}",
-                    source_conversation_id
-                )));
-            }
-        };
-
-        if source.messages.is_empty() {
-            return Err(StorageError::Other("empty conversation".to_string()));
-        }
-
-        if message_index >= source.messages.len() {
-            return Err(StorageError::Other(format!(
-                "message index {} out of bounds (conversation has {} messages)",
-                message_index,
-                source.messages.len()
-            )));
-        }
-
-        let new_id = generate_conversation_id();
-        let truncated: Vec<_> = source.messages[..=message_index].to_vec();
-        let now = now_unix();
-
-        let mut forked_plans = std::collections::HashMap::new();
-        for (plan_id, plan) in &source.plans {
-            // A standalone plan's display host is deliberately absent after
-            // save; lack of a host is not evidence that its durable data lies
-            // beyond this transcript boundary. Legacy durable hosts still prune.
-            if plan.host_message_id.as_ref().is_none_or(|host_msg_id| {
-                truncated.iter().any(|message| &message.id == host_msg_id)
-            }) {
-                forked_plans.insert(plan_id.clone(), plan.clone());
-            }
-        }
-
-        // P4: guard against empty/whitespace-only source titles to avoid "Fork of "
-        // with a dangling trailing space. Party-mode review 2026-04-12.
-        let forked_title = if source.title.trim().is_empty() {
-            "Fork of (Untitled)".to_string()
-        } else {
-            format!("Fork of {}", source.title)
-        };
-        let forked = crate::domain::models::Conversation {
-            id: new_id.clone(),
-            title: forked_title,
-            messages: truncated,
-            turns: Vec::new(),
-            created_at: now,
-            updated_at: now,
-            last_response_at: None,
-            session_id: Some(generate_conversation_id()),
-            usage: None,
-            plans: forked_plans,
-            fork_source: Some(ForkSource {
-                conversation_id: source.id.clone(),
-                message_index,
-                checkpoint_id: checkpoint,
-            }),
-            compaction: None,
-            peer_row_controls: Default::default(),
-            peer_row_revision: 0,
-        };
-
-        // Collect unique image refs from the truncated range so we can hand a
-        // copy to the forked session. Order-preserving dedup by file_name.
-        let mut unique_refs: Vec<ImageReference> = Vec::new();
-        {
-            let mut seen = std::collections::HashSet::<String>::new();
-            for msg in &forked.messages {
-                for img in &msg.images {
-                    if seen.insert(img.file_name.clone()) {
-                        unique_refs.push(img.clone());
-                    }
-                }
-            }
-        }
-
-        self.save_conversation(&forked).await?;
-
-        // Best-effort image copy. Any failure logs a warning but does not
-        // break the fork — AC4 graceful degradation handles missing files on
-        // load. Story 4-3a.1 Task 3b.
-        if !unique_refs.is_empty() {
-            if let Err(e) = self
-                .copy_images(source_conversation_id, &new_id, &unique_refs)
-                .await
-            {
-                tracing::warn!(
-                    source = source_conversation_id,
-                    target = %new_id,
-                    "Failed to copy images during fork: {}",
-                    e
-                );
-            }
-        }
-
-        // Amendment 2 (Story 4-3b): copy the source conversation's checkpoint
-        // log and snapshot files into the forked session directory, filtered to
-        // entries with `message_index <= fork_message_index`. Without this step,
-        // the forked conversation has no checkpoint history and rewind fails
-        // with NotFound (pre-Amendment-2 behavior). With this step, the fork is
-        // an independently-rewindable conversation whose state-before-fork is
-        // preserved exactly.
-        //
-        // Checkpoint ids are conversation-scoped and kept identical across the
-        // copy — the `{cp_id}_{path_hash}` filename is reused verbatim, so the
-        // forked session's snapshot dir and checkpoint log remain in lockstep.
-        //
-        // Best-effort: individual snapshot copy failures log a warning but do
-        // not abort the fork (mirrors the image-copy graceful-degradation
-        // policy above). If the source conversation never had any tool calls,
-        // `load_checkpoint_log` returns an empty log and no snapshot work is
-        // done.
-        {
-            let source_log = self.load_checkpoint_log(source_conversation_id).await?;
-            let filtered_entries: Vec<_> = source_log
-                .entries
-                .into_iter()
-                .filter(|e| e.message_index <= message_index)
-                .collect();
-
-            if !filtered_entries.is_empty() {
-                let eligible_cp_ids: std::collections::HashSet<u64> =
-                    filtered_entries.iter().map(|e| e.id.0).collect();
-
-                // DF-112 (AC6): `detect_layout` now requires `conversation.json`
-                // to exist for Directory layout. `save_checkpoint_log` calls
-                // `create_dir_all(session_dir)` but that alone no longer flips
-                // `detect_layout` — only `conversation.json` presence matters.
-                // Still ensure the directory exists before writing the log.
-                let conv_file = self.conversation_file(&new_id);
-                if !tokio::fs::try_exists(&conv_file).await.unwrap_or(false) {
-                    // Ensure dir and save conversation in Directory layout so that
-                    // the forked session has a self-consistent directory structure.
-                    if let Err(e) = self.save_conversation_inner(&forked, false).await {
-                        tracing::warn!(
-                            target = %new_id,
-                            "Failed to ensure forked conversation in directory layout: {}",
-                            e
-                        );
-                    }
-                }
-
-                // Persist the filtered checkpoint log to the forked session.
-                let forked_log = CheckpointLog {
-                    entries: filtered_entries,
-                };
-                if let Err(e) = self.save_checkpoint_log(&new_id, &forked_log).await {
-                    tracing::warn!(
-                        source = source_conversation_id,
-                        target = %new_id,
-                        "Failed to copy checkpoint log during fork: {}",
-                        e
-                    );
-                }
-
-                // Copy snapshot files whose cp_id is in the eligible set.
-                let src_snapshots_dir = self.snapshots_dir(source_conversation_id);
-                let dst_snapshots_dir = self.snapshots_dir(&new_id);
-                if let Ok(mut entries) = tokio::fs::read_dir(&src_snapshots_dir).await {
-                    let _ = tokio::fs::create_dir_all(&dst_snapshots_dir).await;
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        let fname = entry.file_name().to_string_lossy().to_string();
-                        if fname.ends_with(".tmp") {
-                            continue;
-                        }
-                        // Filename format: "{cp_id}_{path_hash}"
-                        let cp_id_part = match fname.split('_').next() {
-                            Some(s) => s,
-                            None => continue,
-                        };
-                        let cp_id = match cp_id_part.parse::<u64>() {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        if !eligible_cp_ids.contains(&cp_id) {
-                            continue;
-                        }
-                        let src_path = entry.path();
-                        let dst_path = dst_snapshots_dir.join(&fname);
-                        if let Err(e) = tokio::fs::copy(&src_path, &dst_path).await {
-                            tracing::warn!(
-                                source = source_conversation_id,
-                                target = %new_id,
-                                snapshot = %fname,
-                                "Failed to copy snapshot file during fork: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        tracing::debug!(
-            "Forked conversation {} -> {} at message {}",
-            source_conversation_id,
-            new_id,
-            message_index
-        );
-        Ok(new_id)
+    async fn fork_conversation(
+        &self,
+        source: &Conversation,
+        message_index: usize,
+    ) -> Result<String, StorageError> {
+        self.fork_from(&source.id, message_index, Some(source.persist.capture()))
+            .await
     }
 
     async fn finalize_snapshot(
@@ -2299,19 +1589,16 @@ impl StoragePort for FileSystemStorage {
         conversation_id: &str,
         target_message_index: usize,
     ) -> Result<(), crate::domain::errors::StorageError> {
-        use crate::domain::models::transaction::{RewindTxn, RewindTxnPhase};
-        let txn = RewindTxn {
-            conversation_id: conversation_id.to_string(),
-            target_message_index,
-            phase: RewindTxnPhase::Pending,
-            created_at: {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64
-            },
-        };
-        self.write_rewind_txn_file(conversation_id, &txn).await
+        self.begin_journal(conversation_id, target_message_index)
+            .await
+    }
+
+    async fn rewind_conversation(
+        &self,
+        conv: &Conversation,
+        target_message_index: usize,
+    ) -> Result<crate::domain::ports::Rewound, crate::domain::ports::RewindStep> {
+        self.rewind_bound(conv, target_message_index).await
     }
 
     async fn write_rewind_phase(
@@ -2319,32 +1606,14 @@ impl StoragePort for FileSystemStorage {
         conversation_id: &str,
         phase: crate::domain::models::transaction::RewindTxnPhase,
     ) -> Result<(), crate::domain::errors::StorageError> {
-        let mut txn = self
-            .load_rewind_txn_inner(conversation_id)
-            .await?
-            .ok_or_else(|| {
-                crate::domain::errors::StorageError::IoError(format!(
-                    "write_rewind_phase: no active transaction for {}",
-                    conversation_id
-                ))
-            })?;
-        txn.phase = phase;
-        self.write_rewind_txn_file(conversation_id, &txn).await
+        self.advance_journal(conversation_id, phase).await
     }
 
     async fn commit_rewind_txn(
         &self,
         conversation_id: &str,
     ) -> Result<(), crate::domain::errors::StorageError> {
-        let path = self.rewind_txn_path(conversation_id);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(crate::domain::errors::StorageError::IoError(format!(
-                "commit_rewind_txn: failed to remove journal: {}",
-                e
-            ))),
-        }
+        self.remove_journal(conversation_id).await
     }
 
     async fn load_rewind_txn(
@@ -2358,7 +1627,7 @@ impl StoragePort for FileSystemStorage {
     }
 
     async fn reconcile_pending_txns(&self) -> Result<(), crate::domain::errors::StorageError> {
-        self.reconcile_pending_txns_inner().await
+        self.reconcile_journals().await
     }
 }
 
@@ -2699,31 +1968,6 @@ impl FileSystemStorage {
         self.session_dir(id).join("rewind_txn.json")
     }
 
-    /// Write (or overwrite) the rewind transaction journal atomically.
-    async fn write_rewind_txn_file(
-        &self,
-        conversation_id: &str,
-        txn: &crate::domain::models::transaction::RewindTxn,
-    ) -> Result<(), StorageError> {
-        // Ensure the session directory exists.
-        let session_dir = self.session_dir(conversation_id);
-        tokio::fs::create_dir_all(&session_dir)
-            .await
-            .map_err(|e| StorageError::IoError(format!("Failed to create session dir: {}", e)))?;
-
-        let dest = self.rewind_txn_path(conversation_id);
-        let content = serde_json::to_vec_pretty(txn)
-            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        let tmp_path = dest.with_extension("json.tmp");
-        tokio::fs::write(&tmp_path, &content)
-            .await
-            .map_err(|e| StorageError::IoError(format!("rewind_txn write tmp: {}", e)))?;
-        tokio::fs::rename(&tmp_path, &dest)
-            .await
-            .map_err(|e| StorageError::IoError(format!("rewind_txn rename: {}", e)))?;
-        Ok(())
-    }
-
     /// Load the rewind transaction journal if it exists.
     async fn load_rewind_txn_inner(
         &self,
@@ -2742,160 +1986,6 @@ impl FileSystemStorage {
                 e
             ))),
         }
-    }
-
-    /// Reconcile all incomplete rewind transactions on storage init (DF-109, B3.3).
-    ///
-    /// Scans every session directory for a `rewind_txn.json` file.  For each found:
-    /// - `Pending`           → no work done → delete journal.
-    /// - `MessagesTruncated` → truncation done, file revert missing → run file revert, delete journal.
-    /// - `FilesReverted`     → file revert done, truncation missing → run truncation, delete journal.
-    /// - `Committed`         → fully done → delete stale journal.
-    ///
-    /// Individual failures are logged but do not abort the sweep.
-    async fn reconcile_pending_txns_inner(&self) -> Result<(), StorageError> {
-        use crate::domain::models::transaction::RewindTxnPhase;
-
-        let mut entries = match tokio::fs::read_dir(&self.sessions_dir).await {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "reconcile_pending_txns: read_dir failed: {}",
-                    e
-                )));
-            }
-        };
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let meta = match entry.metadata().await {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if !meta.is_dir() {
-                continue;
-            }
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            let txn_path = entry.path().join("rewind_txn.json");
-            if !tokio::fs::try_exists(&txn_path).await.unwrap_or(false) {
-                continue;
-            }
-
-            // Load the journal.
-            let txn = match self.load_rewind_txn_inner(&dir_name).await {
-                Ok(Some(t)) => t,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(
-                        conversation_id = %dir_name,
-                        "reconcile_pending_txns: failed to load journal: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            tracing::info!(
-                conversation_id = %dir_name,
-                phase = ?txn.phase,
-                target_message_index = txn.target_message_index,
-                "reconcile_pending_txns: found incomplete rewind transaction"
-            );
-
-            match txn.phase {
-                RewindTxnPhase::Pending | RewindTxnPhase::Committed => {
-                    // No operations started (Pending) or already finished (Committed).
-                    // Delete the journal — no state changes needed.
-                    if let Err(e) = tokio::fs::remove_file(&txn_path).await {
-                        tracing::warn!(
-                            conversation_id = %dir_name,
-                            "reconcile_pending_txns: failed to remove journal: {}",
-                            e
-                        );
-                    } else {
-                        tracing::info!(
-                            conversation_id = %dir_name,
-                            phase = ?txn.phase,
-                            "reconcile_pending_txns: cleaned up journal"
-                        );
-                    }
-                }
-
-                RewindTxnPhase::MessagesTruncated => {
-                    // Messages were truncated; file revert didn't complete.
-                    // Complete by running revert_file_snapshots.
-                    let recovery_ok = match self
-                        .revert_file_snapshots(&dir_name, txn.target_message_index)
-                        .await
-                    {
-                        Ok(reverted) => {
-                            let restored = reverted
-                                .iter()
-                                .filter(|r| {
-                                    matches!(
-                                        r.status,
-                                        crate::domain::models::checkpoint::RevertStatus::Restored
-                                    )
-                                })
-                                .count();
-                            tracing::info!(
-                                conversation_id = %dir_name,
-                                restored,
-                                "reconcile_pending_txns: completed file revert after crash"
-                            );
-                            true
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                conversation_id = %dir_name,
-                                "reconcile_pending_txns: file revert completion failed: {}; \
-                                 preserving journal at {} for manual recovery",
-                                e, txn_path.display()
-                            );
-                            false
-                        }
-                    };
-                    // Only delete journal after successful recovery — preserve it
-                    // on failure so it can be retried on next startup.
-                    if recovery_ok {
-                        let _ = tokio::fs::remove_file(&txn_path).await;
-                    }
-                }
-
-                RewindTxnPhase::FilesReverted => {
-                    // Files were reverted; message truncation didn't complete.
-                    // Complete by running truncate_conversation.
-                    let recovery_ok = match self
-                        .truncate_conversation(&dir_name, txn.target_message_index)
-                        .await
-                    {
-                        Ok(_) => {
-                            tracing::info!(
-                                conversation_id = %dir_name,
-                                target_message_index = txn.target_message_index,
-                                "reconcile_pending_txns: completed message truncation after crash"
-                            );
-                            true
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                conversation_id = %dir_name,
-                                "reconcile_pending_txns: truncation completion failed: {}; \
-                                 preserving journal at {} for manual recovery",
-                                e, txn_path.display()
-                            );
-                            false
-                        }
-                    };
-                    // Only delete journal after successful recovery.
-                    if recovery_ok {
-                        let _ = tokio::fs::remove_file(&txn_path).await;
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -3029,6 +2119,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         }
     }
 
@@ -3403,12 +2494,18 @@ mod tests {
             });
             let result = storage.save_conversation(&conv).await;
             if directory {
+                // D-24: the transcript rename is the publication point. A later sidecar
+                // failure is a partial commit, never a rollback that deletes the only
+                // accepted transcript (the pre-D-24 DF-096 rollback left no session at all).
                 let error = result.unwrap_err();
-                assert!(error.to_string().contains("Failed to rename meta.json"));
-                // Preserve the existing DF-096 rollback on a genuine sidecar
-                // write failure, rather than mistaking it for a read failure.
-                assert!(!storage.conversation_file(&conv.id).exists());
-                assert!(storage.load_conversation(&conv.id).await.unwrap().is_none());
+                assert!(matches!(error, StorageError::PartialCommit(_)), "{error}");
+                assert!(
+                    error.to_string().contains("required effect failed"),
+                    "{error}"
+                );
+                assert!(storage.conversation_file(&conv.id).exists());
+                let loaded = storage.load_conversation(&conv.id).await.unwrap().unwrap();
+                assert_eq!(loaded.messages[2].content, "new durable history");
             } else {
                 assert!(result.is_ok());
                 let loaded = storage.load_conversation(&conv.id).await.unwrap().unwrap();
@@ -4318,6 +3415,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
 
         storage.save_conversation(&source).await.unwrap();
@@ -4458,6 +3556,7 @@ mod tests {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
 
         storage.save_conversation(&conv).await.unwrap();
@@ -4523,12 +3622,17 @@ mod unique_tmp_tests {
                 store.save_conversation(&conversation("race", rows)).await
             }));
         }
+        // Twenty-four writers that each saw the session missing race to create it: the
+        // authority admits exactly one, and every other is refused as stale (no overwrite).
+        let mut accepted = 0;
         for writer in writers {
-            writer
-                .await
-                .unwrap()
-                .expect("every concurrent save succeeds");
+            match writer.await.unwrap() {
+                Ok(()) => accepted += 1,
+                Err(StorageError::Stale(_)) => {}
+                Err(other) => panic!("unexpected refusal: {other}"),
+            }
         }
+        assert_eq!(accepted, 1, "exactly one concurrent creation is accepted");
         let loaded = FileSystemStorage::new(sessions.clone())
             .load_conversation("race")
             .await
@@ -4571,7 +3675,6 @@ mod unique_tmp_tests {
     fn a_cancelled_write_leaves_no_temp_file() {
         let dir = TempDir::new().unwrap();
         let sessions = dir.path().join("sessions");
-        let storage = FileSystemStorage::new(sessions.clone());
         std::fs::create_dir_all(&sessions).unwrap();
         let json = "{}".repeat(1 << 16);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -4581,7 +3684,10 @@ mod unique_tmp_tests {
         let session = sessions.join("cancel.meta.json");
         {
             let _entered = runtime.enter();
-            let mut save = Box::pin(storage.save_flat_layout("cancel", &json));
+            let mut save = Box::pin(FileSystemStorage::atomic_write(
+                session.clone(),
+                json.clone().into_bytes(),
+            ));
             // One poll submits the worker; the future is never polled again.
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             let _ = save.as_mut().poll(&mut cx);
@@ -4619,7 +3725,7 @@ mod unique_tmp_tests {
         // The target is a non-empty directory: the rename must fail.
         let target = sessions.join("blocked.meta.json");
         std::fs::create_dir_all(target.join("inner")).unwrap();
-        let failed = storage.save_flat_layout("blocked", "{}").await;
+        let failed = FileSystemStorage::atomic_write(target.clone(), b"{}".to_vec()).await;
         assert!(failed.is_err());
         assert!(
             temp_files(&sessions).is_empty(),

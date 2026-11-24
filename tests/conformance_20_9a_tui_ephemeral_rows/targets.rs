@@ -62,7 +62,7 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
             .is_err()
     );
     assert!(
-        handle_rewind_confirm(&store, &conversation, 1)
+        handle_rewind_confirm(&store, &mut None, &conversation, 1)
             .await
             .is_err()
     );
@@ -85,11 +85,7 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
     let fork_before = handle_fork_confirm(&store, &mut None, false, &conversation, 2)
         .await
         .unwrap();
-    let fork_after = handle_fork_confirm(&store, &mut None, false, &initial, 1)
-        .await
-        .unwrap();
-    for fork in [fork_before, fork_after] {
-        let forked = store.load_conversation(&fork).await.unwrap().unwrap();
+    let assert_fork = |forked: rustain::domain::models::Conversation| {
         assert_eq!(
             forked
                 .messages
@@ -102,8 +98,15 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
             forked.plans.contains_key("plan"),
             "durable plan data has no transient host dependency"
         );
-    }
-    let result = handle_rewind_confirm(&store, &conversation, 2)
+    };
+    assert_fork(
+        store
+            .load_conversation(&fork_before)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let result = handle_rewind_confirm(&store, &mut None, &conversation, 2)
         .await
         .unwrap();
     assert_eq!(
@@ -129,8 +132,17 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
         .save_conversation_with_exit(&conversation, true)
         .await
         .unwrap();
+    // After a reload: the copy loaded before those flushes was accepted is stale, so the
+    // reloaded conversation is the one forked and rewound (one holder flushes at a time).
+    let initial = store.load_conversation("targets").await.unwrap().unwrap();
+    let fork_after = handle_fork_confirm(&store, &mut None, false, &initial, 1)
+        .await
+        .unwrap();
+    assert_fork(store.load_conversation(&fork_after).await.unwrap().unwrap());
     let reloaded = store.load_conversation("targets").await.unwrap().unwrap();
-    let result = handle_rewind_confirm(&store, &reloaded, 1).await.unwrap();
+    let result = handle_rewind_confirm(&store, &mut None, &reloaded, 1)
+        .await
+        .unwrap();
     assert_eq!(
         result
             .conversation

@@ -73,6 +73,7 @@ fn make_forked_conversation(id: &str, parent_id: &str) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -92,6 +93,7 @@ fn make_plain_conversation(id: &str) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 

@@ -1,9 +1,8 @@
 //! Fork/rewind storage actions use durable transcript coordinates, not live rows.
 
 use crate::domain::errors::StorageError;
-use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{Conversation, RevertedFile};
-use crate::domain::ports::StoragePort;
+use crate::domain::ports::{RewindStep, StoragePort};
 
 /// Refuse an answer whose index now names a different message.
 pub fn verify_target(
@@ -59,9 +58,9 @@ pub async fn handle_fork_confirm(
         let _ = previous.await;
     }
     storage.save_conversation(conversation).await?;
-    storage
-        .fork_at_checkpoint(&conversation.id, CheckpointId(index as u64))
-        .await
+    // The flush above is the accepted predecessor: the fork projects exactly that version
+    // (or is refused before any write when another writer was accepted after it).
+    storage.fork_conversation(conversation, index).await
 }
 
 pub async fn handle_rewind_fork_instead(
@@ -85,31 +84,35 @@ pub enum RewindFailure {
     Truncate(StorageError),
 }
 
+/// Rewind at a live row. Like the fork, the live durable transcript is written first: a
+/// durable row still only in memory (the plan summary) is otherwise past the stored end and
+/// rewind would drop it. The caller's in-flight background save is completed before the
+/// flush so a stale clone cannot shorten the file again; a failed flush starts nothing.
+/// The store then owns journal, file reversion, truncation and installation as one operation
+/// bound to the flushed version.
 pub async fn handle_rewind_confirm(
     storage: &dyn StoragePort,
+    pending_save: &mut Option<tokio::task::JoinHandle<()>>,
     conversation: &Conversation,
     live_index: usize,
 ) -> Result<RewindOutcome, RewindFailure> {
     let index = durable_target(conversation, live_index).map_err(RewindFailure::Begin)?;
+    if let Some(previous) = pending_save.take() {
+        let _ = previous.await;
+    }
     storage
-        .begin_rewind_txn(&conversation.id, index)
+        .save_conversation(conversation)
         .await
         .map_err(RewindFailure::Begin)?;
-    // Preserve the existing best-effort file-reversion policy and journal order:
-    // revert before truncation prunes the checkpoint log.
-    let reverted = storage
-        .revert_file_snapshots(&conversation.id, index)
+    let rewound = storage
+        .rewind_conversation(conversation, index)
         .await
-        .unwrap_or_default();
-    let truncated = storage
-        .truncate_conversation(&conversation.id, index)
-        .await
-        .map_err(RewindFailure::Truncate)?;
-    if let Err(error) = storage.commit_rewind_txn(&conversation.id).await {
-        tracing::warn!("commit_rewind_txn failed (non-fatal): {}", error);
-    }
+        .map_err(|step| match step {
+            RewindStep::Begin(error) => RewindFailure::Begin(error),
+            RewindStep::Truncate(error) => RewindFailure::Truncate(error),
+        })?;
     Ok(RewindOutcome {
-        conversation: truncated,
-        reverted,
+        conversation: rewound.conversation,
+        reverted: rewound.reverted,
     })
 }

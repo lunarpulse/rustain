@@ -323,6 +323,7 @@ impl Fixture {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
         let mut streaming = StreamingState::default();
         let mut state = TuiState::new(120, 24);

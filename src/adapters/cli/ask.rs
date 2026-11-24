@@ -22,7 +22,7 @@ use crate::domain::models::{
     SkillActivationSet, StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin,
     UsageInfo, UsageLedgerEntry,
 };
-use crate::domain::ports::{LedgerReadMode, StreamingProvider, UsageLedgerPort};
+use crate::domain::ports::{LedgerReadMode, StoragePort, StreamingProvider, UsageLedgerPort};
 use crate::domain::services::message_builder::{self, ResolvedFileContext};
 use crate::domain::services::model_router::{ModelResolutionRequest, resolve_effective_model};
 use crate::infrastructure::composition::CliCore;
@@ -971,6 +971,7 @@ pub async fn run_ask_core(
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         }
     };
 
@@ -1086,8 +1087,15 @@ pub async fn run_ask_core(
 
     let conv_id = conversation.id.clone();
     let mut event_rx = event_rx;
-    let turn_storage = storage.clone();
-    let conversation_snapshot = conversation.clone();
+    // Dry-run takes no session write path: the producer's pre-save and first-tool checkpoint
+    // go to a store that discards them, and the loaded conversation carries no capture state.
+    let turn_storage: Arc<dyn StoragePort> = if opts.dry_run {
+        conversation.persist = Default::default();
+        Arc::new(crate::adapters::noop::NoOpStorage)
+    } else {
+        storage.clone()
+    };
+    let conversation_snapshot = conversation.capture();
     let drain_cancel = turn_cancel.clone();
 
     // Input, prompt, configuration, and model resolution are complete. Start
@@ -1583,6 +1591,7 @@ pub async fn run_ask_core(
 
     // Story 13.1c (AC7): dry-run saves no reply and prints no resume hint. Its
     // provider calls are still recorded in the usage ledger, as for every run.
+    let mut session_saved = !opts.dry_run;
     if !opts.dry_run {
         provider_replay.extend(spans);
         conversation.messages.push(ChatMessage {
@@ -1606,6 +1615,7 @@ pub async fn run_ask_core(
         conversation.last_response_at = Some(now_unix());
 
         if let Err(e) = storage.save_conversation(&conversation).await {
+            session_saved = false;
             if !opts.final_message_only {
                 let _ = writeln!(err, "Warning: failed to save session: {}", e);
             }
@@ -1618,7 +1628,7 @@ pub async fn run_ask_core(
     }
 
     // Story 13.1c (AC7): no resume hint in dry-run (nothing was saved).
-    if !opts.dry_run && !opts.final_message_only {
+    if session_saved && !opts.final_message_only {
         let _ = writeln!(
             err,
             "Session saved. Resume with: rustain --session {}",

@@ -5,6 +5,59 @@ next to the project they belong to (git-repo-local, like `.git`). Cross-
 workspace `session list --all` uses a separate hint registry at
 `~/.rustain/workspaces.json` populated on the first successful save per workspace.
 
+## Ordering and shared writers
+
+Several Rustain processes (a TUI, the daemon, `ask`, an ACP client) may open and
+write the same session. Every writer coordinates through one authority per
+session: `.claude/sessions/.rustain-authority/<id>.{lock,seq,auth.json}`, outside
+both transcript layouts and outside the deletable `<id>/` directory.
+
+- **Capture and refusal.** A conversation is loaded or created against a base
+  (an incarnation plus an accepted version). Every clone of it is a capture that
+  binds that base, a per-writer operation id and, once the session has an
+  authority, a sequence issued across processes. A save is admitted only when
+  its base is still the accepted one (or is the validated causal successor of
+  its own writer) **and** its sequence is newer than the last accepted one. An
+  older snapshot, a snapshot delivered late, a replay (even of identical bytes)
+  and a snapshot of a deleted or recreated session are refused with a typed
+  *stale* error; nothing is written and the accepted version does not move.
+- **Whole operations.** A save, checkpoint, truncate, revert, fork and rewind
+  each hold the session from before their first dependent read to their final
+  publication, cleanup and fence update, even if the caller that started them
+  is cancelled. Other sessions are not blocked. Fork and rewind consume the
+  version their flush was accepted at; if another writer was accepted after it,
+  they are refused before any new-session write, journal or workspace effect.
+- **Crash class: process exit.** An operation first records its successor
+  version, the publication witness and the effects that remain. If the process
+  is killed, the next opener proves whether the first file was published and
+  either finishes the missing effects once or clears the marker. A publication
+  whose later sidecar/log/cleanup effect failed is a *partial commit*: the new
+  version is accepted and the remaining effects stay recorded; further writes
+  are refused until they can finish. No `fsync` is promised, so a power loss or
+  OS crash is outside this guarantee.
+- **Rewind journals.** A rewind started by the TUI first completes the pending
+  save, flushes the live transcript, then writes a journal bound to that
+  accepted version. Startup recovery skips a session that another process is
+  using, never acts on a journal bound to another version, keeps a journal whose
+  file work had begun, and removes the journal only for a provably abandoned
+  rewind.
+
+### Supported stores and upgrade
+
+- Linux and macOS, on a **local** filesystem. The lock is `flock`, the sequence
+  is a memory-mapped counter. A network or overlay filesystem is not supported
+  for shared writers; there is no process-local fallback that pretends
+  otherwise. Windows is not a supported platform.
+- Upgraded writers coordinate with each other. An **old** Rustain does not know
+  the authority and writes unlocked, so an upgrade must never overlap old and
+  new writers on one store: stop every Rustain process (including the daemon)
+  that uses the sessions directory, upgrade, then start; to roll back, stop
+  all processes again before starting the old build. Alternatively run the two
+  builds on separate sessions directories. The new authority cannot stop an old
+  binary.
+- The first upgraded write of an existing session adopts it: its transcript is
+  kept and a new authority record starts at version 1.
+
 ## Temporary TUI displays
 
 Cancelled local replies and standalone plan cards remain visible in their
@@ -261,9 +314,11 @@ For bulk deletes, partial success (some deleted, some refused) is non-zero.
 - `delete` removes only the session footprint (`{id}/` in directory layout, or
   `{id}.meta.json` + `{id}.session.json` in flat layout). It does not mutate
   memory indexes, vector stores, or other sessions.
-- Deleted sessions should stay deleted, but a daemon that still holds the
-  session in memory could in theory write it back after deletion. For
-  guaranteed removal, stop the daemon first.
+- A deleted session stays deleted: delete records a tombstone before it removes
+  any file, so a save that was captured before the delete (a late turn, a
+  daemon that still holds the session in memory) is refused instead of writing
+  the session back. Creating a session with the same id again is an explicit
+  creation that starts a new incarnation.
 
 ## Future
 

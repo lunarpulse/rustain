@@ -27,6 +27,9 @@ include!("cli_ask/eval5_limits.rs");
 #[path = "cli_ask/eval5_interruption.rs"]
 mod eval5_interruption;
 
+#[path = "cli_ask/d24_session_store.rs"]
+mod d24_session_store;
+
 fn default_config() -> rustain::domain::models::AppConfig {
     rustain::domain::models::AppConfig::default()
 }

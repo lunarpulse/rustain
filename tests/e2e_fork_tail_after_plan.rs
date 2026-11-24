@@ -40,7 +40,7 @@ impl EventEmitter for Sink {
     fn emit(&self, _event: AppEvent) {}
 }
 
-fn row(role: MessageRole, content: &str) -> ChatMessage {
+pub(crate) fn row(role: MessageRole, content: &str) -> ChatMessage {
     ChatMessage {
         id: generate_message_id(),
         role,
@@ -68,7 +68,7 @@ fn row_with_tool_call(content: &str) -> ChatMessage {
     message
 }
 
-fn conversation(id: &str) -> Conversation {
+pub(crate) fn conversation(id: &str) -> Conversation {
     Conversation {
         id: id.to_owned(),
         title: "Plan run".to_owned(),
@@ -105,11 +105,11 @@ fn plan() -> Plan {
     }
 }
 
-fn store(dir: &TempDir) -> FileSystemStorage {
+pub(crate) fn store(dir: &TempDir) -> FileSystemStorage {
     FileSystemStorage::new(dir.path().join("sessions"))
 }
 
-fn durable_ids(conversation: &Conversation) -> Vec<String> {
+pub(crate) fn durable_ids(conversation: &Conversation) -> Vec<String> {
     conversation
         .messages
         .iter()
@@ -118,11 +118,11 @@ fn durable_ids(conversation: &Conversation) -> Vec<String> {
         .collect()
 }
 
-fn ids(conversation: &Conversation) -> Vec<String> {
+pub(crate) fn ids(conversation: &Conversation) -> Vec<String> {
     conversation.messages.iter().map(|m| m.id.clone()).collect()
 }
 
-async fn stored(store: &FileSystemStorage, id: &str) -> Conversation {
+pub(crate) async fn stored(store: &FileSystemStorage, id: &str) -> Conversation {
     store
         .load_conversation(id)
         .await
@@ -132,7 +132,7 @@ async fn stored(store: &FileSystemStorage, id: &str) -> Conversation {
 
 /// A completed plan run: the task turn's save has happened, the plan summary row has
 /// not (the render tick pushes it after the save). Returns the live conversation.
-async fn plan_run_tail(store: &FileSystemStorage) -> Conversation {
+pub(crate) async fn plan_run_tail(store: &FileSystemStorage) -> Conversation {
     let mut conv = conversation("plan-run");
     conv.messages.push(row(MessageRole::User, "build it"));
     conv.messages

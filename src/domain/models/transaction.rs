@@ -55,6 +55,21 @@ pub struct RewindTxn {
     pub phase: RewindTxnPhase,
     /// Unix seconds when the transaction was created.
     pub created_at: i64,
+    /// The accepted incarnation and version this rewind is bound to (D-24). `None` for a
+    /// journal written through the unbound id-only API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<RewindBinding>,
+    /// Set durably before the first workspace file effect: from then on a `Pending` journal
+    /// is not proof that nothing started.
+    #[serde(default)]
+    pub files_begun: bool,
+}
+
+/// The accepted state a bound rewind journal belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindBinding {
+    pub epoch: String,
+    pub version: u64,
 }
 
 #[cfg(test)]
@@ -68,6 +83,8 @@ mod tests {
             target_message_index: 3,
             phase: RewindTxnPhase::MessagesTruncated,
             created_at: 1700000000,
+            bound: None,
+            files_begun: false,
         };
         let json = serde_json::to_string(&txn).unwrap();
         let decoded: RewindTxn = serde_json::from_str(&json).unwrap();
@@ -90,6 +107,8 @@ mod tests {
             target_message_index: 0,
             phase: RewindTxnPhase::Pending,
             created_at: 0,
+            bound: None,
+            files_begun: false,
         };
         assert_eq!(txn.phase, RewindTxnPhase::Pending);
     }

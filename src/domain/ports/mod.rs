@@ -164,7 +164,7 @@ pub use wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};
 pub use skill_exposure::SkillExposurePort;
-pub use storage::StoragePort;
+pub use storage::{RewindStep, Rewound, StoragePort};
 pub use tool_exposure::ToolExposurePort;
 pub use toolset::ToolSetPort;
 pub use usage_ledger::{LedgerReadMode, UsageLedgerPort};

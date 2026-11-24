@@ -16,6 +16,29 @@ use crate::domain::ports::StoragePort;
 
 use super::HandlerOutcome;
 
+/// Write only the bookmark list: the store reads the current sidecar and replaces that one
+/// field, so a concurrent save's title/count/fork fields are not overwritten by the tab's
+/// cached copy. A session with no sidecar yet gets the tab's whole sidecar, as before.
+async fn persist_bookmarks(
+    storage: &dyn StoragePort,
+    id: &str,
+    new_meta: &crate::domain::models::SessionMeta,
+) -> Result<(), crate::domain::errors::StorageError> {
+    let bookmarks = new_meta.bookmarks.clone();
+    match storage
+        .update_session_meta(id, &|mut meta| {
+            meta.bookmarks.clone_from(&bookmarks);
+            meta
+        })
+        .await
+    {
+        Err(crate::domain::errors::StorageError::NotFound(_)) => {
+            storage.save_session_meta(id, new_meta).await
+        }
+        other => other,
+    }
+}
+
 /// Story 4-4 AC8: toggle a bookmark on the currently focused message.
 ///
 /// Optimistic UI: update in-memory first, persist to disk; rollback on failure
@@ -95,10 +118,7 @@ pub async fn handle_apply_bookmark_toggle(
     tab_manager.active_tab_mut().session_meta = new_meta.clone();
 
     // Persist to disk. Rollback on failure.
-    match fs_storage
-        .save_session_meta(&conversation.id, &new_meta)
-        .await
-    {
+    match persist_bookmarks(fs_storage, &conversation.id, &new_meta).await {
         Ok(()) => {
             let msg = if was_bookmarked {
                 format!("Bookmark removed (msg {})", target_idx)
@@ -255,9 +275,7 @@ pub async fn handle_apply_delete_bookmark(
     let old_meta = tab_manager.active_tab().session_meta.clone();
     tab_manager.active_tab_mut().session_meta = new_meta.clone();
 
-    let result = fs_storage
-        .save_session_meta(&conversation.id, &new_meta)
-        .await;
+    let result = persist_bookmarks(fs_storage, &conversation.id, &new_meta).await;
     app::with_card_focus_reconcile(state, |state| match result {
         Ok(()) => {
             state.bookmark_undo_buffer = Some(BookmarkUndo {
@@ -333,9 +351,7 @@ pub async fn handle_apply_undo_bookmark_delete(
 
     let old_meta = tab_manager.active_tab().session_meta.clone();
     tab_manager.active_tab_mut().session_meta = new_meta.clone();
-    let result = fs_storage
-        .save_session_meta(&conversation.id, &new_meta)
-        .await;
+    let result = persist_bookmarks(fs_storage, &conversation.id, &new_meta).await;
     app::with_card_focus_reconcile(state, |state| match result {
         Ok(()) => {
             state.bookmark_undo_buffer = None;

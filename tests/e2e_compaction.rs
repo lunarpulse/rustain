@@ -164,6 +164,7 @@ fn test_persisted_conversation_compaction_round_trip() {
         }),
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     let persisted = PersistedConversation::from_conversation(&conv);

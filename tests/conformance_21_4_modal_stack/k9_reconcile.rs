@@ -733,6 +733,8 @@ async fn reset_bookmarks_use_the_live_stage(command: &str) {
     use rustain::domain::models::Conversation;
     use rustain::domain::ports::StoragePort;
     use rustain::infrastructure::runtime::event_loop::reset_stage_conversation;
+    // A valid session key: a session id with other characters cannot be persisted (D-24).
+    let reset_id = format!("reset-{}", command.trim_start_matches('/'));
     let tmp = tempfile::tempdir().unwrap();
     let storage = FileSystemStorage::new(tmp.path().join("sessions"));
     let (mut h, mut tabs) = super::stage_support::stage(80, 24);
@@ -740,7 +742,7 @@ async fn reset_bookmarks_use_the_live_stage(command: &str) {
     let mirror_id = tabs.active_tab().conversation.id.clone();
     let mut conversation = tabs.active_tab().conversation.clone();
     let replacement = Conversation {
-        id: command.into(),
+        id: reset_id.clone(),
         ..conversation.clone()
     };
     reset_stage_conversation(&mut tabs, &mut conversation, &mut h.state, replacement);
@@ -787,7 +789,7 @@ async fn reset_bookmarks_use_the_live_stage(command: &str) {
             .unwrap()
             .conversation_id
             .as_deref(),
-        Some(command)
+        Some(reset_id.as_str())
     );
     assert!(h.screen_text().contains("Bookmarks"));
     assert_eq!(press(&mut h.state, Key::Enter), InputAction::JumpToBookmark);
@@ -818,7 +820,7 @@ async fn reset_bookmarks_use_the_live_stage(command: &str) {
     assert!(h.state.bookmark_undo_buffer.is_none());
     assert_eq!(
         storage
-            .load_session_meta(command)
+            .load_session_meta(&reset_id)
             .await
             .unwrap()
             .unwrap()
@@ -872,7 +874,7 @@ async fn reset_bookmarks_use_the_live_stage(command: &str) {
             .unwrap()
             .conversation_id
             .as_deref(),
-        Some(command)
+        Some(reset_id.as_str())
     );
     wave_overlay::apply(
         &mut h.state,

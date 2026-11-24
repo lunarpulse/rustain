@@ -531,6 +531,7 @@ pub fn seed_conversation(snapshot: &AttachSnapshot) -> Conversation {
     let mut conv = Conversation {
         id: snapshot.conversation_id.clone(),
         peer_row_revision: snapshot.peer_row_revision,
+        persist: Default::default(),
         ..Default::default()
     };
     conv.messages.push(session_boundary_message());

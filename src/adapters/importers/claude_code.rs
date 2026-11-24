@@ -269,6 +269,7 @@ impl ConversationImporter for ClaudeCodeImporter {
             compaction: None,
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
+            persist: Default::default(),
         };
 
         // Write conversation + initial SessionMeta (imported_from: None)
@@ -346,7 +347,9 @@ async fn is_already_imported(
     storage: &dyn StoragePort,
     source_id: &str,
 ) -> Result<bool, StorageError> {
-    let summaries = storage.list_conversations().await?;
+    // The idempotency check is discovery: it must not backfill sidecars before the import
+    // is admitted.
+    let summaries = storage.list_conversations_read_only().await?;
     for summary in &summaries {
         match storage.load_session_meta(&summary.id).await {
             Ok(Some(meta)) => {

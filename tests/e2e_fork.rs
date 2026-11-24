@@ -102,6 +102,7 @@ fn make_conversation_5_messages() -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -398,6 +399,7 @@ fn test_e2e_fork_tab_manager_create_tab_with_conversation() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
     let forked_id = forked_conv.id.clone();
 
@@ -854,6 +856,7 @@ async fn test_e2e_fork_empty_conversation_returns_error() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
     let source_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();

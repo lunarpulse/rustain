@@ -154,6 +154,24 @@ pub enum StorageError {
     #[error("Operation not supported: {0}")]
     NotSupported(String),
 
+    /// The capture is older than what the store already accepted (or the session was
+    /// deleted). Nothing was written.
+    #[error("Stale snapshot refused: {0}")]
+    Stale(String),
+
+    /// New authoritative state is visible but a later required effect did not finish; the
+    /// accepted version advanced and the remaining effects stay recorded for recovery.
+    #[error("Partially committed: {0}")]
+    PartialCommit(String),
+
+    /// The store cannot distinguish old from new state; dependent mutations are refused.
+    #[error("Indeterminate session state: {0}")]
+    Indeterminate(String),
+
+    /// The session id is not a valid physical session key.
+    #[error("Invalid session id: {0}")]
+    InvalidId(String),
+
     #[error("{0}")]
     Other(String),
 }

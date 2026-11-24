@@ -8,12 +8,33 @@ use crate::domain::models::checkpoint::{CheckpointId, CheckpointMeta, RevertedFi
 use crate::domain::models::transaction::{RewindTxn, RewindTxnPhase};
 use crate::domain::models::{Conversation, ConversationSummary, SessionMeta};
 
+/// A rewind applied by a store: the installed conversation and the file reversions.
+pub struct Rewound {
+    pub conversation: Conversation,
+    pub reverted: Vec<RevertedFile>,
+}
+
+/// Where a store-owned rewind stopped, for the caller's failure surface.
+#[derive(Debug)]
+pub enum RewindStep {
+    /// Before any journal, workspace or transcript effect.
+    Begin(StorageError),
+    /// After the journal began: truncation or its settlement failed.
+    Truncate(StorageError),
+}
+
 /// Persistence for conversations and settings.
 ///
 /// Claudian equivalent: `src/core/persistence/conversationPersistence.ts`
 #[async_trait]
 pub trait StoragePort: Send + Sync {
     async fn save_conversation(&self, conv: &Conversation) -> Result<(), StorageError>;
+    /// Explicitly create a conversation. A fencing store admits this over a deleted session
+    /// of the same id (a new incarnation); a plain save of a conversation that was never
+    /// accepted is refused there. Default: [`Self::save_conversation`].
+    async fn create_conversation(&self, conv: &Conversation) -> Result<(), StorageError> {
+        self.save_conversation(conv).await
+    }
     async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError>;
     async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError>;
     /// List conversation summaries without performing any migration or repair writes.
@@ -99,6 +120,16 @@ pub trait StoragePort: Send + Sync {
         Err(StorageError::NotSupported("revert".to_string()))
     }
 
+    /// Create a checkpoint bound to the accepted history `conv` was captured from (D-24).
+    /// A store that fences writes refuses a stale capture before any effect. Default:
+    /// the unbound id-only [`Self::create_checkpoint`].
+    async fn create_checkpoint_for(
+        &self,
+        conv: &Conversation,
+    ) -> Result<CheckpointId, StorageError> {
+        self.create_checkpoint(&conv.id).await
+    }
+
     /// Truncate the conversation to `conv.messages[0..=target_message_index]`,
     /// regardless of whether a checkpoint exists at that boundary.
     ///
@@ -126,6 +157,71 @@ pub trait StoragePort: Send + Sync {
         Err(StorageError::NotSupported(
             "truncate_conversation".to_string(),
         ))
+    }
+
+    /// Truncate the history `conv` was captured from; refused when that history is no
+    /// longer the accepted one. Default: the unbound [`Self::truncate_conversation`].
+    async fn truncate_conversation_for(
+        &self,
+        conv: &Conversation,
+        target_message_index: usize,
+    ) -> Result<Conversation, StorageError> {
+        self.truncate_conversation(&conv.id, target_message_index)
+            .await
+    }
+
+    /// Fork the accepted history `source` was captured from at a durable message index.
+    /// Returns the new conversation's ID. Default: the unbound [`Self::fork_at_checkpoint`].
+    async fn fork_conversation(
+        &self,
+        source: &Conversation,
+        message_index: usize,
+    ) -> Result<String, StorageError> {
+        self.fork_at_checkpoint(&source.id, CheckpointId(message_index as u64))
+            .await
+    }
+
+    /// Rewind the accepted history `conv` was captured from to `target_message_index`:
+    /// journal, file reversion, inclusive truncation, journal removal, as one operation that
+    /// owns the session throughout. Default: the unbound journal sequence.
+    async fn rewind_conversation(
+        &self,
+        conv: &Conversation,
+        target_message_index: usize,
+    ) -> Result<Rewound, RewindStep> {
+        self.begin_rewind_txn(&conv.id, target_message_index)
+            .await
+            .map_err(RewindStep::Begin)?;
+        let reverted = self
+            .revert_file_snapshots(&conv.id, target_message_index)
+            .await
+            .unwrap_or_default();
+        let conversation = self
+            .truncate_conversation_for(conv, target_message_index)
+            .await
+            .map_err(RewindStep::Truncate)?;
+        if let Err(error) = self.commit_rewind_txn(&conv.id).await {
+            tracing::warn!("commit_rewind_txn failed (non-fatal): {}", error);
+        }
+        Ok(Rewound {
+            conversation,
+            reverted,
+        })
+    }
+
+    /// Update the session metadata sidecar in place: the store reads the current sidecar and
+    /// writes the result as one step, so concurrent writers' other fields survive.
+    /// Default: load, apply, save.
+    async fn update_session_meta(
+        &self,
+        id: &str,
+        update: &(dyn Fn(SessionMeta) -> SessionMeta + Send + Sync),
+    ) -> Result<(), StorageError> {
+        let meta = self
+            .load_session_meta(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound(format!("session metadata: {id}")))?;
+        self.save_session_meta(id, &update(meta)).await
     }
 
     /// Snapshot the **original** content of `path` under the given checkpoint.

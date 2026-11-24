@@ -11,6 +11,45 @@ use crate::domain::models::{
 use crate::domain::models::{SemanticMessageType, carries_story_list, story_summary};
 use std::sync::Arc;
 
+/// A refused peer-row save that may still have left the new rows visible on disk (partial or
+/// unprovable publication): the caller keeps its rows, reports the failure and fans out nothing.
+fn persisted_despite(error: &crate::domain::errors::StorageError) -> bool {
+    use crate::domain::errors::StorageError;
+    matches!(
+        error,
+        StorageError::PartialCommit(_) | StorageError::Indeterminate(_)
+    )
+}
+
+/// Undo an applied mutation batch after a refused save, unless the batch may be on disk.
+pub(super) fn rollback_unless_persisted(
+    error: &crate::domain::errors::StorageError,
+    conversation: &mut Conversation,
+    undo: Vec<super::PeerRowUndo>,
+    revision: u64,
+) {
+    if !persisted_despite(error) {
+        super::rollback_peer_rows(conversation, undo, revision);
+    }
+}
+
+/// Put the cleared peer rows (messages and controls) back after a refused save, unless the
+/// clearing may be on disk.
+pub(super) fn restore_unless_persisted(
+    error: &crate::domain::errors::StorageError,
+    conversation: &mut Conversation,
+    cleared: (
+        Vec<ChatMessage>,
+        std::collections::BTreeMap<String, PeerRowControl>,
+    ),
+    revision: u64,
+) {
+    if !persisted_despite(error) {
+        (conversation.messages, conversation.peer_row_controls) = cleared;
+        conversation.peer_row_revision = revision;
+    }
+}
+
 /// Story 19.23 D6: the card's selection sentence names the final header label,
 /// sanitized once here at the render boundary.
 #[allow(clippy::too_many_arguments)]
@@ -694,5 +733,87 @@ mod tests {
         })
         .await
         .expect("refused settlement case completes");
+    }
+    /// D-24 AC2: a refused peer-row save rolls the rows back only when nothing persisted. A
+    /// partial or unprovable publication keeps the rows the disk may already show, returns the
+    /// failure and publishes nothing.
+    #[tokio::test]
+    async fn d24_a_partial_save_keeps_peer_rows_and_a_stale_one_rolls_them_back() {
+        use super::super::ConnRegistry;
+        use crate::domain::errors::StorageError;
+        use crate::domain::ports::StoragePort;
+
+        struct Refusing(fn() -> StorageError);
+
+        #[async_trait::async_trait]
+        impl StoragePort for Refusing {
+            async fn save_conversation(&self, _conv: &Conversation) -> Result<(), StorageError> {
+                Err((self.0)())
+            }
+            async fn load_conversation(
+                &self,
+                _id: &str,
+            ) -> Result<Option<Conversation>, StorageError> {
+                Ok(None)
+            }
+            async fn list_conversations(
+                &self,
+            ) -> Result<Vec<crate::domain::models::ConversationSummary>, StorageError> {
+                Ok(vec![])
+            }
+            async fn read_snapshot(
+                &self,
+                _conversation_id: &str,
+                _checkpoint: crate::domain::models::checkpoint::CheckpointId,
+                _path: &std::path::Path,
+            ) -> Result<Option<Vec<u8>>, StorageError> {
+                Ok(None)
+            }
+        }
+
+        let cases: [(fn() -> StorageError, bool); 3] = [
+            (
+                || StorageError::Stale("another writer was accepted".into()),
+                false,
+            ),
+            (
+                || StorageError::PartialCommit("effects pending".into()),
+                true,
+            ),
+            (|| StorageError::Indeterminate("unprovable".into()), true),
+        ];
+        for (error, rows_stay) in cases {
+            let conversation = Mutex::new(Conversation::default());
+            let registry = Mutex::new(ConnRegistry::default());
+            let serial = Mutex::new(());
+            let row = ChatMessage {
+                id: "peer-row-1".into(),
+                role: MessageRole::Assistant,
+                content: "from a peer".into(),
+                ..Default::default()
+            };
+            let result = commit_peer_rows(
+                &serial,
+                &conversation,
+                &registry,
+                &Refusing(error),
+                vec![PeerRowMutation::Upsert {
+                    message: row,
+                    control: None,
+                }],
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "the caller sees the failure and emits no durable success"
+            );
+            let live = conversation.lock().await;
+            assert_eq!(
+                live.messages.len(),
+                usize::from(rows_stay),
+                "rows_stay = {rows_stay}"
+            );
+            assert_eq!(live.peer_row_revision, u64::from(rows_stay));
+        }
     }
 }

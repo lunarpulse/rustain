@@ -178,6 +178,16 @@ pub fn resolve_write_path(
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub static RUN_TURN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A checkpoint failure that means the captured history is stale or its store is not in a
+/// state to rest tool effects on (as opposed to an ordinary I/O failure).
+fn checkpoint_refused(error: &crate::domain::errors::StorageError) -> bool {
+    use crate::domain::errors::StorageError;
+    matches!(
+        error,
+        StorageError::Stale(_) | StorageError::Indeterminate(_) | StorageError::PartialCommit(_)
+    )
+}
+
 pub async fn run_turn(
     provider: Arc<dyn StreamingProvider>,
     mut messages: Vec<Message>,
@@ -625,8 +635,31 @@ pub async fn run_turn(
                         // The checkpoint captures the conversation state just before the assistant's
                         // tool-executing turn. If creation fails, we fall through with a sentinel
                         // CheckpointId(0) — tools run but rewind to this point will be impossible.
-                        let checkpoint = match storage.create_checkpoint(&conversation_id).await {
+                        let checkpoint = match storage
+                            .create_checkpoint_for(&conversation_snapshot)
+                            .await
+                        {
                             Ok(cp) => cp,
+                            Err(e) if checkpoint_refused(&e) => {
+                                // The history this turn started from is no longer the accepted
+                                // one: no checkpoint, snapshot or tool effect may rest on it.
+                                tracing::error!("Checkpoint refused before tool execution: {}", e);
+                                for chunk in [
+                                    StreamChunk::Error {
+                                        content: "This conversation changed elsewhere while the turn was starting, so its tools were not run. Try again.".to_string(),
+                                    },
+                                    StreamChunk::TurnComplete {
+                                        stop_reason: StopReason::Cancelled,
+                                    },
+                                ] {
+                                    let event = AppEvent::ProviderChunk {
+                                        conversation_id: conversation_id.clone(),
+                                        chunk,
+                                    };
+                                    let _ = event_tx.send(event);
+                                }
+                                return false;
+                            }
                             Err(e) => {
                                 tracing::error!(
                                     "Failed to create checkpoint before tool execution: {}",

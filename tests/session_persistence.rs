@@ -69,6 +69,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
@@ -278,6 +279,7 @@ async fn test_slash_new_saves_and_creates_fresh_session() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
     assert!(new_conv.messages.is_empty());
     assert!(new_conv.title.is_empty());
@@ -320,6 +322,7 @@ async fn test_slash_new_empty_session_no_save() {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     };
 
     // /new with empty session: skip save (event loop checks messages.is_empty())
