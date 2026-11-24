@@ -7,6 +7,7 @@ dependencies = [
     "pytest>=8.0",
     "pexpect>=4.9",
     "pyte>=0.8,<1.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

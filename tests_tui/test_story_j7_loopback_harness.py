@@ -283,7 +283,10 @@ def test_fixture_profile_is_not_a_preview_child():
     profile rewrites ``telegram -> terminal`` and ``cron -> none`` (profile_loader.rs
     ``build_selection``): the daemon would then never poll Telegram. The fixture must
     therefore compose the same selection on ``base``."""
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 (CI)
+        import tomli as tomllib
 
     profile = tomllib.loads((J7 / "profiles" / "j7-dana.toml").read_text())
     assert profile["extends"] == "base" and not profile.get("preview")
@@ -299,7 +302,10 @@ def test_fixture_profile_is_not_a_preview_child():
 
 def test_budget_fixture_prices_the_seeded_row_at_exactly_one_dollar(tmp_path):
     import json
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 (CI)
+        import tomli as tomllib
 
     import world as j7world
 
