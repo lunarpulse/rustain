@@ -332,7 +332,7 @@ listener, webhook or request URL to expose.
    export SLACK_BOT_TOKEN="<bot token from step 3>"
    ```
 
-Release assets from the next tag carry Slack; source builds must enable it. Slack is
+Release assets from v0.6.0 carry Slack; source builds must enable it. Slack is
 not part of the default feature set:
 
 ```sh

@@ -12,7 +12,7 @@
 
 set -eu
 
-DEFAULT_VERSION=0.5.0
+DEFAULT_VERSION=0.6.0
 REPO_URL=https://github.com/lunarpulse/rustain
 PROD_KEY_1=RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF
 

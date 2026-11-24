@@ -7,7 +7,7 @@ This document describes the release process for `rustain`, including the frozen 
 Every release publishes the following assets, with names and formats that are **FROZEN** — Story 13-3a's `verify_release` computes them byte-for-byte:
 
 - **Binary asset**: `rustain-{version}-{target-triple}[.exe]`  
-  Example: `rustain-0.5.0-x86_64-unknown-linux-gnu`
+  Example: `rustain-0.6.0-x86_64-unknown-linux-gnu`
 - **Manifest**: `SHA256SUMS` — one line per asset in GNU coreutils format:  
   `<sha256-hex>  <asset-filename>`
 - **Signature**: `SHA256SUMS.minisig` — detached minisign signature of the manifest (prehashed `ED` algorithm)
@@ -36,7 +36,7 @@ Developer ID signing and notarization are a deferred decision: the owner deferre
 
 ## Federation Features in Published Assets
 
-A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram and cron are included in release assets from `v0.5.0` (Slack from the next tag); source builds require their features. Slack is never in Cargo `default`. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron,slack`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram and cron are included in release assets from `v0.5.0`, Slack from `v0.6.0`; source builds require their features. Slack is never in Cargo `default`. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron,slack`.
 
 ⛔ **After cutting a tag:** name the actual version at the four federation-feature doc sites — this file, `README.md`, `docs/a2a.md`, `docs/p2p.md`. They state the boundary they can prove (`v0.1.3` and earlier do not carry the features) because the next tag is not derivable from the tree; the tagger is the first person who knows it.
 
@@ -137,10 +137,10 @@ When rotating the signing key:
 
 1. Ensure all changes are on `main`, tests pass and CI is green on the commit to be tagged
 2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap, the `VERSION=` line in `docs/install-macos.md` and the `DEFAULT_VERSION=` line in `dist/install.sh`, land it on `main`, and run `scripts/release-check.sh` on the landed commit (Per-Release Checklist)
-3. Push an annotated tag: `git tag -a v0.5.0 -m "rustain v0.5.0" && git push origin v0.5.0`
+3. Push an annotated tag: `git tag -a v0.6.0 -m "rustain v0.6.0" && git push origin v0.6.0`
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
-   - Smokes all six required release features on the Linux binary (`.github/scripts/release-smoke.sh`), then checks the served AgentCard
+   - Smokes all seven required release features on the Linux binary (`.github/scripts/release-smoke.sh`), then checks the served AgentCard
    - Size guard asserts ≤ 40 MiB / 41,943,040 bytes; on Linux, `.github/scripts/release-size-guard.sh` also warns (without failing) when the binary enters the reserved headroom
    - Computes the asset-coverage disclosure (expected targets minus present) for the release body
    - Fails the release if the P0 Linux artifact is missing
@@ -159,7 +159,7 @@ If CI is unavailable, a maintainer can cut a release by hand:
 git status
 
 # 2. Set version
-VERSION="0.5.0"
+VERSION="0.6.0"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary

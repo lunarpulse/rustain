@@ -48,7 +48,7 @@ and do not append `&&` or `||` after the closing parenthesis: that can disable
 `set -e`.
 
 ```sh
-VERSION=0.5.0
+VERSION=0.6.0
 TARGET=aarch64-apple-darwin
 
 (
@@ -168,7 +168,7 @@ cargo install --locked --git https://github.com/lunarpulse/rustain --tag "v${VER
 `--features` adds to the default features, so this is the release feature set;
 `--bin rustain` skips a test helper binary the package also defines. Releases
 are built with the toolchain pinned in `rust-toolchain.toml` (1.98.1 at
-v0.5.0); to use the same one, run `rustup toolchain install 1.98.1` and then
+v0.6.0); to use the same one, run `rustup toolchain install 1.98.1` and then
 `cargo +1.98.1 install` with the same arguments. The build takes a while
 (link-time optimization).
 
