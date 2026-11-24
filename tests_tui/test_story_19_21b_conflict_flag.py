@@ -272,7 +272,9 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
     binary = conflict_run.binary
     executable = binary_identity(binary)
     source_sha, scene_sha = _sha(SOURCE), _sha(SCENE)
-    assert executable["bytes"] <= 39_845_888, "four-feature release exceeds the approved byte ceiling"
+    # The NFR9 ceiling owned by .github/scripts/release-size-guard.sh (D-25), not the
+    # earlier 39,845,888 B four-feature ceiling the shipped six-feature set outgrew.
+    assert executable["bytes"] <= 41_943_040, "shipped release exceeds the NFR9 byte ceiling"
     stamp_time = datetime.now(timezone.utc).replace(microsecond=0)
     stamp = stamp_time.strftime("%Y-%m-%dT%H-%M-%SZ")
     recorded = stamp_time.strftime("%Y-%m-%dT%H:%M:%SZ")
