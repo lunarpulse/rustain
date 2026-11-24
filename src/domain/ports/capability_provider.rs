@@ -317,7 +317,7 @@ mod a2a_conformance {
         targets: Option<std::collections::BTreeSet<String>>,
     }
 
-    /// Every `cargo test` invocation in ci.yml, with `\` continuations joined.
+    /// Every `cargo test` invocation in one workflow file, with `\` continuations joined.
     fn ci_test_invocations(ci: &str) -> Vec<CiInvocation> {
         let mut joined = Vec::new();
         let mut pending = String::new();
@@ -415,16 +415,36 @@ mod a2a_conformance {
             .collect()
     }
 
+    /// Every workflow file counts: lanes demoted from the per-push `ci.yml` to
+    /// `nightly-proofs.yml` (heavy features) still execute their roots.
     #[test]
     fn every_integration_test_root_runs_in_a_ci_lane_with_its_features() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
-        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
-            .expect(".github/workflows/ci.yml must be readable");
-        let invocations = ci_test_invocations(&ci);
+        let mut workflows: Vec<_> = std::fs::read_dir(root.join(".github/workflows"))
+            .expect(".github/workflows must be readable")
+            .map(|entry| entry.expect("workflow entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext == "yml" || ext == "yaml")
+            })
+            .collect();
+        workflows.sort();
+        assert!(
+            workflows.iter().any(|path| path.ends_with("ci.yml")),
+            ".github/workflows/ci.yml must exist"
+        );
+        let invocations: Vec<CiInvocation> = workflows
+            .iter()
+            .flat_map(|path| {
+                let text = std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+                ci_test_invocations(&text)
+            })
+            .collect();
         assert!(
             !invocations.is_empty(),
-            "no `cargo test` invocation found in ci.yml"
+            "no `cargo test` invocation found in .github/workflows"
         );
         let defaults = default_features(&manifest);
 
@@ -455,7 +475,7 @@ mod a2a_conformance {
         }
         assert!(
             unexecuted.is_empty(),
-            "integration roots that no ci.yml `cargo test` invocation executes with their \
+            "integration roots that no workflow `cargo test` invocation executes with their \
              features enabled — a test that never runs is a false green:\n{}",
             unexecuted.join("\n")
         );

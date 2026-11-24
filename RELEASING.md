@@ -42,7 +42,7 @@ A2A and P2P are off by default for `cargo install`. **Published release assets u
 
 The release pipeline asserts each published binary is **≤ 40 MiB (41,943,040 bytes)** (NFR9, amended by the C-2b measurement). The size check lives in CI, not runtime. The release profile uses LTO, stripping, one codegen unit and abort-on-panic to minimize size.
 
-At base `1943331f`, locked Linux release measurements were: four features 38,012,720 B; adding Telegram 39,234,072 B (+1,221,352); adding cron 38,165,896 B (+153,176); both 39,386,672 B (+1,373,952). The six-feature size exceeded the 38 MiB fit threshold of 39,321,600 B, triggering the 40 MiB ceiling. The Linux ratchet reserves 1,966,080 B and limits the binary to 39,976,960 B, 590,288 B above that measurement. The gate measures the landed build; a ratchet failure requires a reviewed recalibration, not a tag retry. macOS retains only the NFR9 ceiling.
+At base `1943331f`, locked Linux release measurements were: four features 38,012,720 B; adding Telegram 39,234,072 B (+1,221,352); adding cron 38,165,896 B (+153,176); both 39,386,672 B (+1,373,952). The six-feature size exceeded the 38 MiB fit threshold of 39,321,600 B, triggering the 40 MiB ceiling. The Linux size guard keeps a 1,966,080 B reserve below the ceiling, a 39,976,960 B warning limit 590,288 B above that measurement. A binary over the warning limit passes with a `::warning::` annotation; only the NFR9 ceiling fails the build. The gate measures the landed build. macOS retains only the NFR9 ceiling.
 
 The workspace crate stays at `opt-level = 3`; cold dependencies use `z`. The reviewed hot list in `Cargo.toml` keeps level 3 for non-generic work per rendered frame, streamed chunk, TLS record/bulk byte, regex/glob match or signed message. Startup, CLI/config, connection setup and QUIC control are cold; generic monomorphizations in rustain keep its level.
 
@@ -141,7 +141,7 @@ When rotating the signing key:
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
    - Smokes all six required release features on the Linux binary (`.github/scripts/release-smoke.sh`), then checks the served AgentCard
-   - Size guard asserts ≤ 40 MiB / 41,943,040 bytes; Linux additionally enforces the reserved-headroom ratchet (`.github/scripts/release-size-guard.sh`)
+   - Size guard asserts ≤ 40 MiB / 41,943,040 bytes; on Linux, `.github/scripts/release-size-guard.sh` also warns (without failing) when the binary enters the reserved headroom
    - Computes the asset-coverage disclosure (expected targets minus present) for the release body
    - Fails the release if the P0 Linux artifact is missing
    - Stages `dist/install.sh` as `install.sh`, failing if its `DEFAULT_VERSION=` is not the tag's version
@@ -169,7 +169,7 @@ cargo build --release --target "$TARGET" --features self-update,relay-server,a2a
 ASSET="rustain-${VERSION}-${TARGET}"
 cp "target/${TARGET}/release/rustain" "$ASSET"
 
-# 5. Size check (Linux ratchet; macOS ceiling only)
+# 5. Size check (Linux: ceiling plus reserve warning; macOS: ceiling only)
 if [ "$TARGET" = "x86_64-unknown-linux-gnu" ]; then
     .github/scripts/release-size-guard.sh "$ASSET"
 else

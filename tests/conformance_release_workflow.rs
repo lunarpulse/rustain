@@ -6,6 +6,9 @@
 //! is a different repository and is absent from the CI checkout (A8).
 
 const WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
+/// The release-candidate tier: one shipped-set release build feeds the size
+/// ratchet, the TLS check, the smoke and the Act 1, Act 2 and Conflict captures.
+const PROOFS: &str = include_str!("../.github/workflows/nightly-proofs.yml");
 /// The build command, matched as a line prefix: the step tees its output for
 /// the failure annotation, which must not loosen the feature-list pin.
 const RELEASE_BUILD: &str = "cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron ";
@@ -507,7 +510,7 @@ const RATCHET_SCRIPT: &str = ".github/scripts/release-size-guard.sh";
 
 #[test]
 #[cfg(unix)]
-fn k3_size_guard_enforces_the_reserved_margin_and_nfr9_boundaries() {
+fn k3_size_guard_warns_on_the_reserved_margin_and_fails_above_nfr9() {
     use std::os::unix::fs::PermissionsExt;
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(RATCHET_SCRIPT);
     assert_ne!(
@@ -534,10 +537,12 @@ fn k3_size_guard_enforces_the_reserved_margin_and_nfr9_boundaries() {
     let dir = tempfile::tempdir().expect("sparse file directory");
     let binary = dir.path().join("binary with spaces");
     let file = std::fs::File::create(&binary).expect("sparse binary");
-    for (bytes, code, diagnostic) in [
-        (ceiling - margin, 0, ""),
-        (ceiling - margin + 1, 1, "RESERVED_HEADROOM_BYTES"),
-        (ceiling + 1, 1, "NFR9"),
+    // The reserve only warns (owner decision 2026-11-22); the NFR9 ceiling fails.
+    for (bytes, code, warns) in [
+        (ceiling - margin, 0, false),
+        (ceiling - margin + 1, 0, true),
+        (ceiling, 0, true),
+        (ceiling + 1, 1, false),
     ] {
         file.set_len(bytes).expect("sparse binary length");
         let output = std::process::Command::new(&script)
@@ -545,14 +550,13 @@ fn k3_size_guard_enforces_the_reserved_margin_and_nfr9_boundaries() {
             .output()
             .expect("run guard");
         assert_eq!(output.status.code(), Some(code), "{bytes}: {output:?}");
-        if !diagnostic.is_empty() {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(text.contains(diagnostic), "{bytes}: {text}");
-        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let warning = stdout
+            .lines()
+            .any(|line| line.starts_with("::warning ") && line.contains("RESERVED_HEADROOM_BYTES"));
+        assert_eq!(warning, warns, "{bytes}: {stdout}");
+        assert_eq!(stderr.contains("NFR9"), code == 1, "{bytes}: {stderr}");
     }
     // A symlink is measured by its target, not by its own path length.
     let link = dir.path().join("link to binary");
@@ -636,10 +640,11 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
                 .unwrap()
     );
     let ci = include_str!("../.github/workflows/ci.yml");
-    let capture = ci
-        .split_once("  tui-conflict-flag:\n")
-        .expect("capture job")
-        .1;
+    assert!(
+        !ci.lines()
+            .any(|line| line.contains("cargo build") && line.contains("--release")),
+        "a per-push release build skips the ratchet; release builds live in nightly-proofs.yml"
+    );
     const BUILD_AND_GUARD: &str = concat!(
         "      - name: Build shipped release set capture binary\n",
         "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron\n",
@@ -657,19 +662,40 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
         "              | .github/scripts/single-tls-stack.sh \"${features:-default}\"\n",
         "          done\n",
     );
+    const SMOKE: &str = "      - name: Smoke required release features\n        shell: bash\n        run: .github/scripts/release-smoke.sh target/release/rustain\n";
+    const SHARE: &str = "      - name: Share the shipped release binary\n        uses: actions/upload-artifact@v4\n        with:\n          name: shipped-release-binary\n";
+    const FETCH: &str = "        uses: actions/download-artifact@v4\n        with:\n          name: shipped-release-binary\n          path: target/release\n";
     const NATIVE_RUN: &str = concat!(
         "          env -u RUSTAIN_TUI_CLIENT_BINARY -u RUSTAIN_CONFLICT_CAPTURE_ONLY pytest \\\n",
         "            'tests_tui/test_story_19_21b_conflict_flag.py::test_conflict_flag_capture[80x24]' \\\n",
         "            -p no:rerunfailures -n 0 --timeout=420 --junitxml=conflict-native-results.xml -v\n",
     );
     assert_eq!(
-        capture.matches("cargo build ").count(),
+        PROOFS.matches("cargo build ").count(),
         1,
-        "reuse the existing release build"
+        "one shipped-set release build feeds every capture"
     );
+    let build = job(PROOFS, "shipped-release");
+    let positions = [BUILD_AND_GUARD, TLS_GUARD, SMOKE, SHARE].map(|step| {
+        build
+            .find(step)
+            .unwrap_or_else(|| panic!("missing exact shipped-release step: {step}"))
+    });
+    assert!(
+        positions.is_sorted(),
+        "the shipped build must check size, TLS and the smoke before it is shared"
+    );
+    for id in ["tui-act1", "tui-act2", "tui-conflict-flag"] {
+        let capture = job(PROOFS, id);
+        assert!(
+            capture.contains("    needs: shipped-release\n") && capture.contains(FETCH),
+            "{id} must capture the shared, ratcheted shipped binary"
+        );
+        assert!(!capture.contains("cargo build"), "{id} must not rebuild");
+    }
+    let capture = job(PROOFS, "tui-conflict-flag");
     let positions = [
-        BUILD_AND_GUARD,
-        TLS_GUARD,
+        FETCH,
         "      - name: Verify existing ephemeral TLS fixture tool\n        run: openssl version\n",
         "      - name: Execute exact conflict 80x24 capture without reruns\n",
         NATIVE_RUN,
@@ -683,15 +709,29 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
     });
     assert!(
         positions.is_sorted(),
-        "Conflict must build once, check size, TLS and OpenSSL, then capture, verify and publish"
+        "Conflict must fetch the shipped binary, check OpenSSL, then capture, verify and publish"
     );
     assert!(
-        positions[5]
+        positions[4]
             < capture
                 .find("        uses: actions/upload-artifact@v4")
                 .unwrap(),
         "Conflict upload must follow the current receipt controls"
     );
+}
+
+/// The text of one job in a workflow: from its `  <id>:` header to the next
+/// two-space-indented line (the next job id or a comment above it).
+fn job<'a>(workflow: &'a str, id: &str) -> &'a str {
+    let body = workflow
+        .split_once(&format!("\n  {id}:\n"))
+        .unwrap_or_else(|| panic!("missing workflow job: {id}"))
+        .1;
+    let end = body
+        .match_indices("\n  ")
+        .find(|(at, _)| !body[at + 3..].starts_with(' '))
+        .map_or(body.len(), |(at, _)| at);
+    &body[..end]
 }
 
 /// rel-4: the sign job publishes `dist/install.sh` as `install.sh`, only when its
@@ -742,7 +782,7 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
             .collect()
     }
 
-    let ci = include_str!("../.github/workflows/ci.yml");
+    let build = job(PROOFS, "shipped-release");
     let smoke = include_str!("../.github/scripts/release-smoke.sh");
     let install = include_str!("../docs/install-macos.md");
     let manual = include_str!("../RELEASING.md");
@@ -751,17 +791,6 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
         "cargo build --release --target ${{ matrix.target }} --features",
         "--features ",
     ));
-    let act1 = ci
-        .split_once("  tui-act1:")
-        .expect("tui-act1 job")
-        .1
-        .split_once("  tui-conflict-flag:")
-        .expect("tui-conflict-flag job")
-        .0;
-    let conflict = ci
-        .split_once("  tui-conflict-flag:")
-        .expect("tui-conflict-flag job")
-        .1;
     let smoke_features = smoke
         .lines()
         .find_map(|line| line.strip_prefix("REQUIRED_FEATURES=\""))
@@ -769,7 +798,7 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
         .expect("REQUIRED_FEATURES anchor")
         .split_whitespace()
         .collect();
-    let tls = ci
+    let tls = build
         .lines()
         .find_map(|line| line.trim().strip_prefix("for features in '' "))
         .and_then(|line| line.strip_suffix("; do"))
@@ -777,17 +806,9 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
     let sites = vec![
         ("release.yml", release.clone()),
         (
-            "tui-act1",
+            "nightly-proofs shipped-release",
             set(value(
-                act1,
-                "cargo build --release --features",
-                "--features ",
-            )),
-        ),
-        (
-            "tui-conflict-flag",
-            set(value(
-                conflict,
+                build,
                 "cargo build --locked --release --features",
                 "--features ",
             )),
@@ -826,16 +847,19 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
         "release build differs from the shipped set"
     );
     assert_eq!(mismatch(&sites, &release), Vec::<&str>::new());
-    let altered = act1.replace(
-        "cargo build --release --features self-update,relay-server,a2a,p2p,telegram,cron",
-        "cargo build --release --features self-update,relay-server,a2a,p2p,telegram",
+    let altered = build.replace(
+        "cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron",
+        "cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram",
     );
-    assert_ne!(altered, act1, "drift fixture must change the build line");
+    assert_ne!(altered, build, "drift fixture must change the build line");
     let mut altered_sites = sites.clone();
     altered_sites[1].1 = set(value(
         &altered,
-        "cargo build --release --features",
+        "cargo build --locked --release --features",
         "--features ",
     ));
-    assert_eq!(mismatch(&altered_sites, &release), vec!["tui-act1"]);
+    assert_eq!(
+        mismatch(&altered_sites, &release),
+        vec!["nightly-proofs shipped-release"]
+    );
 }

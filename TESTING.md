@@ -40,7 +40,6 @@ python3 -m venv /tmp/rustain-metrics-venv
 python3 -m pip install -r tools/ci/requirements-metrics.txt
 python3 .github/scripts/event-loop-complexity.py src/infrastructure/runtime/event_loop.rs
 python3 .github/scripts/test_event_loop_complexity.py
-python3 .github/scripts/test_ratchet_signoff_guard.py
 cargo test --locked --test core conformance::
 ```
 
@@ -49,18 +48,17 @@ all written cfg branches and unexpanded macro tokens. The CLI documents the
 counting model and emits bounds, decision counts, exact versions and SHA-256
 identities. ADR-08-01 §D6.6 / Story19.21e records the separately owner-ratified
 complete historical baseline **634** and unchanged **120%** multiplier: integer-floor
-budget **760**. The independent **11,487-line** hard ceiling remains binding. A protected constant
-change requires its own `RATCHET-SIGNOFF: CONSTANT_NAME — rationale; reviewer`
-in the commit range or PR body; an unrelated or partial approval is insufficient.
+budget **760**. The independent line ratchet on `event_loop.rs` (baseline **8,955**,
+soft **+75**, hard **+250** = **9,205** lines) remains binding.
 
-`attach_loop.rs` (**10,273** lines) and `attach_keys.rs` (**11,187** lines) carry the
-same kind of line ratchet in `tests/conformance.rs`, but their hard ceiling equals the
-baseline: they never grow net (lane contract, boy-scout rule), and there is no soft
-band. A row that adds lines to either file extracts at least as many into a sibling
-module. Raising a ceiling means changing `ATTACH_LOOP_*` / `ATTACH_KEYS_*`
-(`BASELINE_LINES`, `BASELINE_SHA`, `HARD_BUDGET`) with a constant-named
-`RATCHET-SIGNOFF` per changed constant; `test_attach_*_baseline_integrity` checks that
-each baseline matches `git show <SHA>:<path>`.
+`attach_loop.rs` (baseline **10,272** lines, hard **10,580**) and `attach_keys.rs`
+(baseline **11,187** lines, hard **11,522**) carry the same kind of line ratchet in
+`tests/conformance.rs` with one band: the hard ceiling is the baseline plus 3%
+(integer floor), and there is no soft band. All three baselines are the sizes at
+`ddd7dc8e` (owner decision 6, 2026-11-22). Raising a baseline is an ordinary edit
+to `EVENT_LOOP_BASELINE_LINES`, `ATTACH_LOOP_BASELINE_LINES` or
+`ATTACH_KEYS_BASELINE_LINES` in the change that needs it, with the reason in the
+commit message; there is no SHA pin and no sign-off trailer.
 
 Lifetime/label words are excluded both in parsed Rust and inside unexpanded macro
 token trees, where the pinned grammar splits the apostrophe from its identifier.

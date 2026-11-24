@@ -4,8 +4,9 @@
 # +cron 38,165,896 B (+153,176); shipped six-feature B6 39,386,672 B
 # (+1,373,952). B6 exceeds the 38 MiB fit threshold 39,321,600 B, so D-25
 # applies the 40 MiB NFR9 ceiling. Reserve is calculated for B6 + 65,536 B:
-# 1,966,080 B, leaving a 39,976,960 B limit and 590,288 B above B6.
-# Recalibrate only with a reviewed measured table; check NFR9 first.
+# 1,966,080 B, leaving a 39,976,960 B warning limit and 590,288 B above B6.
+# The NFR9 ceiling fails; crossing the reserve only warns (owner decision
+# 2026-11-22). Check NFR9 before recalibrating the reserve.
 set -euo pipefail
 
 NFR9_CEILING_BYTES=41943040
@@ -19,12 +20,11 @@ fi
 # -L measures the file a symlink names; GNU stat first, BSD (macOS) fallback.
 SIZE=$(stat -L -c%s -- "$1" 2>/dev/null || stat -L -f%z -- "$1")
 LIMIT=$((NFR9_CEILING_BYTES - RESERVED_HEADROOM_BYTES))
-echo "Binary size: ${SIZE} bytes; ratchet limit: ${LIMIT} bytes"
+echo "Binary size: ${SIZE} bytes; reserve warning limit: ${LIMIT} bytes; NFR9 ceiling: ${NFR9_CEILING_BYTES} bytes"
 if [ "$SIZE" -gt "$NFR9_CEILING_BYTES" ]; then
     echo "ERROR: NFR9 ceiling exceeded (${SIZE} > ${NFR9_CEILING_BYTES} bytes)" >&2
     exit 1
 fi
 if [ "$SIZE" -gt "$LIMIT" ]; then
-    echo "ERROR: RESERVED_HEADROOM_BYTES=${RESERVED_HEADROOM_BYTES} violated (${SIZE} > ${LIMIT} bytes)" >&2
-    exit 1
+    echo "::warning title=Size reserve::RESERVED_HEADROOM_BYTES=${RESERVED_HEADROOM_BYTES} crossed (${SIZE} > ${LIMIT} bytes); $((NFR9_CEILING_BYTES - SIZE)) bytes remain below the NFR9 ceiling"
 fi

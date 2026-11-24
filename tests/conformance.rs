@@ -561,43 +561,15 @@ fn test_no_std_sync_lock_in_async_module() {
 // process-architecture.md §1.3 registration per AC-7).
 //
 // COMPLEXITY_MULTIPLIER ratified by Winston at Decision Gate (2026-05-17): 1.20.
-// EVENT_LOOP_BASELINE_LINES + _SHA captured at Phase 4 close; pin at merge.
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Line count baseline for `event_loop.rs`.
-/// Re-baselined 2026-05-29 (architect sign-off) from the stale Story 8.0a value
-/// (10_007 @ `4a0ac37`, never re-pinned through Epics 9–10) to the current
-/// `prd` HEAD `6bbedde` (the 10-6 merge), where the file is 10_696 lines.
-/// The +250 hard headroom below carries forward unchanged.
 ///
-/// Re-pinned 2026-06-02 (Story 11.4a, Epic-11 CLOSURE GATE — architect-ratified
-/// via /bmad-party-mode) from 10_696 to 10_990: the new user-facing `/memory
-/// forget` command grew the loop past the rolling +250 headroom even after
-/// extracting its logic to `handlers::forget_command` and DRY-ing both inline
-/// card renders into `widgets::inline_card`.
-///
-/// Re-baselined + pinned 2026-06-05 (Epic 11 retro AI-11.7 closeout; Lunarpulse
-/// sign-off) from the phantom 10_990 to 11_071 at SHA `1bde771`. The 10_990 was
-/// measured at 11.4a *dev-complete*, before its 16 review patches (~24 lines)
-/// landed, so no committed commit ever held a 10_990-line `event_loop.rs`
-/// (11.4a `d0eed74` is 11_014; 11.6 `657916c` is 11_061; HEAD `1bde771` is
-/// 11_071, incl. the AI-11.5 trace-id fix). This reconciles the const to
-/// committed reality and un-skips `test_event_loop_baseline_integrity`.
-///
-/// Re-pinned 2026-08-01 (Story 18.3d Task 1) from the unreachable
-/// `1bde7715d9931a249ccee7510eeaf60590ad5070` object to the committed 18.3c
-/// baseline `cb99253`, where `event_loop.rs` is 11_237 lines. The paired
-/// `/memory` extraction creates headroom without hiding the committed baseline.
-///
-/// GOVERNANCE (Epic 11 retro AI-11.3 / closes AI-10.3): this and every other
-/// tracked ratchet const (`MAX_KNOWN_BYPASSES`, `MAX_KNOWN_STD_SYNC_LOCKS`,
-/// `EVENT_LOOP_*`, `ATTACH_LOOP_BASELINE_{LINES,SHA}` / `ATTACH_LOOP_HARD_BUDGET`,
-/// `ATTACH_KEYS_BASELINE_{LINES,SHA}` / `ATTACH_KEYS_HARD_BUDGET`,
-/// `EXPECTED_HANDLE_COUNT`) are gated by
-/// `.github/workflows/ratchet-signoff-guard.yml`. Changing any of them requires a
-/// `RATCHET-SIGNOFF: <CONST_NAME> — <why>` trailer in a commit message or the PR
-/// body, or CI fails. Bumping a ratchet is a governance decision, never a silent edit.
-const EVENT_LOOP_BASELINE_LINES: usize = 11_237;
+/// Re-pinned 2026-11-22 (owner decision 6, process-friction-4) to the size at
+/// `origin/main` `ddd7dc8e`: 8_955 lines. The previous 11_237 baseline left a
+/// 11_487-line hard ceiling that no longer guarded anything. Edit the const in the
+/// same change that justifies it; no SHA pin and no sign-off trailer.
+const EVENT_LOOP_BASELINE_LINES: usize = 8_955;
 
 /// Soft ceiling: PR-comment warning. Mary's calibration (baseline+75).
 const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
@@ -606,17 +578,11 @@ const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
 const EVENT_LOOP_HARD_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 250;
 
 /// Complete historical run(), ratified by Lunarpulse on 2026-10-16 (Story 19.21e).
-/// RATCHET-SIGNOFF: EVENT_LOOP_RUN_BASELINE_CCN — ADR-08-01 §D6.6 approval record.
+/// Approval record: ADR-08-01 §D6.6.
 const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 634;
 
 /// Winston-ratified multiplier × 100 (avoids float arithmetic in const context).
 const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
-
-/// Commit SHA at which `EVENT_LOOP_BASELINE_LINES` was measured.
-///
-/// Re-pinned by Story 18.3d to the reachable 18.3c baseline, where
-/// `git show <SHA>:src/infrastructure/runtime/event_loop.rs | wc -l` is 11_237.
-const EVENT_LOOP_BASELINE_SHA: &str = "cb99253cd5b8ad16fd29f84b80bca745c2f8ec51";
 
 /// AC-4 line-budget ratchet for `event_loop.rs`. Soft warns; hard fails.
 /// Per Story 8.0a AC-4 + ADR-08-01 §D6.5.
@@ -632,7 +598,7 @@ fn test_event_loop_line_budget() {
         "event_loop.rs HARD line-budget exceeded: {} > {} (baseline {} + 250). \
          Per ADR-08-01 §D6.5, this is a CI failure. Either:\n\
            (a) reduce event_loop.rs (extract additional handlers per the Story 8.0a pattern), or\n\
-           (b) bump EVENT_LOOP_BASELINE_LINES in tests/conformance.rs with architect sign-off + new SHA.\n\
+           (b) raise EVENT_LOOP_BASELINE_LINES in tests/conformance.rs in the same change, with the reason.\n\
          See process-architecture.md §1.3 for ratchet bump policy.",
         lines,
         EVENT_LOOP_HARD_BUDGET,
@@ -648,6 +614,7 @@ fn test_event_loop_line_budget() {
         );
     }
 }
+
 /// Story 18.3d Task 1: `/memory consolidate|forget` must delegate to the
 /// runtime effect shell instead of spending the event-loop line budget.
 #[test]
@@ -670,59 +637,6 @@ fn test_event_loop_memory_command_delegates_to_runtime_bridge() {
             && bridge.contains("parse_forget_query(cmd_name, cmd_arg)"),
         "the runtime bridge must retain both shipped memory command paths"
     );
-}
-
-/// AC-4c baseline integrity (Mary's anchor): the pinned const must match what
-/// `git show <SHA>:event_loop.rs | wc -l` says at the SHA. Falsifies silent
-/// `const` drift. Skipped if `EVENT_LOOP_BASELINE_SHA == "PENDING_MERGE_SHA"`
-/// (pre-merge state).
-#[test]
-fn test_event_loop_baseline_integrity() {
-    if EVENT_LOOP_BASELINE_SHA == "PENDING_MERGE_SHA" {
-        eprintln!(
-            "test_event_loop_baseline_integrity SKIPPED: EVENT_LOOP_BASELINE_SHA \
-             is the pre-merge sentinel. Pin actual SHA at Task 16 closeout."
-        );
-        return;
-    }
-
-    let output = std::process::Command::new("git")
-        .args([
-            "show",
-            &format!(
-                "{}:src/infrastructure/runtime/event_loop.rs",
-                EVENT_LOOP_BASELINE_SHA
-            ),
-        ])
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let content = String::from_utf8_lossy(&out.stdout);
-            let actual_lines = content.lines().count();
-            assert_eq!(
-                actual_lines, EVENT_LOOP_BASELINE_LINES,
-                "baseline drift: EVENT_LOOP_BASELINE_LINES = {} but \
-                 `git show {}:event_loop.rs | wc -l` = {}. \
-                 Per ADR-08-01 §D6 + Mary's Round-3 amendment AC-4c, the const must match the SHA.",
-                EVENT_LOOP_BASELINE_LINES, EVENT_LOOP_BASELINE_SHA, actual_lines,
-            );
-        }
-        Ok(out) => {
-            eprintln!(
-                "test_event_loop_baseline_integrity: git show failed ({}), test inconclusive. \
-                 stderr: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr),
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "test_event_loop_baseline_integrity: git not available ({}), test inconclusive.",
-                e
-            );
-        }
-    }
 }
 
 /// Complete-function source metric; missing tooling or invalid evidence fails closed.
@@ -888,7 +802,7 @@ fn test_event_loop_complexity_floor() {
         report.ccn <= budget,
         "event_loop.rs::run() CCN budget exceeded: {} > {} (baseline {} × {}%). \
          Reduce state-mutation complexity under ADR-08-01 D5; numeric changes require \
-         explicit ratification and a constant-named RATCHET-SIGNOFF (D6.6).",
+         explicit ratification (D6.6).",
         report.ccn,
         budget,
         EVENT_LOOP_RUN_BASELINE_CCN,
@@ -900,35 +814,32 @@ fn test_event_loop_complexity_floor() {
 // hygiene-1: line ratchets for `attach_loop.rs` and `attach_keys.rs`
 // ──────────────────────────────────────────────────────────────────────────────
 //
-// Same mechanism as `event_loop.rs` above, but the hard budget equals the
-// baseline: the lane contract says these files never grow net (boy-scout rule),
-// so there is no headroom and no soft band. A row that adds lines extracts at
-// least as many. All six constants are governed by
-// `.github/workflows/ratchet-signoff-guard.yml` (see the GOVERNANCE note above).
+// Same mechanism as `event_loop.rs` above with one hard band: the budget is the
+// baseline plus 3% (integer floor), no soft band. Baselines are the sizes at
+// `origin/main` `ddd7dc8e` (owner decision 6, 2026-11-22). Raising a baseline is
+// an ordinary edit in the change that needs it; no SHA pin and no sign-off trailer.
 
-/// Path of `attach_loop.rs`, shared by its budget and integrity tests.
+/// Path of `attach_loop.rs`.
 const ATTACH_LOOP_PATH: &str = "src/infrastructure/runtime/attach_loop.rs";
 
-/// Line count baseline for `attach_loop.rs`, measured at `ATTACH_LOOP_BASELINE_SHA`.
-const ATTACH_LOOP_BASELINE_LINES: usize = 10_273;
+/// Line count baseline for `attach_loop.rs` at `ddd7dc8e`.
+const ATTACH_LOOP_BASELINE_LINES: usize = 10_272;
 
-/// Hard ceiling: CI failure. Equal to the baseline (never grow net).
-const ATTACH_LOOP_HARD_BUDGET: usize = ATTACH_LOOP_BASELINE_LINES;
+/// Hard ceiling: CI failure at baseline + 3% (10_580).
+const ATTACH_LOOP_HARD_BUDGET: usize = three_percent_band(ATTACH_LOOP_BASELINE_LINES);
 
-/// Commit where `git show <SHA>:src/infrastructure/runtime/attach_loop.rs | wc -l` is 10_273.
-const ATTACH_LOOP_BASELINE_SHA: &str = "aab1ccb794967a8e4d286e3d63f570b24c8a0a31";
-
-/// Path of `attach_keys.rs`, shared by its budget and integrity tests.
+/// Path of `attach_keys.rs`.
 const ATTACH_KEYS_PATH: &str = "src/infrastructure/runtime/attach_keys.rs";
 
-/// Line count baseline for `attach_keys.rs`, measured at `ATTACH_KEYS_BASELINE_SHA`.
+/// Line count baseline for `attach_keys.rs` at `ddd7dc8e`.
 const ATTACH_KEYS_BASELINE_LINES: usize = 11_187;
 
-/// Hard ceiling: CI failure. Equal to the baseline (never grow net).
-const ATTACH_KEYS_HARD_BUDGET: usize = ATTACH_KEYS_BASELINE_LINES;
+/// Hard ceiling: CI failure at baseline + 3% (11_522).
+const ATTACH_KEYS_HARD_BUDGET: usize = three_percent_band(ATTACH_KEYS_BASELINE_LINES);
 
-/// Commit where `git show <SHA>:src/infrastructure/runtime/attach_keys.rs | wc -l` is 11_187.
-const ATTACH_KEYS_BASELINE_SHA: &str = "aab1ccb794967a8e4d286e3d63f570b24c8a0a31";
+const fn three_percent_band(baseline: usize) -> usize {
+    baseline + baseline * 3 / 100
+}
 
 fn line_budget_exceeded(lines: usize, hard_budget: usize) -> bool {
     lines > hard_budget
@@ -940,37 +851,11 @@ fn assert_line_budget(path: &str, baseline: usize, hard_budget: usize) {
     let lines = content.lines().count();
     assert!(
         !line_budget_exceeded(lines, hard_budget),
-        "{path} HARD line-budget exceeded: {lines} > {hard_budget} (baseline {baseline}, no \
-         headroom). The lane contract forbids net growth. Either:\n\
-           (a) extract at least as many lines as the change adds into a sibling module, or\n\
-           (b) raise the baseline const in tests/conformance.rs with a RATCHET-SIGNOFF trailer + new SHA."
+        "{path} HARD line-budget exceeded: {lines} > {hard_budget} (baseline {baseline} + 3%). \
+         Either:\n\
+           (a) extract lines from the change into a sibling module, or\n\
+           (b) raise the baseline const in tests/conformance.rs in the same change, with the reason."
     );
-}
-
-/// Event-loop pattern: the const must match `git show <SHA>:<path>`; inconclusive
-/// (not failing) when git cannot show the SHA, e.g. depth-1 CI clones.
-fn check_baseline_integrity(path: &str, sha: &str, baseline: usize) {
-    let output = std::process::Command::new("git")
-        .args(["show", &format!("{sha}:{path}")])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let actual_lines = String::from_utf8_lossy(&out.stdout).lines().count();
-            assert_eq!(
-                actual_lines, baseline,
-                "baseline drift: the {path} baseline const = {baseline} but \
-                 `git show {sha}:{path} | wc -l` = {actual_lines}; the const must match the SHA."
-            );
-        }
-        Ok(out) => eprintln!(
-            "baseline integrity for {path}: git show failed ({}), test inconclusive. stderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr),
-        ),
-        Err(e) => {
-            eprintln!("baseline integrity for {path}: git not available ({e}), test inconclusive.")
-        }
-    }
 }
 
 #[test]
@@ -983,15 +868,6 @@ fn test_attach_loop_line_budget() {
 }
 
 #[test]
-fn test_attach_loop_baseline_integrity() {
-    check_baseline_integrity(
-        ATTACH_LOOP_PATH,
-        ATTACH_LOOP_BASELINE_SHA,
-        ATTACH_LOOP_BASELINE_LINES,
-    );
-}
-
-#[test]
 fn test_attach_keys_line_budget() {
     assert_line_budget(
         ATTACH_KEYS_PATH,
@@ -1000,18 +876,11 @@ fn test_attach_keys_line_budget() {
     );
 }
 
+/// K4: the budget is baseline + 3% (floor) and the predicate is strict `>`.
 #[test]
-fn test_attach_keys_baseline_integrity() {
-    check_baseline_integrity(
-        ATTACH_KEYS_PATH,
-        ATTACH_KEYS_BASELINE_SHA,
-        ATTACH_KEYS_BASELINE_LINES,
-    );
-}
-
-/// K4: the budget predicate is strict `>` with no headroom.
-#[test]
-fn line_budget_exceeded_is_strict_and_has_no_headroom() {
+fn line_budget_is_a_three_percent_band_with_a_strict_predicate() {
+    assert_eq!(ATTACH_LOOP_HARD_BUDGET, 10_580);
+    assert_eq!(ATTACH_KEYS_HARD_BUDGET, 11_522);
     for budget in [ATTACH_LOOP_HARD_BUDGET, ATTACH_KEYS_HARD_BUDGET] {
         assert!(!line_budget_exceeded(budget, budget));
         assert!(line_budget_exceeded(budget + 1, budget));

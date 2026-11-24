@@ -1,8 +1,9 @@
 """Assign every collected tests_tui test to one lane (lanes.json); fail collection otherwise.
 
-Lanes: ``core`` and ``governance`` run per PR, ``native_nightly`` runs in the
-integrator's parity leg until a nightly job exists, ``manual`` is never selected,
-and ``requires_api`` tests form the API lane (never in ``lanes.json``).
+Lanes: ``core`` runs per push (``ci.yml``), ``governance`` runs in
+``nightly-proofs.yml``, ``native_nightly`` runs in ``nightly-tui.yml``, the
+integrator's parity leg and the named nightly-proofs capture jobs, ``manual`` is
+never selected, and ``requires_api`` tests form the API lane (never in ``lanes.json``).
 
 The plugin is loaded by ``conftest.py`` (``pytest_plugins``). Its hook runs
 ``tryfirst``, so it sees every collected item before ``-m``, ``-k`` and

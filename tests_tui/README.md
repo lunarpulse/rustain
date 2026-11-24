@@ -21,9 +21,8 @@ python3 -m pip install -e "./tests_tui[dev]"
 # Build the binary (done automatically by fixtures, or manually)
 cargo build
 
-# Run the generic per-PR lane; the policy and named capture jobs are separate.
-RUSTAIN_TUI_BINARY="$PWD/target/debug/rustain" python3 -m pytest tests_tui/ \
-  -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py
+# Run the per-push core lane; receipt, governance and named capture jobs run in nightly-proofs.yml.
+RUSTAIN_TUI_BINARY="$PWD/target/debug/rustain" python3 -m pytest tests_tui/ -m core
 
 # Preview collection and lane assignments without executing the cases.
 python3 -m pytest tests_tui --collect-only -q
@@ -48,7 +47,7 @@ RUSTAIN_CARRIED_J10_REVISION=$(git rev-parse --verify HEAD)
 export RUSTAIN_CARRIED_J10_REVISION
 python3 tests_tui/carried_j10_receipts.py --repository "$PWD" --revision "$RUSTAIN_CARRIED_J10_REVISION"
 
-# All 37 controls, using the same pin after fresh capture in the Act 1 job.
+# All 37 controls, using the same pin after fresh capture in the nightly Act 1 job.
 out=$(mktemp -d /tmp/rustain-receipt-checker.XXXXXX)
 RUSTAIN_RECEIPT_EVIDENCE_DIR="$out/evidence" \
   python3 -m pytest tests_tui/test_receipt_controls.py \
@@ -98,7 +97,8 @@ mutant receipts live next to the story file in the outer repo).
 
 ### Named Act 1 and Act 2 gates
 
-The two PR jobs keep exact, single-attempt selectors:
+The two capture jobs in `.github/workflows/nightly-proofs.yml` (nightly, dispatch,
+`rc/**` and tags) keep exact, single-attempt selectors:
 
 | Job / module under `tests_tui/` | Exact selectors after `::` |
 |---|---|
@@ -106,8 +106,9 @@ The two PR jobs keep exact, single-attempt selectors:
 | `tui-act1` / `test_story_19_21b_standalone_modes.py` | `test_standalone_auto_mode_still_requires_human_send[yolo]`, `test_standalone_auto_mode_still_requires_human_send[autoedit]` |
 | `tui-act2` / `test_story_19_19_act2_consultation.py` | `test_act2_consultation_adr_fanout[80]` (24 rows) |
 
-Act 1 and modes use the shipped six-feature release; the Act 2 CI build is A2A-only.
-Parity additionally runs the same Act 2 ID against the shipped release. Run the
+All three capture jobs (Act 1 with modes, Act 2, Conflict) use the one shipped
+six-feature release that the workflow's `shipped-release` job builds, ratchets and
+smokes. Parity additionally runs the same Act 2 ID against an A2A-only release. Run the
 pinned preflight above in both jobs before native work. Pass `-p no:rerunfailures`
 and give each Act 1 and modes invocation a separate, fresh absolute
 `RUSTAIN_NAMED_PTY_EVIDENCE` JSONL path if retaining evidence. The fixture checks
@@ -122,9 +123,9 @@ parity or the carried controls.
 
 ### Executing conflict-flag capture (Story 19.21h)
 
-The original `19-21b` scene names are retained. The job builds the locked shipped
-six-feature release once, checks size and the single TLS stack, then uses that
-same binary for every host and client. The existing `openssl` executable is
+The original `19-21b` scene names are retained. The job fetches the locked shipped
+six-feature release that `shipped-release` built and checked for size and the single
+TLS stack, then uses that same binary for every host and client. The existing `openssl` executable is
 required for ephemeral local TLS and synthetic pinned Ed25519 identities.
 Certificate verification stays enabled; each observing proxy has its own
 trusted-CA context. No provider account or sibling checkout is needed.
@@ -226,7 +227,7 @@ compared by equivalent graphemes; HTTP and journal text remain byte-exact. Raw
 UTF-8 SHA256 and the product's canonical-JSON-string content hash are distinct.
 This capture does not close J10 or add recipient authorship or policy authority.
 
-The dedicated CI job selects those exact case IDs, rejects zero/skip/failure/error
+The dedicated nightly-proofs job selects those exact case IDs, rejects zero/skip/failure/error
 and always uploads only named JUnit files, identity/checkpoint/HTTP/scene ledgers,
 painted screens, public team logs, genuine transcripts, the exact selected run
 manifest and the three integrity JSON diagnostics. It never uploads fixture keys,
@@ -471,9 +472,9 @@ Every test belongs to exactly one lane:
 
 | Lane | Marker | Runs | Meaning |
 |------|--------|------|---------|
-| core | `core` | generic per PR | the regression stoppers: the native tests D1 keeps and the helper controls they run; no capability build |
-| governance | `governance` | generic per PR or named receipt jobs | receipt and conflict-manifest controls; capability-tagged governance is not a nightly product variant |
-| native_nightly | `native_nightly` | nightly debug, parity, or exact named PR jobs | the scheduled plain/federation subsets are disjoint from Act 1, modes, Act 2 and Conflict |
+| core | `core` | generic per push (`ci.yml`) | the regression stoppers: the native tests D1 keeps and the helper controls they run; no capability build |
+| governance | `governance` | `receipts-governance` and named receipt jobs (`nightly-proofs.yml`) | receipt and conflict-manifest controls; capability-tagged governance is not a nightly product variant |
+| native_nightly | `native_nightly` | nightly debug, parity, or exact named nightly-proofs jobs | the scheduled plain/federation subsets are disjoint from Act 1, modes, Act 2 and Conflict |
 | manual | `manual` | explicit local only | the table names the owning `tui-` row |
 | API | `requires_api` | on request | needs a live key; skipped without one; no lane marker, never in `lanes.json` |
 
@@ -494,26 +495,24 @@ Explicit `file.py::test[param]`, ignored files and other suites do not make
 unvisited modules full. `--strict-markers` rejects unregistered marks.
 
 ```bash
-pytest tests_tui -m core                          # the stoppers
-pytest tests_tui -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py   # CI
+pytest tests_tui -m core                          # the stoppers; CI per push
+pytest tests_tui -m "governance and not a2a_binary" --ignore=tests_tui/test_receipt_controls.py   # nightly-proofs
 pytest tests_tui -m requires_api                  # API lane (needs a key)
 pytest tests_tui --collect-only -q                # also runs the lane guard
 ```
 
 ### CI lane
 
-The `tui-tests` job runs the `core` and `governance` lanes against the debug binary the job already built, through `RUSTAIN_TUI_BINARY`:
+The `tui-tests` job in `ci.yml` runs the `core` lane against the debug binary the job already built, through `RUSTAIN_TUI_BINARY`:
 
 ```bash
-RUSTAIN_TUI_BINARY=$PWD/target/debug/rustain pytest tests_tui/ \
-  -m "core or (governance and not a2a_binary)" \
-  --ignore=tests_tui/test_receipt_controls.py \
+RUSTAIN_TUI_BINARY=$PWD/target/debug/rustain pytest tests_tui/ -m core \
   -n auto --timeout=120 -v --durations=0 --junitxml=tui-results.xml
 ```
 
 - `reruns = 0` in `pyproject.toml` keeps the generic lane single-attempt, with a 120-second case timeout. Named receipt/capture and nightly commands additionally disable the plugin with `-p no:rerunfailures`. Do not rerun a failed or timed-out result to make the gate green; retain diagnostics and report the cause. J21 campaign reruns need the explicit approval described above.
-- The generic step excludes `test_receipt_controls.py`; its separate policy step and the complete Act 1 job cover it.
-- Every skip must be listed with a reason that names its owner row in `tests_tui/skip-allowlist.json` (key `<module>::<test name>`; the file is `{}` while nothing may skip). An unlisted skip and a listed test that did not skip (stale entry) both fail the lane (`.github/scripts/check-tui-skips.py <junit.xml>... <allowlist.json>`; several JUnit files are judged as one union).
+- The `receipts-governance` job in `nightly-proofs.yml` runs the 29 receipt policy controls and the `governance and not a2a_binary` lane (excluding `test_receipt_controls.py`) with no Rust build: every governance module overrides `build_binary`. It rejects any skip. The complete Act 1 job runs all 37 receipt controls.
+- Every skip in the core lane must be listed with a reason that names its owner row in `tests_tui/skip-allowlist.json` (key `<module>::<test name>`; the file is `{}` while nothing may skip). An unlisted skip and a listed test that did not skip (stale entry) both fail the lane (`.github/scripts/check-tui-skips.py <junit.xml>... <allowlist.json>`; several JUnit files are judged as one union).
 - The `python-tui-results` artifact holds `tui-results.xml` (JUnit) and `tui-results.log` (pytest output with `--durations=0`).
 
 ### Scheduled TUI nightly

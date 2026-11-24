@@ -30,9 +30,9 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
     # Lane markers: added by tests_tui/lane_guard.py from tests_tui/lanes.json, never written in a test file.
-    "core: per-PR lane: the regression stoppers, no capability build (CI: -m 'core or (governance and not a2a_binary)')",
-    "governance: per-PR lane: receipt and conflict-manifest controls",
-    "native_nightly: native or capability-build tests kept out of the per-PR lane (the parity leg runs the debug ones)",
+    "core: per-push lane: the regression stoppers, no capability build (CI: -m core)",
+    "governance: receipt and conflict-manifest controls (nightly-proofs.yml: -m 'governance and not a2a_binary')",
+    "native_nightly: native or capability-build tests kept out of the per-push lane (nightly-tui.yml and the parity leg run the debug ones)",
     "manual: never selected by a lane; the table names the owner row",
     "requires_api: API lane: test requires a live API key and network access (no lane marker, not in lanes.json)",
     "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
@@ -43,9 +43,11 @@ markers = [
     "story_19_19: Story 19-19 — executing consultation and ADR fan-out capture",
     "story_19_21: Story 19.21 — attached Act 1 distribution capture",
 ]
-# Lanes (see README "Lanes"). CI per PR:
-#   pytest tests_tui/ -m "core or (governance and not a2a_binary)" --ignore=tests_tui/test_receipt_controls.py -n auto --timeout=120
-# Parity leg (until a nightly job exists):
+# Lanes (see README "Lanes"). CI per push:
+#   pytest tests_tui/ -m core -n auto --timeout=120
+# nightly-proofs.yml (with the 29 receipt policy controls):
+#   pytest tests_tui/ -m "governance and not a2a_binary" --ignore=tests_tui/test_receipt_controls.py -n auto --timeout=120
+# nightly-tui.yml and the parity leg:
 #   pytest tests_tui/ -m "native_nightly and not a2a_binary and not p2p_binary" -n auto --timeout=300
 # API lane: pytest tests_tui/ -m requires_api (needs a key; skipped without one).
 timeout = 180

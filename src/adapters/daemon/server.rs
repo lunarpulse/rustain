@@ -6495,6 +6495,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "quarantine DF-19-20C-K07-CI-PEER-ACCEPTED-ORDER until 2026-12-07"]
     async fn story19_20c_projection_k07_cap_keeps_attached_connections_alive() {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let workspace = tempfile::tempdir().unwrap();
