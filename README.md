@@ -5,7 +5,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-edition_2024-orange.svg)](Cargo.toml)
-[![Status](https://img.shields.io/badge/status-v0.4.1--alpha-yellow.svg)](#project-status--roadmap)
+[![Status](https://img.shields.io/badge/status-v0.5.0--alpha-yellow.svg)](#project-status--roadmap)
 
 Rustain is a standalone Rust terminal application. By default it's an AI coding
 agent — streaming responses, tool execution, collapsible content blocks,
@@ -521,13 +521,11 @@ Normal (prompt for each tool), YOLO (auto-approve safe tools), and Plan
 
 ## Project status & roadmap
 
-**Status: v0.4.1, alpha, actively developed.** Epics 1–18 are closed in the
-sprint ledger; Epics 19 (team journeys) and 20 (OAuth sign-in for the
-supported providers) are still open there for their remaining rows, and Epic 21 (TUI
-layered modals, notification lifecycle, keymap governance) has one story left,
-the three-viewport capture row 21-10. The release assets carry the
-`self-update`, `relay-server`, `a2a` and `p2p` features. v0.4.1 is a patch
-on v0.4.0: no new feature, only the fixes in the roadmap row below.
+**Status: v0.5.0, alpha, actively developed.** Epics 1–18 and 21 are closed in
+the sprint ledger; Epics 19 (team journeys) and 20 (OAuth sign-in for the
+supported providers) are still open there for their remaining rows. The release
+assets carry the `self-update`, `relay-server`, `a2a`, `p2p`, `telegram` and
+`cron` features.
 
 | Phase | Milestone | Status |
 |---|---|---|
@@ -536,8 +534,9 @@ on v0.4.0: no new feature, only the fixes in the roadmap row below.
 | **v0.75 (early phase)** | Memory tiers, context assembly, windowing, vector search | Shipped (Epic 11) |
 | **v1.5 (early phase)** | A2A client, P2P peer transport, multi-agent orchestration | Shipped (Epics 17–18); release assets carry `a2a,p2p` from `v0.2.0` |
 | **v0.4.0** | OAuth sign-in (Epic 20), federation features in release assets, TUI layered modals (Epic 21) | Shipped |
-| **v0.4.1** | Patch: `--version` prints the real features and protocol versions; the OpenAI-compatible stream decoder accepts GitHub Copilot Chat chunks without an `object` field and reports empty, error and non-stream replies; clearer Copilot login and model-refusal messages; macOS install guide; TUI test-suite refinement | Current release |
-| **v0.5.0** | Completion lane: Telegram and cron in release features, Slack channel, persona loader, daemon MCP | Planned |
+| **v0.4.1** | Patch: `--version` prints the real features and protocol versions; the OpenAI-compatible stream decoder accepts GitHub Copilot Chat chunks without an `object` field and reports empty, error and non-stream replies; clearer Copilot login and model-refusal messages; macOS install guide; TUI test-suite refinement | Shipped |
+| **v0.5.0** | Completion lane: Telegram and cron in the release assets; persona loaded from the profile's `config.file`; config-resolved MCP servers in the daemon; Tier-1 skill catalog in the TUI and ACP system prompts; turn, duration and cost limits for `rustain ask`; usage counted once and recorded for `ask` and ACP; signed `install.sh` installer; per-session write authority and owned rewind; provider credentials kept out of MCP server and bash tool environments; whole-plan cancel; Agents-tab delegation rows open the peer thread for follow-ups | Current release |
+| **v0.6.0** | Slack channel; startup sweep of orphaned session temp files | Planned |
 | **v1.0** | Hardening: containment and cost control | Planned |
 | **v2.0** | Dynamic adapter loading, community hub | Planned |
 

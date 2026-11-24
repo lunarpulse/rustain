@@ -7,7 +7,7 @@ This document describes the release process for `rustain`, including the frozen 
 Every release publishes the following assets, with names and formats that are **FROZEN** — Story 13-3a's `verify_release` computes them byte-for-byte:
 
 - **Binary asset**: `rustain-{version}-{target-triple}[.exe]`  
-  Example: `rustain-0.4.1-x86_64-unknown-linux-gnu`
+  Example: `rustain-0.5.0-x86_64-unknown-linux-gnu`
 - **Manifest**: `SHA256SUMS` — one line per asset in GNU coreutils format:  
   `<sha256-hex>  <asset-filename>`
 - **Signature**: `SHA256SUMS.minisig` — detached minisign signature of the manifest (prehashed `ED` algorithm)
@@ -136,8 +136,8 @@ When rotating the signing key:
 ## Automated Release Procedure (CI)
 
 1. Ensure all changes are on `main`, tests pass and CI is green on the commit to be tagged
-2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap, the `VERSION=` line in `docs/install-macos.md` and the `DEFAULT_VERSION=` line in `dist/install.sh`, and run the checks in the release checklist for that version
-3. Push an annotated tag: `git tag -a v0.4.1 -m "rustain v0.4.1" && git push origin v0.4.1`
+2. Update the `Cargo.toml` version (always required), regenerate `Cargo.lock` (`cargo update -w`; CI builds with `--locked`), update the README status line and roadmap, the `VERSION=` line in `docs/install-macos.md` and the `DEFAULT_VERSION=` line in `dist/install.sh`, land it on `main`, and run `scripts/release-check.sh` on the landed commit (Per-Release Checklist)
+3. Push an annotated tag: `git tag -a v0.5.0 -m "rustain v0.5.0" && git push origin v0.5.0`
 4. The `release.yml` workflow triggers automatically (tags matching `v*`):
    - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded); each leg runs `rustup target add` so the target exists for the toolchain pinned in `rust-toolchain.toml`
    - Smokes all six required release features on the Linux binary (`.github/scripts/release-smoke.sh`), then checks the served AgentCard
@@ -159,7 +159,7 @@ If CI is unavailable, a maintainer can cut a release by hand:
 git status
 
 # 2. Set version
-VERSION="0.4.1"
+VERSION="0.5.0"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary
@@ -207,9 +207,11 @@ For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile; st
 
 ## Per-Release Checklist
 
+Run `scripts/release-check.sh vX.Y.Z` from a clean checkout of the release commit. It prints one PASS, FAIL or UNKNOWN line per check: the commit is `origin/main` HEAD; `Cargo.toml` and the `DEFAULT_VERSION=` line in `dist/install.sh` carry the tag's version; the tag is not on `origin` yet; at most five quarantined tests and none past its date; the hosted `CI` run on `main` for that commit succeeded; a `Nightly proofs` run for that commit (any trigger: the 02:43 UTC schedule, a dispatch, or an `rc/**` branch pushed at it) succeeded, including its "Shipped release set" job, which holds the NFR9 ceiling, size reserve, TLS-stack and smoke checks. It exits 0 when every check passes, 1 on any FAIL and 2 when nothing failed but a run is still in progress or the anonymous GitHub API refused the request. `--sha SHA` checks another commit without the clean-tree check (a dry run). It reads no secret and changes nothing.
+
+It then prints the owner-only steps below, which it cannot check:
+
 - [ ] Confirm the `release` environment, its required reviewers and both secrets still exist, and `main` branch protection is unchanged
-- [ ] Bump `Cargo.toml` and `Cargo.lock`, update the README status line and roadmap, the `VERSION=` line in `docs/install-macos.md` and the `DEFAULT_VERSION=` line in `dist/install.sh`, and re-measure the shipped Linux release against the size ratchet
 - [ ] Push the annotated tag for the new version to trigger `release.yml`, then approve the `release` deployment
-- [ ] Verify assets published: binary per target, `install.sh`, `SHA256SUMS`, `SHA256SUMS.minisig`
-- [ ] Verify the signature against the pinned key from the Key Inventory (`PROD_KEY_1`): `minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF`
+- [ ] After publication, verify the assets (binary per target, `install.sh`, `SHA256SUMS`, `SHA256SUMS.minisig`) and the signature against the pinned key from the Key Inventory (`PROD_KEY_1`): `minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF`
 - [ ] Verify 13-3a can update from this release (end-to-end test)
