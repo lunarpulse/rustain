@@ -355,9 +355,13 @@ even with `forward = true`; they stay persisted and visible on attach.
 
 The link reports a health state of `connecting`, `connected`, `reconnecting` or
 `offline`. In an attached session, `Ctrl+X, A` shows that state (trusted-local
-attachments only). After a dropped connection the adapter reconnects with at most
-five retries (1, 2, 4, 8 and 16 seconds apart) before it goes `offline`; a
-successful reconnect resets the budget. `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are
+attachments only). The link state reaches the client as a frame that clients from
+before this release cannot decode: the TUI client and, from this release, the
+`--plain` client skip a frame they cannot decode and stay attached, but an older
+`--plain` client ends the session with `[daemon protocol error]`. After a dropped
+connection the adapter reconnects with at most five retries (1, 2, 4, 8 and 16
+seconds apart) before it goes `offline`; a successful reconnect resets the
+budget. `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are
 redacted from the environment of child tool processes, like the other channel
 credentials.
 

@@ -73,6 +73,114 @@ fn configured_a2a_peer_refuses_daemon_start_with_the_existing_feature_message() 
         ));
 }
 
+/// Story C-12 (review L1): a profile that selects Slack, started through the
+/// real `rustain --profile … daemon start` front door with `SLACK_APP_TOKEN`
+/// unset, fails before readiness with the clear missing-token message — no
+/// PID file, no socket, no network (composition stops before any connect). The
+/// supervised `--foreground` body prints it on stderr; the detached start
+/// reports the child's exit and the child's log carries it.
+#[cfg(feature = "slack")]
+#[test]
+fn slack_profile_without_its_app_token_refuses_daemon_start_clearly() {
+    const SENTINEL: &str = "C12-INERT-SENTINEL-NOT-A-TOKEN";
+    let d = dirs();
+    let profiles = d.cfg.path().join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join("chat.toml"),
+        "name = \"chat\"\nextends = \"base\"\n[channels]\nadapter = \"slack\"\n\
+         [channels.config]\nallowed_user_ids = [\"U012ABCDEF\"]\n",
+    )
+    .unwrap();
+    let start = |args: &[&str]| {
+        let mut cmd = d.cmd();
+        cmd.env_remove("SLACK_APP_TOKEN")
+            .env("SLACK_BOT_TOKEN", SENTINEL)
+            .args(["--profile", "chat", "daemon", "start"])
+            .args(args)
+            .timeout(Duration::from_secs(60))
+            .output()
+            .unwrap()
+    };
+
+    let foreground = start(&["--foreground"]);
+    let stderr = String::from_utf8_lossy(&foreground.stderr);
+    assert!(!foreground.status.success(), "{foreground:?}");
+    assert!(
+        stderr.contains("SLACK_APP_TOKEN env var required for slack adapter"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(SENTINEL),
+        "the bot token never reaches output"
+    );
+    assert!(!d.pid_path().exists(), "a refused start writes no PID file");
+
+    let detached = start(&[]);
+    let stderr = String::from_utf8_lossy(&detached.stderr);
+    assert!(!detached.status.success(), "{detached:?}");
+    assert!(
+        stderr.contains("daemon child exited before becoming ready"),
+        "{stderr}"
+    );
+    let log = std::fs::read_to_string(d.ws.path().join(".rustain").join("daemon.log"))
+        .expect("the detached child's log");
+    assert!(
+        log.contains("SLACK_APP_TOKEN env var required for slack adapter"),
+        "{log}"
+    );
+    assert!(
+        !log.contains(SENTINEL),
+        "the bot token never reaches the log"
+    );
+    assert!(!d.pid_path().exists(), "a refused start writes no PID file");
+}
+
+/// `--profile` reaches what the daemon commands re-invoke: the detached child
+/// `daemon start` spawns and the unit `daemon install` writes both carry the
+/// profile this invocation resolved, not the config file's default (`coding`).
+#[test]
+fn cli_profile_reaches_the_detached_child_and_the_service_unit() {
+    let d = dirs();
+    let profiles = d.cfg.path().join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join("chat.toml"),
+        "name = \"chat\"\nextends = \"base\"\n",
+    )
+    .unwrap();
+
+    #[cfg(target_os = "linux")]
+    d.cmd()
+        .args(["--profile", "chat", "daemon", "install", "--print"])
+        .assert()
+        .success()
+        .stdout(contains(" --profile chat daemon start --foreground"));
+    #[cfg(target_os = "macos")]
+    d.cmd()
+        .args(["--profile", "chat", "daemon", "install", "--print"])
+        .assert()
+        .success()
+        .stdout(contains("<string>--profile</string>\n"))
+        .stdout(contains("<string>chat</string>"));
+
+    d.cmd()
+        .args(["--profile", "chat", "daemon", "start"])
+        .assert()
+        .success()
+        .stdout(contains("Daemon started"));
+    let pid_file = std::fs::read_to_string(d.pid_path()).expect("pid file");
+    d.cmd()
+        .args(["daemon", "stop"])
+        .assert()
+        .success()
+        .stdout(contains("Daemon stopped"));
+    assert!(
+        pid_file.contains("profile = \"chat\""),
+        "the detached child runs the requested profile:\n{pid_file}"
+    );
+}
+
 #[cfg(feature = "a2a")]
 #[tokio::test]
 async fn daemon_composition_starts_a2a_agent_card_discovery_for_configured_peers() {

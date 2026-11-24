@@ -6,8 +6,9 @@
 //! `SSL_CERT_DIR` like the provider clients), with no certificate-verification
 //! relaxation anywhere. The WebSocket URL Slack returns carries a one-time
 //! ticket: it is validated (`wss`, a `*.slack.com` host), used once, and never
-//! logged. Tokens live in [`Secret`], whose `Debug` is redacted and whose
-//! storage is zeroized on drop.
+//! logged. Tokens live in [`Secret`]: Debug-redacted, with a best-effort
+//! zeroize of its own buffer on drop (earlier copies, such as the environment
+//! read and request headers, are not wiped).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +32,7 @@ const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const WS_MAX_PAYLOAD: usize = 2 * MAX_FRAME_BYTES;
 const MAX_API_BODY_BYTES: usize = 64 * 1024;
 
-/// A bearer token: never printed, zeroized when dropped.
+/// A bearer token: Debug-redacted; best-effort zeroize of this buffer on drop.
 struct Secret(String);
 
 impl std::fmt::Debug for Secret {

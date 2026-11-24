@@ -533,6 +533,8 @@ mod a2a_conformance {
                 }
                 lib && features.contains("telegram")
                     && features.contains("cron")
+                    && features.contains("slack")
+                    && targets.contains("cli")
                     && targets.contains("daemon")
                     && targets.contains("profile")
             })
@@ -540,17 +542,20 @@ mod a2a_conformance {
 
     #[test]
     fn ci_runs_all_telegram_cron_library_and_area_tests_unfiltered() {
-        let good = "cargo test --locked --features telegram,cron --lib --test daemon --test profile --no-fail-fast";
+        let good = "cargo test --locked --features telegram,cron,slack --lib --test cli --test daemon --test profile --no-fail-fast";
         assert!(has_unfiltered_telegram_cron_lane(good));
         assert!(has_unfiltered_telegram_cron_lane(&format!(
             "run: |\n  {good} -- --nocapture --include-ignored 2>&1 | tee test-output.log"
         )));
         for bad in [
-            "cargo test --features telegram,cron --test daemon --test profile",
-            "cargo test --features telegram,cron --lib --test daemon --test profile conformance_c2b",
-            "cargo test --features telegram,cron --lib --test daemon --test profile -- conformance_c2b",
-            "cargo test --features telegram,cron --lib --test daemon --test profile -- --exact x",
-            "cargo test --features telegram,cron --lib --test daemon --test profile -- --ignored",
+            "cargo test --features telegram,cron,slack --test cli --test daemon --test profile",
+            // Story C-12: the Slack feature and the `cli` target are part of the lane.
+            "cargo test --features telegram,cron --lib --test cli --test daemon --test profile",
+            "cargo test --features telegram,cron,slack --lib --test daemon --test profile",
+            "cargo test --features telegram,cron,slack --lib --test cli --test daemon --test profile conformance_c2b",
+            "cargo test --features telegram,cron,slack --lib --test cli --test daemon --test profile -- conformance_c2b",
+            "cargo test --features telegram,cron,slack --lib --test cli --test daemon --test profile -- --exact x",
+            "cargo test --features telegram,cron,slack --lib --test cli --test daemon --test profile -- --ignored",
         ] {
             assert!(!has_unfiltered_telegram_cron_lane(bad), "{bad}");
         }
@@ -566,7 +571,7 @@ mod a2a_conformance {
         }
         assert!(
             has_unfiltered_telegram_cron_lane(include_str!("../../../.github/workflows/ci.yml")),
-            "CI must execute the unfiltered telegram+cron lib, daemon, and profile tests"
+            "CI must execute the unfiltered telegram+cron+slack lib, cli, daemon, and profile tests"
         );
     }
 

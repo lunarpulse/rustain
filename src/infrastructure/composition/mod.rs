@@ -742,7 +742,9 @@ pub fn build_channels(
     match name {
         "terminal" => Ok(Arc::new(NoOpChannel)),
         // Daemon-only like Telegram: outside the daemon nothing is read and
-        // nothing starts. Inside it, the tokens come from the environment only.
+        // nothing starts. Inside it, the tokens come from the environment only
+        // and are Debug-redacted downstream (best-effort zeroize, not a wipe of
+        // every copy).
         #[cfg(feature = "slack")]
         "slack" => {
             if ctx.channel_turn_tx.is_none()

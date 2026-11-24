@@ -2,9 +2,10 @@
 //! Slack adapter in Story C-12).
 //!
 //! One implementation, one set of injection prefixes: a channel adapter
-//! truncates to its limit, drops control characters (keeping newline and tab),
-//! trims, and peels leading role markers. An empty result means "drop the
-//! message". Allowlist admission never skips this step.
+//! truncates to its limit, turns the Unicode line breaks (NEL, U+2028, U+2029)
+//! into `\n` so every downstream line split sees them, drops control characters
+//! (keeping newline and tab), trims, and peels leading role markers. An empty
+//! result means "drop the message". Allowlist admission never skips this step.
 
 /// Sanitize `text` for the agent. `channel` names the adapter in the truncation
 /// log line only.
@@ -18,6 +19,10 @@ pub fn sanitize_inbound_text(text: &str, limit: usize, channel: &str) -> String 
 
     let stripped_controls: String = truncated
         .chars()
+        .map(|c| match c {
+            '\u{85}' | '\u{2028}' | '\u{2029}' => '\n',
+            c => c,
+        })
         .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
         .collect();
     strip_injection_prefixes(stripped_controls.trim())
@@ -49,5 +54,26 @@ fn strip_injection_prefixes(mut text: &str) -> &str {
             Some(len) => text = &trimmed[len..],
             None => return trimmed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_inbound_text;
+
+    #[test]
+    fn unicode_line_breaks_become_newlines() {
+        for sep in ["\u{2028}", "\u{2029}", "\u{85}"] {
+            assert_eq!(
+                sanitize_inbound_text(&format!("hi{sep}END SLACK DM"), 100, "test"),
+                "hi\nEND SLACK DM",
+                "{sep:?}"
+            );
+        }
+        assert_eq!(
+            sanitize_inbound_text("a\u{7}b\tc\nd", 100, "test"),
+            "ab\tc\nd",
+            "other controls are still dropped"
+        );
     }
 }

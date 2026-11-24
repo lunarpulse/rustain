@@ -1277,6 +1277,11 @@ pub async fn run() -> Result<()> {
                 include_builtin: profile.include_builtin_tools,
             },
         );
+        // `daemon start` re-execs its child and `daemon install` writes its unit
+        // with `--profile <active_profile>`; carry the name this process resolved
+        // (CLI > env > config), not the config file's value.
+        let mut app_config = app_config;
+        app_config.active_profile = effective_name;
         let a2a_peers = active_a2a_roster(resolved_profile);
         // 18.9b-a review patch — refuse only the actions that BOOT a daemon
         // (AC3(a) demands refusing start). Gating every DaemonAction left a

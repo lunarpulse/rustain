@@ -24,8 +24,8 @@ use crate::infrastructure::runtime::event_bus::RawEventKind;
 
 use super::protocol::{
     ApprovalRefusal, AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame,
-    ExactInputAssembly, WithheldToolInput, answer_attach_challenge, frame_too_large_notice,
-    read_frame, write_frame,
+    ExactInputAssembly, FrameError, WithheldToolInput, answer_attach_challenge,
+    frame_too_large_notice, read_frame, write_frame,
 };
 use crate::adapters::rap::IdentityKeyStore;
 use crate::adapters::tui::widgets::delimited_body::approval_body_rows;
@@ -353,8 +353,7 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
     .await?;
 
     // Handshake.
-    let (mut peer_row_revision, writer) = match read_frame::<_, DaemonFrame>(&mut read_half).await?
-    {
+    let (peer_row_revision, writer) = match read_frame::<_, DaemonFrame>(&mut read_half).await? {
         Some(DaemonFrame::AttachAck {
             granted_mode,
             snapshot,
@@ -371,85 +370,12 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
     // This line client has no TeamProposalDecision input surface. Keep ordinary
     // writer turns usable, but never opt in with EnableTeamProposals.
 
-    let mut team_views = PlainTeamViews::default();
     let approvals = Arc::new(Mutex::new(PlainApprovals::new(writer)));
-    let reader_approvals = Arc::clone(&approvals);
-    let mut reader = tokio::spawn(async move {
-        loop {
-            match read_frame::<_, DaemonFrame>(&mut read_half).await {
-                Ok(Some(frame)) => {
-                    let frame = reader_approvals
-                        .lock()
-                        .await
-                        .handle_frame(frame, &mut std::io::stdout().lock())?;
-                    let Some(frame) = frame else {
-                        continue;
-                    };
-                    match frame {
-                        DaemonFrame::Event(raw) => {
-                            if let RawEventKind::Provider(StreamChunk::Text { content, .. }) =
-                                &raw.kind
-                            {
-                                print!("{content}");
-                                use std::io::Write;
-                                let _ = std::io::stdout().flush();
-                            }
-                        }
-                        DaemonFrame::PeerRowOperation(operation) => {
-                            if operation.revision() > peer_row_revision {
-                                // A line client cannot replace a prior terminal row:
-                                // emit the canonical addressed delta, not a new reply.
-                                use std::io::Write;
-                                let stdout = std::io::stdout();
-                                let mut output = stdout.lock();
-                                serde_json::to_writer(&mut output, operation.as_ref())?;
-                                writeln!(output)?;
-                                output.flush()?;
-                                peer_row_revision = operation.revision();
-                            }
-                        }
-                        DaemonFrame::TeamViewChunk {
-                            request,
-                            sequence,
-                            view,
-                        } => team_views.chunk(request, sequence, &view),
-                        DaemonFrame::TeamViewDone { request, chunks } => {
-                            team_views.done(&request, chunks, &mut std::io::stdout().lock())?
-                        }
-                        result @ DaemonFrame::TeamProposal { .. }
-                        | result @ DaemonFrame::TeamProposalClosed { .. } => {
-                            // The line client exposes the exact private frame; only
-                            // the TM-09 TUI key handler constructs send decisions.
-                            print_frame_json(&result)?;
-                        }
-                        result @ DaemonFrame::TeamSendStarted { .. }
-                        | result @ DaemonFrame::TeamSendSettled { .. }
-                        | result @ DaemonFrame::TeamStatusResult { .. }
-                        | result @ DaemonFrame::TeamRetractPreviewed { .. }
-                        | result @ DaemonFrame::TeamRetractAnswered { .. }
-                        | result @ DaemonFrame::SenderConsentRevoked { .. } => {
-                            print_frame_json(&result)?;
-                        }
-                        result @ DaemonFrame::RecipientActionResult {
-                            target: super::protocol::RecipientActionTarget::Request { .. },
-                            ..
-                        } => print_frame_json(&result)?,
-                        result @ DaemonFrame::RecipientActionResult { .. } => {
-                            print_frame_json(&result)?
-                        }
-                        DaemonFrame::Detached => return Ok::<(), anyhow::Error>(()),
-                        DaemonFrame::Error(e) => eprintln!("\n[daemon error] {e}"),
-                        _ => {}
-                    }
-                }
-                Ok(None) => return Ok::<(), anyhow::Error>(()),
-                Err(e) => {
-                    eprintln!("\n[daemon protocol error] {e}");
-                    anyhow::bail!(e);
-                }
-            }
-        }
-    });
+    let mut reader = tokio::spawn(read_daemon_frames(
+        read_half,
+        Arc::clone(&approvals),
+        peer_row_revision,
+    ));
 
     // stdin → UserMessage, a line at a time. Read on a blocking std thread (tokio's
     // `io-std` feature is not enabled — zero Cargo change, AC7) and forward lines
@@ -497,6 +423,100 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
     reader.abort();
     println!("\n— detached —");
     Ok(())
+}
+
+/// The line client's daemon → stdout half. Returns `Ok` on `Detached` or a
+/// clean close.
+///
+/// Forward-compat, like the TUI attach loop: a frame whose JSON body does not
+/// decode (an event or frame kind this client predates) is logged and skipped.
+/// The length prefix already framed the whole body, so the stream stays in
+/// sync; only I/O, size and framing errors end the session.
+async fn read_daemon_frames<R>(
+    mut read_half: R,
+    reader_approvals: Arc<Mutex<PlainApprovals>>,
+    mut peer_row_revision: u64,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut team_views = PlainTeamViews::default();
+    loop {
+        match read_frame::<_, DaemonFrame>(&mut read_half).await {
+            Ok(Some(frame)) => {
+                let frame = reader_approvals
+                    .lock()
+                    .await
+                    .handle_frame(frame, &mut std::io::stdout().lock())?;
+                let Some(frame) = frame else {
+                    continue;
+                };
+                match frame {
+                    DaemonFrame::Event(raw) => {
+                        if let RawEventKind::Provider(StreamChunk::Text { content, .. }) = &raw.kind
+                        {
+                            print!("{content}");
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                    DaemonFrame::PeerRowOperation(operation) => {
+                        if operation.revision() > peer_row_revision {
+                            // A line client cannot replace a prior terminal row:
+                            // emit the canonical addressed delta, not a new reply.
+                            use std::io::Write;
+                            let stdout = std::io::stdout();
+                            let mut output = stdout.lock();
+                            serde_json::to_writer(&mut output, operation.as_ref())?;
+                            writeln!(output)?;
+                            output.flush()?;
+                            peer_row_revision = operation.revision();
+                        }
+                    }
+                    DaemonFrame::TeamViewChunk {
+                        request,
+                        sequence,
+                        view,
+                    } => team_views.chunk(request, sequence, &view),
+                    DaemonFrame::TeamViewDone { request, chunks } => {
+                        team_views.done(&request, chunks, &mut std::io::stdout().lock())?
+                    }
+                    result @ DaemonFrame::TeamProposal { .. }
+                    | result @ DaemonFrame::TeamProposalClosed { .. } => {
+                        // The line client exposes the exact private frame; only
+                        // the TM-09 TUI key handler constructs send decisions.
+                        print_frame_json(&result)?;
+                    }
+                    result @ DaemonFrame::TeamSendStarted { .. }
+                    | result @ DaemonFrame::TeamSendSettled { .. }
+                    | result @ DaemonFrame::TeamStatusResult { .. }
+                    | result @ DaemonFrame::TeamRetractPreviewed { .. }
+                    | result @ DaemonFrame::TeamRetractAnswered { .. }
+                    | result @ DaemonFrame::SenderConsentRevoked { .. } => {
+                        print_frame_json(&result)?;
+                    }
+                    result @ DaemonFrame::RecipientActionResult {
+                        target: super::protocol::RecipientActionTarget::Request { .. },
+                        ..
+                    } => print_frame_json(&result)?,
+                    result @ DaemonFrame::RecipientActionResult { .. } => {
+                        print_frame_json(&result)?
+                    }
+                    DaemonFrame::Detached => return Ok::<(), anyhow::Error>(()),
+                    DaemonFrame::Error(e) => eprintln!("\n[daemon error] {e}"),
+                    _ => {}
+                }
+            }
+            Ok(None) => return Ok::<(), anyhow::Error>(()),
+            Err(FrameError::Json(e)) => {
+                tracing::warn!(error = %e, "attach: skipping undecodable frame (forward-compat)");
+            }
+            Err(e) => {
+                eprintln!("\n[daemon protocol error] {e}");
+                anyhow::bail!(e);
+            }
+        }
+    }
 }
 
 fn parse_approval_command(line: &str) -> Option<ClientFrame> {
@@ -551,6 +571,47 @@ mod tests {
             OneShotAttachError::WriterHeld.to_string(),
             "another client already has write access to this daemon"
         );
+    }
+
+    async fn raw_frame(w: &mut tokio::io::DuplexStream, body: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        w.write_all(&u32::try_from(body.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        w.write_all(body).await.unwrap();
+    }
+
+    /// Story C-12 (review M2): an older line client skips a frame it cannot
+    /// decode (a newer daemon's event kind) instead of ending the session, and
+    /// still honours the frames after it.
+    #[tokio::test]
+    async fn plain_reader_skips_an_undecodable_frame_and_keeps_reading() {
+        let (mut daemon, client) = tokio::io::duplex(4096);
+        raw_frame(&mut daemon, br#"{"type":"aFrameFromTheFuture","x":1}"#).await;
+        raw_frame(&mut daemon, b"not json at all").await;
+        write_frame(&mut daemon, &DaemonFrame::Detached)
+            .await
+            .unwrap();
+        let approvals = Arc::new(Mutex::new(PlainApprovals::new(false)));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_daemon_frames(client, approvals, 0),
+        )
+        .await
+        .expect("the reader reached Detached");
+        assert!(result.is_ok(), "{result:?}");
+        // The daemon side stayed open, so `Ok` came from `Detached`, not EOF.
+        drop(daemon);
+    }
+
+    #[tokio::test]
+    async fn plain_reader_still_ends_on_a_framing_error() {
+        let (mut daemon, client) = tokio::io::duplex(4096);
+        raw_frame(&mut daemon, b"").await;
+        let approvals = Arc::new(Mutex::new(PlainApprovals::new(false)));
+        let result = read_daemon_frames(client, approvals, 0).await;
+        let error = result.expect_err("a zero-length frame is a protocol error");
+        assert!(error.to_string().contains("zero-length"), "{error}");
     }
 }
 

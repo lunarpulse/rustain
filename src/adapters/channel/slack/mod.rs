@@ -58,7 +58,9 @@ pub use transport::SlackHttpTransport;
 /// Compose the daemon Slack adapter from the profile's `[channels.config]`, the
 /// two credential values the caller read from the environment, and the daemon's
 /// turn queue. Performs no I/O. Every failure names only the missing
-/// requirement, never a value.
+/// requirement, never a value. The tokens end up in the transport's
+/// Debug-redacted `Secret` (best-effort zeroize; the trimmed copies made here
+/// are ordinary strings).
 pub fn compose(
     config: Option<&toml::Value>,
     app_token: Option<String>,
