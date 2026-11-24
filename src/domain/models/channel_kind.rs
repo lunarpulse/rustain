@@ -2,8 +2,8 @@
 //! AC5).
 //!
 //! Epic 12 turns rustain into an always-on daemon that several *channels* feed:
-//! the interactive terminal (Story 12.2c attach), Telegram (Story 12.3), and cron
-//! (Story 12.4). A message's **origin channel** is intrinsic provenance — the
+//! the interactive terminal (Story 12.2c attach), Telegram (Story 12.3), Slack
+//! (Story C-12), and cron (Story 12.4). A message's **origin channel** is intrinsic provenance — the
 //! unified multi-channel scrollback (the core Epic-12 promise) shows a
 //! `[telegram]`/`[cron]` prefix on every message regardless of which client is
 //! attached.
@@ -35,6 +35,9 @@ pub enum ChannelKind {
     Telegram,
     /// A scheduled (cron) job context (Story 12.4).
     Cron,
+    /// The Slack channel adapter (Story C-12): an allowlisted app DM. Persisted
+    /// and replayed like every other origin; legacy rows never carry it.
+    Slack,
 }
 
 impl ChannelKind {
@@ -46,6 +49,7 @@ impl ChannelKind {
             ChannelKind::Terminal => "[terminal]",
             ChannelKind::Telegram => "[telegram]",
             ChannelKind::Cron => "[cron]",
+            ChannelKind::Slack => "[slack]",
         }
     }
 }
@@ -64,6 +68,7 @@ mod tests {
         assert_eq!(ChannelKind::Terminal.as_prefix(), "[terminal]");
         assert_eq!(ChannelKind::Telegram.as_prefix(), "[telegram]");
         assert_eq!(ChannelKind::Cron.as_prefix(), "[cron]");
+        assert_eq!(ChannelKind::Slack.as_prefix(), "[slack]");
     }
 
     #[test]
@@ -72,6 +77,7 @@ mod tests {
             ChannelKind::Terminal,
             ChannelKind::Telegram,
             ChannelKind::Cron,
+            ChannelKind::Slack,
         ] {
             let json = serde_json::to_string(&kind).unwrap();
             let back: ChannelKind = serde_json::from_str(&json).unwrap();
@@ -90,6 +96,21 @@ mod tests {
         }
         let h: Holder = serde_json::from_str("{}").unwrap();
         assert_eq!(h.origin, ChannelKind::Terminal);
+    }
+
+    #[test]
+    fn slack_serializes_camel_case_and_legacy_values_are_unchanged() {
+        assert_eq!(
+            serde_json::to_string(&ChannelKind::Slack).unwrap(),
+            "\"slack\""
+        );
+        for (wire, kind) in [
+            ("\"terminal\"", ChannelKind::Terminal),
+            ("\"telegram\"", ChannelKind::Telegram),
+            ("\"cron\"", ChannelKind::Cron),
+        ] {
+            assert_eq!(serde_json::from_str::<ChannelKind>(wire).unwrap(), kind);
+        }
     }
 
     #[test]

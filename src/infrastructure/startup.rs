@@ -373,13 +373,27 @@ pub async fn run() -> Result<()> {
         crate::infrastructure::profile_resolution::effective_profile_name(&cli, &bootstrap_config);
 
     // Pass 2: construct TomlProfileResolver, load full config with profile overrides at layer 6
+    //
+    // Story C-12 (AC1): `init` reads the profile as data, so a channel adapter
+    // whose feature is not compiled in does not abort it before dispatch (its
+    // channel step can skip or keep it). Every other command, the daemon
+    // included, still fails closed on that selection below.
+    type ResolveFn = fn(
+        &str,
+        std::path::PathBuf,
+    ) -> Result<
+        crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver,
+        crate::domain::errors::ProfileError,
+    >;
+    let resolve: ResolveFn = if matches!(cli.command, Some(Command::Init)) {
+        crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new_for_init
+    } else {
+        crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new
+    };
     let (mut toml_resolver, startup_notices): (
         crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver,
         Vec<String>,
-    ) = match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
-        &effective_name,
-        profiles_dir.clone(),
-    ) {
+    ) = match resolve(&effective_name, profiles_dir.clone()) {
         Ok(r) => (r, Vec::new()),
         Err(crate::domain::errors::ProfileError::ProfileNotFound {
             name,
@@ -507,7 +521,11 @@ pub async fn run() -> Result<()> {
                 cli_config_overrides.as_ref(),
             )
         };
-        return crate::adapters::cli::init::run_init(&reload).await;
+        // Story C-12 (AC2): the channel step's requested profile is startup's
+        // name (`--profile` → `RUSTAIN_PROFILE` → stored `active_profile` →
+        // `coding`), taken before init writes anything — never the `coding`
+        // fallback a missing name resolved to above.
+        return crate::adapters::cli::init::run_init(&effective_name, &reload).await;
     }
     // Story 13.3b — Completions subcommand intercept. Sync (no .await), no provider needed.
     if let Some(Command::Completions { shell, bin_name }) = cli.command {

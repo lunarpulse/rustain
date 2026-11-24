@@ -133,9 +133,9 @@ trusted-CA context. No provider account or sibling checkout is needed.
 ```bash
 set -e -o pipefail
 export CARGO_TARGET_DIR="$(pwd -P)/target"
-cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron
+cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron,slack
 .github/scripts/release-size-guard.sh "$CARGO_TARGET_DIR/release/rustain"
-for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do
+for features in '' self-update,relay-server,a2a,p2p,telegram,cron,slack; do
   args=()
   if [ -n "$features" ]; then args=(--features "$features"); fi
   cargo tree --locked -e normal --prefix none --format '{p}' "${args[@]}" \

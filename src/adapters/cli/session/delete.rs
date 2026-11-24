@@ -1116,6 +1116,7 @@ fn channel_label(kind: &crate::domain::models::channel_kind::ChannelKind) -> &'s
         ChannelKind::Terminal => "#terminal",
         ChannelKind::Telegram => "#telegram",
         ChannelKind::Cron => "#cron",
+        ChannelKind::Slack => "#slack",
     }
 }
 

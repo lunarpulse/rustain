@@ -329,6 +329,14 @@ wasmtime-wasi-io = { version = "46", optional = true }
 # ── Telegram channel adapter (Story 12.3, feature-gated) ──────────
 teloxide = { version = "0.17.0", optional = true, default-features = false, features = ["macros", "rustls-native-roots"] }
 
+# ── Slack channel adapter (Story C-12, feature-gated) ─────────────
+# Outbound Socket Mode only. Every crate below is already in the lock through
+# iroh-relay (`tokio-websockets`, same random/SHA-1 backends, NOT its `server`
+# or `ring` features) and reqwest (`rustls-native-certs`): the OS trust store,
+# one rustls + ring stack, no second TLS policy.
+tokio-websockets = { version = "0.13", optional = true, default-features = false, features = ["client", "rustls-bring-your-own-connector", "getrandom", "rand", "sha1_smol"] }
+rustls-native-certs = { version = "0.8", optional = true }
+
 # ── Cron scheduler adapter (Story 12.4, feature-gated) ───────────
 # Parser only; rustain owns the tokio sleep/select loop.
 croner = { version = "3.0.1", optional = true }
@@ -401,6 +409,10 @@ rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Stor
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
 trybuild = "1"  # compile-time type walls, tests/trybuild_type_walls.rs
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
+
+# Story C-12 — a loopback WebSocket SERVER for the Slack transport tests (the
+# product links only the client half). Dev-only; every crate is already locked.
+tokio-websockets = { version = "0.13", features = ["client", "server", "rustls-bring-your-own-connector", "getrandom", "rand", "sha1_smol"] }
 
 # Story 18.1b — self-signed certificates for the non-loopback TLS keystone.
 # Dev-only: the production TLS path loads operator-supplied PEM files, and a
@@ -478,6 +490,16 @@ wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-io"]
 test-instrumentation = []
 telegram = ["dep:teloxide"]
 cron = ["dep:croner"]
+# Story C-12 — Slack app DMs over outbound Socket Mode. Opt-in; part of the
+# shipped set, never of `default`. `reqwest` carries `apps.connections.open`
+# and `chat.postMessage`; the WebSocket rides tokio-rustls with native roots.
+slack = [
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:tokio-websockets",
+    "dep:rustls-native-certs",
+]
 # Story 11.3a — local semantic memory search. OUT of `default` (NFR9): the
 # embedding model is downloaded on first use, not bundled, and `ort` needs
 # network at build time. `cargo build|test --features vector-search` to enable.

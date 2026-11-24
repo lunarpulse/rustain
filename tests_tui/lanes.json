@@ -54,6 +54,7 @@
     "test_story_9_1_mcp_status_panel.py": "core",
     "test_story_9_2_mcp_autocomplete.py": "core",
     "test_story_9_x_profile_swap_kills_mcp.py": "core",
+    "test_story_c12_init_channel.py": "core",
     "test_story_j7_loopback_harness.py": "core",
     "test_story_agents_thread_smoke.py": "native_nightly",
     "test_terminal_screen.py": "core"

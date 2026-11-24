@@ -243,52 +243,7 @@ async fn run_long_poll_loop(
 
 /// Sanitize Telegram input before giving it to the agent.
 pub fn sanitize_channel_input(text: &str) -> String {
-    let truncated = if text.chars().count() > MAX_TELEGRAM_INPUT_LEN {
-        tracing::warn!(
-            limit = MAX_TELEGRAM_INPUT_LEN,
-            "telegram: inbound message truncated"
-        );
-        text.chars()
-            .take(MAX_TELEGRAM_INPUT_LEN)
-            .collect::<String>()
-    } else {
-        text.to_string()
-    };
-
-    let stripped_controls: String = truncated
-        .chars()
-        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
-        .collect();
-    strip_injection_prefixes(stripped_controls.trim())
-        .trim()
-        .to_string()
-}
-
-fn strip_injection_prefixes(mut text: &str) -> &str {
-    const PREFIXES: &[&str] = &[
-        "[system]",
-        "<|system|>",
-        "human:",
-        "assistant:",
-        "### instruction",
-        "<|im_start|>",
-    ];
-
-    loop {
-        let trimmed = text.trim_start();
-        let lower = trimmed.to_ascii_lowercase();
-        let mut matched = None;
-        for prefix in PREFIXES {
-            if lower.starts_with(prefix) {
-                matched = Some(prefix.len());
-                break;
-            }
-        }
-        match matched {
-            Some(len) => text = &trimmed[len..],
-            None => return trimmed,
-        }
-    }
+    super::sanitize::sanitize_inbound_text(text, MAX_TELEGRAM_INPUT_LEN, "telegram")
 }
 
 /// Build the chunk list for a Telegram response. Network-free and deterministic.

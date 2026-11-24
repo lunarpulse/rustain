@@ -43,14 +43,14 @@ jobs:
       # The only build in this workflow's capture path: every capture job below
       # downloads this binary instead of building its own.
       - name: Build shipped release set capture binary
-        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron
+        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron,slack
       - name: Size ratchet
         run: .github/scripts/release-size-guard.sh target/release/rustain
       # Explicit bash makes both sides of the locked TLS dependency pipeline blocking.
       - name: Single TLS stack (rustls + ring)
         shell: bash
         run: |
-          for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do
+          for features in '' self-update,relay-server,a2a,p2p,telegram,cron,slack; do
             args=()
             if [ -n "$features" ]; then args=(--features "$features"); fi
             cargo tree --locked -e normal --prefix none --format '{p}' "${args[@]}" \

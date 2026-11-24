@@ -36,6 +36,9 @@ pub struct DaemonRuntime {
     pub server: Arc<super::server::AttachServer>,
     /// Story 12.3 — composed daemon channel adapter (terminal noop or Telegram).
     pub channel: Arc<dyn ChannelPort>,
+    /// Story C-12 AC4 — the Channels catalog name of `channel` (the profile
+    /// selection's Channels dimension), the name its link state is published under.
+    pub channel_adapter: String,
     /// Story 12.4 — cron scheduler adapter (or NoOpScheduler).
     pub scheduler: Arc<dyn SchedulerPort>,
     /// Story 12.2b — the daemon's per-activation event bus receiver, handed to the
@@ -192,6 +195,17 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())?;
     let listener = socket::bind(&rt.socket_path)?;
 
+    // Story C-12 AC4 — publish the channel adapter's redacted link state to
+    // trusted-local attachments, from before its first connect attempt; cancelled
+    // and joined at shutdown. Adapters without link state (terminal, Telegram)
+    // publish nothing.
+    let link_shutdown = tokio_util::sync::CancellationToken::new();
+    let link_task = rt.server.spawn_channel_link_publisher(
+        &rt.channel_adapter,
+        rt.channel.as_ref(),
+        link_shutdown.clone(),
+    );
+
     if let Err(e) = rt.channel.start_loop().await {
         tracing::warn!(error = %e, "daemon: channel adapter start_loop failed — continuing without channel");
     }
@@ -292,6 +306,10 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
         }
     }
 
+    link_shutdown.cancel();
+    if let Some(task) = link_task {
+        let _ = task.await;
+    }
     graceful_shutdown(&rt, server_shutdown, server_handle).await;
     Ok(())
 }
@@ -506,6 +524,7 @@ mod tests {
             workspace,
             server: server.clone(),
             channel: probe.clone(),
+            channel_adapter: "terminal".into(),
             scheduler: probe.clone(),
             domain_rx: None,
             channel_turn_rx: None,

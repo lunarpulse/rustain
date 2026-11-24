@@ -66,11 +66,11 @@ jobs:
         # 24,935,304 B, a delta of 3,102,464 B (2.96 MiB) — inside NFR53's 5 MB
         # per-feature bound, which is what decided it.
         #
-        # The shipped set also includes daemon-only Telegram and cron. Their
+        # The shipped set also includes daemon-only Telegram, Slack and cron. Their
         # measured Linux sizes and the NFR9 fit decision are in RELEASING.md.
         run: |
           set -o pipefail
-          cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron 2>&1 | tee build-output.log
+          cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron,slack 2>&1 | tee build-output.log
 
       # Job logs are not public; the first compiler error becomes an annotation.
       - name: Annotate build failure

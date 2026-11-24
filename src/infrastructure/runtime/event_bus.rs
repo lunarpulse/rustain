@@ -87,6 +87,13 @@ pub enum RawEventKind {
         peer_id: String,
         skill_count: usize,
     },
+    /// Story C-12 AC4 (FR68, NFR60) — the daemon channel adapter's redacted link
+    /// state. TrustedLocal attachments only (`attach_audience::withheld_from_peer`);
+    /// an older v16 client skips the unknown kind (attach forward-compat).
+    ChannelLinkChanged {
+        adapter: String,
+        state: crate::domain::models::ChannelLinkState,
+    },
     /// Story 9.3a — Capability lifecycle event from the CapabilityRegistry.
     Capability(crate::domain::events::CapabilityEvent),
     /// Story 14.4 — attributed child→parent subagent event.
@@ -390,6 +397,14 @@ impl RawEvent {
                     skill_count: *skill_count,
                 },
             },
+            AppEvent::ChannelLinkChanged { adapter, state } => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::ChannelLinkChanged {
+                    adapter: adapter.clone(),
+                    state: *state,
+                },
+            },
             AppEvent::CapabilityEvent(event) => RawEvent {
                 conversation_id: None,
                 timestamp_ms: now,
@@ -658,6 +673,39 @@ mod tests {
                 }
             ) if detail == "journal fsync failed"
         ));
+    }
+
+    /// Story C-12 AC4: the link state reaches the wire as exactly the adapter's
+    /// catalog name and the state word; nothing else rides along.
+    #[test]
+    fn channel_link_projects_to_a_redacted_wire_event() {
+        use crate::domain::models::ChannelLinkState;
+        for (state, word) in [
+            (ChannelLinkState::Connecting, "connecting"),
+            (ChannelLinkState::Connected, "connected"),
+            (ChannelLinkState::Reconnecting, "reconnecting"),
+            (ChannelLinkState::Offline, "offline"),
+        ] {
+            let event = AppEvent::ChannelLinkChanged {
+                adapter: "slack".to_owned(),
+                state,
+            };
+            let raw = RawEvent::from_app_event(&event).expect("link state is forwarded");
+            assert!(raw.conversation_id.is_none());
+            let wire = serde_json::to_value(&raw.kind).expect("serialize kind");
+            assert_eq!(
+                wire,
+                serde_json::json!({ "ChannelLinkChanged": { "adapter": "slack", "state": word } })
+            );
+            let decoded: RawEvent =
+                serde_json::from_str(&serde_json::to_string(&raw).expect("serialize raw event"))
+                    .expect("deserialize raw event");
+            assert!(matches!(
+                decoded.kind,
+                RawEventKind::ChannelLinkChanged { ref adapter, state: got }
+                    if adapter == "slack" && got == state
+            ));
+        }
     }
 
     #[test]

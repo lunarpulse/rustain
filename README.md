@@ -158,7 +158,7 @@ rustain daemon stop        # shut down
 ```
 
 Daemon mode enables always-on channels and scheduled tasks across TUI sessions.
-Telegram and cron ship in release assets from the next tag. Systemd and launchd
+Telegram, Slack and cron ship in release assets from the next tag. Systemd and launchd
 service templates are in `dist/`.
 
 **Authentication** (credential management):
@@ -251,14 +251,14 @@ cargo fmt                  # format
 
 # Feature-gated builds
 cargo build --no-default-features --features anthropic     # minimal
-cargo build --features telegram,cron                       # daemon channel and scheduler
+cargo build --features telegram,cron,slack                 # daemon channels and scheduler
 cargo build --features vector-search                       # with local embeddings
 cargo build --features a2a,p2p                             # federation from source
 ```
 
 A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** — source builds need `--features a2a,p2p`. `rustain --version` lists the protocols and features compiled into the binary. See [`docs/a2a.md`](docs/a2a.md) and [`docs/p2p.md`](docs/p2p.md).
-Release assets from the next tag also include `telegram,cron`; source builds
-must enable them. Both adapters run under the daemon; local sessions use no-ops
+Release assets from the next tag also include `telegram,cron,slack`; source builds
+must enable them. These adapters run under the daemon; local sessions use no-ops
 with a notice.
 
 ### TUI peer-send quick start
@@ -524,8 +524,8 @@ Normal (prompt for each tool), YOLO (auto-approve safe tools), and Plan
 **Status: v0.5.0, alpha, actively developed.** Epics 1–18 and 21 are closed in
 the sprint ledger; Epics 19 (team journeys) and 20 (OAuth sign-in for the
 supported providers) are still open there for their remaining rows. The release
-assets carry the `self-update`, `relay-server`, `a2a`, `p2p`, `telegram` and
-`cron` features.
+assets carry the `self-update`, `relay-server`, `a2a`, `p2p`, `telegram`,
+`cron` and `slack` features.
 
 | Phase | Milestone | Status |
 |---|---|---|

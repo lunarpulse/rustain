@@ -11,7 +11,7 @@ const WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 const PROOFS: &str = include_str!("../.github/workflows/nightly-proofs.yml");
 /// The build command, matched as a line prefix: the step tees its output for
 /// the failure annotation, which must not loosen the feature-list pin.
-const RELEASE_BUILD: &str = "cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron ";
+const RELEASE_BUILD: &str = "cargo build --release --target ${{ matrix.target }} --features self-update,relay-server,a2a,p2p,telegram,cron,slack ";
 /// NFR9's 40 MiB byte bound follows the C-2b measured fit test and D-25.
 /// Recalibrate only with a fresh byte measurement and the owner-approved rule.
 const NFR9_BOUND_BYTES: &str = "41943040";
@@ -234,7 +234,7 @@ fn stub_block(features: &str, protocols: &str) -> String {
 #[cfg(unix)]
 fn k9b_smoke_checks_version_before_starting_a_server() {
     let (code, stderr, calls) = run_smoke_against_stub(&stub_block(
-        "a2a, cron, mcp, relay-server, self-update, telegram",
+        "a2a, cron, mcp, relay-server, self-update, slack, telegram",
         STUB_PROTOCOLS,
     ));
     assert_eq!(code, Some(1), "stderr: {stderr}");
@@ -249,7 +249,7 @@ fn k9b_smoke_checks_version_before_starting_a_server() {
     );
 
     let (code, stderr, calls) = run_smoke_against_stub(&stub_block(
-        "a2a, cron, mcp, p2p, relay-server, self-update, telegram",
+        "a2a, cron, mcp, p2p, relay-server, self-update, slack, telegram",
         "protocols: agent-skills, acp 1, mcp 2025-11-25, a2a not built",
     ));
     assert_eq!(code, Some(1), "stderr: {stderr}");
@@ -259,7 +259,7 @@ fn k9b_smoke_checks_version_before_starting_a_server() {
     // Positive control: a complete block crosses the check and the script launches
     // the server (which the stub then fails to be; that later failure is not asserted).
     let (_, _, calls) = run_smoke_against_stub(&stub_block(
-        "a2a, cron, mcp, p2p, relay-server, self-update, telegram",
+        "a2a, cron, mcp, p2p, relay-server, self-update, slack, telegram",
         STUB_PROTOCOLS,
     ));
     assert_eq!(calls.first().map(String::as_str), Some("--version"));
@@ -620,6 +620,13 @@ fn k5_single_tls_stack_check_rejects_missing_ring_or_a_second_stack() {
             "{second}: {stderr}"
         );
     }
+    // The Slack feature adds a WebSocket client over the same rustls + ring stack:
+    // that tree passes, and the same tree with a second stack beside it fails.
+    let slack = format!("{single}tokio-websockets v0.13.0\ntokio-rustls v0.26.4\n");
+    assert_eq!(run(&slack).0, Some(0), "slack single-stack tree");
+    let (code, stderr) = run(&format!("{slack}aws-lc-rs v1.17.3\n"));
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("second TLS stack"), "{stderr}");
 }
 
 #[test]
@@ -647,7 +654,7 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
     );
     const BUILD_AND_GUARD: &str = concat!(
         "      - name: Build shipped release set capture binary\n",
-        "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron\n",
+        "        run: cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron,slack\n",
         "      - name: Size ratchet\n",
         "        run: .github/scripts/release-size-guard.sh target/release/rustain\n",
     );
@@ -655,7 +662,7 @@ fn k4_existing_release_builds_run_the_ratchet_before_capture_or_upload() {
         "      - name: Single TLS stack (rustls + ring)\n",
         "        shell: bash\n",
         "        run: |\n",
-        "          for features in '' self-update,relay-server,a2a,p2p,telegram,cron; do\n",
+        "          for features in '' self-update,relay-server,a2a,p2p,telegram,cron,slack; do\n",
         "            args=()\n",
         "            if [ -n \"$features\" ]; then args=(--features \"$features\"); fi\n",
         "            cargo tree --locked -e normal --prefix none --format '{p}' \"${args[@]}\" \\\n",
@@ -839,6 +846,7 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
         "p2p",
         "telegram",
         "cron",
+        "slack",
     ]
     .into_iter()
     .collect();
@@ -848,8 +856,8 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
     );
     assert_eq!(mismatch(&sites, &release), Vec::<&str>::new());
     let altered = build.replace(
+        "cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron,slack",
         "cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram,cron",
-        "cargo build --locked --release --features self-update,relay-server,a2a,p2p,telegram",
     );
     assert_ne!(altered, build, "drift fixture must change the build line");
     let mut altered_sites = sites.clone();
@@ -858,6 +866,11 @@ fn k11_every_release_composition_site_names_the_shipped_set() {
         "cargo build --locked --release --features",
         "--features ",
     ));
+    let without_slack: BTreeSet<_> = absolute.iter().copied().filter(|f| *f != "slack").collect();
+    assert_eq!(
+        altered_sites[1].1, without_slack,
+        "fixture removes exactly slack"
+    );
     assert_eq!(
         mismatch(&altered_sites, &release),
         vec!["nightly-proofs shipped-release"]

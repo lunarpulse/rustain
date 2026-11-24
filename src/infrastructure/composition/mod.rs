@@ -737,10 +737,38 @@ pub fn build_channels(
     config: Option<&toml::Value>,
     ctx: &ComposeContext,
 ) -> Result<Arc<dyn ChannelPort>, AdapterCompositionError> {
-    #[cfg(not(feature = "telegram"))]
+    #[cfg(not(any(feature = "telegram", feature = "slack")))]
     let _ = (config, ctx);
     match name {
         "terminal" => Ok(Arc::new(NoOpChannel)),
+        // Daemon-only like Telegram: outside the daemon nothing is read and
+        // nothing starts. Inside it, the tokens come from the environment only.
+        #[cfg(feature = "slack")]
+        "slack" => {
+            if ctx.channel_turn_tx.is_none()
+                && crate::domain::services::adapter_catalog::AdapterCatalog::is_daemon_only(
+                    PortDimension::Channels,
+                    name,
+                )
+            {
+                return Ok(Arc::new(NoOpChannel));
+            }
+            use crate::domain::services::app_credentials::{SLACK_APP_TOKEN_ENV, SLACK_BOT_TOKEN_ENV};
+            crate::adapters::channel::slack::compose(
+                config,
+                crate::infrastructure::utils::env_var_trimmed(SLACK_APP_TOKEN_ENV),
+                crate::infrastructure::utils::env_var_trimmed(SLACK_BOT_TOKEN_ENV),
+                ctx.channel_turn_tx.clone(),
+            )
+        }
+        #[cfg(not(feature = "slack"))]
+        "slack" => Err(AdapterCompositionError::MissingComposeContext {
+            port: PortDimension::Channels,
+            name: name.to_string(),
+            missing_field:
+                "slack feature not compiled — profile validator should have rewritten this to 'terminal'"
+                    .into(),
+        }),
         #[cfg(feature = "telegram")]
         "telegram" => {
             if ctx.channel_turn_tx.is_none()
@@ -815,7 +843,7 @@ pub fn build_channels(
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Channels,
             name: other.to_string(),
-            available: vec!["terminal".into(), "telegram".into()],
+            available: vec!["terminal".into(), "telegram".into(), "slack".into()],
         }),
     }
 }
@@ -2673,6 +2701,51 @@ allowed_chat_ids = []
         .parse()
         .unwrap();
         assert!(build_channels("telegram", Some(&config), &ctx).is_ok());
+    }
+
+    #[test]
+    #[cfg(not(feature = "slack"))]
+    fn test_build_channels_slack_feature_off_fails_closed() {
+        let ctx = test_compose_ctx();
+        match build_channels("slack", None, &ctx) {
+            Err(AdapterCompositionError::MissingComposeContext { missing_field, .. }) => {
+                assert_eq!(
+                    missing_field,
+                    "slack feature not compiled — profile validator should have rewritten this to 'terminal'"
+                );
+            }
+            _ => panic!("expected MissingComposeContext"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "slack")]
+    fn test_build_channels_slack_outside_the_daemon_reads_nothing_and_starts_nothing() {
+        // No turn queue (a TUI or CLI session): the daemon-only notice path, even
+        // for an unusable config and with no credential in the environment.
+        let ctx = test_compose_ctx();
+        let channel = build_channels("slack", None, &ctx).expect("no-op outside the daemon");
+        assert!(channel.health_updates().is_none());
+        assert_eq!(
+            channel.health_snapshot().metric,
+            NoOpChannel.health_snapshot().metric
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "slack")]
+    fn test_build_channels_slack_daemon_rejects_a_missing_allowlist_before_readiness() {
+        let mut ctx = test_compose_ctx();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.channel_turn_tx = Some(tx);
+        let config: toml::Value = "allowed_user_ids = []".parse().unwrap();
+        for conf in [None, Some(&config)] {
+            let error = build_channels("slack", conf, &ctx)
+                .err()
+                .expect("explicit Slack with no usable allowlist is rejected")
+                .to_string();
+            assert!(!error.to_lowercase().contains("xapp"), "{error}");
+        }
     }
 
     #[test]

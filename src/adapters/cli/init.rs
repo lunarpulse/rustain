@@ -5,9 +5,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
 
+use crate::adapters::cli::init_channel::{self, ChannelFeatures, ChannelOutcome};
 use crate::domain::models::AppConfig;
 use crate::domain::ports::AuthStorePort;
 use crate::infrastructure::paths;
+
+/// The no-terminal refusal. It names no flag: init has no non-interactive
+/// mode; automation writes configuration and profile TOML directly (C-12).
+const NOT_A_TERMINAL: &str = "rustain init requires an interactive terminal. Without one, write config.toml and profile TOML files directly (see docs/profiles.md) and set channel tokens in the daemon's environment.";
 
 /// Entry point for the `rustain init` wizard.
 ///
@@ -15,27 +20,34 @@ use crate::infrastructure::paths;
 /// and std::io::stdin() for input. The wizard itself never constructs a
 /// provider or sets up the terminal; its last, opt-in step is the CLI sign-in
 /// (`rustain auth login`), whose offline behaviour is that command's. `reload`
-/// is the startup configuration loader.
-pub async fn run_init(reload: &dyn Fn() -> AppConfig) -> Result<()> {
-    run_init_with_paths(None, None, reload).await
+/// is the startup configuration loader. `requested_profile` is startup's
+/// profile name (`--profile` → `RUSTAIN_PROFILE` → stored `active_profile` →
+/// `coding`), the one the Messaging channel step edits.
+pub async fn run_init(requested_profile: &str, reload: &dyn Fn() -> AppConfig) -> Result<()> {
+    run_init_with_paths(None, None, requested_profile, reload).await
 }
 
 /// Testable init implementation that accepts optional path overrides.
 pub async fn run_init_with_paths(
     config_dir_override: Option<PathBuf>,
     workspace_override: Option<PathBuf>,
+    requested_profile: &str,
     reload: &dyn Fn() -> AppConfig,
 ) -> Result<()> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
-        anyhow::bail!(
-            "rustain init requires an interactive terminal. Use `rustain init --non-interactive` for CI environments (available in a future release)."
-        );
+        anyhow::bail!(NOT_A_TERMINAL);
     }
     {
         // Released before the sign-in step: its reads go through the CLI's
         // one terminal-input owner, which shares this buffered stdin.
         let stdout = std::io::stdout();
+        // Story C-12 (AC1): a redirected stdout skips only the channel step.
+        let channel = ChannelSetup {
+            requested: requested_profile,
+            features: ChannelFeatures::compiled(),
+            prompts: stdout.is_terminal(),
+        };
         let mut input = stdin.lock();
         let mut output = stdout.lock();
         run_init_with_io(
@@ -43,6 +55,7 @@ pub async fn run_init_with_paths(
             workspace_override,
             true,
             find_api_key_var(),
+            &channel,
             &mut input,
             &mut output,
         )?;
@@ -64,6 +77,15 @@ pub async fn run_init_with_paths(
         },
     )
     .await
+}
+
+/// The Messaging channel step's inputs (Story C-12).
+struct ChannelSetup<'a> {
+    /// Startup's requested profile name, resolved before init writes anything.
+    requested: &'a str,
+    features: ChannelFeatures,
+    /// Stdout is a terminal; otherwise the step is skipped without reading.
+    prompts: bool,
 }
 
 /// Which standard streams are terminals.
@@ -199,13 +221,12 @@ fn run_init_with_io<R: BufRead, W: Write>(
     workspace_override: Option<PathBuf>,
     is_tty: bool,
     api_key_var: Option<&str>,
+    channel: &ChannelSetup<'_>,
     input: &mut R,
     output: &mut W,
 ) -> Result<()> {
     if !is_tty {
-        anyhow::bail!(
-            "rustain init requires an interactive terminal. Use `rustain init --non-interactive` for CI environments (available in a future release)."
-        );
+        anyhow::bail!(NOT_A_TERMINAL);
     }
 
     let config_dir = match config_dir_override {
@@ -220,6 +241,11 @@ fn run_init_with_io<R: BufRead, W: Write>(
     let settings_json_path = workspace.join(".claude").join("settings.json");
     let interaction_policy_path =
         crate::adapters::policy::config::individual_policy_path(&workspace);
+    // Story C-12 (AC2): read before anything is written. The stored selection
+    // survives the global overwrite below, and the channel target is resolved
+    // from the profiles as they are now.
+    let stored_profile = read_stored_active_profile(&config_toml_path);
+    let channel_target = init_channel::inspect(&config_dir.join("profiles"), channel.requested);
     let config_existed = config_toml_path.exists();
     let settings_existed = settings_json_path.exists();
     let policy_existed = interaction_policy_path.exists();
@@ -232,7 +258,7 @@ fn run_init_with_io<R: BufRead, W: Write>(
     if config_existed && !overwrite {
         writeln!(output, "Existing global configuration preserved.")?;
     } else {
-        write_config_toml(&config_toml_path)?;
+        write_config_toml_keeping_profile(&config_toml_path, stored_profile.as_deref())?;
     }
     if settings_existed {
         writeln!(output, "Existing workspace permissions preserved.")?;
@@ -253,6 +279,13 @@ fn run_init_with_io<R: BufRead, W: Write>(
         }
     };
 
+    // The overwrite answer above is not channel consent: the step asks its own.
+    let channel_outcome = if channel.prompts {
+        init_channel::run_channel_step(&channel_target, channel.features, input, output)?
+    } else {
+        init_channel::skip_without_terminal(&channel_target, output)?
+    };
+
     let sessions_dir = workspace.join(".claude").join("sessions");
     display_summary(
         &config_toml_path,
@@ -261,9 +294,22 @@ fn run_init_with_io<R: BufRead, W: Write>(
         policy_status,
         &sessions_dir,
         api_key_found,
+        &channel_outcome,
         output,
     )?;
     Ok(())
+}
+
+/// The `active_profile` stored in `config.toml`, if any (`activeProfile` is
+/// its accepted alias). Unreadable or unparsable files store nothing.
+fn read_stored_active_profile(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table
+        .get("active_profile")
+        .or_else(|| table.get("activeProfile"))?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Check which API key environment variable is set (if any).
@@ -342,7 +388,20 @@ pub fn create_directories(config_dir: &std::path::Path, workspace: &std::path::P
 
 /// Write default config.toml from AppConfig::default().
 pub fn write_config_toml(path: &std::path::Path) -> Result<()> {
-    let config = AppConfig::default();
+    write_config_toml_keeping_profile(path, None)
+}
+
+/// [`write_config_toml`], carrying a previously stored `active_profile`
+/// through the reset (Story C-12 AC2): the global overwrite resets settings,
+/// never the operator's stored profile selection.
+fn write_config_toml_keeping_profile(
+    path: &std::path::Path,
+    active_profile: Option<&str>,
+) -> Result<()> {
+    let mut config = AppConfig::default();
+    if let Some(name) = active_profile {
+        config.active_profile = name.to_owned();
+    }
     let toml_content =
         toml::to_string_pretty(&config).context("Failed to serialize default config to TOML")?;
 
@@ -499,6 +558,7 @@ fn prompt_choice<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<
 }
 
 /// Display completion summary with absolute paths.
+#[allow(clippy::too_many_arguments)]
 fn display_summary<W: Write>(
     config_path: &std::path::Path,
     settings_path: &std::path::Path,
@@ -506,6 +566,7 @@ fn display_summary<W: Write>(
     interaction_policy_status: FileWriteStatus,
     sessions_path: &std::path::Path,
     api_key_found: bool,
+    channel: &ChannelOutcome,
     output: &mut W,
 ) -> Result<()> {
     let api_status = if api_key_found {
@@ -531,6 +592,11 @@ fn display_summary<W: Write>(
     writeln!(output, "Settings:")?;
     writeln!(output, "  API key:       {api_status}")?;
     writeln!(output, "  Default model: {}", AppConfig::default().model)?;
+    writeln!(output)?;
+    writeln!(output, "Messaging channel:")?;
+    for line in channel.summary_lines() {
+        writeln!(output, "{line}")?;
+    }
     writeln!(output)?;
     writeln!(output, "Next steps:")?;
     writeln!(output, "  Run `rustain` to start the TUI application")?;
@@ -559,6 +625,16 @@ fn prompt_yes_no<R: BufRead, W: Write>(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// The pre-C-12 wizard cases: the channel step is skipped without a read.
+    const NO_CHANNEL: ChannelSetup<'static> = ChannelSetup {
+        requested: "coding",
+        features: ChannelFeatures {
+            telegram: false,
+            slack: false,
+        },
+        prompts: false,
+    };
 
     #[test]
     fn story21_14_the_response_mode_menu_describes_each_choice_in_plain_words() {
@@ -757,6 +833,7 @@ mod tests {
             Some(workspace.clone()),
             true,
             None,
+            &NO_CHANNEL,
             &mut input,
             &mut output,
         )
@@ -784,6 +861,7 @@ mod tests {
             Some(workspace),
             true,
             None,
+            &NO_CHANNEL,
             &mut input,
             &mut output,
         )
@@ -821,6 +899,7 @@ mod tests {
             Some(workspace.clone()),
             true,
             None,
+            &NO_CHANNEL,
             &mut input,
             &mut output,
         )
@@ -851,6 +930,7 @@ mod tests {
             Some(workspace.clone()),
             true,
             None,
+            &NO_CHANNEL,
             &mut input,
             &mut output,
         )
@@ -863,6 +943,7 @@ mod tests {
             Some(workspace.clone()),
             true,
             None,
+            &NO_CHANNEL,
             &mut input,
             &mut output,
         )
@@ -897,6 +978,7 @@ mod tests {
             Some(workspace.clone()),
             false,
             None,
+            &NO_CHANNEL,
             &mut input,
             &mut output,
         )
@@ -1173,5 +1255,135 @@ mod tests {
             assert!(run.calls.is_empty(), "{tty:?}");
             assert_eq!(run.reads, 0, "{tty:?}");
         }
+    }
+
+    /// A world with a stored non-default selection (`travel`) and a separate
+    /// user profile `work` that the channel step targets.
+    struct C12World {
+        _tmp: tempfile::TempDir,
+        config_dir: PathBuf,
+        workspace: PathBuf,
+        work: PathBuf,
+    }
+
+    const C12_WORK: &str = "# Dana's work assistant\nname = \"work\"\nextends = \"base\"\n";
+
+    fn c12_world() -> C12World {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        let profiles = config_dir.join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "active_profile = \"travel\"\nmodel = \"operator-model\"\n",
+        )
+        .unwrap();
+        let work = profiles.join("work.toml");
+        std::fs::write(&work, C12_WORK).unwrap();
+        C12World {
+            workspace: tmp.path().join("workspace"),
+            config_dir,
+            work,
+            _tmp: tmp,
+        }
+    }
+
+    fn c12_run(world: &C12World, prompts: bool, answers: &[u8]) -> (String, u64) {
+        let channel = ChannelSetup {
+            requested: "work",
+            features: ChannelFeatures {
+                telegram: true,
+                slack: true,
+            },
+            prompts,
+        };
+        let mut input = std::io::Cursor::new(answers.to_vec());
+        let mut output = Vec::new();
+        run_init_with_io(
+            Some(world.config_dir.clone()),
+            Some(world.workspace.clone()),
+            true,
+            None,
+            &channel,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        (String::from_utf8(output).unwrap(), input.position())
+    }
+
+    /// C-12 AC2: an accepted global overwrite resets settings but carries the
+    /// stored `active_profile` (here not the channel destination) through, and
+    /// its "y" is not channel consent: Enter at the channel confirmation
+    /// leaves the profile byte-identical. A confirmed save also keeps it.
+    #[test]
+    fn c12_overwrite_keeps_the_stored_selection_and_is_not_channel_consent() {
+        let world = c12_world();
+        let config_path = world.config_dir.join("config.toml");
+        // Overwrite y, two policy defaults, Slack, one ID, Enter (No).
+        let (text, _) = c12_run(&world, true, b"y\n\n\n2\nU012ABCDEF\n\n");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !config.contains("operator-model"),
+            "the overwrite reset settings"
+        );
+        assert_eq!(
+            read_stored_active_profile(&config_path).as_deref(),
+            Some("travel")
+        );
+        assert_eq!(std::fs::read_to_string(&world.work).unwrap(), C12_WORK);
+        assert!(text.contains("Save, replacing this profile's channel settings? [y/N] "));
+        assert!(
+            text.contains("Messaging channel:\n  Channel setup skipped.\n"),
+            "{text}"
+        );
+
+        let (text, _) = c12_run(&world, true, b"y\n\n\n2\nU012ABCDEF\ny\n");
+        assert_eq!(
+            read_stored_active_profile(&config_path).as_deref(),
+            Some("travel")
+        );
+        let saved = std::fs::read_to_string(&world.work).unwrap();
+        assert!(saved.starts_with(C12_WORK), "{saved}");
+        assert!(
+            saved.contains("allowed_user_ids = [\"U012ABCDEF\"]"),
+            "{saved}"
+        );
+        assert!(
+            text.contains("  Slack settings saved (not connected).\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    rustain --profile work daemon start\n"),
+            "{text}"
+        );
+    }
+
+    /// C-12 AC1: a redirected stdout skips only the channel step — the setup
+    /// questions still read their answers, the channel step reads nothing.
+    #[test]
+    fn c12_redirected_stdout_skips_only_the_channel_step() {
+        let world = c12_world();
+        // Overwrite y, two policy answers; "2\n" stays unread.
+        let answers = b"y\n3\n2\n2\n";
+        let (text, read) = c12_run(&world, false, answers);
+        assert_eq!(read, (answers.len() - 2) as u64, "{text}");
+        assert!(text.contains("Messaging channel setup skipped (output is not a terminal).\n"));
+        assert!(!text.contains("Selection [3]"), "{text}");
+        assert!(text.contains("  Channel setup skipped.\n"), "{text}");
+        assert_eq!(std::fs::read_to_string(&world.work).unwrap(), C12_WORK);
+        let policy = crate::adapters::policy::load_workspace_policies(&world.workspace).unwrap();
+        assert_eq!(
+            policy.individual.defaults.response_mode,
+            Some(crate::domain::models::ResponseMode::NotifyAndAuto)
+        );
+    }
+
+    /// C-12 AC1: the refusal names no flag that does not exist.
+    #[test]
+    fn c12_no_terminal_error_offers_no_non_interactive_flag() {
+        assert!(NOT_A_TERMINAL.starts_with("rustain init requires an interactive terminal."));
+        assert!(!NOT_A_TERMINAL.contains("--non-interactive"));
+        assert!(NOT_A_TERMINAL.contains("docs/profiles.md"));
     }
 }

@@ -6,6 +6,10 @@
 //! loop reads every loaded adapter's `health_snapshot()` once): opening it again reads again.
 //! There is no timer behind the window (no new poll, AD-2111), so a health change while it is
 //! open shows at the next opening; the rail says nothing live about it.
+//!
+//! Attached to a daemon (Story C-12 AC4, FR68 + NFR60) the window shows one row instead: the
+//! daemon channel adapter's redacted link state, fed by the attach event stream
+//! ([`apply_channel_link`]), so it updates live while open. It never reads a local core.
 
 use std::cell::Cell;
 
@@ -49,6 +53,38 @@ impl AdaptersWindowState {
 /// Open (or refresh) the Adapters window with a fresh snapshot.
 pub fn open(state: &mut TuiState, rows: Vec<AdapterLine>) {
     reducer::open_adapters(state, AdaptersWindowState::new(rows));
+}
+
+/// `Ctrl+X a` in an attached session: the window on the daemon's channel link state.
+pub fn open_attached(state: &mut TuiState) {
+    let rows = attached_rows(state);
+    open(state, rows);
+}
+
+/// Record the daemon's latest channel link state (an attach `ChannelLinkChanged` event),
+/// replacing any earlier one; an open attached window repaints it at once. Returns whether a
+/// redraw is needed.
+pub fn apply_channel_link(
+    state: &mut TuiState,
+    adapter: String,
+    link: crate::domain::models::ChannelLinkState,
+) -> bool {
+    state.attached_channel_link = Some((adapter, link));
+    let rows = attached_rows(state);
+    if let Some(window) = state.adapters_window.as_mut() {
+        window.rows = rows;
+    }
+    state.needs_redraw = true;
+    true
+}
+
+fn attached_rows(state: &TuiState) -> Vec<AdapterLine> {
+    crate::adapters::tui::widgets::adapter_status_panel::attached_link_rows(
+        state
+            .attached_channel_link
+            .as_ref()
+            .map(|(adapter, link)| (adapter.as_str(), *link)),
+    )
 }
 
 /// The Adapters window is the top frame.

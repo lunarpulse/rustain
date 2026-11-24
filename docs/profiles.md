@@ -355,6 +355,66 @@ Adapter-local config (`[context.config]`):
 | `max_tokens` | `2000` | Hard cap on injected memory tokens (effective budget = `min(call-site, this)`). |
 | `daily_window_days` | `2` | Recency window: entries within N days are labelled `[daily-log: …]`, older as `[memory]`. |
 
+## Channel Setup with `rustain init` (Story C-12)
+
+`rustain init` ends its setup questions with an optional **Messaging channel**
+step, before the completion summary (provider sign-in stays the separate last
+step). It writes only a profile's channel table — the same shape you can write
+by hand — and never asks for, reads or stores a token:
+
+```toml
+[channels]
+adapter = "slack"            # or "telegram"
+
+[channels.config]
+allowed_user_ids = ["U012ABCDEF"]   # Slack: sender user IDs, case kept
+# allowed_chat_ids = [123456789]    # Telegram: positive chat IDs (integers)
+```
+
+- **Which profile.** The one startup selects: `--profile` → `RUSTAIN_PROFILE` →
+  stored `active_profile` → `coding`, read before init writes anything. The step
+  shows that name and its current channel first.
+- **Menu.** `1. Telegram`, `2. Slack`, `3. Skip` (or `Keep existing`) — the
+  numbers never change. Enter skips or keeps. A channel whose cargo feature is not
+  built is listed as unavailable and explains the feature; with neither feature a
+  short notice replaces the menu.
+- **IDs.** Comma-separated; blank goes back. Duplicates are dropped; empty items,
+  wildcards, names and (for Slack) channel IDs are refused by position only, for
+  example `Entry 2 must be a Slack user ID, not a channel ID.` The review shows the
+  adapter, the profile and the number of IDs, and saving needs an explicit `y`
+  (Enter is No). Saving replaces the whole channel table; switching adapters keeps
+  nothing of the old one. The "Overwrite?" answer earlier in init is never consent
+  to change a channel, and it keeps your stored `active_profile`.
+- **Where it writes.** A writable, non-preview **user** profile is edited in place:
+  only its `[channels]` / `[channels.config]` tables change. With `extends`, the
+  selected profile gets its own channel table; the parent is never edited. Keeping
+  the same adapter keeps its other settings. The file is replaced atomically, and
+  nothing is written if it changed while init was running.
+- **Built-in profiles** are never changed or shadowed. After a separate
+  confirmation init creates a new user profile named `<built-in>-channel` (for
+  example `coding-channel`): a full copy of what the built-in resolves to in this
+  build with only the channel replaced — a `personal-assistant` copy keeps
+  scheduler `none` and never its dormant `cron`. It is used only when you select
+  it (`--profile coding-channel`); your default profile does not change.
+- **Refused, nothing written.** A missing profile name (init never falls back to
+  `coding`), a community profile, a user preview profile, a file the loader skips
+  (unreadable, over 1 MB), a symbolic link or non-regular file, a read-only file,
+  an already used `<built-in>-channel` name, or a profile file holding an inline
+  channel token. For a legacy Telegram `bot_token`, move the token to
+  `TELEGRAM_BOT_TOKEN` in the daemon's environment, delete the line by hand and
+  run init again.
+- **After saving.** Nothing is connected yet. Set the daemon's environment —
+  `TELEGRAM_BOT_TOKEN`, or `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` — and run
+  `rustain --profile <name> daemon start`. A supervised daemon needs the variables
+  in its own environment; a running daemon keeps its old settings until you
+  restart it with that profile.
+- **No terminal.** Init needs an interactive terminal; there is no
+  non-interactive mode. For automation, write the profile TOML above and the
+  daemon environment directly. With stdout redirected, init skips only this step.
+- **Startup order.** A profile selecting a channel whose feature is not built
+  still fails `rustain` and `rustain daemon start` with `Profile load failed`;
+  `rustain init` reads it as data so the step can keep it.
+
 ## Available Adapters by Port
 
 | Port       | Available Adapters                          |
@@ -363,7 +423,7 @@ Adapter-local config (`[context.config]`):
 | Memory     | noop, project-scoped, daily-log, long-term, vector-search (feature-gated) |
 | Session    | basic, workspace                            |
 | Tools      | builtin-only, builtin-full, composite        |
-| Channels   | terminal, telegram (feature-gated)          |
+| Channels   | terminal, telegram (feature-gated), slack (feature-gated) |
 | Scheduler  | none, cron (feature-gated)                  |
 | Context    | default, daily (alias of default), noop, composite (default + peer-origin context, tainted; Story 18.4a) |
 

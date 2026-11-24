@@ -36,7 +36,9 @@ impl AdapterCatalog {
     pub fn is_daemon_only(port: PortDimension, name: &str) -> bool {
         matches!(
             (port, name),
-            (PortDimension::Channels, "telegram") | (PortDimension::Scheduler, "cron")
+            (PortDimension::Channels, "telegram")
+                | (PortDimension::Channels, "slack")
+                | (PortDimension::Scheduler, "cron")
         )
     }
 
@@ -92,6 +94,7 @@ impl AdapterCatalog {
     pub fn is_feature_compiled(feature: &str) -> bool {
         match feature {
             "telegram" => cfg!(feature = "telegram"),
+            "slack" => cfg!(feature = "slack"),
             "cron" => cfg!(feature = "cron"),
             "gmail" => cfg!(feature = "gmail"),
             "mcp" => cfg!(feature = "mcp"),
@@ -195,6 +198,11 @@ static CHANNELS_ADAPTERS: &[&AdapterDescriptor] = &[
         feature_gate: Some("telegram"),
         fallback: Some("terminal"),
     },
+    &AdapterDescriptor {
+        name: "slack",
+        feature_gate: Some("slack"),
+        fallback: Some("terminal"),
+    },
 ];
 
 static SCHEDULER_ADAPTERS: &[&AdapterDescriptor] = &[
@@ -284,6 +292,22 @@ mod tests {
         let names = AdapterCatalog::known_for(PortDimension::Channels);
         assert!(names.contains(&"terminal"));
         assert!(names.contains(&"telegram"));
+    }
+
+    #[test]
+    fn slack_is_a_feature_gated_daemon_only_channel() {
+        let desc = AdapterCatalog::lookup(PortDimension::Channels, "slack").unwrap();
+        assert_eq!(desc.feature_gate, Some("slack"));
+        assert_eq!(desc.fallback, Some("terminal"));
+        assert!(AdapterCatalog::is_daemon_only(
+            PortDimension::Channels,
+            "slack"
+        ));
+        assert_eq!(
+            AdapterCatalog::is_feature_compiled("slack"),
+            cfg!(feature = "slack")
+        );
+        assert!(AdapterCatalog::known_for(PortDimension::Channels).contains(&"slack"));
     }
 
     #[test]

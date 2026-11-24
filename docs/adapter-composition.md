@@ -55,6 +55,7 @@ The following adapter names are **feature-gated** and return a hard error when t
 |------|------|----------|----------|
 | Scheduler | `cron` | `cron` feature (not yet implemented) | `none` (NoOpScheduler) |
 | Channels | `telegram` | `telegram` feature (not yet implemented) | `terminal` (NoOpChannel) |
+| Channels | `slack` | `slack` feature | `terminal` (NoOpChannel) |
 
 ## Adapter SDK Compatibility
 

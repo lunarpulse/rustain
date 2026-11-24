@@ -58,7 +58,7 @@ pub fn attached_panel_remedy() -> &'static str {
 pub fn attached_mission_remedy() -> &'static str {
     static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
-            "Mission Control in an attached session shows Messages only; agents, tasks, the Room, artifacts, History, Adapters and the monitor are local to a standalone session. Detach ({}) and run rustain for them.",
+            "Mission Control in an attached session shows Messages only; agents, tasks, the Room, artifacts, History and the monitor are local to a standalone session. Detach ({}) and run rustain for them.",
             super::render::leader_follow_up_long(LeaderCmd::Detach)
         )
     });
@@ -321,7 +321,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('p')], LeaderCmd::Profile, "Profile").avail(attached_profile).help(C, "Ctrl+X, P", "Profile switcher").witness("Profile Switcher"),
     l(&[Key::Char('m')], LeaderCmd::Model, "Model").avail(attached_sign_in).help(C, "Ctrl+X, M", "Model selector").witness("Select Model"),
     l(&[Key::Char('i')], LeaderCmd::SignIn, "Sign in").avail(attached_sign_in).help(C, "Ctrl+X, I", "Sign in to a model provider (/login)").witness("Sign in"),
-    l(&[Key::Char('a')], LeaderCmd::Adapters, "Adapters").avail(attached_mission).help(C, "Ctrl+X, A", "Adapters window (port and MCP server health, read-only)").witness("Adapters"),
+    l(&[Key::Char('a')], LeaderCmd::Adapters, "Adapters").help(C, "Ctrl+X, A", "Adapters window (port and MCP health, read-only; attached: the daemon channel link)").witness("Adapters"),
     l(&[Key::Char('s')], LeaderCmd::Agents, "Agents").avail(attached_mission).help(C, "Ctrl+X, S", "Mission Control: Agents tab (subagents; Enter opens the agent window)").witness("Mission Control · Agents"),
     l(&[Key::Char('l')], LeaderCmd::A2aLog, "A2A log").slash("/team").help(C, "Ctrl+X, L", "Mission Control: Messages tab (the A2A log, read-only; both hosts)").witness("Mission Control · Messages"),
     l(&[Key::Char('r')], LeaderCmd::Room, "Room").slash("/room").avail(attached_mission).help(C, "Ctrl+X, R", "Mission Control: Room tab (durable room replay, read-only)").witness("Mission Control · Room"),

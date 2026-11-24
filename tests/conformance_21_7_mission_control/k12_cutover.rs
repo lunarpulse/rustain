@@ -48,8 +48,9 @@ fn runs(host: Host, key: char, width: u16) -> bool {
     match (host, key) {
         (Host::Local, 'w') => width >= 120,
         (Host::Local, _) => true,
-        // The attached hub shows Messages only: `l` runs, `u` and the rest name a remedy.
-        (Host::Attached, 'l') => true,
+        // The attached hub shows Messages only: `l` runs, `u` and the rest name a remedy. `a`
+        // runs too: the Adapters window on the daemon's channel link (Story C-12 AC4).
+        (Host::Attached, 'l' | 'a') => true,
         (Host::Attached, _) => false,
     }
 }

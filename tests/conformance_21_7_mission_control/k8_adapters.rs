@@ -1,9 +1,9 @@
 //! K8 / AC14 / A21 (21-7 slice 7-C): the Adapters window. The rows are the port and MCP health the
 //! sidebar panel painted (the same builder, one snapshot taken when the window opens), in a
 //! frame of their own at every width; read-only; the chord and the palette open the same
-//! window; the attached host refuses with the one A20 remedy. Keys travel as crossterm events
-//! through the local host's decoder; assertions read painted cells and the one frame on the
-//! stack. No sleeps.
+//! window; attached, the chord opens it on the daemon's channel link (Story C-12 AC4). Keys
+//! travel as crossterm events through the local host's decoder; assertions read painted cells
+//! and the one frame on the stack. No sleeps.
 use super::support::*;
 use rustain::adapters::tui::adapters_window;
 use rustain::adapters::tui::app::InputAction;
@@ -218,16 +218,19 @@ async fn keys_are_the_registrys_unbound_printables_never_reach_the_composer_or_c
     assert_eq!(top_surface(&rig), Some(Surface::Adapters));
 }
 
+/// Story C-12 AC4 (replaces the 7-C attached refusal): the attached host runs `Ctrl+X a` (the
+/// window then shows the daemon's channel link), and the A20 remedy no longer names Adapters.
 #[test]
-fn the_attached_host_refuses_the_adapters_chord_with_the_one_a20_remedy() {
+fn the_attached_host_runs_the_adapters_chord() {
     for width in [60, 80, 130] {
         let avail = AvailCtx::attached(width, false);
-        match leader_step(Host::Attached, Key::Char('a'), &avail, "Input") {
-            LeaderStep::Unavailable(_, remedy) => {
-                assert_eq!(remedy, attached_mission_remedy(), "{width}");
-            }
-            other => panic!("attached `a` must be refused: {other:?}"),
-        }
+        assert!(
+            matches!(
+                leader_step(Host::Attached, Key::Char('a'), &avail, "Input"),
+                LeaderStep::Run(_)
+            ),
+            "{width}"
+        );
         // Control: the same chord runs in the local host at the same width.
         let local = AvailCtx::local(width);
         assert!(matches!(
@@ -235,6 +238,7 @@ fn the_attached_host_refuses_the_adapters_chord_with_the_one_a20_remedy() {
             LeaderStep::Run(_)
         ));
     }
+    assert!(!attached_mission_remedy().contains("Adapters"));
 }
 
 // 7C-02 (A9): adapter and MCP labels are untrusted scalars: each is one safe line before any

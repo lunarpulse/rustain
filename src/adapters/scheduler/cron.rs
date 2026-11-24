@@ -1920,6 +1920,68 @@ prompt = "nope"
         assert!(channel.sent.lock().await.is_empty());
     }
 
+    /// Story C-12 AC5: a hand-authored Slack + cron profile with `forward = true`
+    /// completes and persists the job, but the Slack adapter has no unattended
+    /// route, so nothing is posted. The Telegram-style recording channel in
+    /// `result_persisted_and_forwarded_only_when_opted_in` is the positive control.
+    #[cfg(feature = "slack")]
+    #[tokio::test]
+    async fn slack_channel_never_receives_a_forwarded_cron_result() {
+        use crate::adapters::channel::slack::{SlackChannelAdapter, fixture::FakeSlack};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let provider: Arc<dyn StreamingProvider> = Arc::new(StaticProvider {
+            chunks: vec![
+                StreamChunk::Text {
+                    content: "morning briefing".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        });
+        let (core, storage) = scripted_core(ws, provider);
+        let fake = FakeSlack::new(vec![]);
+        let slack: Arc<dyn ChannelPort> = Arc::new(
+            SlackChannelAdapter::with_transport(
+                fake.clone(),
+                vec!["U111AAAA".into()],
+                mpsc::unbounded_channel().0,
+            )
+            .unwrap(),
+        );
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+        let running = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        running.lock().await.insert("briefing".into());
+        let job = CronJobTask {
+            job: ScheduledJob {
+                name: "briefing".into(),
+                cron: Cron::from_str("0 9 * * *").unwrap(),
+                prompt: "report".into(),
+                forward: true,
+                timeout_secs: None,
+            },
+            fired_at_unix: 700,
+            core,
+            completion_tx,
+            channel: slack,
+            storage,
+            shutdown: CancellationToken::new(),
+            job_timeout: Duration::from_secs(1),
+            running,
+            _permit: Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .unwrap(),
+        };
+        run_job(job).await;
+        let completion = completion_rx.recv().await.expect("the job still completes");
+        assert_eq!(completion.result_text, "morning briefing");
+        assert!(fake.posts().is_empty(), "no unattended Slack post");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn full_drive_turn_memory_write_blocks_swap_mid_turn() {
         let tmp = tempfile::tempdir().unwrap();

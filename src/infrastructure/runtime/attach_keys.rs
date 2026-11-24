@@ -1307,6 +1307,8 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             let args = crate::adapters::tui::handlers::team_command::TeamLogArgs::default();
             open_team_log(ctx, &args).await;
         }
+        // Story C-12 AC4: the daemon's channel link state from the attach stream.
+        LeaderCmd::Adapters => crate::adapters::tui::adapters_window::open_attached(ctx.state),
         LeaderCmd::Notifications => {
             // S-LOG pushes above the exact frame that started this leader.
             notification_log::open(ctx.state);
@@ -2095,7 +2097,7 @@ pub(crate) mod tests {
         use crate::adapters::tui::handlers::team_command::log_blocks;
         use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
         for read_only in [false, true] {
-            for key in ['s', 't', 'r', 'e', 'a', 'h', 'w'] {
+            for key in ['s', 't', 'r', 'e', 'h', 'w'] {
                 let mut rig = Rig::new(read_only);
                 crate::adapters::tui::mission_control::open_messages(
                     &mut rig.state,
@@ -2130,11 +2132,10 @@ pub(crate) mod tests {
 
         // Capability-qualified unavailable chords: the same logical command's
         // explicit result with its real remedy, shown as a store notice.
-        let unavailable: [(char, NoticeSource, &str); 11] = [
+        let unavailable: [(char, NoticeSource, &str); 10] = [
             ('p', NoticeSource::Chord, "rustain profile"),
             ('m', NoticeSource::Login, "rustain auth login"),
             ('i', NoticeSource::Login, "rustain auth login"),
-            ('a', NoticeSource::Chord, "shows Messages only"),
             ('s', NoticeSource::Chord, "shows Messages only"),
             ('r', NoticeSource::Chord, "shows Messages only"),
             ('e', NoticeSource::Chord, "shows Messages only"),
@@ -2298,6 +2299,20 @@ pub(crate) mod tests {
         assert_eq!(rig.state.notifications.visible().count(), 1);
         assert!(rig.frames().is_empty(), "a local answer, nothing sent");
         exercised.insert("Q".to_owned());
+
+        // `a`: the Adapters window opens over the origin with the daemon's link
+        // state (nothing published here, so the honest note); Esc closes it and
+        // the draft survives. Nothing is sent to the daemon.
+        let mut rig = Rig::new(false);
+        rig.type_text("keep me").await;
+        rig.ctrl('x').await;
+        assert_eq!(rig.ch('a').await, KeyFlow::Continue);
+        assert!(presentation::is_open(&rig.state, Surface::Adapters));
+        assert!(rig.frames().is_empty(), "a local window, nothing sent");
+        assert_eq!(rig.esc().await, KeyFlow::Continue);
+        assert!(!presentation::is_open(&rig.state, Surface::Adapters));
+        assert_eq!(rig.state.input_buffer, "keep me");
+        exercised.insert("A".to_owned());
 
         // The painted menu inventory equals the exercised routes, so hiding an
         // attached chord (or painting one without a caller) fails here.
@@ -5387,7 +5402,6 @@ pub(crate) mod tests {
                 LeaderCmd::Profile
                 | LeaderCmd::Model
                 | LeaderCmd::SignIn
-                | LeaderCmd::Adapters
                 | LeaderCmd::Agents
                 | LeaderCmd::Room
                 | LeaderCmd::Artifacts
@@ -5428,6 +5442,18 @@ pub(crate) mod tests {
                             .is_some_and(|page| !page.filtered),
                         "{label}"
                     );
+                    assert!(rig.frames().is_empty(), "{label}: a local read");
+                    assert_eq!(rig.state.input_buffer, "draft", "{label}");
+                }
+                // Story C-12 AC4: the window on the daemon's link state, sent nothing.
+                LeaderCmd::Adapters => {
+                    assert_eq!(
+                        rig.state.modal_stack.top().map(|frame| frame.surface),
+                        Some(Surface::Adapters),
+                        "{label}"
+                    );
+                    assert!(rig.state.adapters_window.is_some(), "{label}");
+                    assert_eq!(posted, 0, "{label}: no remedy");
                     assert!(rig.frames().is_empty(), "{label}: a local read");
                     assert_eq!(rig.state.input_buffer, "draft", "{label}");
                 }

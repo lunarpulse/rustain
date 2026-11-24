@@ -11,7 +11,7 @@ Run these tests before marking an epic as done. Estimated time: under 5 minutes.
   - `cargo test --test conformance_18_3a_f_resolution -- --test-threads=1` — the resolve-verb budget (same effective ceiling by construction)
 - `cargo clippy --all-targets -- -D warnings` — **strict, not advisory.** A story's own files must be warning-free.
 - `cargo fmt --check`
-- `cargo check --release --features self-update,relay-server,a2a,p2p,telegram,cron` — the shipped feature-unification probe. Release builds run in the integrator's gate or CI; the C-2b Task 0 measurement was a one-time owner-mandated exception.
+- `cargo check --release --features self-update,relay-server,a2a,p2p,telegram,cron,slack` — the shipped feature-unification probe. Release builds run in the integrator's gate or CI; the C-2b Task 0 measurement was a one-time owner-mandated exception.
 
 ### Integration-test layout (Grand Plan P0-3)
 
@@ -89,7 +89,7 @@ implementation-text pins.
   Integration-root ownership and feature-coverage guards ensure new roots run.
 - **Feature lanes:** skills-validation runs lib tests; a2a, p2p and MCP have
   their own lanes, as do Telegram+cron, macOS daemon tests and the Python TUI.
-- **Clippy is blocking in CI.** The default, telegram+cron, a2a and p2p lanes all fail the pipeline on warnings. CI also runs `cargo test --locked --features telegram,cron --lib --test daemon --test profile --no-fail-fast` without a test-name filter.
+- **Clippy is blocking in CI.** The default, telegram+cron+slack, a2a and p2p lanes all fail the pipeline on warnings. CI also runs `cargo test --locked --features telegram,cron,slack --lib --test cli --test daemon --test profile --no-fail-fast` (the `telegram-cron` lane) without a test-name filter.
 
 ## 1. Core User Journey
 

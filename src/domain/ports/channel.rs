@@ -16,6 +16,15 @@ pub trait ChannelPort: Send + Sync {
     fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
         crate::domain::models::HealthSummary::unknown()
     }
+    /// Live link-state updates for an adapter that publishes them (Story C-12 AC4).
+    /// `None` (the default) means the adapter only answers `health_snapshot`;
+    /// the daemon publishes nothing for it. The receiver's current value is the
+    /// late-attach snapshot; each change is one live update.
+    fn health_updates(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<crate::domain::models::ChannelLinkState>> {
+        None
+    }
     async fn shutdown_loop(&self) -> Result<(), crate::domain::errors::TransitionError> {
         Ok(())
     }

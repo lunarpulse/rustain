@@ -30,3 +30,6 @@ mod daemon_lifecycle;
 
 #[path = "../conformance_c2b_release_features.rs"]
 mod conformance_c2b_release_features;
+
+#[path = "../daemon_channel_link.rs"]
+mod daemon_channel_link;

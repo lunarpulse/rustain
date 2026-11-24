@@ -291,6 +291,76 @@ Replies include the whole turn's text and public tool-use labels, but never tool
 results. An unfinished turn is identified in the reply. Telegram turns are refused
 at the daily budget; see [budget configuration](configuration.md).
 
+## Slack channel setup (Story C-12)
+
+Slack is a **daemon-only** channel adapter for direct messages to your own Slack
+app. Outside the daemon the local session uses `terminal` and shows a notice; Slack
+messages enter through the daemon and appear in attached scrollback with the
+`[slack]` prefix. Explicitly selected Slack configuration that cannot be composed
+(missing feature, missing token, empty or invalid allowlist) makes daemon startup
+fail before the PID file is written. A profile selects one channel adapter, so a
+profile uses either Telegram or Slack, not both.
+
+Rustain connects **outbound** over Slack Socket Mode. There is no public endpoint,
+listener, webhook or request URL to expose.
+
+1. Create a Slack app and enable **Socket Mode**.
+2. Create an app-level token with the `connections:write` scope. This is the
+   Socket Mode app token.
+3. Under OAuth & Permissions add the bot scopes `chat:write` and `im:history`,
+   install the app to your workspace and copy the bot token.
+4. Under Event Subscriptions enable events and subscribe the bot to `message.im`.
+5. Under App Home enable the **Messages Tab** so people can message the app.
+6. Add the channel adapter to the active profile with the Slack member IDs allowed
+   to talk to it (an ID looks like `U012ABCDEF`; letter case is kept as written):
+
+   ```toml
+   [channels]
+   adapter = "slack"
+
+   [channels.config]
+   allowed_user_ids = ["U012ABCDEF"]
+   ```
+
+   `rustain init` can write this profile section for you. It only ever writes the
+   profile, never credentials.
+7. Provide both tokens through the environment of the daemon process. Slack
+   tokens are never read from the profile, and there is no inline-token fallback:
+
+   ```sh
+   export SLACK_APP_TOKEN="<app-level token from step 2>"
+   export SLACK_BOT_TOKEN="<bot token from step 3>"
+   ```
+
+Release assets from the next tag carry Slack; source builds must enable it. Slack is
+not part of the default feature set:
+
+```sh
+cargo install --path . --features slack
+```
+
+Only app direct messages from `allowed_user_ids` are handled. A sender who is not
+on the allowlist gets no reply. Replies include the whole turn's text and public
+tool-use labels, but never tool results, and are posted in the same DM as one or
+more ordered `chat.postMessage` chunks of at most 3,000 characters each.
+
+Limits: at most eight DMs wait for the agent at once (more are dropped and logged,
+without a reply), incoming text is cut at 8,192 characters, a reply at 30,000, and
+a chunk that fails to post is not retried (its outcome may be unknown, and a retry
+could duplicate it); the rest of that reply is dropped. The WebSocket does not
+follow `HTTPS_PROXY`; the Web API calls do.
+
+Slack never carries unattended output: cron results are not forwarded to Slack,
+even with `forward = true`; they stay persisted and visible on attach.
+
+The link reports a health state of `connecting`, `connected`, `reconnecting` or
+`offline`. In an attached session, `Ctrl+X, A` shows that state (trusted-local
+attachments only). After a dropped connection the adapter reconnects with at most
+five retries (1, 2, 4, 8 and 16 seconds apart) before it goes `offline`; a
+successful reconnect resets the budget. `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are
+redacted from the environment of child tool processes, like the other channel
+credentials.
+
 ## Cron scheduler setup (Story 12.4)
 
 Cron is a **daemon-only** scheduler. Outside the daemon the local session uses

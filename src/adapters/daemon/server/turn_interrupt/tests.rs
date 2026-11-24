@@ -2717,6 +2717,7 @@ async fn c2b_fence_lifecycle_abort_releases_conversation_and_resolves_reply() {
         workspace,
         server: rig.server.clone(),
         channel: Arc::new(NoOpChannel),
+        channel_adapter: "terminal".into(),
         scheduler: Arc::new(NoOpScheduler),
         domain_rx: None,
         channel_turn_rx: None,
@@ -2766,3 +2767,5 @@ async fn channel_empty_failed_and_incomplete_turns_are_distinct() {
         rig.finish().await;
     }
 }
+
+mod slack_wire_tests;

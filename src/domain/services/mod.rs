@@ -6,6 +6,7 @@ pub mod approval_runtime;
 pub mod authority_ledger;
 pub mod authority_recovery;
 pub mod budget_gate;
+pub mod channel_allowlist;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;
 pub mod command_normalize;

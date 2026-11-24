@@ -48,6 +48,47 @@ impl<'a> ProfileLoader<'a> {
         })
     }
 
+    /// Story C-12 (AC1): load `name` as data for `rustain init`'s channel step.
+    ///
+    /// Identical to [`Self::load`] except for one check: a non-preview profile
+    /// whose **channel** adapter needs a cargo feature this build lacks is not
+    /// fatal, and that adapter is kept as written (no fallback rewrite), so init
+    /// can show and keep it. Every other validation error — including a missing
+    /// feature on any other port — is returned unchanged. Normal startup and the
+    /// daemon keep using [`Self::load`], which still fails closed.
+    pub fn load_ignoring_channel_feature(
+        &self,
+        name: &str,
+    ) -> Result<ResolvedProfile, ProfileError> {
+        let mut visited: Vec<String> = vec![name.to_string()];
+        let merged = self.resolve_extends(name, &mut visited, 1)?;
+        // Validate a copy whose uncompiled channel stands in as its fallback;
+        // the selection is built from the profile as written.
+        let mut probe = merged.clone();
+        if let Some(channels) = probe.channels.as_mut()
+            && let Some(desc) = AdapterCatalog::lookup(PortDimension::Channels, &channels.adapter)
+            && desc
+                .feature_gate
+                .is_some_and(|feature| !AdapterCatalog::is_feature_compiled(feature))
+            && let Some(fallback) = desc.fallback
+        {
+            channels.adapter = fallback.to_string();
+        }
+        let validated = self.validate(&probe, name)?;
+        let selection = self.build_selection(&merged);
+        let overrides = validated.overrides.and_then(toml_value_to_figment);
+
+        Ok(ResolvedProfile {
+            name: name.to_string(),
+            selection,
+            overrides,
+            preview: merged.preview,
+            mcp_servers: Vec::new(),
+            a2a_peers: Vec::new(),
+            include_builtin_tools: true,
+        })
+    }
+
     /// Parse a raw TOML string into a `ProfileDefinition`.
     fn parse(
         toml_str: &str,
@@ -899,6 +940,63 @@ log_level = "debug"
         assert!(format!("{:?}", ov).contains("default_plan_mode"));
         assert!(format!("{:?}", ov).contains("child-model"));
         assert!(format!("{:?}", ov).contains("debug"));
+    }
+
+    /// Story C-12 (AC1): init reads an uncompiled channel selection as data,
+    /// while `load` (startup, daemon) still fails closed on it, and no other
+    /// validation error is relaxed.
+    #[test]
+    fn c12_init_load_tolerates_only_an_uncompiled_channel() {
+        let slack = "name = \"chat\"\nextends = \"base\"\n[channels]\nadapter = \"slack\"\n\
+                     [channels.config]\nallowed_user_ids = [\"U012ABCDEF\"]\n";
+        let base = base_toml();
+        let source = TestProfileSource::new(vec![("base", base.as_str()), ("chat", slack)]);
+        let loader = make_loader(&source);
+        let read = loader.load_ignoring_channel_feature("chat").unwrap();
+        let channel = &read.selection.dimensions[&PortDimension::Channels];
+        assert_eq!(channel.adapter, "slack", "kept as written, no fallback");
+        assert!(channel._config.is_some());
+        assert!(!read.preview);
+        if cfg!(feature = "slack") {
+            assert_eq!(
+                loader.load("chat").unwrap().selection.dimensions[&PortDimension::Channels].adapter,
+                "slack"
+            );
+        } else {
+            assert!(matches!(
+                loader.load("chat").unwrap_err(),
+                ProfileError::AdapterFeatureGated {
+                    port: PortDimension::Channels,
+                    ..
+                }
+            ));
+        }
+
+        // An unrelated error behind the uncompiled channel is still reported.
+        let broken = "name = \"broken\"\nextends = \"base\"\n[channels]\nadapter = \"slack\"\n\
+                      [scheduler]\nadapter = \"cronn\"\n";
+        let source = TestProfileSource::new(vec![("base", base.as_str()), ("broken", broken)]);
+        let loader = make_loader(&source);
+        assert!(matches!(
+            loader.load_ignoring_channel_feature("broken").unwrap_err(),
+            ProfileError::AdapterUnknown {
+                port: PortDimension::Scheduler,
+                ..
+            }
+        ));
+        let unknown_channel =
+            "name = \"odd\"\nextends = \"base\"\n[channels]\nadapter = \"slak\"\n";
+        let source =
+            TestProfileSource::new(vec![("base", base.as_str()), ("odd", unknown_channel)]);
+        assert!(matches!(
+            make_loader(&source)
+                .load_ignoring_channel_feature("odd")
+                .unwrap_err(),
+            ProfileError::AdapterUnknown {
+                port: PortDimension::Channels,
+                ..
+            }
+        ));
     }
 
     #[test]

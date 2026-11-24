@@ -48,8 +48,18 @@ pub const PROVIDER_CREDENTIAL_ENV: &[&str] = &[
 /// The Telegram channel credential variable.
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 
+/// The Slack Socket Mode app-level token (`xapp-…`) variable (Story C-12).
+pub const SLACK_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
+
+/// The Slack bot token (`xoxb-…`) variable (Story C-12).
+pub const SLACK_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
+
 /// Channel credential variables.
-pub const CHANNEL_CREDENTIAL_ENV: &[&str] = &[TELEGRAM_BOT_TOKEN_ENV];
+pub const CHANNEL_CREDENTIAL_ENV: &[&str] = &[
+    TELEGRAM_BOT_TOKEN_ENV,
+    SLACK_APP_TOKEN_ENV,
+    SLACK_BOT_TOKEN_ENV,
+];
 
 /// The parent-only MCP HTTP auth-token family: the process-wide fallback and
 /// every `<prefix>_<SERVER>` per-server name.

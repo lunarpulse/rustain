@@ -7,6 +7,7 @@ pub mod completions;
 pub mod config_cmd;
 pub mod doctor;
 pub mod init;
+pub mod init_channel;
 pub mod migrate;
 pub mod peer;
 pub mod profile;

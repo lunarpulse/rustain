@@ -19,6 +19,11 @@ use crate::domain::services::profile_loader::{
     ProfileLoader, ProfileSource as LoaderProfileSource,
 };
 
+/// Largest profile file the resolver reads; a bigger one is skipped and the
+/// next source (community, then embedded) is used. `rustain init` mirrors this
+/// to tell which file a profile name actually resolves to (Story C-12).
+pub const MAX_PROFILE_SIZE: usize = 1024 * 1024;
+
 pub struct TomlProfileResolver {
     resolved: ResolvedProfile,
     config_dir: PathBuf,
@@ -60,8 +65,6 @@ impl LoaderProfileSource for FileSystemProfileSource {
         if name.contains(['/', '\\']) {
             return None;
         }
-
-        const MAX_PROFILE_SIZE: usize = 1024 * 1024;
 
         let user_path = self.config_dir.join(format!("{name}.toml"));
         if user_path.exists() {
@@ -121,10 +124,31 @@ impl LoaderProfileSource for FileSystemProfileSource {
 
 impl TomlProfileResolver {
     pub fn new(active_name: &str, config_dir: PathBuf) -> Result<Self, ProfileError> {
+        Self::build(active_name, config_dir, false)
+    }
+
+    /// Story C-12 (AC1): the resolver `rustain init` starts with. A channel
+    /// adapter whose cargo feature is not compiled in does not abort `init`
+    /// (its channel step can still skip or keep it); every other validation
+    /// error is fatal exactly as in [`Self::new`], which startup uses for every
+    /// other command, the daemon included.
+    pub fn new_for_init(active_name: &str, config_dir: PathBuf) -> Result<Self, ProfileError> {
+        Self::build(active_name, config_dir, true)
+    }
+
+    fn build(
+        active_name: &str,
+        config_dir: PathBuf,
+        tolerate_uncompiled_channel: bool,
+    ) -> Result<Self, ProfileError> {
         let source = FileSystemProfileSource::new(config_dir.clone());
         let catalog = AdapterCatalog;
         let loader = ProfileLoader::new(&catalog, &source);
-        let mut resolved = loader.load(active_name)?;
+        let mut resolved = if tolerate_uncompiled_channel {
+            loader.load_ignoring_channel_feature(active_name)?
+        } else {
+            loader.load(active_name)?
+        };
 
         // Story 17.4a: A2A config is parsed even without the feature so a
         // configured peer can fail loud instead of disappearing.

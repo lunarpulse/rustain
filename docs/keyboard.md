@@ -23,7 +23,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, P` | Profile switcher | local, attached | portable | not available in an attached session |
 | `Ctrl+X, M` | Model selector | local, attached | portable | not available in an attached session |
 | `Ctrl+X, I` | Sign in to a model provider (/login) | local, attached | portable | not available in an attached session |
-| `Ctrl+X, A` | Adapters window (port and MCP server health, read-only) | local, attached | portable | not available in an attached session |
+| `Ctrl+X, A` | Adapters window (port and MCP health, read-only; attached: the daemon channel link) | local, attached | portable |  |
 | `Ctrl+X, S` | Mission Control: Agents tab (subagents; Enter opens the agent window) | local, attached | portable | not available in an attached session |
 | `Ctrl+X, L` | Mission Control: Messages tab (the A2A log, read-only; both hosts) | local, attached | portable |  |
 | `Ctrl+X, R` | Mission Control: Room tab (durable room replay, read-only) | local, attached | portable | not available in an attached session |
@@ -389,11 +389,11 @@ Also inherits: Inspector body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Esc` | Back to the frame beneath | local | portable |  |
-| `Ctrl+C` | Back to the frame beneath without cancelling work | local | portable |  |
-| `Ctrl+X` | Open the Ctrl+X menu above the Adapters window | local | portable |  |
-| `Ctrl+P` | Open the command palette above the Adapters window | local | portable |  |
-| `Ctrl+Q` | Ask to quit without closing the Adapters window | local | portable |  |
+| `Esc` | Back to the frame beneath | local, attached | portable |  |
+| `Ctrl+C` | Back to the frame beneath without cancelling work | local, attached | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu above the Adapters window | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above the Adapters window | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the Adapters window | local, attached | portable |  |
 
 ## Mission Control
 

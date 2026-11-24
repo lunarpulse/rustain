@@ -83,8 +83,8 @@ jobs:
       - name: Clippy (default)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Clippy (telegram+cron)
-        run: cargo clippy --all-targets --features "telegram cron" -- -D warnings
+      - name: Clippy (telegram+cron+slack)
+        run: cargo clippy --all-targets --features "telegram cron slack" -- -D warnings
 
       - name: Clippy (a2a)
         run: cargo clippy --all-targets --features a2a -- -D warnings
@@ -150,7 +150,7 @@ jobs:
         run: cargo test --lib --features skills-validation
 
   telegram-cron:
-    name: Telegram + Cron Features
+    name: Telegram + Cron + Slack Features
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,10 +159,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Run Telegram and cron tests
+      - name: Run Telegram, cron and Slack tests
         run: |
           set -o pipefail
-          cargo test --locked --features telegram,cron --lib --test daemon --test profile --no-fail-fast 2>&1 | tee test-output.log
+          cargo test --locked --features telegram,cron,slack --lib --test cli --test daemon --test profile --no-fail-fast 2>&1 | tee test-output.log
       - name: Annotate test failures
         if: failure()
         run: python3 .github/scripts/annotate-test-failures.py test-output.log
@@ -337,14 +337,15 @@ jobs:
               - 'src/infrastructure/paths.rs'
               - 'dist/**'
               - 'tests/daemon_*'
+              - 'src/adapters/channel/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/nightly-daemon.yml'
 
       - name: Run macOS daemon lib tests
         if: steps.filter.outputs.daemon-paths == 'true' || github.event_name == 'push'
         run: |
-          cargo test --features telegram,cron --lib adapters::daemon::pidfile
-          cargo test --features telegram,cron --lib adapters::daemon::procargs
+          cargo test --features telegram,cron,slack --lib adapters::daemon::pidfile
+          cargo test --features telegram,cron,slack --lib adapters::daemon::procargs
 
       # tests/daemon_crash_recovery.rs is a module of the `daemon` area binary;
       # the filter keeps this job to that module's non-ignored tests.

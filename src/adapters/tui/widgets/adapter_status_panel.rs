@@ -15,7 +15,9 @@ use ratatui::{
 
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
-use crate::domain::models::{AdapterRef, HealthLevel, HealthSummary, McpHealthRow, PortDimension};
+use crate::domain::models::{
+    AdapterRef, ChannelLinkState, HealthLevel, HealthSummary, McpHealthRow, PortDimension,
+};
 use crate::domain::services::adapter_overlay;
 use crate::domain::services::peer_text::sanitize_display_line;
 use crate::infrastructure::runtime::agent_core::AgentCore;
@@ -155,6 +157,47 @@ pub fn snapshot(
         get_registry_summary(agent_core),
         overrides,
     )
+}
+
+/// The scope note of the attached window: only the daemon's channel link is shown there.
+pub const ATTACHED_SCOPE_NOTE: &str =
+    "Attached: the daemon's channel link only; other ports are local.";
+/// The attached window's honest row when the daemon published no link state (its channel
+/// adapter, e.g. terminal or Telegram, does not publish one).
+pub const ATTACHED_NO_LINK_NOTE: &str =
+    "The daemon's channel adapter publishes no live link state.";
+
+/// Story C-12 AC4 — the rows of the attached Adapters window: one `channels` row from the
+/// daemon's redacted link state (connecting / connected / reconnecting / offline), or the
+/// no-link note, then the scope note. Pure: the daemon-sourced state is the only input.
+#[must_use]
+pub fn attached_link_rows(link: Option<(&str, ChannelLinkState)>) -> Vec<AdapterLine> {
+    let mut rows = Vec::with_capacity(3);
+    match link {
+        Some((adapter, state)) => {
+            let (level, action) = match state {
+                ChannelLinkState::Connecting | ChannelLinkState::Reconnecting => {
+                    (HealthLevel::Degraded, None)
+                }
+                ChannelLinkState::Connected => (HealthLevel::Healthy, None),
+                ChannelLinkState::Offline => {
+                    (HealthLevel::Error, Some("restart the daemon to reconnect"))
+                }
+            };
+            rows.push(AdapterLine::Port {
+                level,
+                label: "channels",
+                adapter: sanitize_display_line(adapter),
+                overridden: false,
+                metric: state.label().to_owned(),
+                action,
+            });
+        }
+        None => rows.push(AdapterLine::Note(ATTACHED_NO_LINK_NOTE.to_owned())),
+    }
+    rows.push(AdapterLine::Blank);
+    rows.push(AdapterLine::Note(ATTACHED_SCOPE_NOTE.to_owned()));
+    rows
 }
 
 /// The rows at `inner_width` cells, one painted line each (a degraded port adds its action
@@ -490,6 +533,59 @@ mod tests {
         assert_eq!(
             text.last().map(String::as_str),
             Some("7 adapters loaded; most are placeholders.")
+        );
+    }
+
+    /// Story C-12 AC4: the attached rows say exactly the daemon's state, never a hopeful one.
+    #[test]
+    fn attached_link_rows_paint_the_daemon_state_and_the_offline_remedy() {
+        for (state, level, word) in [
+            (
+                ChannelLinkState::Connecting,
+                HealthLevel::Degraded,
+                "connecting",
+            ),
+            (
+                ChannelLinkState::Connected,
+                HealthLevel::Healthy,
+                "connected",
+            ),
+            (
+                ChannelLinkState::Reconnecting,
+                HealthLevel::Degraded,
+                "reconnecting",
+            ),
+            (ChannelLinkState::Offline, HealthLevel::Error, "offline"),
+        ] {
+            let rows = attached_link_rows(Some(("slack", state)));
+            assert!(
+                matches!(&rows[0], AdapterLine::Port { level: got, .. } if *got == level),
+                "{word}: {rows:?}"
+            );
+            let text = painted(&rows, 78);
+            assert!(text[0].starts_with(level.symbol()), "{text:?}");
+            assert!(text[0].contains("channels"), "{text:?}");
+            assert!(text[0].contains(": slack"), "{text:?}");
+            assert!(text[0].ends_with(word), "{word}: {text:?}");
+            assert_eq!(
+                text.iter()
+                    .any(|row| row == "  → restart the daemon to reconnect"),
+                state == ChannelLinkState::Offline,
+                "{text:?}"
+            );
+            assert_eq!(text.last().map(String::as_str), Some(ATTACHED_SCOPE_NOTE));
+        }
+        let none = painted(&attached_link_rows(None), 78);
+        assert_eq!(
+            none,
+            vec![ATTACHED_NO_LINK_NOTE, "", ATTACHED_SCOPE_NOTE],
+            "no published state paints no channels row"
+        );
+        let evil = attached_link_rows(Some(("sl\u{1b}[31mack\n", ChannelLinkState::Connected)));
+        let evil = painted(&evil, 78);
+        assert!(
+            !evil[0].contains('\u{1b}') && !evil[0].contains('\n'),
+            "{evil:?}"
         );
     }
 }

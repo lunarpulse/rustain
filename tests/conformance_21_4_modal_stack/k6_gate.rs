@@ -17,8 +17,12 @@ const HOSTS: &[(&str, &str)] = &[
 ];
 const TEST_FILES: &[&str] = &[
     "src/adapters/auth/flows/api_key/tests.rs",
+    "src/adapters/channel/slack/fixture_tests.rs",
+    "src/adapters/channel/slack/tests.rs",
+    "src/adapters/cli/init_channel/tests.rs",
     "src/adapters/daemon/approval_lifecycle_tests.rs",
     "src/adapters/daemon/server/attach_audience_tests.rs",
+    "src/adapters/daemon/server/turn_interrupt/tests/slack_wire_tests.rs",
     "src/adapters/daemon/server/turn_interrupt/tests.rs",
     "src/adapters/filesystem/fence_tests.rs",
     "src/adapters/filesystem/scratch_tests.rs",
@@ -26,6 +30,7 @@ const TEST_FILES: &[&str] = &[
     "src/adapters/tui/auth_outcome_tests.rs",
     "src/adapters/tui/decision_queue/cards_tests.rs",
     "src/adapters/tui/story21_2_slash_tests.rs",
+    "src/infrastructure/runtime/attach_loop/channel_link_tests.rs",
     "src/infrastructure/runtime/attach_loop/inspect_hint_tests.rs",
     "src/infrastructure/runtime/state_extraction_tests.rs",
 ];

@@ -533,12 +533,14 @@ async fn run_daemon_foreground(
     let recall: std::sync::Arc<dyn crate::domain::ports::RecallProviderPort> =
         std::sync::Arc::new(crate::adapters::noop::NoopRecallProvider);
 
+    // Story C-12 AC4: the Channels catalog name also names the published link state.
+    let channel_adapter = selection
+        .dimensions
+        .get(&crate::domain::models::PortDimension::Channels)
+        .map_or("terminal", |a| a.adapter.as_str())
+        .to_owned();
     let channel: std::sync::Arc<dyn crate::domain::ports::ChannelPort> = {
-        let chan_name = selection
-            .dimensions
-            .get(&crate::domain::models::PortDimension::Channels)
-            .map(|a| a.adapter.as_str())
-            .unwrap_or("terminal");
+        let chan_name = channel_adapter.as_str();
         let chan_config = selection
             .dimensions
             .get(&crate::domain::models::PortDimension::Channels)
@@ -710,6 +712,7 @@ async fn run_daemon_foreground(
         socket_path: socket_path.clone(),
         server,
         channel,
+        channel_adapter,
         scheduler,
         domain_rx: Some(domain_rx),
         channel_turn_rx: Some(channel_turn_rx),

@@ -113,7 +113,6 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         "[P] Profile (n/a)",
         "[M] Model (n/a)",
         "[I] Sign in (n/a)",
-        "[A] Adapters (n/a)",
         "[W] Monitor (n/a)",
         "[U] Usage (n/a)",
         "[S] Agents (n/a)",
@@ -129,6 +128,8 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
     }
     for painted in [
         "[D] Detach",
+        // Story C-12 AC4: the Adapters window on the daemon's channel link.
+        "[A] Adapters",
         "[L] A2A log",
         "[?] Help",
         "[N] Notifications",

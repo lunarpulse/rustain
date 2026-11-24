@@ -119,6 +119,15 @@ pub fn to_flat_toml(
     Ok(out)
 }
 
+/// A resolved profile's `overrides` as TOML — the conversion [`to_flat_toml`]
+/// uses. Story C-12: `rustain init` writes it into a profile derived from an
+/// embedded preset so the derivative keeps the preset's effective overrides.
+pub fn overrides_to_toml(
+    overrides: &figment::value::Value,
+) -> Result<toml::Value, ProfileSerializeError> {
+    figment_to_toml(overrides)
+}
+
 /// Convert a `figment::value::Value` to a `toml::Value` via serde round-trip.
 fn figment_to_toml(fv: &figment::value::Value) -> Result<toml::Value, ProfileSerializeError> {
     let json_val = serde_json::to_value(fv)

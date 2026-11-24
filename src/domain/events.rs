@@ -442,6 +442,13 @@ pub enum AppEvent {
         peer_id: String,
         skill_count: usize,
     },
+    /// Story C-12 AC4 (FR68, NFR60) — the daemon's channel adapter changed link
+    /// state. `adapter` is its catalog name (`"slack"`); the payload is redacted by
+    /// construction (no token, URL, user ID or error text).
+    ChannelLinkChanged {
+        adapter: String,
+        state: crate::domain::models::ChannelLinkState,
+    },
     /// Story 9.3a — capability lifecycle events from the CapabilityRegistry.
     /// Wraps the three sub-variants (Registered, Deregistered, Updated) in one
     /// nested enum to keep the top-level surface lean and group related events

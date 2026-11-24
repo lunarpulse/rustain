@@ -793,7 +793,11 @@ pub fn apply_client_event(
         RawEventKind::DomainEvent(payload) => {
             crate::adapters::tui::handlers::transparency::apply_domain_event(state, &payload)
         }
-        // ModeChanged/SystemNotice/Tool/DomainEvent handled above; everything
+        RawEventKind::ChannelLinkChanged {
+            adapter,
+            state: link,
+        } => crate::adapters::tui::adapters_window::apply_channel_link(state, adapter, link),
+        // ModeChanged/SystemNotice/Tool/DomainEvent/ChannelLinkChanged handled above; everything
         // else (Approval/Mcp*/Capability/ConfigReloaded + any future variant)
         // is not acted on by the thin client — ignore gracefully, never panic.
         _ => false,
@@ -2453,6 +2457,9 @@ pub async fn run_attached(
     loop_result
 }
 
+#[cfg(test)]
+#[path = "attach_loop/channel_link_tests.rs"]
+mod channel_link_tests;
 #[cfg(test)]
 #[path = "attach_loop/inspect_hint_tests.rs"]
 mod inspect_hint_tests;
@@ -8753,6 +8760,7 @@ mod tests {
             vec![
                 user_msg("hi from terminal", ChannelKind::Terminal),
                 user_msg("hi from telegram", ChannelKind::Telegram),
+                user_msg("hi from slack", ChannelKind::Slack),
             ],
             0,
         );
@@ -8801,6 +8809,10 @@ mod tests {
         assert!(
             text.contains("[telegram]"),
             "telegram channel prefix missing in attach render:\n{text}"
+        );
+        assert!(
+            text.contains("[slack]"),
+            "slack channel prefix missing in attach render:\n{text}"
         );
     }
 

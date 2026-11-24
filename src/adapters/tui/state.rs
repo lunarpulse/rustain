@@ -2318,6 +2318,10 @@ pub struct TuiState {
     pub task_window: Option<crate::adapters::tui::task_window::TaskWindowState>,
     /// The Adapters window's payload (Story 21.7 A21): the health snapshot taken at open.
     pub adapters_window: Option<crate::adapters::tui::adapters_window::AdaptersWindowState>,
+    /// Story C-12 AC4 — the attached daemon's channel adapter link state: its catalog name and
+    /// the latest redacted state from the attach event stream (`None` until the daemon publishes
+    /// one; never set in a standalone session). The attached Adapters window reads it.
+    pub attached_channel_link: Option<(String, crate::domain::models::ChannelLinkState)>,
     /// The History window's payload (Story 21.7 A21): a snapshot of the session index, set by
     /// the reducer's opener, cleared when the frame closes.
     pub history_window: Option<crate::adapters::tui::history_window::HistoryWindowState>,
@@ -2766,6 +2770,7 @@ impl TuiState {
             agent_window: None,
             task_window: None,
             adapters_window: None,
+            attached_channel_link: None,
             history_window: None,
             daily_budget: None,
             budget_acknowledged: None,

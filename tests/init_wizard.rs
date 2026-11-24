@@ -196,9 +196,16 @@ fn test_tty_rejection_subprocess() {
         "Should display TTY error message, got: {}",
         stderr
     );
+    // Story C-12 (AC1): no `--non-interactive` mode exists, so the refusal must
+    // not offer one; it points to declarative configuration instead.
     assert!(
-        stderr.contains("--non-interactive"),
-        "Should mention --non-interactive flag, got: {}",
+        !stderr.contains("--non-interactive"),
+        "Must not offer a --non-interactive flag, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("docs/profiles.md"),
+        "Should point to declarative profile configuration, got: {}",
         stderr
     );
 }

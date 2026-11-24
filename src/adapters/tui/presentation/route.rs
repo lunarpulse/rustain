@@ -314,7 +314,7 @@ pub fn route(
             crate::adapters::tui::artifact_window::on_key(state, key, host),
         ),
         Surface::ArtifactWindow => RouteEffect::Consumed,
-        // The agent, task and Adapters windows are local: an attached host never opens one.
+        // The agent and task windows are local: an attached host never opens one.
         Surface::AgentWindow if host == Host::Local => {
             RouteEffect::Action(crate::adapters::tui::agent_window::on_key(state, key, host))
         }
@@ -324,17 +324,26 @@ pub fn route(
         Surface::Adapters if host == Host::Local => RouteEffect::Action(
             crate::adapters::tui::adapters_window::on_key(state, key, host),
         ),
+        // Attached (Story C-12 AC4) the Adapters window is state-only: Back and scroll, nothing
+        // is sent.
+        Surface::Adapters => {
+            let action = crate::adapters::tui::adapters_window::on_key(state, key, host);
+            assert_eq!(
+                action,
+                InputAction::Consumed,
+                "the attached Adapters window has no host effect"
+            );
+            RouteEffect::Consumed
+        }
         Surface::History if host == Host::Local => RouteEffect::Action(
             crate::adapters::tui::history_window::on_key(state, key, host),
         ),
         Surface::Tour if host == Host::Local => {
             RouteEffect::Action(crate::adapters::tui::tour::on_key(state, key, host))
         }
-        Surface::AgentWindow
-        | Surface::TaskWindow
-        | Surface::Adapters
-        | Surface::History
-        | Surface::Tour => RouteEffect::Consumed,
+        Surface::AgentWindow | Surface::TaskWindow | Surface::History | Surface::Tour => {
+            RouteEffect::Consumed
+        }
         Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
             Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
                 RouteEffect::Decision(effect)

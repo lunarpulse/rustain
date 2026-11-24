@@ -306,7 +306,7 @@ pub use waiting_hazard::{WAITING_HAZARD_THRESHOLD_MS, WaitingHazard, waiting_haz
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
-pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
+pub use adapter_health::{ChannelLinkState, HealthLevel, HealthSummary, McpHealthRow};
 #[allow(unused_imports)]
 pub use agent_envelope::{AgentEnvelope, AgentEnvelopeHeader, RapTaskState, RapTaskStateError};
 pub use agent_id::{AgentId, AgentIdError};

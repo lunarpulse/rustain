@@ -25,6 +25,35 @@ impl HealthLevel {
     }
 }
 
+/// Redacted connection state of a daemon channel adapter (Story C-12 AC4, NFR60).
+///
+/// Carries no token, URL, user ID or error text, so the same value can travel
+/// to an attached trusted-local operator and back out of a log unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum ChannelLinkState {
+    /// First connection attempt in progress (nothing has connected yet).
+    Connecting,
+    /// Socket open and the service said hello.
+    Connected,
+    /// A live connection was lost; retrying within the NFR60 budget.
+    Reconnecting,
+    /// The retry budget is spent; the adapter has stopped until restart.
+    Offline,
+}
+
+impl ChannelLinkState {
+    /// The one-word label the Adapter Status window shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Offline => "offline",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HealthSummary {
     pub level: HealthLevel,

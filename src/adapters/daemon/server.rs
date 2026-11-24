@@ -31,7 +31,7 @@ use crate::adapters::a2a::driver::A2aDelegationRuntime;
 use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
-use super::attach_audience::{frame_variant_name, withheld_from_peer};
+use super::attach_audience::frame_variant_name;
 use super::protocol::{
     AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, FrameError,
     MAX_FRAME_BYTES, PROTOCOL_VERSION, ProposalToken, ProtocolError, RecipientAction,
@@ -56,6 +56,7 @@ use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 mod assistant_turn;
 use assistant_turn::{AssistantTurnBuffer, PendingChannelReply};
+mod channel_link;
 mod cron_completion;
 mod frame_decode;
 mod inbound_turn;
@@ -866,6 +867,8 @@ struct ConnRegistry {
     conns: Vec<Conn>,
     /// Story 21.2 A4: guarded by this registry's mutex, the admission fence.
     active_turn: turn_interrupt::ActiveTurnSlot,
+    /// Story C-12 AC4: the latest channel link frame (the late-attach snapshot).
+    channel_link: Option<DaemonFrame>,
 }
 
 impl ConnRegistry {
@@ -901,34 +904,6 @@ impl ConnRegistry {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_))
                 | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(conn.id),
-            }
-        }
-        dead
-    }
-
-    /// Project once per audience, preserving the existing slow/closed queue policy.
-    fn fanout(&self, frame: &DaemonFrame) -> Vec<u64> {
-        let mut dead = Vec::new();
-        for tier in [ConnectionTier::TrustedLocal, ConnectionTier::Peer] {
-            // Story C-3 (AD-12): MCP connection status goes to TrustedLocal only.
-            if tier == ConnectionTier::Peer && withheld_from_peer(frame) {
-                continue;
-            }
-            let mut connections = self
-                .conns
-                .iter()
-                .filter(|conn| conn.tier == tier)
-                .peekable();
-            if connections.peek().is_none() {
-                continue;
-            }
-            let projected = project_attach_frame(frame.clone(), tier);
-            for conn in connections {
-                match conn.tx.try_send(projected.clone()) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_))
-                    | Err(mpsc::error::TrySendError::Closed(_)) => dead.push(conn.id),
-                }
             }
         }
         dead
@@ -2270,7 +2245,7 @@ impl AttachServer {
 
     async fn fanout(&self, frame: DaemonFrame) {
         let dead = {
-            let reg = self.registry.lock().await;
+            let mut reg = self.registry.lock().await;
             reg.fanout(&frame)
         };
         if !dead.is_empty() {
@@ -2429,6 +2404,7 @@ impl AttachServer {
                 approval_ready: false,
             });
             reg.project_active_turn_to(conn_id);
+            reg.project_channel_link_to(conn_id);
             granted
         };
 

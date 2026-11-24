@@ -78,6 +78,9 @@ mod conformance_20_9g_relock_refresh_order;
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 
+#[path = "../conformance_c12_init_channel.rs"]
+mod conformance_c12_init_channel;
+
 #[path = "../conformance_catalog_cli.rs"]
 mod conformance_catalog_cli;
 

@@ -91,8 +91,9 @@ const fn g(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Bi
     .local()
 }
 
+/// Both hosts: attached, the window shows the daemon's channel link (Story C-12 AC4).
 const fn ad(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
-    bind(Context::Adapters, keys, CommandId::Mission(command), label).local()
+    bind(Context::Adapters, keys, CommandId::Mission(command), label)
 }
 
 const fn hi(keys: &'static [Key], command: MissionCmd, label: &'static str) -> Binding {
@@ -176,12 +177,12 @@ pub const ROWS: &[Binding] = &[
     ro(&[Key::Esc], MissionCmd::ReorderCancel, "Cancel").does("Cancel the reorder and restore the original order"),
     ro(&[Key::Ctrl('c')], MissionCmd::ReorderCancel, "").does("Cancel the reorder and restore the original order without cancelling work"),
     bind(Context::MissionReorder, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").local().does("Ask to quit without ending the reorder"),
-    // ── the Adapters window (local) ──
+    // ── the Adapters window (both hosts; attached: the daemon's channel link) ──
     ad(&[Key::Esc], MissionCmd::Back, "Back").does("Back to the frame beneath"),
     ad(&[Key::Ctrl('c')], MissionCmd::Back, "").does("Back to the frame beneath without cancelling work"),
-    bind(Context::Adapters, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").local().does("Open the Ctrl+X menu above the Adapters window"),
-    bind(Context::Adapters, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").local().does("Open the command palette above the Adapters window"),
-    bind(Context::Adapters, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").local().does("Ask to quit without closing the Adapters window"),
+    bind(Context::Adapters, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").does("Open the Ctrl+X menu above the Adapters window"),
+    bind(Context::Adapters, &[Key::Ctrl('p')], CommandId::Input(InputCmd::OpenPalette), "").does("Open the command palette above the Adapters window"),
+    bind(Context::Adapters, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").does("Ask to quit without closing the Adapters window"),
     // ── the History window (local) ──
     hi(&[Key::Enter], MissionCmd::HistoryOpen, "Open").does("Open the selected conversation (a new tab, or switch to its tab) and close History"),
     hi(&[Key::Char('d')], MissionCmd::HistoryDelete, "Delete").does("Delete the selected conversation; a decision confirms it"),

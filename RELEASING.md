@@ -36,7 +36,7 @@ Developer ID signing and notarization are a deferred decision: the owner deferre
 
 ## Federation Features in Published Assets
 
-A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram and cron are included in release assets from the next tag; source builds require their features. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron`.
+A2A and P2P are off by default for `cargo install`. **Published release assets up to and including `v0.1.3` do not contain them; `v0.2.0` and later do** (Story 19.5). Telegram, Slack and cron are included in release assets from the next tag; source builds require their features. Slack is never in Cargo `default`. The shipped release set is `self-update,relay-server,a2a,p2p,telegram,cron,slack`.
 
 ⛔ **After cutting a tag:** name the actual version at the four federation-feature doc sites — this file, `README.md`, `docs/a2a.md`, `docs/p2p.md`. They state the boundary they can prove (`v0.1.3` and earlier do not carry the features) because the next tag is not derivable from the tree; the tagger is the first person who knows it.
 
@@ -46,7 +46,7 @@ At base `1943331f`, locked Linux release measurements were: four features 38,012
 
 The workspace crate stays at `opt-level = 3`; cold dependencies use `z`. The reviewed hot list in `Cargo.toml` keeps level 3 for non-generic work per rendered frame, streamed chunk, TLS record/bulk byte, regex/glob match or signed message. Startup, CLI/config, connection setup and QUIC control are cold; generic monomorphizations in rustain keep its level.
 
-Default and shipped-release-set builds use one TLS stack, **rustls + ring**, with no `libssl`/`libcrypto` runtime dependency. Unanchored reqwest 0.12 clients, including Telegram, use native OS roots; MCP retains its platform verifier. Anchored A2A remains operator-anchor-only. The single-stack check runs on both trees.
+Default and shipped-release-set builds use one TLS stack, **rustls + ring**, with no `libssl`/`libcrypto` runtime dependency. Unanchored reqwest 0.12 clients, including Telegram, use native OS roots; MCP retains its platform verifier. The Slack adapter's WebSocket rides the same rustls + ring stack with native OS roots. Anchored A2A remains operator-anchor-only. The single-stack check runs on both trees.
 
 ## Signing Scheme: minisign
 
@@ -163,7 +163,7 @@ VERSION="0.5.0"
 TARGET="x86_64-unknown-linux-gnu"
 
 # 3. Build release binary
-cargo build --release --target "$TARGET" --features self-update,relay-server,a2a,p2p,telegram,cron
+cargo build --release --target "$TARGET" --features self-update,relay-server,a2a,p2p,telegram,cron,slack
 
 # 4. Stage asset
 ASSET="rustain-${VERSION}-${TARGET}"

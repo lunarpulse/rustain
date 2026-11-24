@@ -59,6 +59,7 @@ const FEATURES: &[Feature] = features![
     "sandbox",
     "self-update",
     "skills-validation",
+    "slack",
     "telegram",
     "test-fake-mcp" test_only = true,
     "test-instrumentation" test_only = true,
