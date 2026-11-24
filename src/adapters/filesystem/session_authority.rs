@@ -204,9 +204,13 @@ pub(crate) fn admit(
             {
                 return stale("a capture not newer than the last accepted one");
             }
+            // The writer's run continues through every operation of its own lineage, on the
+            // current base or not: only another writer (or a stampless operation) starts a
+            // new run. Restarting it on a same-base write of the same lineage would fence
+            // that lineage's still-live captures after two of its own saves.
             Ok(Admit {
                 new_epoch: false,
-                chained: !same_base,
+                chained: own_run,
                 keep_writer: false,
             })
         }

@@ -518,7 +518,7 @@ async fn session_files_keep_carrier_defaults_and_survive_future_tokens() {
             row.insert("sendAuthorization".into(), json!(token));
         }
         std::fs::write(&path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
-        for loaded in both_loaders(root, &id).await {
+        for (loader, loaded) in both_loaders(root, &id).await.into_iter().enumerate() {
             let row = &loaded.messages[0];
             assert_eq!(
                 row.authorship, authorship,
@@ -535,8 +535,13 @@ async fn session_files_keep_carrier_defaults_and_survive_future_tokens() {
                 assert!(painted.rows.iter().any(|line| line.contains(BODY)));
             }
             if auth_token.is_none() {
+                // D-24: a save must extend the history it was loaded from, so
+                // each loader's re-save starts from a fresh load by that loader
+                // (the previous loader's re-save already advanced the history).
+                let [startup, daemon] = both_loaders(root, &id).await;
+                let fresh = if loader == 0 { startup } else { daemon };
                 FileSystemStorage::new(root.to_path_buf())
-                    .save_conversation(&loaded)
+                    .save_conversation(&fresh)
                     .await
                     .unwrap();
                 let saved = read_session(&path);

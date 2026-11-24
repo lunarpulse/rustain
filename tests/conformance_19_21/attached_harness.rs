@@ -1259,7 +1259,10 @@ impl RecipientHost {
             rustain::adapters::daemon::server::peer_bus_slot_with_policy(&tree, delivery.clone());
         let attach = AttachServer::new_with_node_tree_bus_policy_and_journal(
             core,
-            Arc::new(tokio::sync::Mutex::new(Conversation::default())),
+            Arc::new(tokio::sync::Mutex::new(Conversation {
+                id: "recipient-host".into(),
+                ..Conversation::default()
+            })),
             domain_tx,
             tree,
             bus,

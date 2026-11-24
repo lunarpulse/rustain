@@ -356,8 +356,10 @@ def _exercise(binary, evidence, root, monkeypatch):
         check_server()
 
         store = workspace / ".claude" / "sessions"
+        # `.rustain-authority` holds the per-session write locks, not a session.
         ids = sorted({p.name[:-len(".meta.json")] if p.name.endswith(".meta.json") else p.name
-                      for p in store.iterdir() if p.is_dir() or p.name.endswith(".meta.json")})
+                      for p in store.iterdir()
+                      if (p.is_dir() and p.name != ".rustain-authority") or p.name.endswith(".meta.json")})
         assert len(ids) == 1, ids
         session_id = ids[0]
         payload_path = store / session_id / "conversation.json"

@@ -7920,7 +7920,10 @@ mod tests {
     async fn notify_and_wait_transitions_then_stamps_and_resume_clears() {
         let tmp = tempfile::tempdir().unwrap();
         let (core, _storage) = mock_core(tmp.path(), vec![]);
-        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "notify-and-wait".into(),
+            ..Default::default()
+        }));
         let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
         let server = AttachServer::new(core, conversation, domain_tx);
         let mut task = inbound_task(test_signer(90).identity().peer_id.clone(), "status?");
@@ -10179,7 +10182,10 @@ mod tests {
             let (domain_tx, domain_rx) = mpsc::unbounded_channel();
             let server = AttachServer::new(
                 core,
-                Arc::new(Mutex::new(Conversation::default())),
+                Arc::new(Mutex::new(Conversation {
+                    id: "k06b-ingress-principal".into(),
+                    ..Default::default()
+                })),
                 domain_tx,
             );
             let listener = UnixListener::bind(tmp.path().join("approval-forwarder.sock")).unwrap();
@@ -10621,7 +10627,10 @@ mod tests {
     async fn digest_flush_surfaces_one_batched_drillable_conversation_row() {
         let tmp = tempfile::tempdir().unwrap();
         let (core, _storage) = mock_core(tmp.path(), vec![]);
-        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "digest-flush".into(),
+            ..Default::default()
+        }));
         let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
         let server = journaled_server(
             core,
@@ -10661,7 +10670,10 @@ mod tests {
     async fn queue_urgency_surfaces_at_the_next_turn_complete_without_notice_severity() {
         let tmp = tempfile::tempdir().unwrap();
         let (core, _storage) = mock_core(tmp.path(), vec![]);
-        let conversation = Arc::new(Mutex::new(Conversation::default()));
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "queue-urgency".into(),
+            ..Default::default()
+        }));
         let (domain_tx, mut domain_rx) = mpsc::unbounded_channel();
         let journal = Arc::new(RecordingJournal::default());
         let router = Arc::new(crate::adapters::daemon::urgency::UrgencyRouter::new(
@@ -10730,6 +10742,7 @@ mod tests {
         let submitter = SubmitterKey::loopback();
         let node = mint_inbound_node_id(&submitter, "reply-task");
         let conversation = Arc::new(Mutex::new(Conversation {
+            id: "reply-card".into(),
             messages: vec![ChatMessage {
                 id: format!("peer-response-{}", node.as_str()),
                 role: MessageRole::Assistant,
@@ -10889,6 +10902,7 @@ mod tests {
         let (core, _storage) = mock_core(tmp.path(), vec![]);
         let auto_node = AgentId::from_validated("auto-node");
         let conversation = Arc::new(Mutex::new(Conversation {
+            id: "trusted-local-retract".into(),
             messages: vec![ChatMessage {
                 id: format!("peer-response-{}", auto_node.as_str()),
                 role: MessageRole::Assistant,

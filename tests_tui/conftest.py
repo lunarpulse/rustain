@@ -90,6 +90,7 @@ def _named_capture_geometry(request):
             spawns += 1
             rows, columns = child.getwinsize()
             if evidence:
+                Path(evidence).parent.mkdir(parents=True, exist_ok=True)
                 with open(evidence, "a", encoding="utf-8") as stream:
                     stream.write(json.dumps({
                         "nodeid": nodeid, "spawn": spawns, "rows": rows, "columns": columns,

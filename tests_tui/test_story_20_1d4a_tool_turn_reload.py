@@ -579,8 +579,10 @@ def _exercise(binary, evidence, root, monkeypatch):
         assert (status, signal) == (0, None), (status, signal)
         spawns[-1]["exit_status"] = status
 
+        # `.rustain-authority` holds the per-session write locks, not a session.
         sessions = [path for path in (workspace / ".claude/sessions").iterdir()
-                    if path.is_dir() or path.name.endswith(".meta.json")]
+                    if (path.is_dir() and path.name != ".rustain-authority")
+                    or path.name.endswith(".meta.json")]
         ids = sorted({path.name[:-len(".meta.json")] if path.name.endswith(".meta.json")
                       else path.name for path in sessions})
         assert len(ids) == 1, ids

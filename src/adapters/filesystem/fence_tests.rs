@@ -433,6 +433,30 @@ async fn a_stale_capture_cannot_create_a_checkpoint() {
     );
 }
 
+#[tokio::test]
+async fn a_turn_capture_still_checkpoints_after_its_own_lineage_saved_twice() {
+    // A daemon turn checkpoints from its capture before each tool round, while the forwarder
+    // saves the live holder (the committed tool call, then its late result) in between.
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+    let mut live = conv("s1", &[("u1", "one")]);
+    s.save_conversation(&live).await.unwrap();
+    let turn = live.capture();
+    s.create_checkpoint_for(&turn).await.unwrap();
+    live.messages.push(row("a1", "tool call"));
+    s.save_conversation(&live).await.unwrap();
+    live.messages.push(row("u2", "tool result"));
+    s.save_conversation(&live).await.unwrap();
+    assert_eq!(
+        s.create_checkpoint_for(&turn).await.unwrap(),
+        CheckpointId(2),
+        "the lineage's own later saves never fence its turn"
+    );
+    // A competing writer still does.
+    store(&dir).truncate_conversation("s1", 0).await.unwrap();
+    assert!(stale(s.create_checkpoint_for(&turn).await));
+}
+
 // ── AC2: publication outcomes, crash and recovery ───────────────────────────────
 
 #[tokio::test]

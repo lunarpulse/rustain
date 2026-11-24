@@ -79,6 +79,7 @@ fn conversation(plans: Vec<Plan>) -> Conversation {
         compaction: None,
         peer_row_controls: Default::default(),
         peer_row_revision: 0,
+        persist: Default::default(),
     }
 }
 
