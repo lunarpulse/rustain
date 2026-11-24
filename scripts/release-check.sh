@@ -112,8 +112,9 @@ if [ -z "$REPO" ] || ! RUNS=$(api "actions/runs?head_sha=$SHA&per_page=100"); th
     unknown "Nightly proofs and its Shipped release set job: GitHub API not readable"
 else
     pick='if . == null then "none - - -" else "\(.status) \(.conclusion // "-") \(.html_url) \(.id)" end'
-    read -r st co url _ < <(jq -r "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .event == \"push\" and .head_branch == \"main\")] | sort_by(.created_at) | last | $pick" <<<"$RUNS")
-    verdict "CI on main" "$st" "$co" "$url"
+    # Any push run of ci.yml for this exact commit counts (main or its gate branch); a successful run wins.
+    read -r st co url _ < <(jq -r "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .event == \"push\")] | sort_by(.created_at) | (map(select(.conclusion == \"success\")) | last) // last | $pick" <<<"$RUNS")
+    verdict "CI on this commit" "$st" "$co" "$url"
     # Any trigger counts; a successful run wins over a later failed or running one.
     read -r st co url id < <(jq -r "[.workflow_runs[] | select(.path == \".github/workflows/nightly-proofs.yml\")] | sort_by(.created_at) | (map(select(.conclusion == \"success\")) | last) // last | $pick" <<<"$RUNS")
     verdict "Nightly proofs" "$st" "$co" "$url"

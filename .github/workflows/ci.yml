@@ -195,10 +195,19 @@ jobs:
       # ratchet and AC7b's card-signing counter are both cfg'd behind it, and without
       # it those keystones would silently degrade to their behavioural halves. Pinned
       # by `the_ci_a2a_lane_enables_the_zero_mutation_ratchet`.
+      #
+      # Compile with two jobs, then run. `--all-targets` compiles the whole crate
+      # four times (lib, lib unittests, and src/main.rs, which re-declares every
+      # module, as bin and bin unittests); at the runner's four jobs three of those
+      # rustc processes overlap at ~4 GiB each (~12-13 GiB resident) on the 16 GiB
+      # hosted runner, which then loses the runner mid-compile: exit 143 with the
+      # `if: failure()` step skipped, or "The hosted runner lost communication".
+      # Two jobs peak at ~7 GiB.
       - name: Test with a2a feature (lib + whole suite)
         run: |
           set -o pipefail
-          cargo test --features a2a,test-instrumentation --all-targets --no-fail-fast 2>&1 | tee test-output.log
+          cargo test --features a2a,test-instrumentation --all-targets --no-run -j 2 2>&1 | tee test-output.log
+          cargo test --features a2a,test-instrumentation --all-targets --no-fail-fast 2>&1 | tee -a test-output.log
       - name: Annotate test failures
         if: failure()
         run: python3 .github/scripts/annotate-test-failures.py test-output.log
