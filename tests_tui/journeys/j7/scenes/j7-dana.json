@@ -1,0 +1,21 @@
+{
+  "scene": "j7-dana",
+  "personas": {
+    "j7-dana-key": {
+      "turns": [
+        {
+          "expect": "J7 Dana: confirm my design review.",
+          "content": [{"type": "text", "text": "J7 Telegram reply: design review confirmed."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 120, "output_tokens": 12}
+        },
+        {
+          "expect": "J7 Dana: give my morning briefing.",
+          "content": [{"type": "text", "text": "J7 morning briefing: two meetings."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 140, "output_tokens": 10}
+        }
+      ]
+    }
+  }
+}

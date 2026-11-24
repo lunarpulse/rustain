@@ -1,0 +1,34 @@
+# Dana's narrowed personal-assistant profile (J7, PRD Journey 7). It reproduces the
+# embedded `personal-assistant` selection (daily-log memory, daily context, cron
+# scheduler, Telegram channel) on top of `base`, with the persona and channel
+# sections replaced as the story requires.
+#
+# ⚠ It does NOT `extends = "personal-assistant"`: that profile is `preview = true`, the
+# flag is inherited (`child.preview || parent.preview`, profile_loader.rs) and a
+# preview profile REWRITES `telegram -> terminal` and `cron -> none` at selection
+# time (profile_loader.rs `build_selection`). A child of it can never run Telegram or
+# cron. docs/daemon.md prescribes "your own profile" for exactly this reason.
+#
+# No `bot_token` here: the token slot is the child's TELEGRAM_BOT_TOKEN only.
+name = "j7-dana"
+description = "J7 fixture: persona file + Telegram (chat 101) + cron on daily-log memory"
+extends = "base"
+
+[persona]
+adapter = "personal-assistant"
+config = { file = "j7-dana.md" }
+
+[memory]
+adapter = "daily-log"
+
+[channels]
+adapter = "telegram"
+
+[channels.config]
+allowed_chat_ids = [101]
+
+[scheduler]
+adapter = "cron"
+
+[context]
+adapter = "daily"
