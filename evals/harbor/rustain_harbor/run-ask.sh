@@ -27,7 +27,10 @@ had_sessions=0
 [ -e .claude/sessions ] && had_sessions=1
 sessions_before="$(ls -A .claude/sessions 2>/dev/null)"
 
-rustain ask --yolo --output-format stream-json "$(cat "$instruction_file")" \
+# Story 23.1 (ADR-23-1-01 owner decision 3): Terminal-Bench tasks install system
+# packages inside their container, so eval runs with the sandbox off; published
+# numbers state "sandbox off; container-isolated".
+rustain ask --yolo --sandbox-adapter noop --output-format stream-json "$(cat "$instruction_file")" \
     >"$logs/rustain.stream.jsonl" 2>"$logs/rustain.stderr.txt"
 status=$?
 

@@ -1940,6 +1940,9 @@ pub async fn run() -> Result<()> {
     // call (ADR-23-1-01 §7). The rustain process itself is never confined:
     // the manager confines each spawned command.
     {
+        crate::adapters::tui::widgets::status_bar::set_sandbox_enforced(
+            compose_snapshot.sandbox.status.is_enforced(),
+        );
         let notice = compose_snapshot.sandbox.status.notice();
         let _ = event_bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,

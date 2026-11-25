@@ -26,6 +26,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Story 23.1: Linux sandbox keystones fail instead of skipping without Landlock.
+  RUSTAIN_REQUIRE_LANDLOCK: "1"
 
 # Rust caches save only on `main` (see ci.yml): the repository cache is at its limit.
 jobs:

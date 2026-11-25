@@ -1718,9 +1718,25 @@ pub async fn run_ask(
 
     let effective_session = if force_new { None } else { session_id };
 
-    let core =
-        crate::infrastructure::composition::build_cli_core(&app_config, &workspace, yolo, persona)
-            .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
+    let (core, sandbox) = match crate::infrastructure::composition::build_cli_core_with_sandbox(
+        &app_config,
+        &workspace,
+        yolo,
+        persona,
+        &crate::infrastructure::sandbox::SandboxProbe::detect(),
+    ) {
+        Ok(composed) => composed,
+        // Story 23.1 AC7 — a `[sandbox]` refusal (YOLO without a usable
+        // sandbox, or Landlock required but missing) exits non-zero with the
+        // notice, before any provider request.
+        Err(e @ crate::domain::errors::AdapterCompositionError::Sandbox(_)) => {
+            exit_with_cli_error(resolved_output_format, limited, &e.to_string(), dry_run)
+        }
+        Err(e) => return Err(anyhow::anyhow!("Failed to initialize: {}", e)),
+    };
+    // Story 23.1 AC8 — one stderr line with the sandbox status before the
+    // first provider request; stdout keeps the selected format.
+    eprintln!("{}", sandbox.status.notice().text);
 
     let provider = core.provider.clone();
 

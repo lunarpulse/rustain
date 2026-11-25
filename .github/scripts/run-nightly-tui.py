@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 PRODUCT = Path(__file__).resolve().parents[2]
 SCRIPTS = PRODUCT / ".github" / "scripts"
 TUI = PRODUCT / "tests_tui"
-DEFAULT_FEATURES = {"anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev"}
+DEFAULT_FEATURES = {"anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev", "sandbox"}
 LANES = {
     "plain": ("native_nightly and not a2a_binary and not p2p_binary", "auto", 300, "j21", "RUSTAIN_J21_RECEIPT_DIR"),
     "federation": ("native_nightly and (a2a_binary or p2p_binary)", "0", 420, "19-20c", "RUSTAIN_19_20C_EVIDENCE"),

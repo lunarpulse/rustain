@@ -17,7 +17,7 @@ import venv
 PRODUCT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(".github/scripts/run-nightly-tui.py")
 WORKFLOW = PRODUCT / ".github/workflows/nightly-tui.yml"
-PLAIN = "anthropic, clipboard, mcp, meta-search, models-dev, ollama, openai"
+PLAIN = "anthropic, clipboard, mcp, meta-search, models-dev, ollama, openai, sandbox"
 FEATURE = "a2a, " + PLAIN + ", p2p"
 LEDGER = {
     "plain": ["tests_tui/test_plain.py::test_history", "tests_tui/sub/test_plain.py::TestRoute::test_size[80x24]"],

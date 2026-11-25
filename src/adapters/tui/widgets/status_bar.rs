@@ -54,7 +54,7 @@ pub fn render(
     // It shows while nothing more specific (streaming, executing, retrying) does.
     let status_text =
         if permission_mode == PermissionMode::Yolo && matches!(status, StatusState::Idle) {
-            YOLO_FACT.to_string()
+            yolo_fact(SANDBOX_ENFORCED.load(std::sync::atomic::Ordering::Relaxed)).to_string()
         } else {
             status.display_text()
         };
@@ -569,8 +569,32 @@ impl From<u64> for NoticeBadges {
     }
 }
 
-/// Story 21.1 A12: the status fact painted while YOLO is the permission mode.
-pub const YOLO_FACT: &str = "⚠ YOLO mode active — all tools auto-approved";
+/// Story 21.1 A12, amended by Story 23.1 AC8: the status fact painted while
+/// YOLO is the permission mode. It names the bound: confined commands, or no
+/// sandbox at all.
+pub const YOLO_FACT_CONFINED: &str =
+    "⚠ YOLO mode active — all tools auto-approved; commands confined to the workspace";
+pub const YOLO_FACT_UNCONFINED: &str = "⚠ YOLO mode active — all tools auto-approved; NO SANDBOX";
+
+/// Story 23.1 — whether this process's tool commands are kernel-confined.
+/// Set once by the TUI root after the sandbox resolves; never changes during
+/// the session. Unset reads as unconfined: the fact never claims a bound that
+/// nobody established.
+static SANDBOX_ENFORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the session's sandbox status for the YOLO fact.
+pub fn set_sandbox_enforced(enforced: bool) {
+    SANDBOX_ENFORCED.store(enforced, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The YOLO status fact for a session whose commands are (or are not) confined.
+pub fn yolo_fact(enforced: bool) -> &'static str {
+    if enforced {
+        YOLO_FACT_CONFINED
+    } else {
+        YOLO_FACT_UNCONFINED
+    }
+}
 
 /// Story 21.1 AC5 — the unseen warning/error badge (`Log !N`, capped `99+`).
 /// `None` hides it: it appears only while something still needs a look.
@@ -1434,7 +1458,12 @@ mod tests {
             LogAwareness::Hidden,
             0,
         );
-        assert!(row.contains(YOLO_FACT), "{row}");
+        // Story 23.1: unset (no sandbox established) reads as NO SANDBOX.
+        assert!(row.contains(YOLO_FACT_UNCONFINED), "{row}");
+        assert_eq!(yolo_fact(true), YOLO_FACT_CONFINED);
+        assert_eq!(yolo_fact(false), YOLO_FACT_UNCONFINED);
+        assert!(YOLO_FACT_CONFINED.ends_with("commands confined to the workspace"));
+        assert!(YOLO_FACT_UNCONFINED.ends_with("NO SANDBOX"));
         assert!(!row.contains("Ready"), "{row}");
 
         let row = draw_notice_bar(
@@ -1457,7 +1486,7 @@ mod tests {
             0,
         );
         assert!(row.contains("Streaming..."), "{row}");
-        assert!(!row.contains(YOLO_FACT), "{row}");
+        assert!(!row.contains("YOLO mode active"), "{row}");
     }
 
     #[test]

@@ -312,9 +312,6 @@ minisign-verify = { version = "0.2", optional = true }
 fastembed = { version = "5.14", optional = true }
 bincode = { version = "2", optional = true }
 
-# ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
-landlock = { version = "0.4", optional = true }
-
 # ── WASM execution sandbox (Story 17.3a, ADR-17-3a-01, feature-gated `wasm-sandbox`) ──
 # Untrusted-guest execution over the wasmtime component model. OUT of `default`
 # (NFR9 binary size; no untrusted-tool population exists yet — party ruling N4):
@@ -389,6 +386,12 @@ tempfile = "3.0"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# ── Landlock sandbox (Story 9.5, ADR-06-04; Story 23.1, ADR-23-1-01) ──
+# Linux-only: the crate issues `SYS_landlock_*` syscalls with no target gate.
+# Optional behind the `sandbox` feature, which is in `default`.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { version = "0.4", optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 tokio = { version = "1.50", features = ["test-util", "rt", "macros", "time", "sync"] }  # deterministic time (pause/advance) for abandonment timing tests
@@ -423,7 +426,7 @@ rcgen = "0.14"
 procfs = "0.17"
 
 [features]
-default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev"]
+default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev", "sandbox"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses
@@ -480,6 +483,9 @@ p2p-test-utils = ["p2p", "iroh/test-utils"]
 relay-server = ["dep:iroh-relay", "dep:rustls", "dep:rustls-pemfile"]
 skills-validation = []
 meta-search = ["dep:bm25"]
+# Story 23.1 (ADR-23-1-01): in `default`, so every release build confines tool
+# commands on Linux. `landlock` is a Linux-only target dependency, so on macOS
+# the feature enables nothing and the NoOp path builds.
 sandbox = ["dep:landlock"]
 # Story 17.3a — WASM execution sandbox (FR146). OFF by default (see the wasmtime
 # dep comment). The port + domain value types compile without it; enabling this

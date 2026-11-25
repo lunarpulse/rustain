@@ -1346,8 +1346,10 @@ pub(crate) fn daemon_compose_context(
     // parity-rule result.
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
     include_builtin_tools: bool,
+    // Story 23.1 — resolved once per daemon boot by `build_daemon_core` from
+    // `[sandbox]` (closes DF-C-3-DAEMON-IGNORES-SANDBOX-CONFIG).
+    sandbox: &crate::infrastructure::sandbox::ResolvedSandbox,
 ) -> ComposeContext {
-    use crate::adapters::sandbox::NoOpSandbox;
     ComposeContext {
         workspace_path: workspace_path.to_path_buf(),
         config_dir: config_dir.to_path_buf(),
@@ -1364,13 +1366,9 @@ pub(crate) fn daemon_compose_context(
         skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
             crate::infrastructure::skill_cache::SkillCacheConfig::default(),
         )),
-        sandbox: crate::domain::models::sandbox::SandboxSession::off(),
-        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
-            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
-        )),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
-            crate::domain::models::sandbox::SandboxPolicy::Permissive,
-        )),
+        sandbox: sandbox.session.clone(),
+        sandbox_slot: sandbox.slot(),
+        sandbox_policy: sandbox.policy_cell(),
         memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
@@ -1535,6 +1533,23 @@ pub fn build_daemon_core(
     // ⛔ Not inside `daemon_compose_context`: that runs again on first activity,
     // so a store built there would be a second log the transport never writes.
     let peer_topic_store = Arc::new(crate::adapters::rap::PeerTopicStore::new());
+    // Story 23.1 — `[sandbox]` resolved once per boot for the daemon's
+    // permanently-Normal tools (closes DF-C-3-DAEMON-IGNORES-SANDBOX-CONFIG);
+    // the status goes to the daemon log before any turn.
+    let sandbox = resolve_headless_sandbox(
+        &snapshot,
+        workspace,
+        crate::domain::models::PermissionMode::Normal,
+        &crate::infrastructure::sandbox::SandboxProbe::detect(),
+    )?;
+    {
+        let notice = sandbox.session.status.notice();
+        if notice.level == crate::domain::models::NoticeLevel::Info {
+            tracing::info!(target: "rustain::sandbox", "{}", notice.text);
+        } else {
+            tracing::warn!(target: "rustain::sandbox", "{}", notice.text);
+        }
+    }
     let eager_ctx = daemon_compose_context(
         workspace,
         config_dir,
@@ -1545,6 +1560,7 @@ pub fn build_daemon_core(
         Arc::clone(&peer_topic_store),
         Vec::new(),
         true,
+        &sandbox,
     );
     let persona = compose_persona(
         &persona_ref,
@@ -1562,6 +1578,7 @@ pub fn build_daemon_core(
         let channel_turn_tx = channel_turn_tx.clone();
         let factory_topic_store = Arc::clone(&peer_topic_store);
         let factory_config_dir = config_dir.to_path_buf();
+        let factory_sandbox = sandbox.clone();
         // AD-9 — the persona file is read once, at boot; the factory reuses the
         // eager `Arc` so a file edited or deleted afterwards cannot change it.
         let factory_persona = Arc::clone(&persona);
@@ -1585,6 +1602,7 @@ pub fn build_daemon_core(
                     Arc::clone(&factory_topic_store),
                     factory_mcp.mcp_servers.clone(),
                     factory_mcp.include_builtin,
+                    &factory_sandbox,
                 );
                 // Live, connection-holding parts — first activity only.
                 let provider: Arc<dyn StreamingProvider> = {
@@ -1822,16 +1840,46 @@ impl From<CliCore> for AcpCore {
     }
 }
 
+/// The `ask` composition over the probed host. See
+/// [`build_cli_core_with_sandbox`].
 pub fn build_cli_core(
     app_config: &crate::domain::models::AppConfig,
     workspace: &std::path::Path,
     yolo: bool,
     persona: Arc<dyn PersonaPort>,
 ) -> Result<CliCore, AdapterCompositionError> {
+    build_cli_core_with_sandbox(
+        app_config,
+        workspace,
+        yolo,
+        persona,
+        &crate::infrastructure::sandbox::SandboxProbe::detect(),
+    )
+    .map(|(core, _)| core)
+}
+
+/// Story 23.1 — the `ask` composition with the sandbox probe injected
+/// (production: `SandboxProbe::detect()`). Returns the core and the session's
+/// sandbox facts, whose status `ask` prints before the first provider
+/// request. `yolo` with the sandbox unavailable is refused here.
+pub fn build_cli_core_with_sandbox(
+    app_config: &crate::domain::models::AppConfig,
+    workspace: &std::path::Path,
+    yolo: bool,
+    persona: Arc<dyn PersonaPort>,
+    probe: &crate::infrastructure::sandbox::SandboxProbe,
+) -> Result<(CliCore, crate::domain::models::sandbox::SandboxSession), AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::NoOpApprovalPersistence;
-    use crate::adapters::sandbox::NoOpSandbox;
     use crate::adapters::security_adapter::SecurityAdapter;
+    use crate::domain::models::PermissionMode;
+
+    let mode = if yolo {
+        PermissionMode::Yolo
+    } else {
+        PermissionMode::Normal
+    };
+    let sandbox = resolve_headless_sandbox(app_config, workspace, mode, probe)?;
 
     let raw_capacity = app_config.runtime.event_bus.raw_capacity;
 
@@ -1839,7 +1887,6 @@ pub fn build_cli_core(
 
     let provider_layer = crate::infrastructure::startup::init_provider_layer(app_config);
     let provider: Arc<dyn StreamingProvider> = provider_layer.router as Arc<dyn StreamingProvider>;
-
     let security: Arc<dyn SecurityPort> = {
         let adapter = SecurityAdapter::new(workspace.to_path_buf());
         if yolo {
@@ -1870,13 +1917,9 @@ pub fn build_cli_core(
         skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
             crate::infrastructure::skill_cache::SkillCacheConfig::default(),
         )),
-        sandbox: crate::domain::models::sandbox::SandboxSession::off(),
-        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
-            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
-        )),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
-            crate::domain::models::sandbox::SandboxPolicy::Permissive,
-        )),
+        sandbox: sandbox.session.clone(),
+        sandbox_slot: sandbox.slot(),
+        sandbox_policy: sandbox.policy_cell(),
         memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
             crate::adapters::noop::NoOpMemory,
         )
@@ -1907,18 +1950,41 @@ pub fn build_cli_core(
     let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
         Arc::new(crate::adapters::ledger::FileUsageLedger::new());
 
-    Ok(CliCore {
-        provider,
-        security,
-        tools,
-        tool_scheduler,
-        approval,
-        storage,
-        event_tx,
-        event_rx,
-        ledger,
-        persona,
-    })
+    Ok((
+        CliCore {
+            provider,
+            security,
+            tools,
+            tool_scheduler,
+            approval,
+            storage,
+            event_tx,
+            event_rx,
+            ledger,
+            persona,
+        },
+        sandbox.session,
+    ))
+}
+
+/// Story 23.1 — resolve the sandbox for a headless root (`ask`, ACP, daemon)
+/// and apply the one YOLO decision: a `[sandbox]` refusal or a YOLO session
+/// without a usable sandbox is an [`AdapterCompositionError::Sandbox`]
+/// carrying the notice.
+pub(crate) fn resolve_headless_sandbox(
+    app_config: &crate::domain::models::AppConfig,
+    workspace: &std::path::Path,
+    mode: crate::domain::models::PermissionMode,
+    probe: &crate::infrastructure::sandbox::SandboxProbe,
+) -> Result<crate::infrastructure::sandbox::ResolvedSandbox, AdapterCompositionError> {
+    let resolved =
+        crate::infrastructure::sandbox::resolve_sandbox(app_config, workspace, mode, probe)
+            .map_err(|e| AdapterCompositionError::Sandbox(e.to_string()))?;
+    if mode == crate::domain::models::PermissionMode::Yolo {
+        crate::domain::models::sandbox::yolo_permitted(&resolved.session.status)
+            .map_err(|notice| AdapterCompositionError::Sandbox(notice.text))?;
+    }
+    Ok(resolved)
 }
 
 pub fn build_acp_core(
@@ -1930,8 +1996,23 @@ pub fn build_acp_core(
 ) -> Result<AcpCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::NoOpApprovalPersistence;
-    use crate::adapters::sandbox::NoOpSandbox;
     use crate::adapters::security_adapter::SecurityAdapter;
+    use crate::domain::models::PermissionMode;
+
+    let mode = if yolo {
+        PermissionMode::Yolo
+    } else {
+        PermissionMode::Normal
+    };
+    let sandbox = resolve_headless_sandbox(
+        app_config,
+        workspace,
+        mode,
+        &crate::infrastructure::sandbox::SandboxProbe::detect(),
+    )?;
+    // Story 23.1 AC8 — ACP: stdout is the protocol, so the notice is a stderr
+    // line, before the session's first tool call.
+    eprintln!("{}", sandbox.session.status.notice().text);
 
     let raw_capacity = app_config.runtime.event_bus.raw_capacity;
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1984,13 +2065,9 @@ pub fn build_acp_core(
         skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
             crate::infrastructure::skill_cache::SkillCacheConfig::default(),
         )),
-        sandbox: crate::domain::models::sandbox::SandboxSession::off(),
-        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
-            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
-        )),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
-            crate::domain::models::sandbox::SandboxPolicy::Permissive,
-        )),
+        sandbox: sandbox.session.clone(),
+        sandbox_slot: sandbox.slot(),
+        sandbox_policy: sandbox.policy_cell(),
         memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
             crate::adapters::noop::NoOpMemory,
         )

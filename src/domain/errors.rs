@@ -451,6 +451,12 @@ pub enum AdapterCompositionError {
     MissingDimension {
         port: crate::domain::models::PortDimension,
     },
+
+    /// Story 23.1 — the `[sandbox]` setting refuses this session: Landlock
+    /// required but unavailable, or YOLO while the sandbox is unavailable.
+    /// The text is the user-facing notice.
+    #[error("{0}")]
+    Sandbox(String),
 }
 
 #[derive(Debug, Error)]

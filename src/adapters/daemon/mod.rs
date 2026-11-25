@@ -555,6 +555,8 @@ async fn run_daemon_foreground(
             core.peer_topic_store.clone(),
             Vec::new(),
             true,
+            // The channel context builds no tools and spawns nothing.
+            &crate::infrastructure::sandbox::ResolvedSandbox::off(),
         );
         crate::infrastructure::composition::build_channels(chan_name, chan_config, &chan_ctx)
             .map_err(|e| anyhow::anyhow!("composing daemon channel: {e}"))?

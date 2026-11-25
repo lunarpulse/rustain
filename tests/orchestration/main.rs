@@ -70,6 +70,9 @@ mod conformance_sandbox;
 #[path = "../conformance_sandbox_inheritance.rs"]
 mod conformance_sandbox_inheritance;
 
+#[path = "../conformance_23_1_sandbox_default.rs"]
+mod conformance_23_1_sandbox_default;
+
 #[path = "../conformance_subagent_approval_routing.rs"]
 mod conformance_subagent_approval_routing;
 

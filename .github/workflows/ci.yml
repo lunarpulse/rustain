@@ -18,6 +18,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Story 23.1: a Linux sandbox keystone that finds no Landlock ABI 3+ fails
+  # instead of skipping.
+  RUSTAIN_REQUIRE_LANDLOCK: "1"
 
 # Every Swatinem/rust-cache step saves only on `main`. The repository cache sits
 # at its 10 GB limit with the `main` caches alone, so caches saved from gate or

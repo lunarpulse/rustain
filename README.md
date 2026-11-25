@@ -32,6 +32,7 @@ lines of Rust. One binary.
   - [Understand Rustain](#-understand-rustain)
 - [Repository layout](#repository-layout)
 - [Feature highlights](#feature-highlights)
+- [Sandbox](#sandbox)
 - [Profile system](#profile-system)
 - [Four-layer extensibility](#four-layer-extensibility)
 - [Project status & roadmap](#project-status--roadmap)
@@ -272,7 +273,7 @@ For the headless twin, start a daemon in the configured workspace and run `rusta
 5. In the TUI, run `/team send reviewer review this patch`; inspect delivery with `/team log`.
 
 **Default features:** `anthropic`, `openai`, `ollama`, `clipboard`, `mcp`,
-`meta-search`, `models-dev`.
+`meta-search`, `models-dev`, `sandbox` (Landlock on Linux; see [Sandbox](#sandbox)).
 
 The test suite includes 96 conformance tests that enforce architectural
 invariants (dependency rules, lock policies, namespace conventions, port
@@ -452,6 +453,65 @@ socket, foreground detection with boot-id veto and process nonce verification.
 workspaces; delete by stable id with an in-use daemon guard, typed-count
 confirmation for bulk deletes, `--dry-run`, and a versioned `--json` envelope.
 
+## Sandbox
+
+On Linux, every command the agent runs through the Bash tool, and everything that
+command starts, is confined by the kernel (Landlock, ABI 3 or later: Linux 6.2+).
+The rustain process itself is not confined.
+
+**What a confined command may do**, in every permission mode, YOLO included (YOLO
+removes prompts, not the bound):
+
+- read any file you can read, except rustain's credential store
+  (`~/.rustain/auth.json`) and the paths in `[sandbox].deny_read`;
+- create, write, rename, truncate and delete only inside the writable set: the
+  workspace, `/tmp`, `$TMPDIR`, `/dev/shm`, the device files (`/dev/null`, …), the
+  toolchain caches (`~/.cache` or `$XDG_CACHE_HOME`, the cargo `registry`, `git` and
+  `.package-cache` directories, `~/.npm`) and `[sandbox].writable_roots`;
+- open TCP connections, unless `[sandbox].network = false` (Landlock ABI 4+, Linux
+  6.7+);
+- not gain privileges: `sudo` and other setuid programs fail.
+
+Plan mode runs commands read-only with TCP blocked.
+
+```toml
+[sandbox]
+adapter = "auto"          # "auto" (default), "landlock" (required) or "noop" (off)
+writable_roots = ["~/.local/share/my-tool"]   # widen the writable set
+network = true            # false: block TCP bind/connect (ABI 4+)
+deny_read = ["~/.aws"]    # paths commands cannot read
+```
+
+`--sandbox-adapter auto|landlock|noop` overrides `adapter` for one run.
+
+**Notices.** The sandbox status reaches you before the first tool call: a notice
+in the TUI, one stderr line for `rustain ask`, a stderr line for `rustain acp`, a
+daemon log line, and a `Sandbox` row in `rustain doctor`. The YOLO status reads
+"commands confined to the workspace" or "NO SANDBOX".
+
+| Situation | Normal, AutoEdit, Plan | YOLO |
+|---|---|---|
+| Linux, Landlock ABI 3+ | confined | confined |
+| Linux, `auto`, no usable Landlock | runs unconfined, with a warning | refused: `/mode yolo` keeps the current mode, `ask --yolo` exits non-zero |
+| `adapter = "landlock"`, no usable Landlock | startup error | startup error |
+| `adapter = "noop"` | unconfined, with a notice | allowed, "NO SANDBOX" |
+| macOS, Windows | unconfined, with a notice | allowed, with the notice |
+
+A command that cannot be confined fails; it is never run unconfined.
+
+**Escape hatches.** `adapter = "noop"` (or `--sandbox-adapter noop`) turns the
+sandbox off for the whole session; `writable_roots` widens the writable set. There
+is no per-command escalation. Commands that write outside the writable set (`cargo
+install`, `npm -g`, `pip install --user`) fail until you add a root or switch the
+sandbox off.
+
+**Residual risks.** Reads outside the deny set (`~/.ssh`, `~/.aws`, …) are allowed
+and, with the network on, can leave the machine. Inside the workspace everything is
+in reach, including `.git` (hooks run later, unconfined) and build scripts: the
+workspace is the blast radius. Network control covers TCP only (not UDP or Unix
+sockets). A denied path inside a writable root cannot be protected; the notice
+lists it.
+
 ## Profile system
 
 Profiles are named TOML files that compose one adapter per port dimension:
@@ -516,7 +576,8 @@ Layer  3: A2A            Agent-to-agent delegation (localhost/LAN/internet)
   and delegate to remote agents) and server (accept tasks from external agents).
 
 All layers are governed by one unified permission system with three modes:
-Normal (prompt for each tool), YOLO (auto-approve safe tools), and Plan
+Normal (prompt for each tool), YOLO (auto-approve tools; on Linux every command
+stays confined to the workspace by the [sandbox](#sandbox)), and Plan
 (propose-then-execute).
 
 ## Project status & roadmap
