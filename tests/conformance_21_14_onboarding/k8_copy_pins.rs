@@ -123,7 +123,7 @@ fn sandbox_adapter_errors_say_what_is_accepted() {
             .to_string(),
         invalid(
             "sandbox.adapter",
-            r#"empty sandbox adapter value is invalid. Accepts `"noop"` (the default on all platforms) or `"landlock"` (Linux only, requires `sandbox` cargo feature)."#
+            r#"empty sandbox adapter value is invalid. Accepts `"auto"` (the default: Landlock on Linux when the kernel supports it), `"landlock"` (required: Linux only, requires `sandbox` cargo feature) or `"noop"` (sandbox off)."#
         )
     );
     assert_eq!(
@@ -132,7 +132,7 @@ fn sandbox_adapter_errors_say_what_is_accepted() {
             .to_string(),
         invalid(
             "sandbox.adapter",
-            r#"unknown sandbox adapter `bogus`. Accepts only `"noop"` (the default) and `"landlock"` (Linux + `sandbox` feature only)."#
+            r#"unknown sandbox adapter `bogus`. Accepts only `"auto"` (the default), `"landlock"` (Linux + `sandbox` feature only) and `"noop"` (sandbox off)."#
         )
     );
     #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
@@ -142,7 +142,7 @@ fn sandbox_adapter_errors_say_what_is_accepted() {
             .to_string(),
         invalid(
             "sandbox.adapter",
-            r#"`landlock` sandbox adapter requires the `sandbox` cargo feature AND a Linux build. Rebuild with `--features sandbox` or set `[sandbox].adapter = "noop"` (the default)."#
+            r#"`landlock` sandbox adapter requires the `sandbox` cargo feature AND a Linux build. Rebuild with `--features sandbox`, or set `[sandbox].adapter = "auto"` (the default) or `"noop"`."#
         )
     );
 }

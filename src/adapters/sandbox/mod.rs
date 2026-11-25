@@ -1,7 +1,8 @@
-//! Sandbox adapter module per ADR-06-04 §Decision lines 52-53.
+//! Sandbox adapter module (ADR-06-04, amended by ADR-23-1-01).
 //!
-//! Phase A ships `NoOpSandbox` (default; always composable; all platforms)
-//! AND `LandlockSandbox` (Linux only, gated on `sandbox` cargo feature).
+//! `NoOpSandbox` (always composable; all platforms) and `LandlockSandbox`
+//! (Linux only, `sandbox` cargo feature, part of `default`). The composition
+//! root picks one through `infrastructure::sandbox::resolve_sandbox`.
 
 pub mod noop;
 pub use noop::NoOpSandbox;
@@ -18,8 +19,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxAdapterKind {
-    /// `NoOpSandbox` — the default on macOS/Windows, and on Linux without
-    /// the `sandbox` cargo feature. Zero OS-level enforcement;
+    /// `NoOpSandbox` — zero OS-level enforcement;
     /// `PermissionChain::check` is the only line of defense.
     NoOp,
     /// `LandlockSandbox` — Linux only, gated on `sandbox` cargo feature.
@@ -37,15 +37,7 @@ pub enum SandboxError {
         reason: String,
     },
     /// Landlock crate rejected the ruleset (malformed path, kernel ABI too old).
+    /// The tool call fails; nothing is spawned unconfined.
     #[error("landlock ruleset build failed: {0}")]
     RulesetBuildFailed(String),
-    /// Kernel ABI is below the Landlock minimum (v3).
-    /// NON-FATAL at startup; falls back to NoOpSandbox semantics with a
-    /// `tracing::warn!` per ADR-06-04 §Negative.
-    #[error("landlock kernel ABI v{found} below minimum v{required}; falling back to NoOp")]
-    AbiTooOld { found: u32, required: u32 },
-    /// `Command::pre_exec` closure setup failed (rare; typically a borrow or
-    /// lifetime issue at composition time, not at runtime).
-    #[error("pre_exec setup failed: {0}")]
-    PreExecSetupFailed(String),
 }

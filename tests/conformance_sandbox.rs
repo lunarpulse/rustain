@@ -73,10 +73,14 @@ fn test_sandbox_adapter_empty_rejected() {
     assert!(result.is_err(), "empty adapter should be rejected");
 }
 
-// AC-9-5-4: Pre-v9.5 config round-trips to noop default.
+// AC-9-5-4, amended by Story 23.1 AC2: a config without `[sandbox]` resolves to
+// the `auto` default, network on, no extra roots or denied paths.
 #[test]
-fn test_sandbox_config_pre_v9_5_round_trips_to_noop() {
+fn test_sandbox_config_pre_v9_5_round_trips_to_auto() {
     let config: rustain::domain::models::AppConfig =
         serde_json::from_str("{}").expect("empty config should parse");
-    assert_eq!(config.sandbox.adapter, "noop");
+    assert_eq!(config.sandbox.adapter, "auto");
+    assert!(config.sandbox.network);
+    assert!(config.sandbox.writable_roots.is_empty());
+    assert!(config.sandbox.deny_read.is_empty());
 }

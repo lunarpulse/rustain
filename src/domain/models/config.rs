@@ -455,25 +455,36 @@ impl Default for MarkdownConfig {
     }
 }
 
-/// Sandbox enforcement configuration (Story 9.5, ADR-06-04 §Decision).
+/// Sandbox enforcement configuration (Story 9.5 ADR-06-04, amended by
+/// Story 23.1 ADR-23-1-01).
 ///
 /// Threaded through the existing 7-layer Figment stack.
 ///
-/// # Phase A
-///
-/// Accepts `"noop"` (default on all platforms) and `"landlock"` (Linux only,
-/// gated on `sandbox` cargo feature). On Linux without the feature,
-/// `"landlock"` produces an actionable startup error pointing at the
-/// `sandbox` cargo feature.
+/// `adapter`: `"auto"` (default: Landlock on Linux when the kernel has ABI 3+,
+/// otherwise unconfined with a notice and YOLO refused), `"landlock"`
+/// (required: startup fails without it) or `"noop"` (off).
+/// `writable_roots` widen the writable set, `network = false` blocks TCP
+/// bind/connect (Landlock ABI 4+), `deny_read` adds paths tool commands cannot
+/// read. Relative paths resolve against the workspace; `~/` against home.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SandboxConfig {
     #[serde(default = "SandboxConfig::default_adapter")]
     pub adapter: String,
+    #[serde(default)]
+    pub writable_roots: Vec<std::path::PathBuf>,
+    #[serde(default = "SandboxConfig::default_network")]
+    pub network: bool,
+    #[serde(default)]
+    pub deny_read: Vec<std::path::PathBuf>,
 }
 
 impl SandboxConfig {
     fn default_adapter() -> String {
-        "noop".to_string()
+        "auto".to_string()
+    }
+
+    fn default_network() -> bool {
+        true
     }
 }
 
@@ -481,6 +492,9 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             adapter: Self::default_adapter(),
+            writable_roots: Vec::new(),
+            network: Self::default_network(),
+            deny_read: Vec::new(),
         }
     }
 }

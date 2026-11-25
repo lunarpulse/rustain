@@ -214,8 +214,7 @@ fn test_compose_with_default_config_binds_static_full() {
         skill_cache: std::sync::Arc::new(
             rustain::infrastructure::skill_cache::SkillCache::new_in_memory(),
         ),
-        sandbox_adapter: "noop".into(),
-        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox: rustain::domain::models::sandbox::SandboxSession::off(),
         sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
             rustain::adapters::sandbox::NoOpSandbox,
         )
@@ -271,8 +270,7 @@ fn test_compose_with_unknown_exposure_returns_error() {
         skill_cache: std::sync::Arc::new(
             rustain::infrastructure::skill_cache::SkillCache::new_in_memory(),
         ),
-        sandbox_adapter: "noop".into(),
-        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox: rustain::domain::models::sandbox::SandboxSession::off(),
         sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
             rustain::adapters::sandbox::NoOpSandbox,
         )

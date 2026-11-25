@@ -494,9 +494,13 @@ async fn ac6_other_tools_refused_with_plan_mode_error() {
 
 #[test]
 fn ac7_sandbox_policy_plan_is_readonly_no_network() {
-    let ws = std::path::Path::new("/tmp/ws");
+    let scope = rustain::domain::models::SandboxScope {
+        writable_roots: vec![std::path::PathBuf::from("/tmp/ws")],
+        network: true,
+        off: false,
+    };
     assert_eq!(
-        SandboxPolicy::from_mode(PermissionMode::Plan, ws),
+        SandboxPolicy::from_mode(PermissionMode::Plan, &scope),
         SandboxPolicy::ReadOnly { network: false }
     );
 }

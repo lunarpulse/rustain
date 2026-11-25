@@ -164,7 +164,7 @@ pub use config::RuntimeConfig;
 pub use config::{
     AuthHeaderScheme, AutoApprovePolicy, DaemonConfig, MarkdownConfig, MouseConfig,
     NotificationTtlSecs, NotificationsConfig, OnboardingConfig, ProviderConfig, ReasoningDisplay,
-    SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
+    SandboxConfig, SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::{ContentBlockType, ResponseSpan, ResponseSpanBuilder};
@@ -266,7 +266,9 @@ pub use redacted_url::RedactedUrl;
 pub use relay::{MAX_CONFIGURED_RELAYS, RelayConfigState, RelayMode, RelaySet};
 #[allow(unused_imports)]
 pub use room_role::{RoomEditDecision, RoomEditKind, RoomRole};
-pub use sandbox::SandboxPolicy;
+pub use sandbox::{
+    SandboxNotice, SandboxPolicy, SandboxScope, SandboxSession, SandboxStatus, yolo_permitted,
+};
 pub use secret::SecretString;
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};

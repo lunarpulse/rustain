@@ -353,8 +353,7 @@ mod tests {
             assembler: "passthrough".into(),
             skill_exposure: "l1-metadata".into(),
             skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
-            sandbox_adapter: "noop".into(),
-            sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            sandbox: crate::domain::models::sandbox::SandboxSession::off(),
             sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
                 crate::adapters::sandbox::NoOpSandbox,
             )

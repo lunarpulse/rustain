@@ -575,8 +575,7 @@ pub fn app_state(workspace: &Path) -> (AppState, tokio::sync::mpsc::UnboundedRec
         assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
-        sandbox_adapter: "noop".into(),
-        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox: rustain::domain::models::sandbox::SandboxSession::off(),
         sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(
             rustain::adapters::sandbox::NoOpSandbox,
         )

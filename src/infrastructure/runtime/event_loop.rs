@@ -4967,34 +4967,28 @@ pub async fn run(
                             }
                         }
                         AppEvent::SetPermissionMode(mode) => {
-                        security.set_mode(mode);
-                        // Update sandbox policy
-                        let new_policy = crate::domain::models::SandboxPolicy::from_mode(mode, &workspace_path);
-                        tracing::info!(
-                            target: "rustain::sandbox",
-                            mode = ?mode,
-                            policy = ?new_policy,
-                            "Sandbox policy updated on permission mode change (Story 9.5 AC-9-5-4 Task 4.7)"
-                        );
-                        *app_state.sandbox_policy.write().await = new_policy;
-
-                        // Plan mode warmup
-                        if mode == PermissionMode::Plan {
-                            let mut meta = tab_manager.active_tab_mut().session_meta.clone();
-                            let _ = app_state.plan_manager.ensure_dir().await;
-                            let plan = app_state.plan_manager.plan_file_for(&mut meta);
-                            tab_manager.active_tab_mut().session_meta.plan_slug = meta.plan_slug;
-                            tool_scheduler.set_plan_file(Some(plan.path.clone())).await;
-                            state.plan_file_path = Some(plan.path);
-                            app_state.plan_injector.as_ref().reset_reentry();
-                            state.pending_plan_reminder_at_turn = Some(0);
-                        } else {
-                            tool_scheduler.set_plan_file(None).await;
-                            state.plan_file_path = None;
-                            state.pending_plan_reminder_at_turn = None;
+                        // Story 23.1 — YOLO refused while the sandbox is unavailable.
+                        if crate::infrastructure::sandbox::apply_permission_mode(
+                            mode, security.as_ref(), &app_state.compose_snapshot.sandbox,
+                            &app_state.sandbox_policy, app_state.event_bus.as_ref(),
+                        ).await {
+                            // Plan mode warmup
+                            if mode == PermissionMode::Plan {
+                                let mut meta = tab_manager.active_tab_mut().session_meta.clone();
+                                let _ = app_state.plan_manager.ensure_dir().await;
+                                let plan = app_state.plan_manager.plan_file_for(&mut meta);
+                                tab_manager.active_tab_mut().session_meta.plan_slug = meta.plan_slug;
+                                tool_scheduler.set_plan_file(Some(plan.path.clone())).await;
+                                state.plan_file_path = Some(plan.path);
+                                app_state.plan_injector.as_ref().reset_reentry();
+                                state.pending_plan_reminder_at_turn = Some(0);
+                            } else {
+                                tool_scheduler.set_plan_file(None).await;
+                                state.plan_file_path = None;
+                                state.pending_plan_reminder_at_turn = None;
+                            }
+                            notice_actions::announce_permission_mode(&mut state, mode);
                         }
-
-                        notice_actions::announce_permission_mode(&mut state, mode);
                     }
                     AppEvent::RetryMessage { content: text, .. } => {
                         // Delayed retry arrived — start the turn now (no images on retry)

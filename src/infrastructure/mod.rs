@@ -19,6 +19,7 @@ pub mod profile_resolution;
 pub mod provider_availability;
 pub mod provider_factory;
 pub mod runtime;
+pub mod sandbox;
 #[cfg(feature = "meta-search")]
 pub mod search;
 pub mod signals;

@@ -1525,7 +1525,19 @@ pub async fn run() -> Result<()> {
     let plan_injector = Arc::new(DefaultPlanInjector::new());
 
     let initial_mode = app_config.initial_permission_mode();
-    let sandbox_policy = SandboxPolicy::from_mode(initial_mode, &workspace_path);
+    // Story 23.1 — the one sandbox resolver (ADR-23-1-01 §6).
+    let resolved_sandbox = match crate::infrastructure::sandbox::resolve_sandbox(
+        &app_config,
+        &workspace_path,
+        initial_mode,
+        &crate::infrastructure::sandbox::SandboxProbe::detect(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            eprintln!("Config validation failed: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let usage_ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
         Arc::new(FileUsageLedger::new());
@@ -1701,17 +1713,13 @@ pub async fn run() -> Result<()> {
     let shared_skill_cache = Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
         crate::infrastructure::skill_cache::SkillCacheConfig::default(),
     ));
-    // Story 9.5 — shared sandbox slot and policy ref, created EARLY so
-    // ToolSetAdapter and ComposeContext/AppState share the SAME Arc instances.
-    // The slot starts as NoOpSandbox and is updated after AgentCore::compose().
-    let sandbox_slot: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>> = {
-        use crate::adapters::sandbox::NoOpSandbox;
-        Arc::new(arc_swap::ArcSwap::from_pointee(
-            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
-        ))
-    };
+    // Story 9.5 / 23.1 — shared sandbox slot and policy ref holding the
+    // resolved manager, created EARLY so ToolSetAdapter, ComposeContext,
+    // AgentCore and AppState share the SAME Arc instances.
+    let sandbox_slot: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>> =
+        resolved_sandbox.slot();
     let sandbox_policy_ref: Arc<tokio::sync::RwLock<SandboxPolicy>> =
-        Arc::new(tokio::sync::RwLock::new(sandbox_policy.clone()));
+        resolved_sandbox.policy_cell();
 
     let agent_activator = Arc::new(crate::adapters::agent_activation::AgentActivator::new(
         Arc::clone(&security),
@@ -1887,8 +1895,7 @@ pub async fn run() -> Result<()> {
         assembler: app_config.assembler.strategy.clone(),
         skill_exposure: app_config.skill_exposure.kind.clone(),
         skill_cache: Arc::clone(&shared_skill_cache),
-        sandbox_adapter: app_config.sandbox.adapter.clone(),
-        sandbox_startup_policy: sandbox_policy.clone(),
+        sandbox: resolved_sandbox.session.clone(),
         sandbox_slot: Arc::clone(&sandbox_slot),
         sandbox_policy: Arc::clone(&sandbox_policy_ref),
         // Story 11.1 — shared memory slot for the `remember` tool. `build_memory`
@@ -1929,38 +1936,16 @@ pub async fn run() -> Result<()> {
     };
     let compose_snapshot = Arc::new(compose_ctx);
 
-    // Story 9.5 — wire the resolved sandbox adapter into the shared slot
-    // (used by ToolSetAdapter for Bash-tool enforcement) and into AgentCore.
+    // Story 23.1 — the sandbox status reaches the user before the first tool
+    // call (ADR-23-1-01 §7). The rustain process itself is never confined:
+    // the manager confines each spawned command.
     {
-        let resolved = agent_core_inner.sandbox.load_full();
-        sandbox_slot.store(Arc::clone(&resolved));
-    }
-
-    // Story 9.5 — restrict the parent rustain process with Landlock
-    // (NoOp on non-Linux; non-fatal on ABI-too-old fallback).
-    // Must happen AFTER all 10 AgentCore slots are filled AND AFTER
-    // SkillCache warm_up has populated frontmatter (which happens on
-    // first skill_exposure render), but BEFORE the event loop enters.
-    //
-    // Uses the LEAST-RESTRICTIVE plausible policy (WorkspaceWrite + network)
-    // per sandbox.rs docstring: Landlock is one-way restrictive — once
-    // restricted, the process can never regain access. The mode-derived
-    // policy (e.g. ReadOnly in Plan mode) would permanently lock rustain.
-    // Per-call apply() tightens further for individual Bash invocations.
-    {
-        let startup_restrict_policy = SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![workspace_path.clone()],
-            read_only_paths: vec![workspace_path.join(".git"), workspace_path.join(".rustain")],
-            network: true,
-        };
-        let sandbox = agent_core_inner.sandbox.load_full();
-        if let Err(e) = sandbox.restrict_self(&startup_restrict_policy).await {
-            tracing::warn!(
-                error = %e,
-                "Sandbox restrict_self failed at startup (non-fatal); \
-                 ADR-06-04 §Negative — documented as known limitation"
-            );
-        }
+        let notice = compose_snapshot.sandbox.status.notice();
+        let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: notice.level,
+            message: notice.text,
+        });
     }
 
     // Story 8.5 AC-8 — apply startup-time adapter overrides from CLI flags
@@ -3206,33 +3191,34 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
     }
 }
 
-/// Story 9.5 — validate the `sandbox.adapter` config value at startup.
+/// Story 9.5, amended by Story 23.1 — validate the `sandbox.adapter` config
+/// value at startup.
 ///
-/// Phase A accepts `"noop"` (default on all platforms) and `"landlock"`
-/// (Linux only, gated on `sandbox` cargo feature). On Linux without the
-/// feature, `"landlock"` produces an actionable error pointing at the
-/// `sandbox` cargo feature.
+/// Accepts `"auto"` (the default), `"landlock"` (Linux builds with the
+/// `sandbox` cargo feature only; startup fails when the kernel cannot enforce
+/// it) and `"noop"` (off).
 pub fn validate_sandbox_adapter(adapter: &str) -> Result<(), crate::domain::errors::DomainError> {
     use crate::domain::errors::{ConfigError, DomainError};
     if adapter.is_empty() {
         return Err(DomainError::Config(ConfigError::Invalid {
             field: "sandbox.adapter".into(),
             value: "empty sandbox adapter value is invalid. \
-                    Accepts `\"noop\"` (the default on all platforms) \
-                    or `\"landlock\"` (Linux only, requires `sandbox` cargo feature)."
+                    Accepts `\"auto\"` (the default: Landlock on Linux when the kernel supports it), \
+                    `\"landlock\"` (required: Linux only, requires `sandbox` cargo feature) \
+                    or `\"noop\"` (sandbox off)."
                 .to_string(),
         }));
     }
     match adapter {
-        "noop" => Ok(()),
+        "auto" | "noop" => Ok(()),
         "landlock" => {
             #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
             {
                 return Err(DomainError::Config(ConfigError::Invalid {
                     field: "sandbox.adapter".into(),
                     value: "`landlock` sandbox adapter requires the `sandbox` cargo feature \
-                             AND a Linux build. Rebuild with `--features sandbox` or set \
-                             `[sandbox].adapter = \"noop\"` (the default)."
+                             AND a Linux build. Rebuild with `--features sandbox`, or set \
+                             `[sandbox].adapter = \"auto\"` (the default) or `\"noop\"`."
                         .to_string(),
                 }));
             }
@@ -3242,8 +3228,8 @@ pub fn validate_sandbox_adapter(adapter: &str) -> Result<(), crate::domain::erro
         other => Err(DomainError::Config(ConfigError::Invalid {
             field: "sandbox.adapter".into(),
             value: format!(
-                "unknown sandbox adapter `{}`. Accepts only `\"noop\"` \
-                 (the default) and `\"landlock\"` (Linux + `sandbox` feature only).",
+                "unknown sandbox adapter `{}`. Accepts only `\"auto\"` (the default), \
+                 `\"landlock\"` (Linux + `sandbox` feature only) and `\"noop\"` (sandbox off).",
                 other
             ),
         })),

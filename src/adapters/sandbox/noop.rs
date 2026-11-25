@@ -1,5 +1,4 @@
-//! `NoOpSandbox` — default sandbox adapter (all platforms; Linux without the
-//! `sandbox` cargo feature).
+//! `NoOpSandbox` — the unconfined sandbox adapter.
 //!
 //! Zero OS-level enforcement. `PermissionChain::check` is the only line of
 //! defense in this configuration. This adapter exists so the composition
@@ -7,13 +6,13 @@
 //! support is a property of THIS ADAPTER's behavior, not of the slot being
 //! empty.
 //!
-//! # When this ships in production
+//! # When this ships in production (ADR-23-1-01 §6)
 //!
-//! - All macOS sessions (no Landlock equivalent shipped in Phase A).
-//! - All Windows sessions (no Landlock equivalent shipped in Phase A).
-//! - Linux sessions built without the `sandbox` cargo feature.
-//! - Linux sessions where the kernel ABI is below Landlock v3 (LandlockSandbox
-//!    falls back here per AC-9-5-3 with a `tracing::warn!`).
+//! - `[sandbox].adapter = "noop"` (the sandbox is off).
+//! - `"auto"` on a Linux kernel without Landlock ABI v3, or a build without
+//!   the `sandbox` feature (status `Unavailable`; YOLO refused).
+//! - macOS and Windows (status `NotSupported`).
+//! - Composition contexts that spawn no commands.
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -33,10 +32,6 @@ impl SandboxManager for NoOpSandbox {
     }
 
     async fn apply(&self, _cmd: &mut Command, _policy: &SandboxPolicy) -> Result<(), SandboxError> {
-        Ok(())
-    }
-
-    async fn restrict_self(&self, _policy: &SandboxPolicy) -> Result<(), SandboxError> {
         Ok(())
     }
 }
@@ -77,12 +72,6 @@ mod tests {
             .await
             .is_ok()
         );
-    }
-
-    #[tokio::test]
-    async fn test_restrict_self_is_ok() {
-        let sb = NoOpSandbox;
-        assert!(sb.restrict_self(&SandboxPolicy::Permissive).await.is_ok());
     }
 
     #[tokio::test]

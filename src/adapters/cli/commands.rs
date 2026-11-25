@@ -76,9 +76,10 @@ pub struct Cli {
     /// default) or `"static-full"` (lists each skill's full SKILL.md, within the catalog token cap).
     #[arg(long, global = true, value_parser = ["l1-metadata", "static-full"])]
     pub skill_exposure: Option<String>,
-    /// Choose the sandbox adapter: `"noop"` (the default on all platforms) or
-    /// `"landlock"` (Linux builds with the `sandbox` cargo feature only).
-    #[arg(long, global = true, value_parser = ["noop", "landlock"])]
+    /// Choose the sandbox adapter: `"auto"` (the default: Landlock on Linux when
+    /// the kernel supports it), `"landlock"` (required; Linux builds with the
+    /// `sandbox` cargo feature only) or `"noop"` (sandbox off).
+    #[arg(long, global = true, value_parser = ["auto", "landlock", "noop"])]
     pub sandbox_adapter: Option<String>,
     /// Serve this instance as a loopback-only A2A endpoint. An explicit address
     /// uses `--serve-a2a=127.0.0.1:PORT`; the default is 127.0.0.1:8080.

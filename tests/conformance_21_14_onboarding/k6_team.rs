@@ -171,7 +171,7 @@ fn startup_seeds_security_and_sandbox_from_the_initial_permission_mode() {
     let text = include_str!("../../src/infrastructure/startup.rs");
     for anchor in [
         "let initial_mode = app_config.initial_permission_mode();",
-        "SandboxPolicy::from_mode(initial_mode, &workspace_path)",
+        "resolve_sandbox(\n        &app_config,\n        &workspace_path,\n        initial_mode,",
         "security_adapter.set_mode(initial_mode);",
     ] {
         assert!(text.contains(anchor), "startup.rs must contain `{anchor}`");

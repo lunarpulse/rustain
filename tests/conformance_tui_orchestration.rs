@@ -876,8 +876,11 @@ fn leader_mode_and_tour_arms_delegate_to_their_handlers() {
         .split("AppEvent::RetryMessage")
         .next()
         .expect("the SetPermissionMode arm is bounded by the RetryMessage arm");
+    // Story 23.1: the mode is set through the sandbox handler, which refuses
+    // YOLO while the sandbox is unavailable.
     assert!(
-        set_mode.contains("security.set_mode(mode)")
+        set_mode.contains("crate::infrastructure::sandbox::apply_permission_mode(")
+            && set_mode.contains("mode, security.as_ref()")
             && set_mode.contains("notice_actions::announce_permission_mode(&mut state, mode)")
             && !set_mode.contains("submit_turn!"),
         "SetPermissionMode must set the mode, announce it and start no turn: {set_mode}"

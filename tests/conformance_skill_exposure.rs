@@ -309,8 +309,7 @@ fn test_compose_with_default_config_binds_l1_metadata() {
         assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: test_cache(),
-        sandbox_adapter: "noop".into(),
-        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox: rustain::domain::models::sandbox::SandboxSession::off(),
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
             rustain::adapters::sandbox::NoOpSandbox,
         )
@@ -366,8 +365,7 @@ fn test_compose_with_static_full_binds_static_full() {
         assembler: "passthrough".into(),
         skill_exposure: "static-full".into(),
         skill_cache: test_cache(),
-        sandbox_adapter: "noop".into(),
-        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox: rustain::domain::models::sandbox::SandboxSession::off(),
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
             rustain::adapters::sandbox::NoOpSandbox,
         )
