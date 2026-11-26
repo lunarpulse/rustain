@@ -37,13 +37,14 @@ impl HostPaths {
             temp_dirs.push(PathBuf::from(tmp));
         }
         temp_dirs.push(PathBuf::from("/dev/shm"));
+        // No `/dev/tty`: commands run in their own session without a
+        // controlling terminal (review M1).
         let device_files = [
             "/dev/null",
             "/dev/zero",
             "/dev/full",
             "/dev/random",
             "/dev/urandom",
-            "/dev/tty",
         ]
         .into_iter()
         .map(PathBuf::from)
@@ -65,8 +66,10 @@ impl HostPaths {
         if let Some(home) = &home {
             cache_dirs.push(home.join(".npm"));
         }
+        // The store and the temporary file it is written through before the
+        // rename (review L2).
         let credential_files = crate::infrastructure::paths::data_dir()
-            .map(|dir| vec![dir.join("auth.json")])
+            .map(|dir| vec![dir.join("auth.json"), dir.join("auth.json.tmp")])
             .unwrap_or_default();
         Self {
             home,
@@ -197,8 +200,26 @@ pub fn resolve_sandbox(
     probe: &SandboxProbe,
 ) -> Result<ResolvedSandbox, SandboxResolveError> {
     let config = &app_config.sandbox;
+    let host = &probe.host;
+    let configured_roots: Vec<PathBuf> = config
+        .writable_roots
+        .iter()
+        .map(|p| expand(p, workspace, host.home.as_deref()))
+        .collect();
+    let session = |scope: SandboxScope, status: SandboxStatus| SandboxSession {
+        scope,
+        status,
+        adapter: config.adapter.clone(),
+        configured_roots: configured_roots.clone(),
+        provenance: config.provenance.clone(),
+    };
     let required = match config.adapter.as_str() {
-        "noop" => return Ok(ResolvedSandbox::off()),
+        "noop" => {
+            return Ok(ResolvedSandbox {
+                session: session(SandboxScope::off(), SandboxStatus::Off),
+                ..ResolvedSandbox::off()
+            });
+        }
         "auto" => false,
         "landlock" => true,
         other => {
@@ -210,7 +231,6 @@ pub fn resolve_sandbox(
             ));
         }
     };
-    let host = &probe.host;
     let (writable_roots, missing_roots) = writable_set(config, workspace, host);
     let scope = SandboxScope {
         writable_roots,
@@ -231,17 +251,27 @@ pub fn resolve_sandbox(
         };
     let (manager, status) = match &probe.landlock {
         LandlockProbe::Available { abi } => {
-            let (protected, unprotected) = deny_set(config, workspace, host, &scope.writable_roots);
-            match landlock_manager(*abi, protected, probe.inject_not_enforced) {
-                Some(manager) => (
+            let (protected, unprotected, credentials_unprotected) =
+                deny_set(config, workspace, host, &scope.writable_roots);
+            match landlock_manager(
+                *abi,
+                protected,
+                &scope.writable_roots,
+                probe.inject_not_enforced,
+            ) {
+                Some(Ok(manager)) => (
                     manager,
                     SandboxStatus::Enforced {
                         abi: *abi,
                         network_enforced: config.network || *abi >= 4,
                         unprotected,
                         missing_roots,
+                        ipc_scoped: *abi >= 6,
+                        broad_roots: broad_roots(&scope.writable_roots, host.home.as_deref()),
+                        credentials_unprotected,
                     },
                 ),
+                Some(Err(reason)) => unavailable(reason)?,
                 None => unavailable(NOT_BUILT.to_string())?,
             }
         }
@@ -262,28 +292,37 @@ pub fn resolve_sandbox(
     Ok(ResolvedSandbox {
         manager,
         policy,
-        session: SandboxSession { scope, status },
+        session: session(scope, status),
     })
 }
 
+/// The Landlock manager, holding a descriptor of every writable root opened
+/// now (`O_PATH|O_NOFOLLOW`): later spawns reuse these inodes, so a confined
+/// command that swaps a root for a symlink widens nothing (review H2).
 #[cfg(all(target_os = "linux", feature = "sandbox"))]
 fn landlock_manager(
     abi: u32,
     deny_read: Vec<PathBuf>,
+    writable_roots: &[PathBuf],
     inject_not_enforced: bool,
-) -> Option<Arc<dyn SandboxManager>> {
-    Some(Arc::new(
-        crate::adapters::sandbox::LandlockSandbox::new(abi, deny_read)
-            .with_injected_not_enforced(inject_not_enforced),
-    ))
+) -> Option<Result<Arc<dyn SandboxManager>, String>> {
+    Some(
+        crate::adapters::sandbox::LandlockSandbox::new(abi, deny_read, writable_roots)
+            .map(|sb| {
+                Arc::new(sb.with_injected_not_enforced(inject_not_enforced))
+                    as Arc<dyn SandboxManager>
+            })
+            .map_err(|e| e.to_string()),
+    )
 }
 
 #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
 fn landlock_manager(
     _abi: u32,
     _deny_read: Vec<PathBuf>,
+    _writable_roots: &[PathBuf],
     _inject_not_enforced: bool,
-) -> Option<Arc<dyn SandboxManager>> {
+) -> Option<Result<Arc<dyn SandboxManager>, String>> {
     None
 }
 
@@ -330,34 +369,57 @@ fn writable_set(
     (roots, missing)
 }
 
-/// The deny set, canonical: (protected, unprotected). A denied path under a
-/// writable root cannot be carved out (Landlock grants are a union).
+/// The deny set, canonical: (protected, unprotected, credentials exposed). A
+/// denied path under a writable root cannot be carved out (Landlock grants are
+/// a union), and a writable root inside a denied directory stays readable;
+/// both are reported as unprotected while the rest of the directory stays
+/// denied.
 fn deny_set(
     config: &crate::domain::models::SandboxConfig,
     workspace: &Path,
     host: &HostPaths,
     writable_roots: &[PathBuf],
-) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let mut protected = Vec::new();
-    let mut unprotected = Vec::new();
-    let paths = host.credential_files.iter().cloned().chain(
-        config
-            .deny_read
-            .iter()
-            .map(|p| expand(p, workspace, host.home.as_deref())),
-    );
-    for path in paths {
+) -> (Vec<PathBuf>, Vec<PathBuf>, bool) {
+    let mut protected: Vec<PathBuf> = Vec::new();
+    let mut unprotected: Vec<PathBuf> = Vec::new();
+    let mut credentials_exposed = false;
+    let credentials = host.credential_files.iter().map(|p| (p.clone(), true));
+    let configured = config
+        .deny_read
+        .iter()
+        .map(|p| (expand(p, workspace, host.home.as_deref()), false));
+    for (path, credential) in credentials.chain(configured) {
         let path = canonical_or_lexical(&path);
-        let bucket = if writable_roots.iter().any(|root| path.starts_with(root)) {
-            &mut unprotected
-        } else {
-            &mut protected
-        };
-        if !bucket.contains(&path) {
-            bucket.push(path);
+        if writable_roots.iter().any(|root| path.starts_with(root)) {
+            credentials_exposed |= credential;
+            if !unprotected.contains(&path) {
+                unprotected.push(path);
+            }
+            continue;
+        }
+        for root in writable_roots {
+            if root.starts_with(&path) && !unprotected.contains(root) {
+                unprotected.push(root.clone());
+            }
+        }
+        if !protected.contains(&path) {
+            protected.push(path);
         }
     }
-    (protected, unprotected)
+    (protected, unprotected, credentials_exposed)
+}
+
+/// Writable roots that bound nothing: `/`, the home directory or an ancestor
+/// of it (Story 23.1 review M3).
+fn broad_roots(writable_roots: &[PathBuf], home: Option<&Path>) -> Vec<PathBuf> {
+    let home = home.map(canonical_or_lexical);
+    writable_roots
+        .iter()
+        .filter(|root| {
+            root.as_path() == Path::new("/") || home.as_ref().is_some_and(|h| h.starts_with(root))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Canonical when it exists; else the canonical parent joined with the name.
@@ -373,6 +435,26 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
     }
 }
 
+/// `rustain doctor`'s sandbox row and the sandbox its MCP probe spawns under,
+/// from the same resolver the sessions use. When `[sandbox]` refuses the
+/// session (a required Landlock is missing) the probe gets `Err` and starts
+/// no server (Story 23.1 review CR231-01).
+pub fn doctor_sandbox_check(
+    app_config: &AppConfig,
+    workspace: &Path,
+    probe: &SandboxProbe,
+) -> crate::adapters::cli::doctor::SandboxCheck {
+    let resolved = resolve_sandbox(app_config, workspace, PermissionMode::Normal, probe);
+    crate::adapters::cli::doctor::SandboxCheck {
+        adapter: app_config.sandbox.adapter.clone(),
+        mcp: match &resolved {
+            Ok(r) => Ok(Some((Arc::clone(&r.manager), r.session.scope.ceiling()))),
+            Err(e) => Err(e.to_string()),
+        },
+        outcome: resolved.map(|r| r.session).map_err(|e| e.to_string()),
+    }
+}
+
 /// The TUI `SetPermissionMode` arm's sandbox half (ADR-23-1-01 §6): YOLO is
 /// refused while the sandbox is unavailable — the mode stays and the notice is
 /// shown. Otherwise the mode is set and the Bash policy re-derived. Returns
@@ -385,7 +467,7 @@ pub(crate) async fn apply_permission_mode(
     event_bus: &crate::infrastructure::runtime::event_bus::EventBus,
 ) -> bool {
     if mode == PermissionMode::Yolo
-        && let Err(notice) = crate::domain::models::sandbox::yolo_permitted(&sandbox.status)
+        && let Err(notice) = crate::domain::models::sandbox::yolo_permitted(sandbox)
     {
         let _ = event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
             conversation_id: None,
@@ -607,12 +689,82 @@ mod tests {
             }
             other => panic!("expected Enforced, got {other:?}"),
         }
-        let (protected, _) = deny_set(&cfg.sandbox, &ws, &p.host, &r.session.scope.writable_roots);
+        let (protected, _, exposed) =
+            deny_set(&cfg.sandbox, &ws, &p.host, &r.session.scope.writable_roots);
         let home = std::fs::canonicalize(dir.path().join("home")).unwrap();
         assert_eq!(
             protected,
             vec![home.join(".rustain/auth.json"), home.join(".ssh")]
         );
+        assert!(!exposed, "the credential store lies outside W");
+    }
+
+    /// CR231-06 / L1: a denied directory that contains a writable root stays
+    /// denied, and the writable subtree inside it is reported as readable.
+    #[cfg(all(target_os = "linux", feature = "sandbox"))]
+    #[test]
+    fn a_denied_directory_containing_a_writable_root_reports_the_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let ws = home.join("project");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut cfg = config("auto");
+        cfg.sandbox.deny_read = vec![PathBuf::from("~")];
+        let p = probe(dir.path(), LandlockProbe::Available { abi: 6 });
+        let r = resolve_sandbox(&cfg, &ws, PermissionMode::Normal, &p).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let (protected, unprotected, _) =
+            deny_set(&cfg.sandbox, &ws, &p.host, &r.session.scope.writable_roots);
+        assert!(protected.contains(&canon(&home)), "{protected:?}");
+        match r.session.status {
+            SandboxStatus::Enforced { unprotected, .. } => {
+                assert!(unprotected.contains(&canon(&ws)), "{unprotected:?}");
+                assert!(
+                    unprotected.contains(&canon(&home.join(".cache"))),
+                    "{unprotected:?}"
+                );
+            }
+            other => panic!("expected Enforced, got {other:?}"),
+        }
+        assert!(unprotected.contains(&canon(&ws)));
+    }
+
+    /// M3: a workspace that is the home directory bounds nothing: warning and
+    /// YOLO refused; the credential store inside it is reported readable.
+    #[cfg(all(target_os = "linux", feature = "sandbox"))]
+    #[test]
+    fn a_home_or_root_workspace_is_broad_and_refuses_yolo() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = probe(dir.path(), LandlockProbe::Available { abi: 6 });
+        let home = dir.path().join("home");
+        for workspace in [home.clone(), dir.path().to_path_buf()] {
+            let r =
+                resolve_sandbox(&config("auto"), &workspace, PermissionMode::Normal, &p).unwrap();
+            match &r.session.status {
+                SandboxStatus::Enforced {
+                    broad_roots,
+                    credentials_unprotected,
+                    ..
+                } => {
+                    assert_eq!(
+                        broad_roots,
+                        &vec![std::fs::canonicalize(&workspace).unwrap()]
+                    );
+                    assert!(*credentials_unprotected);
+                }
+                other => panic!("expected Enforced, got {other:?}"),
+            }
+            assert!(crate::domain::models::yolo_permitted(&r.session).is_err());
+            assert_eq!(
+                r.session.notice().level,
+                crate::domain::models::NoticeLevel::Advisory
+            );
+        }
+        // A workspace beside home is bounded.
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let r = resolve_sandbox(&config("auto"), &ws, PermissionMode::Normal, &p).unwrap();
+        assert!(crate::domain::models::yolo_permitted(&r.session).is_ok());
     }
 
     fn unavailable_probe(root: &Path) -> SandboxProbe {
@@ -681,7 +833,7 @@ mod tests {
         assert_eq!(*cell.read().await, resolved.policy);
         match rx.try_recv() {
             Ok(crate::domain::events::AppEvent::SystemNotice { message, .. }) => {
-                assert_eq!(message, resolved.session.status.notice().text)
+                assert_eq!(message, resolved.session.notice().text)
             }
             other => panic!("expected the sandbox notice, got {other:?}"),
         }

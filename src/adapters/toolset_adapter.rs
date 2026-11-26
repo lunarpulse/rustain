@@ -366,6 +366,7 @@ impl ToolSetAdapter {
 
         // Q-6 AC1: the final command-construction boundary. The child never
         // inherits an app-owned credential, whatever the permission mode.
+        crate::adapters::child_env::new_session(&mut child);
         crate::adapters::child_env::omit_app_credentials(&mut child);
 
         let mut child = child

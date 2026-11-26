@@ -52,12 +52,13 @@ pub fn render(
     }
     // Story 21.1 A12: YOLO is a status FACT of the permission mode, not a flash.
     // It shows while nothing more specific (streaming, executing, retrying) does.
-    let status_text =
-        if permission_mode == PermissionMode::Yolo && matches!(status, StatusState::Idle) {
-            yolo_fact(SANDBOX_ENFORCED.load(std::sync::atomic::Ordering::Relaxed)).to_string()
-        } else {
-            status.display_text()
-        };
+    let yolo_fact_shown = (permission_mode == PermissionMode::Yolo
+        && matches!(status, StatusState::Idle))
+    .then(|| yolo_fact(sandbox_enforced()));
+    let status_text = match yolo_fact_shown {
+        Some(fact) => fact.to_string(),
+        None => status.display_text(),
+    };
     let fg = theme.colors.status_fg;
     let sep = " │ ";
 
@@ -141,9 +142,11 @@ pub fn render(
     }
 
     // Session title (after model, if restored session)
+    let mut title_span_index = None;
     if let Some(title) = session_title {
         let display = if title.is_empty() { "Untitled" } else { title };
         left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+        title_span_index = Some(left_spans.len());
         left_spans.push(Span::styled(display.to_string(), Style::default().fg(fg)));
     }
 
@@ -382,6 +385,28 @@ pub fn render(
     {
         left_spans[optional_start..].rotate_left(optional_end - optional_start);
     }
+    // Story 23.1 review CR231-02: the YOLO fact's bound (confined, or NO
+    // SANDBOX) is mandatory; a long session title yields to it before it clips.
+    if let (Some(index), Some(fact)) = (title_span_index, yolo_fact_shown) {
+        let bound = fact.split(" —").next().unwrap_or(fact);
+        let core_width = left_spans[..optional_start]
+            .iter()
+            .map(|span| geom::cells(&span.content))
+            .sum::<usize>()
+            + geom::cells(sep)
+            + geom::cells(bound);
+        let deficit =
+            (core_width - model_width + reserved_width).saturating_sub(usize::from(area.width));
+        if deficit > 0 {
+            let old_width = geom::cells(&left_spans[index].content);
+            let title = left_spans[index].content.to_string();
+            left_spans[index].content =
+                geom::ellipsize(&title, old_width.saturating_sub(deficit), "…")
+                    .into_owned()
+                    .into();
+            left_width -= old_width - geom::cells(&left_spans[index].content);
+        }
+    }
     // A focused tool has no Stage marker in this slice: fit its compact,
     // registry-derived discovery cue using the existing flexible model slot.
     // State/counters/mode/host/log/decision facts still win; if those leave
@@ -570,11 +595,11 @@ impl From<u64> for NoticeBadges {
 }
 
 /// Story 21.1 A12, amended by Story 23.1 AC8: the status fact painted while
-/// YOLO is the permission mode. It names the bound: confined commands, or no
-/// sandbox at all.
-pub const YOLO_FACT_CONFINED: &str =
-    "⚠ YOLO mode active — all tools auto-approved; commands confined to the workspace";
-pub const YOLO_FACT_UNCONFINED: &str = "⚠ YOLO mode active — all tools auto-approved; NO SANDBOX";
+/// YOLO is the permission mode. It names the bound first — confined commands,
+/// or no sandbox at all — so a narrow row that clips the explanation still
+/// shows it (review CR231-02).
+pub const YOLO_FACT_CONFINED: &str = "⚠ YOLO confined to the workspace — all tools auto-approved";
+pub const YOLO_FACT_UNCONFINED: &str = "⚠ YOLO NO SANDBOX — all tools auto-approved";
 
 /// Story 23.1 — whether this process's tool commands are kernel-confined.
 /// Set once by the TUI root after the sandbox resolves; never changes during
@@ -582,9 +607,25 @@ pub const YOLO_FACT_UNCONFINED: &str = "⚠ YOLO mode active — all tools auto-
 /// nobody established.
 static SANDBOX_ENFORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: a per-thread value, so a test can render either fact without
+    /// racing the process-wide flag.
+    static TEST_SANDBOX_ENFORCED: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Record the session's sandbox status for the YOLO fact.
 pub fn set_sandbox_enforced(enforced: bool) {
     SANDBOX_ENFORCED.store(enforced, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn sandbox_enforced() -> bool {
+    #[cfg(test)]
+    if let Some(enforced) = TEST_SANDBOX_ENFORCED.with(std::cell::Cell::get) {
+        return enforced;
+    }
+    SANDBOX_ENFORCED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The YOLO status fact for a session whose commands are (or are not) confined.
@@ -1462,8 +1503,8 @@ mod tests {
         assert!(row.contains(YOLO_FACT_UNCONFINED), "{row}");
         assert_eq!(yolo_fact(true), YOLO_FACT_CONFINED);
         assert_eq!(yolo_fact(false), YOLO_FACT_UNCONFINED);
-        assert!(YOLO_FACT_CONFINED.ends_with("commands confined to the workspace"));
-        assert!(YOLO_FACT_UNCONFINED.ends_with("NO SANDBOX"));
+        assert!(YOLO_FACT_CONFINED.starts_with("⚠ YOLO confined to the workspace"));
+        assert!(YOLO_FACT_UNCONFINED.starts_with("⚠ YOLO NO SANDBOX"));
         assert!(!row.contains("Ready"), "{row}");
 
         let row = draw_notice_bar(
@@ -1486,7 +1527,68 @@ mod tests {
             0,
         );
         assert!(row.contains("Streaming..."), "{row}");
-        assert!(!row.contains("YOLO mode active"), "{row}");
+        assert!(!row.contains("auto-approved"), "{row}");
+    }
+
+    /// Story 23.1 review CR231-02: at 80 columns, with a long model name, real
+    /// token counters, a context window and a session title, the bound (NO
+    /// SANDBOX / confined) is still on the row in both states.
+    #[test]
+    fn yolo_bound_survives_eighty_columns() {
+        let usage = UsageInfo {
+            input_tokens: 123_456,
+            output_tokens: 7_890,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+            counters_observed: true,
+        };
+        for (enforced, bound) in [(false, "NO SANDBOX"), (true, "YOLO confined")] {
+            TEST_SANDBOX_ENFORCED.with(|c| c.set(Some(enforced)));
+            let mut t = Terminal::new(TestBackend::new(80, 1)).unwrap();
+            let theme = Theme::dark();
+            t.draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    "claude-sonnet-4-6-20250929",
+                    Some("anthropic"),
+                    &StatusState::Idle,
+                    &theme,
+                    0,
+                    &[],
+                    0,
+                    20,
+                    PermissionMode::Yolo,
+                    Some(&usage),
+                    200_000,
+                    true,
+                    Some("Refactor the sandbox resolver and its tests"),
+                    false,
+                    true,
+                    0,
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    false,
+                    None,
+                    LogAwareness::Hidden,
+                    3,
+                );
+            })
+            .unwrap();
+            let row = row_text(t.backend().buffer());
+            assert!(
+                row.contains(bound),
+                "{bound} must survive 80 columns: {row:?}"
+            );
+        }
+        TEST_SANDBOX_ENFORCED.with(|c| c.set(None));
     }
 
     #[test]

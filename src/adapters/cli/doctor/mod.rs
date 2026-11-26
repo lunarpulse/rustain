@@ -91,11 +91,9 @@ fn build_check_list(
     )],
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
     policy: PolicyCheckContext,
-    // Story 23.1 (AC9): manager and ceiling for the MCP probe's spawns.
-    mcp_sandbox: Option<(
-        std::sync::Arc<dyn crate::domain::ports::SandboxManager>,
-        crate::domain::models::SandboxPolicy,
-    )>,
+    // Story 23.1 (AC9, review CR231-01): manager and ceiling for the MCP
+    // probe's spawns (`Ok(None)`: unconfined), or why no server may start.
+    mcp_sandbox: checks::McpProbeSandbox,
 ) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = vec![
         Box::new(ApiKeyCheck {
@@ -138,11 +136,16 @@ fn build_check_list(
     }
     // Story 13.2b: MCP reachability check (AC1-AC3a).
     #[cfg(feature = "mcp")]
-    checks.push(Box::new(McpReachabilityCheck {
-        servers: mcp_servers,
-        per_server_budget: checks::MCP_PER_SERVER_BUDGET,
-        sandbox: mcp_sandbox,
-    }));
+    match mcp_sandbox {
+        Ok(sandbox) => checks.push(Box::new(McpReachabilityCheck {
+            servers: mcp_servers,
+            per_server_budget: checks::MCP_PER_SERVER_BUDGET,
+            sandbox,
+        })),
+        // Story 23.1 (review CR231-01): a sandbox the configuration requires
+        // failed to resolve, so configured servers are not started at all.
+        Err(reason) => checks.push(Box::new(checks::McpProbeRefused { reason })),
+    }
     #[cfg(not(feature = "mcp"))]
     let _ = mcp_sandbox;
     #[cfg(feature = "self-update")]
@@ -739,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_build_check_list_default() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), Ok(None));
         assert!(checks.len() >= 8, "Should have at least 8 checks");
         // Verify names
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
@@ -761,8 +764,9 @@ mod tests {
     #[test]
     fn test_build_check_list_with_terminal_detail() {
         let checks_without =
-            build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
-        let checks_with = build_check_list(true, &[], vec![], PolicyCheckContext::default(), None);
+            build_check_list(false, &[], vec![], PolicyCheckContext::default(), Ok(None));
+        let checks_with =
+            build_check_list(true, &[], vec![], PolicyCheckContext::default(), Ok(None));
         assert_eq!(
             checks_with.len(),
             checks_without.len() + 1,
@@ -772,11 +776,68 @@ mod tests {
         assert!(names.contains(&"Terminal details"));
     }
 
+    /// Story 23.1 review CR231-01: when `[sandbox].adapter = "landlock"` cannot
+    /// be honored, `doctor` starts no configured MCP server (it would run
+    /// unconfined) and says so; with the sandbox off the same server starts.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn cr231_01_a_required_sandbox_failure_starts_no_mcp_server() {
+        use crate::infrastructure::sandbox::{
+            HostPaths, LandlockProbe, SandboxProbe, doctor_sandbox_check,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("server-started");
+        let spec = crate::domain::models::McpServerSpec {
+            id: "marker".into(),
+            transport: crate::domain::models::McpTransport::Stdio,
+            command: Some("sh".into()),
+            args: vec!["-c".into(), format!("touch '{}'", marker.display())],
+            env: Default::default(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        };
+        let probe = SandboxProbe {
+            landlock: LandlockProbe::Unavailable {
+                reason: "injected".into(),
+            },
+            host: HostPaths::default(),
+            inject_not_enforced: false,
+        };
+        let run_mcp = |mcp: checks::McpProbeSandbox| {
+            let spec = spec.clone();
+            async move {
+                let list =
+                    build_check_list(false, &[], vec![spec], PolicyCheckContext::default(), mcp);
+                let check = list
+                    .iter()
+                    .find(|c| c.name() == "MCP server reachability")
+                    .expect("the MCP row exists");
+                check.run().await
+            }
+        };
+
+        let mut config = crate::domain::models::AppConfig::default();
+        config.sandbox.adapter = "landlock".into();
+        let refused = doctor_sandbox_check(&config, dir.path(), &probe);
+        assert!(refused.mcp.is_err());
+        let row = run_mcp(refused.mcp.clone()).await;
+        assert!(matches!(row.status, CheckStatus::Skipped(_)), "{row:?}");
+        assert!(row.message.contains("not started"), "{}", row.message);
+        assert!(!marker.exists(), "no MCP server may start unconfined");
+
+        // Control: with the sandbox off the same server is started.
+        config.sandbox.adapter = "noop".into();
+        let off = doctor_sandbox_check(&config, dir.path(), &probe);
+        let _ = run_mcp(off.mcp.clone()).await;
+        assert!(marker.exists(), "the fixture server starts when allowed");
+    }
+
     // ── Story 13.2b ratchets: MCP check present, no update_health ──
 
     #[test]
     fn test_mcp_check_present_in_build_check_list() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), Ok(None));
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             names.contains(&"MCP server reachability"),
@@ -788,7 +849,7 @@ mod tests {
     #[cfg(feature = "self-update")]
     #[tokio::test]
     async fn test_update_health_is_info_tier_and_present() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), Ok(None));
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             names.contains(&"Update health"),
@@ -815,7 +876,7 @@ mod tests {
     #[cfg(not(feature = "self-update"))]
     #[test]
     fn test_no_update_health_without_feature() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), Ok(None));
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             !names
@@ -962,7 +1023,7 @@ mod tests {
                 workspace: Some(workspace),
                 peers: Vec::new(),
             },
-            None,
+            Ok(None),
         );
         let index = checks
             .iter()
@@ -1082,7 +1143,13 @@ mod tests {
     /// changed nothing about them (the framework's extensibility promise).
     #[tokio::test]
     async fn ac6_only_the_policy_check_publishes_machine_detail() {
-        let checks = build_check_list(false, &[], Vec::new(), PolicyCheckContext::default(), None);
+        let checks = build_check_list(
+            false,
+            &[],
+            Vec::new(),
+            PolicyCheckContext::default(),
+            Ok(None),
+        );
         for check in &checks {
             if check.name() == "Interaction policy" {
                 continue;

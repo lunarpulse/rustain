@@ -84,9 +84,9 @@ TRUST_TITLE = "Trust and enable this skill"
 QUEUED_CUE = "Needs you (1)"
 # Idle status while the permission mode is YOLO: the idle "Ready" text
 # (status_bar.rs `StatusState::Idle.display_text()`) is REPLACED by the YOLO
-# fact `YOLO_FACT` (status_bar.rs:573; pinned by the status_bar test asserting
-# the YOLO row contains the fact and not "Ready").
-YOLO_IDLE_FACT = "all tools auto-approved"
+# fact (status_bar.rs `YOLO_FACT_CONFINED` / `YOLO_FACT_UNCONFINED`). Its bound
+# comes first and survives 80 columns; the explanation after it may clip.
+YOLO_IDLE_FACTS = ("YOLO confined to the workspace", "YOLO NO SANDBOX")
 # Busy statuses: `StatusState::display_text()` — "Executing <tool>...",
 # "Streaming...", "Retrying (a/b) in …" (status_bar.rs, test_status_state_display_text).
 BUSY_MARKERS = ("Executing", "Streaming...", "Retrying")
@@ -96,7 +96,7 @@ BUSY_MARKERS = ("Executing", "Streaming...", "Retrying")
 
 def is_idle(screen: str) -> bool:
     text = _normalized(screen)
-    return YOLO_IDLE_FACT in text and not any(m in text for m in BUSY_MARKERS)
+    return any(f in text for f in YOLO_IDLE_FACTS) and not any(m in text for m in BUSY_MARKERS)
 
 
 def _wait_idle(observe, tui, timeout: float = 30.0, stable: float = 1.0) -> None:
@@ -114,14 +114,13 @@ def _wait_idle(observe, tui, timeout: float = 30.0, stable: float = 1.0) -> None
         assert now < deadline, f"the TUI never settled to the YOLO idle row:\n{screen}"
 
 
-def _exercise(binary: Path, evidence: Path, scratch: Path, monkeypatch) -> None:
+def _exercise(binary: Path, evidence: Path, scratch: Path, home: Path, monkeypatch) -> None:
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
 
     workspace = scratch / "ws"
     outside = scratch / "out"
-    home = scratch / "home"
-    for directory in (workspace, outside, home):
+    for directory in (workspace, outside):
         directory.mkdir()
     source = scratch / "skill-src" / SKILL_NAME / "SKILL.md"
     source.parent.mkdir(parents=True)
@@ -239,8 +238,11 @@ def test_redirect_under_a_command_pattern_is_refused_80x24(monkeypatch):
         assert binary.is_file() and "release" not in binary.parts, binary
         manifest.update(binary=str(binary), binary_sha256=_sha256(binary))
         identity.write_text(json.dumps(manifest, indent=2) + "\n")
-        with tempfile.TemporaryDirectory(prefix="s19-29-", dir="/tmp") as scratch:
-            _exercise(binary, evidence, Path(scratch), monkeypatch)
+        # HOME outside /tmp: a sandbox writable root (/tmp) that contains HOME
+        # makes writes unbounded, and YOLO is refused (Story 23.1).
+        with tempfile.TemporaryDirectory(prefix="s19-29-", dir="/tmp") as scratch, \
+                tempfile.TemporaryDirectory(prefix="s19-29-home-", dir="/var/tmp") as home:
+            _exercise(binary, evidence, Path(scratch), Path(home), monkeypatch)
         assert _sha256(binary) == manifest["binary_sha256"], "binary changed during smoke"
         manifest["result"] = "PASS"
     except BaseException:

@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -142,12 +143,14 @@ class _ObservedHttp:
 
 
 @pytest.mark.parametrize("mode", ["yolo", "autoedit"])
-def test_standalone_auto_mode_still_requires_human_send(tmp_path, mode):
+def test_standalone_auto_mode_still_requires_human_send(tmp_path, mode, request):
     binary = Path(os.environ.get("RUSTAIN_TUI_BINARY", harness.BINARY)).resolve()
     sender = tmp_path / "sender"
     sender.mkdir()
-    sender_home = tmp_path / "sender-home"
-    sender_home.mkdir()
+    # HOME outside /tmp: a sandbox writable root (/tmp) that contains HOME
+    # makes writes unbounded, and YOLO is refused (Story 23.1).
+    sender_home = Path(tempfile.mkdtemp(prefix="tp-k02-home-", dir="/var/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(sender_home, ignore_errors=True))
     control = sender / "mode-control.txt"
     body = "ADR-047: Root must wait for a human Send key."
     def response(expect, content, stop_reason):

@@ -1431,7 +1431,7 @@ mod local_occlusion {
             store.clone(),
             journal,
             f.app.event_bus.clone(),
-            Arc::new(GitPatchApplier),
+            Arc::new(GitPatchApplier::default()),
         ));
         let artifact = merge.capture(
             AgentId::parse("spoke-1").unwrap(), CapabilityTokenId::root(),

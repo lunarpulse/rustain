@@ -127,7 +127,7 @@ struct JournalWitnessApplier {
 impl JournalWitnessApplier {
     fn new(workspace: &Path, hang_after_mutating: bool) -> Self {
         Self {
-            inner: GitPatchApplier,
+            inner: GitPatchApplier::default(),
             reader: WorkspaceJournalReader::open_workspace(workspace),
             calls: Arc::new(AtomicUsize::new(0)),
             started_seen: Arc::new(AtomicUsize::new(0)),

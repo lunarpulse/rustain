@@ -69,15 +69,18 @@ async fn reaped_within(pid: u32, secs: u64) -> bool {
     true
 }
 
-/// The graceful close waits up to 2 s for a child that ignores stdin EOF; with a
-/// 100 ms bound the disconnect future is dropped, and the child must still have
-/// exited when `shutdown_mcp_clients` returns (and be counted as killed).
+/// A child that ignores stdin EOF, shut down with a 100 ms bound: since Story
+/// 23.1 the disconnect stops the server's process group first, so it may finish
+/// inside the bound (counted closed) or be force-stopped (counted killed);
+/// either way the child has exited when `shutdown_mcp_clients` returns. The
+/// forced path itself is pinned by
+/// `force_stop_stops_a_live_child_through_its_pidfd` below (review CR231-04).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_disconnect_past_the_bound_still_ends_with_the_child_stopped() {
+async fn a_bounded_shutdown_ends_with_the_child_stopped() {
     if !rustain::adapters::mcp::child_handle::pidfd_supported() {
         let _ = std::io::Write::write_all(
             &mut std::io::stderr(),
-            b"SKIPPED a_disconnect_past_the_bound_still_ends_with_the_child_stopped: pidfd_open unavailable\n",
+            b"SKIPPED a_bounded_shutdown_ends_with_the_child_stopped: pidfd_open unavailable\n",
         );
         return;
     }
@@ -100,8 +103,6 @@ async fn a_disconnect_past_the_bound_still_ends_with_the_child_stopped() {
         .shutdown_mcp_clients(Duration::from_millis(100))
         .await;
 
-    // Story 23.1: the disconnect now stops the server's group first, so it can
-    // finish inside the bound; either way exactly one child is gone.
     assert_eq!(
         closed + killed,
         1,
@@ -112,6 +113,34 @@ async fn a_disconnect_past_the_bound_still_ends_with_the_child_stopped() {
         "the child must have exited when shutdown returns"
     );
     assert!(reaped_within(pid, 5).await, "and be reaped by its owner");
+}
+
+/// The pidfd fallback that runs when a disconnect does not finish within its
+/// bound: with no disconnect at all, `force_stop_children` stops a live,
+/// EOF-ignoring child and reports it killed (review CR231-04).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_stop_stops_a_live_child_through_its_pidfd() {
+    if !rustain::adapters::mcp::child_handle::pidfd_supported() {
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"SKIPPED force_stop_stops_a_live_child_through_its_pidfd: pidfd_open unavailable\n",
+        );
+        return;
+    }
+    let spec = spec("stubborn", &[("FAKE_MCP_IGNORE_STDIN_EOF", "1".into())]);
+    let client = Arc::new(McpClientAdapter::new(spec, None));
+    client.connect().await.expect("fake server connects");
+    let pid = client
+        .live_child_pids()
+        .await
+        .first()
+        .copied()
+        .expect("child registered");
+    assert!(!terminated(pid), "control: alive before the forced stop");
+    let reap = client.force_stop_children(Duration::from_secs(1)).await;
+    assert_eq!(reap, rustain::adapters::mcp::client::ChildReap::Killed);
+    assert!(terminated(pid), "the forced stop ended the child");
+    assert!(reaped_within(pid, 5).await);
 }
 
 /// Aborting the connect supervisor while the server is provably INSIDE
@@ -189,14 +218,18 @@ async fn an_mcp_child_leads_its_own_process_group_and_inherits_stderr() {
         .expect("child registered");
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
     let after_comm = stat.rsplit(')').next().expect("stat tail");
-    // Fields after `)`: state ppid pgrp ...
-    let pgrp: u32 = after_comm
-        .split_whitespace()
-        .nth(2)
-        .expect("pgrp")
-        .parse()
-        .expect("int");
-    assert_eq!(pgrp, pid, "the child leads its own process group");
+    // Fields after `)`: state ppid pgrp session ...
+    let field = |n: usize| -> u32 {
+        after_comm
+            .split_whitespace()
+            .nth(n)
+            .expect("stat field")
+            .parse()
+            .expect("int")
+    };
+    assert_eq!(field(2), pid, "the child leads its own process group");
+    // Story 23.1 review M1: and its own session (no controlling terminal).
+    assert_eq!(field(3), pid, "the child leads its own session");
     let child_err = std::fs::read_link(format!("/proc/{pid}/fd/2")).expect("child fd 2");
     let own_err = std::fs::read_link("/proc/self/fd/2").expect("own fd 2");
     assert_eq!(

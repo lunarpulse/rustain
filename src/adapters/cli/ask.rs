@@ -1736,7 +1736,7 @@ pub async fn run_ask(
     };
     // Story 23.1 AC8 — one stderr line with the sandbox status before the
     // first provider request; stdout keeps the selected format.
-    eprintln!("{}", sandbox.status.notice().text);
+    eprintln!("{}", sandbox.notice().text);
 
     let provider = core.provider.clone();
 

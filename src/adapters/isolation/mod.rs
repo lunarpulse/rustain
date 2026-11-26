@@ -14,6 +14,9 @@ pub struct CowIsolationProvider {
     clock: Arc<dyn Clock>,
     periodic_reaper_started: Arc<AtomicBool>,
     entry_hook: EntryHook,
+    /// Story 23.1 (review H3): the session sandbox and ceiling policy every
+    /// scratch-dir git command runs under (`None`: unconfined).
+    sandbox: GitSandbox,
 }
 
 impl Default for CowIsolationProvider {
@@ -28,7 +31,20 @@ impl CowIsolationProvider {
             clock,
             periodic_reaper_started: Arc::new(AtomicBool::new(false)),
             entry_hook: EntryHook::none(),
+            sandbox: None,
         }
+    }
+
+    /// Run the scratch-dir git commands under `manager` and `policy` (the
+    /// session ceiling): the isolated child wrote that tree, `.git/config`
+    /// included (review H3).
+    pub fn with_sandbox(
+        mut self,
+        manager: Arc<dyn crate::domain::ports::SandboxManager>,
+        policy: crate::domain::models::SandboxPolicy,
+    ) -> Self {
+        self.sandbox = Some((manager, policy));
+        self
     }
 
     /// Test seam: see [`EntryHook`].
@@ -136,7 +152,7 @@ impl IsolationProvider for CowIsolationProvider {
             reason: format!("scratch copy task failed: {join_err}"),
         })??;
 
-        init_git_baseline(temp_dir.path()).await?;
+        init_git_baseline(temp_dir.path(), &self.sandbox).await?;
         tracing::info!(backend = ?backend, path = %temp_dir.path().display(), "isolation active");
         IsolationHandle::new(temp_dir, backend, self.now_ms()?)
     }
@@ -147,11 +163,10 @@ impl IsolationProvider for CowIsolationProvider {
         // common case for a coding subagent. `git add -A` then `git diff
         // --cached` captures new + modified + deleted entries against the
         // baseline commit.
-        run_git(h.path(), &["add", "-A"]).await?;
-        let output = Command::new("git")
-            .arg("diff")
-            .arg("--cached")
-            .current_dir(h.path())
+        run_git(h.path(), &["add", "-A"], &self.sandbox).await?;
+        let output = git_command(h.path(), &self.sandbox)
+            .await?
+            .args(["diff", "--cached", "--no-ext-diff", "--no-textconv"])
             .output()
             .await
             .map_err(|source| IsolationError::GitFailed {
@@ -519,15 +534,16 @@ fn copy_symlink(path: &Path, target: &Path) -> Result<(), IsolationError> {
     })
 }
 
-async fn init_git_baseline(path: &Path) -> Result<(), IsolationError> {
-    run_git(path, &["init", "--quiet"]).await?;
+async fn init_git_baseline(path: &Path, sandbox: &GitSandbox) -> Result<(), IsolationError> {
+    run_git(path, &["init", "--quiet"], sandbox).await?;
     run_git(
         path,
         &["config", "user.email", "rustain-isolation@example.invalid"],
+        sandbox,
     )
     .await?;
-    run_git(path, &["config", "user.name", "Rustain Isolation"]).await?;
-    run_git(path, &["add", "-A"]).await?;
+    run_git(path, &["config", "user.name", "Rustain Isolation"], sandbox).await?;
+    run_git(path, &["add", "-A"], sandbox).await?;
     run_git(
         path,
         &[
@@ -537,15 +553,53 @@ async fn init_git_baseline(path: &Path) -> Result<(), IsolationError> {
             "-m",
             "isolation baseline",
         ],
+        sandbox,
     )
     .await?;
     Ok(())
 }
 
-async fn run_git(path: &Path, args: &[&'static str]) -> Result<(), IsolationError> {
-    let output = Command::new("git")
+/// The manager and policy every git command on a scratch dir runs under.
+pub type GitSandbox = Option<(
+    Arc<dyn crate::domain::ports::SandboxManager>,
+    crate::domain::models::SandboxPolicy,
+)>;
+
+/// Config overrides on every git command rustain runs on a tree a confined
+/// command could write: no fsmonitor hook, no hooks (Story 23.1 review H3).
+pub const HARDENED_GIT: [&str; 4] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
+/// A `git` command on the scratch dir: hardened, and confined like the child
+/// that wrote the dir. The dir's `.git/config` and `.gitattributes` are the
+/// child's to write, so any filter or driver they name runs inside the
+/// sandbox, never as rustain (review H3).
+async fn git_command(path: &Path, sandbox: &GitSandbox) -> Result<Command, IsolationError> {
+    let mut cmd = Command::new("git");
+    cmd.args(HARDENED_GIT).current_dir(path);
+    if let Some((manager, policy)) = sandbox {
+        manager
+            .apply(&mut cmd, policy)
+            .await
+            .map_err(|e| IsolationError::FailClosed {
+                reason: format!("git on the scratch dir could not be sandboxed: {e}"),
+            })?;
+    }
+    Ok(cmd)
+}
+
+async fn run_git(
+    path: &Path,
+    args: &[&'static str],
+    sandbox: &GitSandbox,
+) -> Result<(), IsolationError> {
+    let output = git_command(path, sandbox)
+        .await?
         .args(args)
-        .current_dir(path)
         .output()
         .await
         .map_err(|source| IsolationError::GitFailed {

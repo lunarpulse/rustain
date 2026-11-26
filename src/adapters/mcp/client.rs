@@ -586,13 +586,14 @@ impl McpClientAdapter {
                     cmd.env(k, v);
                 }
                 cmd.kill_on_drop(true);
-                // Story 23.1 (AC9): the server leads its own process group, so
-                // shutdown can stop wrapper descendants with the leader
-                // (`ChildHandle::kill_group`), and runs under the session
-                // ceiling policy; everything it starts inherits the domain. A
-                // confinement failure fails the start: never spawned unconfined.
-                #[cfg(unix)]
-                cmd.process_group(0);
+                // Story 23.1 (AC9, review M1): the server runs in its own
+                // session, so it leads its own process group (shutdown stops
+                // wrapper descendants with the leader, `ChildHandle::kill_group`)
+                // and has no controlling terminal; it runs under the session
+                // ceiling policy and everything it starts inherits the domain.
+                // A confinement failure fails the start: never spawned
+                // unconfined.
+                crate::adapters::child_env::new_session(&mut cmd);
                 if let Some((manager, policy)) = &self.sandbox
                     && let Err(e) = manager.apply(&mut cmd, policy).await
                 {

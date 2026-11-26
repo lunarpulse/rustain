@@ -73,6 +73,9 @@ mod conformance_sandbox_inheritance;
 #[path = "../conformance_23_1_sandbox_default.rs"]
 mod conformance_23_1_sandbox_default;
 
+#[path = "../conformance_23_1_config_trust.rs"]
+mod conformance_23_1_config_trust;
+
 #[path = "../conformance_subagent_approval_routing.rs"]
 mod conformance_subagent_approval_routing;
 

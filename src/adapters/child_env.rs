@@ -30,3 +30,25 @@ pub fn omit_app_credentials(cmd: &mut tokio::process::Command) {
         }
     }
 }
+
+/// Story 23.1 (review M1): start the child in a new session (`setsid`): no
+/// controlling terminal, so it cannot inject keystrokes into the terminal
+/// rustain runs in, and it leads its own process group (the MCP shutdown
+/// stops that group). Its order relative to the sandbox's `pre_exec` does not
+/// matter: `setsid` is not a filesystem access.
+pub fn new_session(cmd: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    // SAFETY: runs after fork, before exec; setsid is async-signal-safe and the
+    // error is a raw errno (no allocation).
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}

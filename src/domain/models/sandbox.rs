@@ -94,10 +94,20 @@ pub enum SandboxStatus {
         abi: u32,
         /// `false` only when `network = false` was requested on ABI < 4.
         network_enforced: bool,
-        /// Deny-set paths under a writable root: Landlock cannot exclude them.
+        /// Paths the deny set names that tool commands can still read: denied
+        /// paths inside a writable root, and writable roots inside a denied
+        /// directory (Landlock grants are a union).
         unprotected: Vec<PathBuf>,
         /// Configured or default writable roots that do not exist (skipped).
         missing_roots: Vec<PathBuf>,
+        /// Signals and abstract Unix sockets are scoped to the sandbox
+        /// (Landlock ABI 6+).
+        ipc_scoped: bool,
+        /// Writable roots that are `/`, the home directory or an ancestor of
+        /// it: no write bound worth the name, so YOLO is refused.
+        broad_roots: Vec<PathBuf>,
+        /// rustain's own credential store is readable by tool commands.
+        credentials_unprotected: bool,
     },
     /// `auto` found no usable Landlock: commands run unconfined, YOLO refused.
     Unavailable { reason: String },
@@ -120,33 +130,67 @@ impl SandboxStatus {
         matches!(self, SandboxStatus::Enforced { .. })
     }
 
-    /// The one notice renderer (ADR-23-1-01 §7).
+    /// The status part of the notice (ADR-23-1-01 §7); the session adds the
+    /// configuration facts (see [`SandboxSession::notice`]).
     pub fn notice(&self) -> SandboxNotice {
         match self {
             SandboxStatus::Enforced {
                 abi,
                 network_enforced,
                 unprotected,
+                ipc_scoped,
+                broad_roots,
+                credentials_unprotected,
                 ..
             } => {
                 let mut text = format!(
                     "Sandbox on (Landlock ABI {abi}): tool commands can write only inside the \
                      workspace, temp and cache directories."
                 );
-                // Enforced is info level (ADR-23-1-01 §7); unprotected paths
-                // are listed, and only an unenforced network request warns.
+                // Enforced is info level (ADR-23-1-01 §7) unless the bound has
+                // a hole the user must know about.
                 let mut level = NoticeLevel::Info;
+                if !broad_roots.is_empty() {
+                    level = NoticeLevel::Advisory;
+                    text.push_str(&format!(
+                        " The writable root {} covers your home directory, so writes are not \
+                         bounded and YOLO is disabled.",
+                        join_paths(broad_roots)
+                    ));
+                }
+                if *credentials_unprotected {
+                    level = NoticeLevel::Advisory;
+                    text.push_str(
+                        " rustain's credential store lies inside a writable root and is \
+                         readable by tool commands.",
+                    );
+                }
                 if !unprotected.is_empty() {
                     text.push_str(&format!(
-                        " Not protected from reads (inside a writable root): {}.",
+                        " Readable despite [sandbox].deny_read: {}.",
                         join_paths(unprotected)
                     ));
                 }
-                if !network_enforced {
-                    level = NoticeLevel::Advisory;
+                if *abi < 4 {
+                    if !network_enforced {
+                        level = NoticeLevel::Advisory;
+                    }
                     text.push(' ');
                     text.push_str(&network_unenforced_text(*abi));
                 }
+                if *ipc_scoped {
+                    text.push_str(
+                        " Signals and abstract Unix sockets cannot reach processes outside it;",
+                    );
+                } else {
+                    text.push_str(&format!(
+                        " Landlock ABI {abi} cannot scope signals or abstract Unix sockets;"
+                    ));
+                }
+                text.push_str(
+                    " services reachable over Unix socket files (D-Bus, tmux, Docker, X11) act \
+                     outside the sandbox.",
+                );
                 SandboxNotice { level, text }
             }
             SandboxStatus::Unavailable { reason } => SandboxNotice {
@@ -175,8 +219,8 @@ impl SandboxStatus {
 
 fn network_unenforced_text(abi: u32) -> String {
     format!(
-        "Sandbox network restriction unavailable (Landlock ABI {abi}): tool commands keep \
-         network access."
+        "Landlock ABI {abi} cannot restrict the network: tool commands keep network access, \
+         in Plan mode too."
     )
 }
 
@@ -188,23 +232,45 @@ fn join_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// The one "YOLO permitted" decision for `/mode yolo` and `ask --yolo`.
-/// YOLO is refused only when `auto` found no usable Landlock: in YOLO the
-/// sandbox is the only boundary left. `Err` carries the notice to show.
-pub fn yolo_permitted(status: &SandboxStatus) -> Result<(), SandboxNotice> {
-    match status {
-        SandboxStatus::Unavailable { .. } => Err(status.notice()),
+/// The one "YOLO permitted" decision for `/mode yolo` and `ask --yolo`. YOLO
+/// is refused when `auto` found no usable Landlock, and when a writable root
+/// covers the home directory: in YOLO the sandbox is the only boundary left.
+/// `Err` carries the notice to show.
+pub fn yolo_permitted(session: &SandboxSession) -> Result<(), SandboxNotice> {
+    match &session.status {
+        SandboxStatus::Unavailable { .. } => Err(session.notice()),
+        SandboxStatus::Enforced { broad_roots, .. } if !broad_roots.is_empty() => {
+            Err(session.notice())
+        }
         SandboxStatus::Enforced { .. }
         | SandboxStatus::Off
         | SandboxStatus::NotSupported { .. } => Ok(()),
     }
 }
 
-/// The sandbox facts a composed session carries: the bound and its status.
+/// Where the effective `[sandbox]` settings came from (Story 23.1 review H1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SandboxProvenance {
+    /// The layer that set `[sandbox].adapter` (a file path, "environment",
+    /// "command line" or "built-in default").
+    pub adapter_source: String,
+    /// Weakening settings a workspace layer tried and that were ignored, one
+    /// sentence each, naming the file and key.
+    pub ignored: Vec<String>,
+}
+
+/// The sandbox facts a composed session carries: the bound, its status and
+/// where the configuration came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxSession {
     pub scope: SandboxScope,
     pub status: SandboxStatus,
+    /// `[sandbox].adapter` as resolved.
+    pub adapter: String,
+    /// `[sandbox].writable_roots` as configured (expanded, before canonical
+    /// resolution).
+    pub configured_roots: Vec<PathBuf>,
+    pub provenance: SandboxProvenance,
 }
 
 impl SandboxSession {
@@ -214,7 +280,35 @@ impl SandboxSession {
         Self {
             scope: SandboxScope::off(),
             status: SandboxStatus::Off,
+            adapter: "noop".to_string(),
+            configured_roots: Vec::new(),
+            provenance: SandboxProvenance::default(),
         }
+    }
+
+    /// The one notice renderer (ADR-23-1-01 §7): the status, then the extra
+    /// writable roots, the layer that chose the adapter, and every ignored
+    /// workspace attempt to weaken the sandbox (warning level).
+    pub fn notice(&self) -> SandboxNotice {
+        let mut notice = self.status.notice();
+        if !self.configured_roots.is_empty() {
+            notice.text.push_str(&format!(
+                " Extra writable roots ([sandbox].writable_roots): {}.",
+                join_paths(&self.configured_roots)
+            ));
+        }
+        if !self.provenance.adapter_source.is_empty() {
+            notice.text.push_str(&format!(
+                " Adapter \"{}\" set by {}.",
+                self.adapter, self.provenance.adapter_source
+            ));
+        }
+        for ignored in &self.provenance.ignored {
+            notice.level = NoticeLevel::Advisory;
+            notice.text.push(' ');
+            notice.text.push_str(ignored);
+        }
+        notice
     }
 }
 
@@ -332,74 +426,168 @@ mod tests {
                 .text,
             "Sandbox not available on macos: tool commands run without OS confinement."
         );
-        let enforced = SandboxStatus::Enforced {
-            abi: 6,
-            network_enforced: true,
-            unprotected: vec![],
-            missing_roots: vec![],
-        }
-        .notice();
+        let enforced = enforced(6).notice();
         assert_eq!(enforced.level, NoticeLevel::Info);
         assert_eq!(
             enforced.text,
             "Sandbox on (Landlock ABI 6): tool commands can write only inside the workspace, \
-             temp and cache directories."
+             temp and cache directories. Signals and abstract Unix sockets cannot reach \
+             processes outside it; services reachable over Unix socket files (D-Bus, tmux, \
+             Docker, X11) act outside the sandbox."
         );
+    }
+
+    fn enforced(abi: u32) -> SandboxStatus {
+        SandboxStatus::Enforced {
+            abi,
+            network_enforced: true,
+            unprotected: vec![],
+            missing_roots: vec![],
+            ipc_scoped: abi >= 6,
+            broad_roots: vec![],
+            credentials_unprotected: false,
+        }
+    }
+
+    fn session(status: SandboxStatus) -> SandboxSession {
+        SandboxSession {
+            status,
+            ..SandboxSession::off()
+        }
     }
 
     #[test]
     fn enforced_notice_names_network_and_unprotected_gaps() {
-        let notice = SandboxStatus::Enforced {
-            abi: 3,
-            network_enforced: false,
-            unprotected: vec![PathBuf::from("/w/secret")],
-            missing_roots: vec![],
+        let mut gaps = enforced(3);
+        if let SandboxStatus::Enforced {
+            network_enforced,
+            unprotected,
+            ..
+        } = &mut gaps
+        {
+            *network_enforced = false;
+            *unprotected = vec![PathBuf::from("/w/secret")];
         }
-        .notice();
+        let notice = gaps.notice();
         assert_eq!(notice.level, NoticeLevel::Advisory);
-        // Enforced is info level (ADR-23-1-01 §7); only the unenforced network
-        // request (ABI < 4) is a warning. Unprotected paths are listed.
-        let listed = SandboxStatus::Enforced {
-            abi: 6,
-            network_enforced: true,
-            unprotected: vec![PathBuf::from("/w/secret")],
-            missing_roots: vec![],
-        }
-        .notice();
-        assert_eq!(listed.level, NoticeLevel::Info);
-        assert!(listed.text.contains("/w/secret"), "{}", listed.text);
         assert!(
             notice
                 .text
-                .contains("Not protected from reads (inside a writable root): /w/secret."),
+                .contains("Readable despite [sandbox].deny_read: /w/secret."),
             "{}",
             notice.text
         );
         assert!(
-            notice.text.ends_with(
-                "Sandbox network restriction unavailable (Landlock ABI 3): tool commands keep \
-                 network access."
+            notice.text.contains(
+                "Landlock ABI 3 cannot restrict the network: tool commands keep network access, \
+                 in Plan mode too."
             ),
             "{}",
             notice.text
         );
+        assert!(
+            notice
+                .text
+                .contains("Landlock ABI 3 cannot scope signals or abstract Unix sockets;"),
+            "{}",
+            notice.text
+        );
+        // L3: on ABI 3 the Plan-mode network claim is never made, even with
+        // `network = true` (info level then).
+        let plan = enforced(3).notice();
+        assert_eq!(plan.level, NoticeLevel::Info);
+        assert!(plan.text.contains("in Plan mode too"), "{}", plan.text);
+        // Unprotected paths alone stay info level and are listed.
+        let mut listed = enforced(6);
+        if let SandboxStatus::Enforced { unprotected, .. } = &mut listed {
+            *unprotected = vec![PathBuf::from("/w/secret")];
+        }
+        let listed = listed.notice();
+        assert_eq!(listed.level, NoticeLevel::Info);
+        assert!(listed.text.contains("/w/secret"), "{}", listed.text);
     }
 
     #[test]
-    fn yolo_is_refused_only_when_the_sandbox_is_unavailable() {
-        let unavailable = SandboxStatus::Unavailable { reason: "x".into() };
+    fn broad_roots_and_exposed_credentials_warn() {
+        let mut broad = enforced(6);
+        if let SandboxStatus::Enforced { broad_roots, .. } = &mut broad {
+            *broad_roots = vec![PathBuf::from("/home/u")];
+        }
+        let notice = broad.notice();
+        assert_eq!(notice.level, NoticeLevel::Advisory);
+        assert!(
+            notice.text.contains(
+                "The writable root /home/u covers your home directory, so writes are not \
+                 bounded and YOLO is disabled."
+            ),
+            "{}",
+            notice.text
+        );
+        let mut exposed = enforced(6);
+        if let SandboxStatus::Enforced {
+            credentials_unprotected,
+            ..
+        } = &mut exposed
+        {
+            *credentials_unprotected = true;
+        }
+        assert_eq!(exposed.notice().level, NoticeLevel::Advisory);
+    }
+
+    #[test]
+    fn yolo_is_refused_when_unavailable_or_unbounded() {
+        let unavailable = session(SandboxStatus::Unavailable { reason: "x".into() });
         assert_eq!(yolo_permitted(&unavailable), Err(unavailable.notice()));
+        let mut broad = enforced(6);
+        if let SandboxStatus::Enforced { broad_roots, .. } = &mut broad {
+            *broad_roots = vec![PathBuf::from("/")];
+        }
+        let broad = session(broad);
+        assert_eq!(yolo_permitted(&broad), Err(broad.notice()));
         for status in [
             SandboxStatus::Off,
             SandboxStatus::NotSupported { os: "macos".into() },
-            SandboxStatus::Enforced {
-                abi: 4,
-                network_enforced: true,
-                unprotected: vec![],
-                missing_roots: vec![],
-            },
+            enforced(4),
         ] {
-            assert_eq!(yolo_permitted(&status), Ok(()), "{status:?}");
+            assert_eq!(
+                yolo_permitted(&session(status.clone())),
+                Ok(()),
+                "{status:?}"
+            );
         }
+    }
+
+    #[test]
+    fn session_notice_lists_roots_adapter_source_and_ignored_weakening() {
+        let mut s = session(enforced(6));
+        s.adapter = "auto".into();
+        s.configured_roots = vec![PathBuf::from("/opt/tool")];
+        s.provenance = SandboxProvenance {
+            adapter_source: "built-in default".into(),
+            ignored: vec!["Ignored `[sandbox].adapter` in /w/.rustain/config.toml.".into()],
+        };
+        let notice = s.notice();
+        assert_eq!(notice.level, NoticeLevel::Advisory);
+        assert!(
+            notice
+                .text
+                .contains(" Extra writable roots ([sandbox].writable_roots): /opt/tool."),
+            "{}",
+            notice.text
+        );
+        assert!(
+            notice
+                .text
+                .contains(" Adapter \"auto\" set by built-in default."),
+            "{}",
+            notice.text
+        );
+        assert!(
+            notice
+                .text
+                .ends_with("Ignored `[sandbox].adapter` in /w/.rustain/config.toml."),
+            "{}",
+            notice.text
+        );
     }
 }

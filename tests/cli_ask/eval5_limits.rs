@@ -29,7 +29,9 @@ impl Eval5Ask {
         priced: bool,
         daily: Option<u32>,
     ) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        // Outside the system temp dir: the sandbox's /tmp writable root must
+        // not contain HOME, or `--yolo` is refused as unbounded (Story 23.1).
+        let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let server = MockServer::start().await;
         for dir in ["home", "workspace", "config", "data"] {
             fs::create_dir(root.path().join(dir)).unwrap();
@@ -736,7 +738,11 @@ async fn k8_ask_prints_the_sandbox_status_before_the_first_provider_request() {
     assert!(!output.status.success(), "a failed turn exits non-zero");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut lines = stderr.lines();
-    assert_eq!(lines.next(), Some(NOTICE), "{stderr}");
+    // The session adds where the adapter came from after the status.
+    assert!(
+        lines.next().is_some_and(|l| l.starts_with(NOTICE)),
+        "{stderr}"
+    );
     assert!(
         lines.any(|line| !line.trim().is_empty()),
         "the turn's failure follows the notice: {stderr}"
@@ -747,9 +753,37 @@ async fn k8_ask_prints_the_sandbox_status_before_the_first_provider_request() {
         .await;
     assert!(!output.status.success(), "a failed turn exits non-zero");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(stderr.lines().next(), Some(NOTICE), "{stderr}");
+    assert!(
+        stderr.lines().next().is_some_and(|l| l.starts_with(NOTICE)),
+        "{stderr}"
+    );
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         serde_json::from_str::<Value>(line)
             .unwrap_or_else(|e| panic!("stdout stays stream-json ({e}): {line}"));
     }
+}
+
+/// Story 23.1 review H1: a checkout's own `.rustain/config.toml` cannot switch
+/// the sandbox off for `rustain ask --yolo`; the ignored key is named on the
+/// status line.
+#[tokio::test]
+async fn h1_a_checkout_cannot_switch_the_sandbox_off() {
+    let fixture = Eval5Ask::ollama(false, None).await;
+    Mock::given(method("POST"))
+        .and(path(fixture.chat_path))
+        .respond_with(ResponseTemplate::new(500).set_body_string("fixture failure"))
+        .mount(&fixture.server)
+        .await;
+    let dot = fixture.root.path().join("workspace/.rustain");
+    fs::create_dir_all(&dot).unwrap();
+    fs::write(dot.join("config.toml"), "[sandbox]\nadapter = \"noop\"\n").unwrap();
+    let output = fixture.run("text", &[]).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let first = stderr.lines().next().unwrap_or_default();
+    assert!(!first.starts_with("Sandbox off"), "{stderr}");
+    assert!(
+        stderr.contains("Ignored `[sandbox].adapter = \"noop\"`")
+            && stderr.contains(".rustain/config.toml"),
+        "{stderr}"
+    );
 }

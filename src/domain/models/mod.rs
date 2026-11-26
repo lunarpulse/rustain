@@ -267,7 +267,8 @@ pub use relay::{MAX_CONFIGURED_RELAYS, RelayConfigState, RelayMode, RelaySet};
 #[allow(unused_imports)]
 pub use room_role::{RoomEditDecision, RoomEditKind, RoomRole};
 pub use sandbox::{
-    SandboxNotice, SandboxPolicy, SandboxScope, SandboxSession, SandboxStatus, yolo_permitted,
+    SandboxNotice, SandboxPolicy, SandboxProvenance, SandboxScope, SandboxSession, SandboxStatus,
+    yolo_permitted,
 };
 pub use secret::SecretString;
 #[allow(unused_imports)]

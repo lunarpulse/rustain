@@ -630,6 +630,12 @@ impl CompositeToolsetAdapter {
                     "MCP child reap timed out during teardown; proceeding"
                 ),
             }
+            // Story 23.1 (review CR231-03): a spawn attempt that never became
+            // the running service (aborted mid-handshake) is stopped too, its
+            // process group first while the leader is alive.
+            let _ = client
+                .force_stop_children(std::time::Duration::from_secs(1))
+                .await;
         }
     }
 

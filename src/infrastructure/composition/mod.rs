@@ -167,8 +167,11 @@ impl AgentCore {
         let tool_exposure = build_tool_exposure(selection, ctx)?;
         let skill_exposure = build_skill_exposure(selection, ctx)?;
         let sandbox = build_sandbox(selection, ctx)?;
-        let isolation: Arc<dyn crate::domain::ports::IsolationProvider> =
-            Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
+        // Story 23.1 (review H3): scratch-dir git runs under the session ceiling.
+        let isolation: Arc<dyn crate::domain::ports::IsolationProvider> = Arc::new(
+            crate::adapters::isolation::CowIsolationProvider::default()
+                .with_sandbox(Arc::clone(&sandbox), ctx.sandbox.scope.ceiling()),
+        );
 
         let elapsed = started.elapsed();
         tracing::info!(
@@ -1549,7 +1552,7 @@ pub fn build_daemon_core(
         &crate::infrastructure::sandbox::SandboxProbe::detect(),
     )?;
     {
-        let notice = sandbox.session.status.notice();
+        let notice = sandbox.session.notice();
         if notice.level == crate::domain::models::NoticeLevel::Info {
             tracing::info!(target: "rustain::sandbox", "{}", notice.text);
         } else {
@@ -1987,7 +1990,7 @@ pub(crate) fn resolve_headless_sandbox(
         crate::infrastructure::sandbox::resolve_sandbox(app_config, workspace, mode, probe)
             .map_err(|e| AdapterCompositionError::Sandbox(e.to_string()))?;
     if mode == crate::domain::models::PermissionMode::Yolo {
-        crate::domain::models::sandbox::yolo_permitted(&resolved.session.status)
+        crate::domain::models::sandbox::yolo_permitted(&resolved.session)
             .map_err(|notice| AdapterCompositionError::Sandbox(notice.text))?;
     }
     Ok(resolved)
@@ -2000,6 +2003,25 @@ pub fn build_acp_core(
     mcp_servers: &[crate::domain::models::McpServerSpec],
     persona: Arc<dyn PersonaPort>,
 ) -> Result<AcpCore, AdapterCompositionError> {
+    build_acp_core_with_probe(
+        app_config,
+        workspace,
+        yolo,
+        mcp_servers,
+        persona,
+        &crate::infrastructure::sandbox::SandboxProbe::detect(),
+    )
+}
+
+/// [`build_acp_core`] with the sandbox probe injected (Story 23.1).
+pub fn build_acp_core_with_probe(
+    app_config: &crate::domain::models::AppConfig,
+    workspace: &std::path::Path,
+    yolo: bool,
+    mcp_servers: &[crate::domain::models::McpServerSpec],
+    persona: Arc<dyn PersonaPort>,
+    probe: &crate::infrastructure::sandbox::SandboxProbe,
+) -> Result<AcpCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::NoOpApprovalPersistence;
     use crate::adapters::security_adapter::SecurityAdapter;
@@ -2010,15 +2032,10 @@ pub fn build_acp_core(
     } else {
         PermissionMode::Normal
     };
-    let sandbox = resolve_headless_sandbox(
-        app_config,
-        workspace,
-        mode,
-        &crate::infrastructure::sandbox::SandboxProbe::detect(),
-    )?;
+    let sandbox = resolve_headless_sandbox(app_config, workspace, mode, probe)?;
     // Story 23.1 AC8 — ACP: stdout is the protocol, so the notice is a stderr
     // line, before the session's first tool call.
-    eprintln!("{}", sandbox.session.status.notice().text);
+    eprintln!("{}", sandbox.session.notice().text);
 
     let raw_capacity = app_config.runtime.event_bus.raw_capacity;
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();

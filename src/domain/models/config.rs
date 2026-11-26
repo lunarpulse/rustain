@@ -476,6 +476,11 @@ pub struct SandboxConfig {
     pub network: bool,
     #[serde(default)]
     pub deny_read: Vec<std::path::PathBuf>,
+    /// Story 23.1 (review H1): where the effective values came from, filled by
+    /// the config loader. Workspace layers can only tighten `[sandbox]`; their
+    /// ignored weakening attempts are recorded here. Never read from a file.
+    #[serde(skip)]
+    pub provenance: crate::domain::models::sandbox::SandboxProvenance,
 }
 
 impl SandboxConfig {
@@ -495,6 +500,7 @@ impl Default for SandboxConfig {
             writable_roots: Vec::new(),
             network: Self::default_network(),
             deny_read: Vec::new(),
+            provenance: crate::domain::models::sandbox::SandboxProvenance::default(),
         }
     }
 }
@@ -849,8 +855,8 @@ pub struct AppConfig {
     /// INVERTED from the Tools track which defaults to `static-full`).
     #[serde(default)]
     pub skill_exposure: SkillExposureConfig,
-    /// OS-level sandbox enforcement configuration. Story 9.5.
-    /// Defaults to "noop" on all platforms; "landlock" opt-in on Linux.
+    /// OS-level sandbox enforcement configuration (Story 9.5, Story 23.1).
+    /// Defaults to `"auto"`: Landlock on Linux when the kernel supports it.
     #[serde(default)]
     pub sandbox: SandboxConfig,
     /// Phase B search configuration per ADR-09-02 v2 §Audience Split.

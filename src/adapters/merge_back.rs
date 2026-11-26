@@ -14,15 +14,51 @@ use tokio::io::AsyncWriteExt;
 use crate::domain::ports::{PatchApplier, PatchApplyError};
 
 /// Apply patches via `git apply --whitespace=nowarn -` reading the body from stdin.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct GitPatchApplier;
+///
+/// Story 23.1 (review H3): the workspace is writable by sandboxed commands, so
+/// its `.git/config` and `.gitattributes` may name filters and hooks. Every
+/// git command here is hardened (no fsmonitor, no hooks) and runs under the
+/// session sandbox (`sandbox`, the ceiling policy) so a planted filter runs
+/// confined, never as rustain.
+#[derive(Clone, Default)]
+pub struct GitPatchApplier {
+    sandbox: crate::adapters::isolation::GitSandbox,
+}
+
+impl GitPatchApplier {
+    /// Run git under `manager` and `policy`.
+    pub fn with_sandbox(
+        manager: std::sync::Arc<dyn crate::domain::ports::SandboxManager>,
+        policy: crate::domain::models::SandboxPolicy,
+    ) -> Self {
+        Self {
+            sandbox: Some((manager, policy)),
+        }
+    }
+
+    async fn git(
+        workspace: &Path,
+        sandbox: &crate::adapters::isolation::GitSandbox,
+    ) -> Result<tokio::process::Command, PatchApplyError> {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(crate::adapters::isolation::HARDENED_GIT)
+            .current_dir(workspace);
+        if let Some((manager, policy)) = sandbox {
+            manager
+                .apply(&mut cmd, policy)
+                .await
+                .map_err(|e| PatchApplyError::Io(format!("git could not be sandboxed: {e}")))?;
+        }
+        Ok(cmd)
+    }
+}
 
 #[async_trait]
 impl PatchApplier for GitPatchApplier {
     async fn apply(&self, workspace: &Path, body: &[u8]) -> Result<(), PatchApplyError> {
-        let mut child = tokio::process::Command::new("git")
+        let mut child = Self::git(workspace, &self.sandbox)
+            .await?
             .args(["apply", "--whitespace=nowarn", "-"])
-            .current_dir(workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -66,9 +102,10 @@ impl PatchApplier for GitPatchApplier {
         // supported workspaces for `git apply`. Every failure mode collapses
         // to `None` — this value is a preimage witness for the durable apply
         // record, never an input to control flow.
-        let output = tokio::process::Command::new("git")
+        let output = Self::git(workspace, &self.sandbox)
+            .await
+            .ok()?
             .args(["rev-parse", "HEAD"])
-            .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

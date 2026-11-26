@@ -673,7 +673,7 @@ async fn a_new_file_patch_resurrects_on_reapply_and_records_honestly() {
         std::sync::Arc::new(FileSystemArtifactStore::new(root));
     let (bus, rx) = EventBus::new(64);
     std::mem::forget(rx);
-    let applier: std::sync::Arc<dyn PatchApplier> = std::sync::Arc::new(GitPatchApplier);
+    let applier: std::sync::Arc<dyn PatchApplier> = std::sync::Arc::new(GitPatchApplier::default());
     let service = PatchMergeBack::new(
         root.to_path_buf(),
         store,

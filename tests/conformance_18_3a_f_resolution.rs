@@ -140,7 +140,7 @@ struct CrashingApplier {
 impl CrashingApplier {
     fn new(hang_after_mutating: bool) -> Self {
         Self {
-            inner: GitPatchApplier,
+            inner: GitPatchApplier::default(),
             calls: Arc::new(AtomicUsize::new(0)),
             hang_after_mutating,
             entered: Arc::new(Notify::new()),

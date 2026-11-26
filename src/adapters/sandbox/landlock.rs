@@ -27,13 +27,15 @@
 //! (entries listed at spawn; symlinks need no rule because Landlock checks the
 //! resolved hierarchy).
 
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd,
-    Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus,
+    ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset,
+    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope,
 };
 use tokio::process::Command;
 
@@ -45,16 +47,43 @@ use crate::domain::ports::SandboxManager;
 pub const MIN_ABI: u32 = 3;
 /// The first ABI that handles TCP bind/connect (Linux 6.7).
 pub const NETWORK_ABI: u32 = 4;
+/// The first ABI that handles device ioctls (Linux 6.10).
+pub const IOCTL_ABI: u32 = 5;
+/// The first ABI that scopes signals and abstract Unix sockets (Linux 6.12).
+pub const SCOPE_ABI: u32 = 6;
 
 /// The filesystem rights every ruleset handles.
 fn handled_fs() -> BitFlags<AccessFs> {
     AccessFs::from_all(ABI::V3)
 }
 
-/// Landlock-backed sandbox adapter. Rulesets are built per spawn.
+/// Open `path` itself, never a symlink it may have become: `O_PATH |
+/// O_NOFOLLOW`, plus `O_DIRECTORY` for a directory.
+fn open_nofollow(path: &Path, directory: bool) -> std::io::Result<OwnedFd> {
+    let mut flags = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    if directory {
+        flags |= libc::O_DIRECTORY;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)?;
+    Ok(file.into())
+}
+
+/// One writable root, opened when the session resolved its sandbox.
+struct HeldRoot {
+    path: PathBuf,
+    fd: OwnedFd,
+    directory: bool,
+}
+
+/// Landlock-backed sandbox adapter. Rulesets are built per spawn from the
+/// writable roots' descriptors held since session start.
 pub struct LandlockSandbox {
     abi: u32,
     deny_read: Vec<PathBuf>,
+    roots: Vec<HeldRoot>,
     /// Test seam: the `pre_exec` closure reads the restriction as not enforced.
     inject_not_enforced: bool,
 }
@@ -78,14 +107,39 @@ impl LandlockSandbox {
         Ok(abi)
     }
 
-    /// An adapter for a kernel with Landlock `abi` (from [`Self::probe`]) and
-    /// the canonical deny set.
-    pub fn new(abi: u32, deny_read: Vec<PathBuf>) -> Self {
-        Self {
+    /// An adapter for a kernel with Landlock `abi` (from [`Self::probe`]), the
+    /// canonical deny set and the canonical writable set `W`. Every root is
+    /// opened now with `O_PATH | O_NOFOLLOW` and its descriptor reused by
+    /// every spawn: a confined command that later replaces a root (or one of
+    /// its parents) with a symlink cannot widen the next spawn (review H2).
+    pub fn new(
+        abi: u32,
+        deny_read: Vec<PathBuf>,
+        writable_roots: &[PathBuf],
+    ) -> Result<Self, SandboxError> {
+        let roots = writable_roots
+            .iter()
+            .map(|path| {
+                let directory = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+                let fd = open_nofollow(path, directory).map_err(|e| {
+                    SandboxError::RulesetBuildFailed(format!(
+                        "cannot open writable root {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                Ok(HeldRoot {
+                    path: path.clone(),
+                    fd,
+                    directory,
+                })
+            })
+            .collect::<Result<Vec<_>, SandboxError>>()?;
+        Ok(Self {
             abi,
             deny_read,
+            roots,
             inject_not_enforced: false,
-        }
+        })
     }
 
     /// Test seam: make the in-child check see a not-enforced restriction.
@@ -137,37 +191,60 @@ impl LandlockSandbox {
             .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(handled_fs())
             .map_err(err)?;
+        if self.abi >= IOCTL_ABI {
+            // Device ioctls (TIOCSTI and friends) on files opened inside the
+            // sandbox are denied unless granted below (review M1).
+            ruleset = ruleset.handle_access(AccessFs::IoctlDev).map_err(err)?;
+        }
         if !network && self.abi >= NETWORK_ABI {
             ruleset = ruleset
                 .handle_access(AccessNet::from_all(ABI::V4))
                 .map_err(err)?;
         }
+        if self.abi >= SCOPE_ABI {
+            // Signals and abstract Unix sockets cannot reach processes outside
+            // the sandbox (review M2).
+            ruleset = ruleset
+                .scope(Scope::AbstractUnixSocket | Scope::Signal)
+                .map_err(err)?;
+        }
         let mut created = ruleset.create().map_err(err)?;
 
         // Reads: everything except the deny set.
+        let io = |path: &Path, e: std::io::Error| {
+            SandboxError::RulesetBuildFailed(format!("cannot open {}: {e}", path.display()))
+        };
         let root_read = AccessFs::ReadDir | AccessFs::Execute;
         created = created
-            .add_rule(PathBeneath::new(open("/")?, root_read))
+            .add_rule(PathBeneath::new(
+                open_nofollow(Path::new("/"), true).map_err(|e| io(Path::new("/"), e))?,
+                root_read,
+            ))
             .map_err(err)?;
         for path in split_read_grants(&self.deny_read, &mut list_dir) {
             // An entry that vanished since the listing needs no grant.
-            let Ok(fd) = PathFd::new(&path) else { continue };
+            let Ok(fd) = open_nofollow(&path, false) else {
+                continue;
+            };
             created = created
                 .add_rule(PathBeneath::new(fd, AccessFs::ReadFile))
                 .map_err(err)?;
         }
 
-        // Writes: the writable set only.
+        // Writes: the writable set only, through the descriptors held since
+        // the session started.
         for root in writable_roots {
-            let Ok(fd) = PathFd::new(root) else {
-                tracing::warn!(
-                    path = %root.display(),
-                    "Landlock: writable root cannot be opened; it stays read-only"
-                );
-                continue;
+            let Some(held) = self.roots.iter().find(|held| held.path == *root) else {
+                return Err(SandboxError::RulesetBuildFailed(format!(
+                    "writable root {} was not opened when the session started",
+                    root.display()
+                )));
             };
-            let access = if root.is_dir() {
+            let fd = held.fd.try_clone().map_err(|e| io(root, e))?;
+            let access = if held.directory {
                 handled_fs()
+            } else if self.abi >= IOCTL_ABI {
+                AccessFs::from_file(ABI::V3) | AccessFs::IoctlDev
             } else {
                 AccessFs::from_file(ABI::V3)
             };
@@ -177,11 +254,6 @@ impl LandlockSandbox {
         }
         Ok(created)
     }
-}
-
-fn open(path: &str) -> Result<PathFd, SandboxError> {
-    PathFd::new(path)
-        .map_err(|e| SandboxError::RulesetBuildFailed(format!("cannot open {path}: {e}")))
 }
 
 /// The kernel's Landlock ABI, or why there is none.
@@ -416,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn permissive_and_read_only_under_writable_root_are_refused() {
-        let sb = LandlockSandbox::new(MIN_ABI, Vec::new());
+        let sb = LandlockSandbox::new(MIN_ABI, Vec::new(), &[]).unwrap();
         assert!(matches!(
             sb.build_ruleset(&SandboxPolicy::Permissive),
             Err(SandboxError::Unsupported { .. })
@@ -453,7 +525,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("f");
         std::fs::write(&file, "x").unwrap();
-        let sb = LandlockSandbox::new(abi, Vec::new());
+        let sb = LandlockSandbox::new(abi, Vec::new(), &[]).unwrap();
         let policy = SandboxPolicy::ReadOnly { network: true };
         let (ok, _) = run(&sb, &policy, &format!("cat {}", file.display())).await;
         assert!(ok, "reads stay allowed");

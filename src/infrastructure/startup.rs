@@ -889,25 +889,11 @@ pub async fn run() -> Result<()> {
                 .unwrap_or_default()
         };
         // Story 23.1 AC8 — the same resolver the session roots use.
-        let sandbox = {
-            let workspace = std::env::current_dir().unwrap_or_default();
-            let resolved = crate::infrastructure::sandbox::resolve_sandbox(
-                &app_config,
-                &workspace,
-                PermissionMode::Normal,
-                &crate::infrastructure::sandbox::SandboxProbe::detect(),
-            );
-            crate::adapters::cli::doctor::SandboxCheck {
-                adapter: app_config.sandbox.adapter.clone(),
-                mcp: resolved
-                    .as_ref()
-                    .ok()
-                    .map(|r| (Arc::clone(&r.manager), r.session.scope.ceiling())),
-                outcome: resolved
-                    .map(|resolved| resolved.session)
-                    .map_err(|e| e.to_string()),
-            }
-        };
+        let sandbox = crate::infrastructure::sandbox::doctor_sandbox_check(
+            &app_config,
+            &std::env::current_dir().unwrap_or_default(),
+            &crate::infrastructure::sandbox::SandboxProbe::detect(),
+        );
         return crate::adapters::cli::doctor::run_doctor(
             terminal,
             adapters,
@@ -1964,7 +1950,7 @@ pub async fn run() -> Result<()> {
         crate::adapters::tui::widgets::status_bar::set_sandbox_enforced(
             compose_snapshot.sandbox.status.is_enforced(),
         );
-        let notice = compose_snapshot.sandbox.status.notice();
+        let notice = compose_snapshot.sandbox.notice();
         let _ = event_bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: notice.level,
@@ -2332,8 +2318,13 @@ pub async fn run() -> Result<()> {
                 1024,
             );
 
-            let isolation_provider: Arc<dyn crate::domain::ports::IsolationProvider> =
-                Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
+            let isolation_provider: Arc<dyn crate::domain::ports::IsolationProvider> = Arc::new(
+                // Story 23.1 (review H3): scratch-dir git runs confined.
+                crate::adapters::isolation::CowIsolationProvider::default().with_sandbox(
+                    Arc::clone(&resolved_sandbox.manager),
+                    resolved_sandbox.session.scope.ceiling(),
+                ),
+            );
             let tools_factory_storage = tools_storage.clone();
             let tools_factory_sandbox_slot = sandbox_slot.clone();
             let tools_factory_sandbox_policy = sandbox_policy_ref.clone();
@@ -2452,7 +2443,11 @@ pub async fn run() -> Result<()> {
                     artifact_store.clone(),
                     node_journal.clone(),
                     event_bus.clone(),
-                    Arc::new(crate::adapters::merge_back::GitPatchApplier),
+                    // Story 23.1 (review H3): workspace git runs confined.
+                    Arc::new(crate::adapters::merge_back::GitPatchApplier::with_sandbox(
+                        Arc::clone(&resolved_sandbox.manager),
+                        resolved_sandbox.session.scope.ceiling(),
+                    )),
                 ));
             patch_apply_executor = Some(patch_merge_back.clone()
                 as std::sync::Arc<dyn crate::domain::ports::PatchApplyExecutor>);

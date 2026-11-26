@@ -1082,12 +1082,51 @@ pub struct SandboxCheck {
     pub adapter: String,
     /// The resolved session, or the startup error `[sandbox]` produces.
     pub outcome: Result<crate::domain::models::SandboxSession, String>,
-    /// The resolved manager and MCP ceiling policy, so `doctor`'s MCP probe
-    /// spawns servers as a session does (`None`: unresolved).
-    pub mcp: Option<(
+    /// The MCP probe's sandbox: the resolved manager and ceiling policy, so
+    /// `doctor` spawns servers as a session does; `Err` when `[sandbox]`
+    /// refused the session, so no server is started at all.
+    pub mcp: McpProbeSandbox,
+}
+
+/// What the `doctor` MCP probe may spawn under (Story 23.1, review
+/// CR231-01): `Ok(Some(..))` confined, `Ok(None)` unconfined (sandbox off or
+/// unavailable under `auto`), `Err(reason)` nothing.
+pub type McpProbeSandbox = Result<
+    Option<(
         std::sync::Arc<dyn crate::domain::ports::SandboxManager>,
         crate::domain::models::SandboxPolicy,
     )>,
+    String,
+>;
+
+/// The MCP reachability row when the sandbox the configuration requires is
+/// unavailable: configured servers are not started (Story 23.1, CR231-01).
+pub struct McpProbeRefused {
+    pub reason: String,
+}
+
+#[async_trait]
+impl HealthCheck for McpProbeRefused {
+    fn name(&self) -> &str {
+        "MCP server reachability"
+    }
+
+    async fn run(&self) -> CheckResult {
+        CheckResult {
+            name: self.name().to_string(),
+            category: "mcp".to_string(),
+            status: CheckStatus::Skipped(
+                "configured servers were not started: the sandbox is unavailable".to_string(),
+            ),
+            message: format!(
+                "configured MCP servers were not started, because they would run unconfined: {}",
+                self.reason
+            ),
+            fix: None,
+            latency: None,
+            tier: CheckTier::Info,
+        }
+    }
 }
 
 #[async_trait]
@@ -1121,6 +1160,9 @@ impl HealthCheck for SandboxCheck {
                     network_enforced,
                     unprotected,
                     missing_roots,
+                    ipc_scoped,
+                    broad_roots,
+                    credentials_unprotected,
                 } => {
                     let network = match (session.scope.network, network_enforced) {
                         (true, _) => "on".to_string(),
@@ -1128,17 +1170,40 @@ impl HealthCheck for SandboxCheck {
                         (false, false) => format!("off requested, not enforced (ABI {abi} < 4)"),
                     };
                     let mut message = format!(
-                        "adapter {}: Landlock ABI {abi} enforced; writable: {}; network: {network}",
+                        "adapter {}: Landlock ABI {abi} enforced; writable: {}; network: {network}; \
+                         signals and abstract sockets {}",
                         self.adapter,
-                        join(&session.scope.writable_roots)
+                        join(&session.scope.writable_roots),
+                        if *ipc_scoped {
+                            "scoped"
+                        } else {
+                            "not scoped (ABI < 6)"
+                        }
                     );
+                    if !broad_roots.is_empty() {
+                        message.push_str(&format!(
+                            "; covers the home directory (YOLO refused): {}",
+                            join(broad_roots)
+                        ));
+                    }
+                    if *credentials_unprotected {
+                        message.push_str("; credential store readable");
+                    }
                     if !unprotected.is_empty() {
                         message.push_str(&format!("; unprotected: {}", join(unprotected)));
                     }
                     if !missing_roots.is_empty() {
                         message.push_str(&format!("; skipped (missing): {}", join(missing_roots)));
                     }
-                    let status = if unprotected.is_empty() && *network_enforced {
+                    if !session.provenance.ignored.is_empty() {
+                        message.push_str(&format!("; {}", session.provenance.ignored.join(" ")));
+                    }
+                    let status = if unprotected.is_empty()
+                        && *network_enforced
+                        && broad_roots.is_empty()
+                        && !credentials_unprotected
+                        && session.provenance.ignored.is_empty()
+                    {
                         CheckStatus::Pass
                     } else {
                         CheckStatus::Warning
@@ -1147,12 +1212,12 @@ impl HealthCheck for SandboxCheck {
                 }
                 SandboxStatus::Unavailable { .. } => (
                     CheckStatus::Warning,
-                    format!("adapter {}: {}", self.adapter, session.status.notice().text),
+                    format!("adapter {}: {}", self.adapter, session.notice().text),
                     None,
                 ),
                 SandboxStatus::Off | SandboxStatus::NotSupported { .. } => (
                     CheckStatus::Info,
-                    format!("adapter {}: {}", self.adapter, session.status.notice().text),
+                    format!("adapter {}: {}", self.adapter, session.notice().text),
                     None,
                 ),
             },
@@ -1321,7 +1386,11 @@ impl HealthCheck for GitCheck {
     }
 
     async fn run(&self) -> CheckResult {
+        // Story 23.1 (review H3): the workspace `.git/config` is writable by
+        // sandboxed commands; `rev-parse` runs no filter, and the hardening
+        // turns off the fsmonitor and hooks it could name.
         let output = tokio::process::Command::new("git")
+            .args(crate::adapters::isolation::HARDENED_GIT)
             .args(["rev-parse", "--is-inside-work-tree"])
             .output()
             .await;
@@ -1820,7 +1889,7 @@ mod sandbox_check_tests {
         SandboxCheck {
             adapter: "auto".into(),
             outcome,
-            mcp: None,
+            mcp: Ok(None),
         }
         .run()
         .await
@@ -1839,7 +1908,11 @@ mod sandbox_check_tests {
                 network_enforced: true,
                 unprotected: vec![],
                 missing_roots: vec![PathBuf::from("/home/u/.npm")],
+                ipc_scoped: true,
+                broad_roots: vec![],
+                credentials_unprotected: false,
             },
+            ..SandboxSession::off()
         }))
         .await;
         assert_eq!(r.status, CheckStatus::Pass);
@@ -1847,7 +1920,8 @@ mod sandbox_check_tests {
         assert_eq!(
             r.message,
             "adapter auto: Landlock ABI 6 enforced; writable: /w, /tmp; network: off (TCP \
-             bind/connect blocked); skipped (missing): /home/u/.npm"
+             bind/connect blocked); signals and abstract sockets scoped; skipped (missing): \
+             /home/u/.npm"
         );
     }
 
@@ -1858,6 +1932,7 @@ mod sandbox_check_tests {
             status: SandboxStatus::Unavailable {
                 reason: "Landlock is not built into this kernel".into(),
             },
+            ..SandboxSession::off()
         }))
         .await;
         assert_eq!(r.status, CheckStatus::Warning);

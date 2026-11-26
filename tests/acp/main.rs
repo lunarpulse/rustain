@@ -18,5 +18,8 @@ mod acp_self_session;
 #[path = "../acp_subprocess_no_listener.rs"]
 mod acp_subprocess_no_listener;
 
+#[path = "../conformance_23_1_acp.rs"]
+mod conformance_23_1_acp;
+
 #[path = "../conformance_acp_zed.rs"]
 mod conformance_acp_zed;

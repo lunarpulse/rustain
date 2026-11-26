@@ -2065,7 +2065,7 @@ impl VerdictHarness {
             store.clone(),
             journal.clone(),
             std::sync::Arc::new(event_bus),
-            std::sync::Arc::new(rustain::adapters::merge_back::GitPatchApplier),
+            std::sync::Arc::new(rustain::adapters::merge_back::GitPatchApplier::default()),
         ));
         // 🔴 Policy OFF, deliberately and assertedly: a captured patch carries
         // non-empty provenance, so under production's `true` a non-self-originated

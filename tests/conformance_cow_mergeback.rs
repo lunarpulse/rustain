@@ -68,7 +68,7 @@ async fn service(
             store,
             journal.clone(),
             Arc::new(event_bus),
-            Arc::new(rustain::adapters::merge_back::GitPatchApplier),
+            Arc::new(rustain::adapters::merge_back::GitPatchApplier::default()),
         ),
         journal,
         producer,

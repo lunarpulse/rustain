@@ -5135,7 +5135,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
         let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
             Arc::new(runner),
@@ -5296,7 +5296,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
         let executor = Arc::new(
             crate::infrastructure::orchestrator::ForkJoinExecutor::new(
@@ -5988,7 +5988,7 @@ mod tests {
                         store.clone(),
                         journal.clone(),
                         Arc::new(merge_bus),
-                        Arc::new(crate::adapters::merge_back::GitPatchApplier),
+                        Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
                     ));
                 let executor = Arc::new(
                     crate::infrastructure::orchestrator::ForkJoinExecutor::new(
@@ -7212,7 +7212,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
         let executor = build_real_executor(runner, ledger, root)
             .with_journal(journal)
@@ -7363,7 +7363,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
         let security = Arc::new(SecurityAdapter::new(workspace.path().to_path_buf()))
             as Arc<dyn crate::domain::ports::SecurityPort>;
@@ -8337,7 +8337,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
         let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
             runner.clone(),

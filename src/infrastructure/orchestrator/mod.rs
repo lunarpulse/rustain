@@ -3298,7 +3298,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
         let exe = build_exe_for_rerun()
             .with_journal(journal.clone())
@@ -3470,7 +3470,7 @@ mod tests {
             store.clone(),
             journal.clone(),
             Arc::new(merge_bus),
-            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier::default()),
         ));
 
         let root = CapabilityToken::r1_root(AgentId::root());

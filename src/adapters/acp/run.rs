@@ -105,8 +105,9 @@ pub async fn run_acp(
     persona: Arc<dyn crate::domain::ports::PersonaPort>,
 ) -> Result<()> {
     let outgoing = tokio::io::stdout().compat_write();
-    let incoming = tokio::io::stdin().compat();
-    serve_acp_with_io(
+    let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let incoming = InterruptibleInput::new(tokio::io::stdin(), interrupted.clone()).compat();
+    let result = serve_acp_with_io(
         outgoing,
         incoming,
         app_config,
@@ -115,7 +116,14 @@ pub async fn run_acp(
         client_profile,
         persona,
     )
-    .await
+    .await;
+    if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+        // Sessions and MCP servers are already stopped. Exit now: the blocking
+        // stdin read still pending on the runtime's thread pool would otherwise
+        // hold the runtime's shutdown until the client closes the pipe.
+        std::process::exit(130);
+    }
+    result
 }
 
 /// Serve ACP over caller-provided byte streams with production composition.
@@ -137,20 +145,7 @@ where
     R: AsyncRead + Unpin + 'static,
 {
     tracing::debug!(target: "acp", ?client_profile, "ACP client profile selected; R1 profiles are behavior-identical");
-    let factory_config = app_config.clone();
-    let core_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
-        crate::infrastructure::composition::build_acp_core(
-            &factory_config,
-            cwd,
-            false,
-            mcp_servers,
-            Arc::clone(&persona),
-        )
-        .map_err(|e| {
-            tracing::error!("ACP build_acp_core failed: {e:#}");
-            acp::Error::internal_error()
-        })
-    });
+    let core_factory = acp_core_factory(app_config.clone(), persona, None);
     serve_acp_with_acp_core_factory(
         outgoing,
         incoming,
@@ -160,6 +155,102 @@ where
         core_factory,
     )
     .await
+}
+
+/// The production per-session ACP factory over [`build_acp_core_with_probe`]
+/// (`probe = None`: the running host). A `[sandbox]` refusal (Landlock
+/// required but unavailable) reaches the operator as a stderr line and the
+/// client as the protocol error's data, never only the log (Story 23.1 review
+/// CR231-07).
+///
+/// [`build_acp_core_with_probe`]: crate::infrastructure::composition::build_acp_core_with_probe
+pub fn acp_core_factory(
+    app_config: AppConfig,
+    persona: Arc<dyn crate::domain::ports::PersonaPort>,
+    probe: Option<crate::infrastructure::sandbox::SandboxProbe>,
+) -> AcpCoreFactory {
+    Rc::new(move |cwd, mcp_servers| {
+        let probe = probe
+            .clone()
+            .unwrap_or_else(crate::infrastructure::sandbox::SandboxProbe::detect);
+        crate::infrastructure::composition::build_acp_core_with_probe(
+            &app_config,
+            cwd,
+            false,
+            mcp_servers,
+            Arc::clone(&persona),
+            &probe,
+        )
+        .map_err(|e| {
+            tracing::error!("ACP build_acp_core failed: {e:#}");
+            match e {
+                crate::domain::errors::AdapterCompositionError::Sandbox(notice) => {
+                    eprintln!("{notice}");
+                    acp::Error::internal_error().data(serde_json::json!({ "sandbox": notice }))
+                }
+                _ => acp::Error::internal_error(),
+            }
+        })
+    })
+}
+
+/// Story 23.1 (review CR231-03): stdin that reads as end-of-file once the
+/// terminal interrupts (SIGINT) or the process is asked to stop (SIGTERM). The
+/// ACP server then takes its normal end-of-input path — cancel every session
+/// and stop its MCP servers, process groups included — instead of dying with
+/// the default signal action and leaving servers that lead their own group.
+struct InterruptibleInput<R> {
+    inner: R,
+    interrupt: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    interrupted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R> InterruptibleInput<R> {
+    fn new(inner: R, interrupted: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            inner,
+            interrupt: Box::pin(async {
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let mut terminate = signal(SignalKind::terminate()).ok();
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = async {
+                            match terminate.as_mut() {
+                                Some(stream) => { stream.recv().await; }
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {}
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }),
+            interrupted,
+        }
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InterruptibleInput<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::sync::atomic::Ordering;
+        if !self.interrupted.load(Ordering::Relaxed) && self.interrupt.as_mut().poll(cx).is_ready()
+        {
+            tracing::info!(target: "acp", "interrupted: ending input to stop sessions and MCP servers");
+            self.interrupted.store(true, Ordering::Relaxed);
+        }
+        if self.interrupted.load(Ordering::Relaxed) {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
 }
 
 /// Serve ACP over caller-provided byte streams with injected turn composition.

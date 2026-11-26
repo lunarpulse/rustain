@@ -316,13 +316,22 @@ pub fn try_load_with_config_overrides(
     profile_resolver: &dyn ProfileResolver,
     cli_config_overrides: Option<&Value>,
 ) -> Result<AppConfig, DomainError> {
-    let figment = build_figment(cli, profile_resolver, cli_config_overrides);
+    let layers = config_layers(cli);
+    let figment = layered_figment(cli, &layers, profile_resolver, cli_config_overrides, None);
 
-    let config: AppConfig = figment.extract().map_err(|e| {
+    let mut config: AppConfig = figment.extract().map_err(|e| {
         DomainError::Config(ConfigError::Extract {
             reason: e.to_string(),
         })
     })?;
+    apply_sandbox_trust(
+        &mut config,
+        cli,
+        &layers,
+        profile_resolver,
+        cli_config_overrides,
+        None,
+    );
     register_configured_credential_names(&config);
 
     // models.dev live pricing: overlay the cached snapshot onto the bundled +
@@ -360,7 +369,12 @@ fn build_figment(
     profile_resolver: &dyn ProfileResolver,
     cli_config_overrides: Option<&Value>,
 ) -> Figment {
-    let layers = match crate::adapters::cli::config_cmd::config_layer_paths(cli) {
+    let layers = config_layers(cli);
+    layered_figment(cli, &layers, profile_resolver, cli_config_overrides, None)
+}
+
+fn config_layers(cli: &Cli) -> Vec<crate::adapters::cli::config_cmd::LayerDescriptor> {
+    match crate::adapters::cli::config_cmd::config_layer_paths(cli) {
         Ok(layers) => layers,
         Err(e) => {
             tracing::error!("Failed to resolve config layer paths: {e}");
@@ -368,8 +382,172 @@ fn build_figment(
             // (if default-only) configuration rather than panicking.
             Vec::new()
         }
+    }
+}
+
+/// Story 23.1 (review H1) — `[sandbox]` is honored from the built-in defaults,
+/// the user-global file, the environment, CLI flags and `-c`. The layers a
+/// checkout or a profile supplies — `<cwd>/.rustain/config.toml` (unless named
+/// by `--config-file` or it IS the user-global file),
+/// `<cwd>/.claude/rustain-settings.json` and the active profile — may only
+/// tighten it: a stronger `adapter`, `network = false`, extra `deny_read`.
+/// Their weakening attempts (a weaker adapter, `network = true`,
+/// `writable_roots`) are ignored and recorded for the warning-level notice. A
+/// sandboxed command can write the workspace, so honoring them would let one
+/// session turn the next one's sandbox off.
+fn apply_sandbox_trust(
+    config: &mut AppConfig,
+    cli: &Cli,
+    layers: &[crate::adapters::cli::config_cmd::LayerDescriptor],
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+    env: Option<&Value>,
+) {
+    use crate::adapters::cli::config_cmd::LayerDescriptor;
+    let user_global = layers
+        .iter()
+        .find(|l| l.priority == USER_GLOBAL_CONFIG_PRIORITY)
+        .and_then(|l| l.path.clone());
+    let untrusted = |layer: &LayerDescriptor| match layer.priority {
+        LOCAL_OVERRIDE_PRIORITY | ACTIVE_PROFILE_PRIORITY => true,
+        WORKSPACE_CONFIG_PRIORITY => {
+            cli.config_file.is_none() && !same_file(layer.path.as_deref(), user_global.as_deref())
+        }
+        _ => false,
     };
-    layered_figment(cli, &layers, profile_resolver, cli_config_overrides, None)
+    let trusted_layers: Vec<LayerDescriptor> =
+        layers.iter().filter(|l| !untrusted(l)).cloned().collect();
+    let trusted = merge_layers(
+        cli,
+        &trusted_layers,
+        profile_resolver,
+        cli_config_overrides,
+        env,
+        false,
+    );
+    let mut sandbox: crate::domain::models::SandboxConfig =
+        trusted.extract_inner("sandbox").unwrap_or_default();
+    let mut provenance = crate::domain::models::SandboxProvenance {
+        adapter_source: adapter_source(&trusted),
+        ignored: Vec::new(),
+    };
+    // Lowest priority first, so each tightening composes.
+    for layer in layers.iter().rev().filter(|l| untrusted(l)) {
+        let (label, table) = if layer.priority == ACTIVE_PROFILE_PRIORITY {
+            (
+                "the active profile".to_string(),
+                profile_resolver
+                    .resolve_active_profile_defaults()
+                    .and_then(|v| serde_json::to_value(v).ok())
+                    .and_then(|v| v.get("sandbox").cloned()),
+            )
+        } else {
+            let Some(path) = layer.path.as_deref() else {
+                continue;
+            };
+            (path.display().to_string(), sandbox_table_of(path))
+        };
+        if let Some(table) = table {
+            tighten_sandbox(&mut sandbox, &mut provenance, &label, &table);
+        }
+    }
+    sandbox.provenance = provenance;
+    config.sandbox = sandbox;
+}
+
+fn same_file(a: Option<&Path>, b: Option<&Path>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            a == b
+                || matches!(
+                    (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                    (Ok(x), Ok(y)) if x == y
+                )
+        }
+        _ => false,
+    }
+}
+
+/// The layer that supplied `[sandbox].adapter` in the trusted merge.
+fn adapter_source(figment: &Figment) -> String {
+    let Some(metadata) = figment.find_metadata("sandbox.adapter") else {
+        return "built-in default".to_string();
+    };
+    if let Some(figment::Source::File(path)) = &metadata.source {
+        return path.display().to_string();
+    }
+    let name = metadata.name.as_ref();
+    if name.contains("environment") {
+        "RUSTAIN_SANDBOX__ADAPTER".to_string()
+    } else if name.contains("CliOverrides") {
+        "--sandbox-adapter".to_string()
+    } else if name.contains("AppConfig") {
+        "built-in default".to_string()
+    } else {
+        "-c sandbox.adapter".to_string()
+    }
+}
+
+/// The `[sandbox]` table of one untrusted config file, if it parses.
+fn sandbox_table_of(path: &Path) -> Option<Value> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: Value = if path.extension().is_some_and(|e| e == "json") {
+        serde_json::from_str(&content).ok()?
+    } else {
+        serde_json::to_value(toml::from_str::<toml::Value>(&content).ok()?).ok()?
+    };
+    value.get("sandbox").cloned()
+}
+
+/// Apply one untrusted layer's `[sandbox]` table: tightening only.
+fn tighten_sandbox(
+    sandbox: &mut crate::domain::models::SandboxConfig,
+    provenance: &mut crate::domain::models::SandboxProvenance,
+    label: &str,
+    table: &Value,
+) {
+    let rank = |adapter: &str| match adapter {
+        "noop" => Some(0),
+        "auto" => Some(1),
+        "landlock" => Some(2),
+        _ => None,
+    };
+    let ignored = |key: &str, provenance: &mut crate::domain::models::SandboxProvenance| {
+        provenance.ignored.push(format!(
+            "Ignored `[sandbox].{key}` in {label}: workspace configuration can only tighten the \
+             sandbox."
+        ));
+    };
+    if let Some(adapter) = table.get("adapter").and_then(Value::as_str) {
+        match (rank(adapter), rank(&sandbox.adapter)) {
+            (Some(new), Some(current)) if new > current => {
+                sandbox.adapter = adapter.to_string();
+                provenance.adapter_source = label.to_string();
+            }
+            (Some(new), Some(current)) if new == current => {}
+            _ => ignored(&format!("adapter = \"{adapter}\""), provenance),
+        }
+    }
+    match table.get("network").and_then(Value::as_bool) {
+        Some(false) => sandbox.network = false,
+        Some(true) if !sandbox.network => ignored("network = true", provenance),
+        _ => {}
+    }
+    if let Some(paths) = table.get("deny_read").and_then(Value::as_array) {
+        for path in paths.iter().filter_map(Value::as_str) {
+            let path = std::path::PathBuf::from(path);
+            if !sandbox.deny_read.contains(&path) {
+                sandbox.deny_read.push(path);
+            }
+        }
+    }
+    if table
+        .get("writable_roots")
+        .and_then(Value::as_array)
+        .is_some_and(|roots| !roots.is_empty())
+    {
+        ignored("writable_roots", provenance);
+    }
 }
 
 /// Merge `layers` once; when the result says `onboarding.team = true` (from a file, the
@@ -418,7 +596,7 @@ pub fn load_from_explicit_layers(
     cli_config_overrides: Option<&Value>,
     env: &Value,
 ) -> Result<AppConfig, DomainError> {
-    let config: AppConfig = layered_figment(
+    let mut config: AppConfig = layered_figment(
         cli,
         layers,
         profile_resolver,
@@ -431,6 +609,14 @@ pub fn load_from_explicit_layers(
             reason: e.to_string(),
         })
     })?;
+    apply_sandbox_trust(
+        &mut config,
+        cli,
+        layers,
+        profile_resolver,
+        cli_config_overrides,
+        Some(env),
+    );
     register_configured_credential_names(&config);
     Ok(config)
 }
