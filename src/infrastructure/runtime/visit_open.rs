@@ -311,7 +311,9 @@ async fn read_prepared(job: &Job) -> Prepared {
         return Err(Box::new(read));
     }
     #[cfg(test)]
-    tests::prepared_on_this_thread();
+    let window =
+        probe::in_read(|| VisitWindowState::prepare(job.key.clone(), read, job.layout.clone()));
+    #[cfg(not(test))]
     let window = VisitWindowState::prepare(job.key.clone(), read, job.layout.clone());
     Ok(Box::new(window))
 }
@@ -334,8 +336,14 @@ async fn run(job: Job) -> Outcome {
     Outcome { current, target }
 }
 
-/// Whether `opening` may still be waited for in `state` under `ctx`.
-fn holds(state: &TuiState, opening: &VisitOpening, ctx: &VisitOpenCtx<'_>) -> bool {
+/// Whether `opening` may still be waited for in `state` under `ctx`. `fresh_source`: also
+/// re-read the Inspector's source from the live conversation (the paint-time rule).
+fn holds(
+    state: &TuiState,
+    opening: &VisitOpening,
+    ctx: &VisitOpenCtx<'_>,
+    fresh_source: bool,
+) -> bool {
     if opening.tab_id != ctx.tab_id || opening.conversation_id != ctx.conversation.id {
         return false;
     }
@@ -348,10 +356,10 @@ fn holds(state: &TuiState, opening: &VisitOpening, ctx: &VisitOpenCtx<'_>) -> bo
     match &opening.origin {
         OpeningOrigin::Inspector { .. } => {
             matches!(top.surface, Surface::ToolInspector(_))
-                && state
-                    .tool_inspectors
-                    .get(&top.id)
-                    .is_some_and(|inspector| inspector.opening_still_current(opening))
+                && state.tool_inspectors.get(&top.id).is_some_and(|inspector| {
+                    let source = fresh_source.then_some(ctx.conversation);
+                    inspector.opening_still_current(opening, source)
+                })
         }
         OpeningOrigin::Visit { cursor_key, .. } => {
             top.surface == Surface::SessionVisit
@@ -365,9 +373,18 @@ fn holds(state: &TuiState, opening: &VisitOpening, ctx: &VisitOpenCtx<'_>) -> bo
 /// Drop a pending open whose context changed (silently: its token is cancelled by the drop).
 /// A pending open survives only while its origin frame is the top frame and still shows what
 /// it started on, the session tab and conversation are unchanged, the editors are closed and
-/// host authority holds. The loop runs this before every paint and at the start of [`apply`].
+/// host authority holds. The loop runs this before every paint: a source that changed or
+/// expired is judged from the live conversation there, so a stale `Opening…` cue is never
+/// painted. [`apply`] runs the same rule without the source check: a completion that arrives
+/// before any repaint opens the Visit and the reauthorize before its first paint shows
+/// `Changed` (AC6).
 pub fn reconcile(state: &mut TuiState, ctx: VisitOpenCtx<'_>) {
-    let Some(held) = session_visit::pending_open(state).map(|opening| holds(state, opening, &ctx))
+    reconcile_with(state, ctx, true);
+}
+
+fn reconcile_with(state: &mut TuiState, ctx: VisitOpenCtx<'_>, fresh_source: bool) {
+    let Some(held) =
+        session_visit::pending_open(state).map(|opening| holds(state, opening, &ctx, fresh_source))
     else {
         return;
     };
@@ -404,7 +421,7 @@ fn finish(state: &mut TuiState, target: Option<Prepared>) {
 /// names the target opens it. The caller paints through `reauthorize_session_visit`, which
 /// verifies source, revision, backing and expiry against the live conversation first.
 pub fn apply(state: &mut TuiState, done: VisitOpenDone, ctx: VisitOpenCtx<'_>) -> bool {
-    reconcile(state, ctx);
+    reconcile_with(state, ctx, false);
     let VisitOpenDone {
         generation,
         frame_id,
@@ -448,13 +465,94 @@ pub fn redraw_needed(before: bool, state: &TuiState) -> bool {
     before || active(state)
 }
 
+/// One finished read and one already-admitted input event, held while the loop decides which
+/// goes first. A completion never applies (and so never paints) ahead of input that was
+/// already ready when it arrived: an `Esc` or a context change in that input must first get
+/// the chance to cancel the open the completion belongs to. Only the completion waits; every
+/// other event source is unaffected, and an input that is not ready never delays it.
+pub struct Parked<T> {
+    done: Option<VisitOpenDone>,
+    input: Option<T>,
+}
+
+impl<T> Default for Parked<T> {
+    fn default() -> Self {
+        Self {
+            done: None,
+            input: None,
+        }
+    }
+}
+
+impl<T> Parked<T> {
+    /// A completion arrived; a newer one replaces an older one (the older open was
+    /// superseded, so its completion could not apply anyway).
+    pub fn park_done(&mut self, done: VisitOpenDone) {
+        self.done = Some(done);
+    }
+
+    /// The parked input event, to be dispatched before anything else.
+    pub fn take_input(&mut self) -> Option<T> {
+        self.input.take()
+    }
+
+    /// The completion to apply now, if any. With input parked, or ready right now
+    /// (`ready_input` polls the terminal without waiting), the completion keeps waiting and
+    /// that input is parked to be dispatched first.
+    pub fn next_apply(&mut self, ready_input: impl FnOnce() -> Option<T>) -> Option<VisitOpenDone> {
+        if self.input.is_some() || self.done.is_none() {
+            return None;
+        }
+        if let Some(input) = ready_input() {
+            self.input = Some(input);
+            return None;
+        }
+        self.done.take()
+    }
+}
+
+/// Test oracle: which thread builds a reader. `prepare` reports itself here, but only while a
+/// read task runs it under [`probe::in_read`], so moving the build to another thread leaves
+/// the reader-thread count short.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    thread_local! {
+        static IN_READ: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) static ON_READER: AtomicUsize = AtomicUsize::new(0);
+    pub(crate) static ELSEWHERE: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn in_read<T>(build: impl FnOnce() -> T) -> T {
+        IN_READ.with(|flag| flag.set(true));
+        let built = build();
+        IN_READ.with(|flag| flag.set(false));
+        built
+    }
+
+    pub(crate) fn prepared() {
+        if IN_READ.with(Cell::get) {
+            let counter = if std::thread::current().name() == Some(super::READER_THREAD) {
+                &ON_READER
+            } else {
+                &ELSEWHERE
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -469,26 +567,12 @@ mod tests {
     use crate::domain::events::DomainInputEvent;
     use crate::domain::models::orchestration_room::{HostBinding, VisitReport};
     use crate::domain::models::{
-        AgentId, InvocationStatus, MessageRole, ToolOutput, WriteDiffState,
+        AgentId, InvocationStatus, MessageRole, TabManager, ToolOutput, WriteDiffState,
     };
     use crate::infrastructure::subagent::NodeJournal;
     use crate::infrastructure::subagent::session_history::hash_body;
 
     const MISSING: &str = "No readable retained session for this exact source.";
-
-    /// Readers prepared on the reader thread and anywhere else, across every test of the
-    /// process (they all share the one reader thread).
-    static PREPARED_ON_READER: AtomicUsize = AtomicUsize::new(0);
-    static PREPARED_ELSEWHERE: AtomicUsize = AtomicUsize::new(0);
-
-    pub(super) fn prepared_on_this_thread() {
-        let counter = if std::thread::current().name() == Some(READER_THREAD) {
-            &PREPARED_ON_READER
-        } else {
-            &PREPARED_ELSEWHERE
-        };
-        counter.fetch_add(1, Ordering::SeqCst);
-    }
 
     fn retained_deadline() -> i64 {
         let now = std::time::SystemTime::now()
@@ -587,6 +671,8 @@ mod tests {
         _dir: tempfile::TempDir,
         history: Arc<SessionHistory>,
         #[cfg_attr(not(unix), allow(dead_code))]
+        journal: Arc<NodeJournal>,
+        #[cfg_attr(not(unix), allow(dead_code))]
         lock: PathBuf,
         state: TuiState,
         conversation: Conversation,
@@ -597,10 +683,17 @@ mod tests {
         calls: Vec<String>,
         tab_id: TabId,
         local_allowed: bool,
+        tabs: TabManager,
     }
 
     impl Rig {
         async fn new() -> Self {
+            Self::seeded(1).await
+        }
+
+        /// The middle result's attempt retains `middle_turns` ordinals (128 reaches the cap
+        /// marker slot, so the real resolve is `Partial` with turns 1..=127).
+        async fn seeded(middle_turns: u32) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let mut turn = Turn::new("model".into(), 0);
             let mut pairs = Vec::new();
@@ -653,16 +746,24 @@ mod tests {
             for (n, (key, (_, _, content))) in keys.iter().zip(&pairs).enumerate() {
                 let attempt = AgentId::new();
                 history.begin(&key.conversation_id, &attempt).unwrap();
-                history
-                    .record_turn(
-                        &attempt,
-                        &AgentId::root(),
-                        1,
-                        &["Read: ok".into()],
-                        &format!("PUBLIC_{n}"),
-                    )
-                    .await
-                    .unwrap();
+                let ordinals = if n == 1 { middle_turns } else { 1 };
+                for ordinal in 1..=ordinals {
+                    let text = if middle_turns == 1 || n != 1 {
+                        format!("PUBLIC_{n}")
+                    } else {
+                        format!("t{ordinal}")
+                    };
+                    history
+                        .record_turn(
+                            &attempt,
+                            &AgentId::root(),
+                            ordinal,
+                            &["Read: ok".into()],
+                            &text,
+                        )
+                        .await
+                        .unwrap();
+                }
                 history
                     .offer(
                         &key.conversation_id,
@@ -680,10 +781,12 @@ mod tests {
             }
 
             let (tx, rx) = mpsc::channel(4);
+            let tabs = TabManager::new(CancellationToken::new());
             let mut rig = Self {
                 lock: journal.path().with_extension("lock"),
                 _dir: dir,
                 history,
+                journal,
                 state: TuiState::new(80, 24),
                 conversation: Conversation {
                     id: "main".into(),
@@ -695,8 +798,9 @@ mod tests {
                 rx,
                 keys,
                 calls,
-                tab_id: 0,
+                tab_id: tabs.active_tab_id(),
                 local_allowed: true,
+                tabs,
             };
             rig.reset();
             rig
@@ -713,7 +817,7 @@ mod tests {
                 None,
             ));
             self.cancel = CancellationToken::new();
-            self.tab_id = 0;
+            self.tab_id = self.tabs.active_tab_id();
             self.local_allowed = true;
         }
 
@@ -807,6 +911,37 @@ mod tests {
                 .modal_stack
                 .iter()
                 .any(|frame| frame.surface == Surface::SessionVisit)
+        }
+
+        /// One production paint at 80x24 (`render_with_visit`: reconcile, reauthorize, then the
+        /// draw that refreshes the Inspector), as the screen text.
+        fn paint(&mut self) -> String {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            crate::infrastructure::runtime::event_loop::render_with_visit(
+                &mut terminal,
+                &mut self.state,
+                &self.conversation,
+                &crate::domain::models::StreamingState::default(),
+                "model",
+                "provider",
+                &crate::adapters::noop::NoOpSecurity,
+                &mut self.tabs,
+                &crate::domain::services::session_index::SessionIndex::new(),
+                128_000,
+                Some(self.history.as_ref()),
+                &self.cancel,
+            )
+            .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..24_u16)
+                .map(|y| {
+                    (0..80_u16)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         }
 
         fn last_notice(&self) -> String {
@@ -1440,7 +1575,7 @@ mod tests {
             .unwrap();
         assert_eq!(name.as_deref(), Some(READER_THREAD));
         assert_ne!(reader, std::thread::current().id());
-        let before = PREPARED_ON_READER.load(Ordering::SeqCst);
+        let before = probe::ON_READER.load(Ordering::SeqCst);
         let mut rig = Rig::new().await;
         for round in 0..2 {
             rig.reset();
@@ -1454,11 +1589,11 @@ mod tests {
             assert!(rig.state.session_visit.is_some());
         }
         assert!(
-            PREPARED_ON_READER.load(Ordering::SeqCst) >= before + 2,
+            probe::ON_READER.load(Ordering::SeqCst) >= before + 2,
             "both opens prepared their reader on the reader thread"
         );
         assert_eq!(
-            PREPARED_ELSEWHERE.load(Ordering::SeqCst),
+            probe::ELSEWHERE.load(Ordering::SeqCst),
             0,
             "no reader is prepared on any other thread"
         );
@@ -1517,5 +1652,260 @@ mod tests {
             1,
             "superseded and live reads keep no job"
         );
+    }
+
+    /// IR-1/IR-4: the loop's arbitration step (`Parked`, the production type the loop uses)
+    /// with the completion and an `Esc` / `]` both ready. The completion must not apply or
+    /// paint before the key is dispatched; afterwards it is judged by what the key left.
+    #[tokio::test]
+    async fn visit_async_open_a_ready_esc_or_step_key_is_dispatched_before_the_completion_applies()
+    {
+        for code in [KeyCode::Esc, KeyCode::Char(']')] {
+            let mut rig = Rig::new().await;
+            let handle = rig.begin().expect("the read starts");
+            let done = rig.done().await;
+            handle.await.unwrap();
+            let notices = rig.state.notifications.len();
+
+            // Branch 6 parks the completion; the input is already ready in the terminal.
+            let mut parked: Parked<KeyCode> = Parked::default();
+            parked.park_done(done);
+            let mut terminal = VecDeque::from([code]);
+            assert!(
+                parked.next_apply(|| terminal.pop_front()).is_none(),
+                "{code:?}: the completion yields to the ready key"
+            );
+            assert!(
+                rig.state.session_visit.is_none(),
+                "{code:?}: nothing applied"
+            );
+            assert!(
+                !rig.paint().contains("Session Visit ·"),
+                "{code:?}: nothing painted"
+            );
+
+            // Branch 1 dispatches the parked key the way the loop does.
+            let code = parked.take_input().expect("the key was parked");
+            match rig.key(code) {
+                Some(RouteEffect::Action(InputAction::StepTool { forward })) => {
+                    assert!(tool_inspector::step(
+                        &mut rig.state,
+                        &rig.conversation,
+                        None,
+                        forward
+                    ));
+                }
+                Some(RouteEffect::Action(InputAction::Consumed)) => {}
+                other => panic!("{code:?}: unexpected dispatch {other:?}"),
+            }
+
+            // Nothing else is ready: the completion is now judged by the pending open left.
+            let done = parked
+                .next_apply(|| terminal.pop_front())
+                .expect("no input is waiting any more");
+            assert!(
+                !rig.applied(done),
+                "{code:?}: the late completion is dropped"
+            );
+            let screen = rig.paint();
+            assert!(rig.state.session_visit.is_none(), "{code:?}: no Visit");
+            assert!(!rig.visit_frame_open());
+            assert!(
+                !screen.contains("Session Visit ·"),
+                "{code:?}: no Visit paint"
+            );
+            assert!(!screen.contains("PUBLIC_1"), "{code:?}: no retained body");
+            assert_eq!(
+                rig.state.notifications.len(),
+                notices,
+                "{code:?}: no notice"
+            );
+            if code == KeyCode::Esc {
+                assert!(screen.contains("[Esc] Back"), "the ordinary rail");
+            } else {
+                let title = rig.state.modal_stack.top().unwrap().title();
+                assert!(title.ends_with("#3"), "`]` reached result #3: {title}");
+            }
+        }
+    }
+
+    /// IR-3: a source that changes or expires while the read is pending is cancelled by the
+    /// first production paint (`render_with_visit`: reconcile before the draw that refreshes
+    /// the Inspector), which already shows the ordinary rail.
+    #[tokio::test]
+    async fn visit_async_open_a_stale_source_drops_the_open_on_the_first_production_paint() {
+        let mut rig = Rig::new().await;
+        for change in ["edited", "expired"] {
+            rig.reset();
+            let handle = rig.begin().expect(change);
+            assert!(
+                rig.paint().contains("Opening Session Visit"),
+                "{change}: the cue paints while the source is current"
+            );
+            if change == "edited" {
+                rig.edit_middle_result();
+            } else {
+                let result = rig.keys[1].result;
+                rig.conversation.turns[0].visit_deadlines.insert(result, 0);
+            }
+            let screen = rig.paint();
+            assert!(
+                rig.pending_generation().is_none(),
+                "{change}: the open is dropped"
+            );
+            assert!(
+                !screen.contains("Opening Session Visit"),
+                "{change}: no stale cue"
+            );
+            assert!(screen.contains("[Esc] Back"), "{change}: the ordinary rail");
+            handle.await.unwrap();
+            assert!(rig.rx.try_recv().is_err(), "{change}: no completion");
+        }
+    }
+
+    /// IR-4 / AC6: loop iterations around a source change while a read is pending. A repaint
+    /// first (the tick) drops the open on the live source and paints the ordinary rail, and
+    /// the completion that arrives afterwards is dropped; a completion that arrives before
+    /// any repaint applies and shows `Changed` (`..._result_edited_during_the_read_*`).
+    #[tokio::test]
+    async fn visit_async_open_a_completion_after_a_live_context_change_is_dropped_and_paints_plain()
+    {
+        let mut rig = Rig::new().await;
+        let handle = rig.begin().expect("the read starts");
+        let done = rig.done().await;
+        handle.await.unwrap();
+        rig.edit_middle_result();
+        let plain = rig.paint();
+        assert!(
+            rig.pending_generation().is_none(),
+            "the repaint dropped the open"
+        );
+        assert!(!plain.contains("Opening") && plain.contains("[Esc] Back"));
+
+        let mut parked: Parked<KeyCode> = Parked::default();
+        parked.park_done(done);
+        let done = parked
+            .next_apply(|| None)
+            .expect("no input is ready: the completion is judged");
+        assert!(!rig.applied(done));
+        let screen = rig.paint();
+        assert!(rig.state.session_visit.is_none());
+        assert!(!screen.contains("Session Visit ·") && !screen.contains("Opening"));
+        assert!(screen.contains("[Esc] Back"));
+    }
+
+    /// IR-2: repeated open/`Esc` cycles while the writer exclusion is held start at most one
+    /// blocking projection; its descriptor and admission are released only when it ends.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_async_open_repeated_cancel_under_a_held_lock_keeps_one_blocked_worker() {
+        use std::sync::atomic::Ordering;
+        let mut rig = Rig::new().await;
+        let probe = rig.journal.projection_probe();
+        let hold = Hold::acquire(&rig.lock);
+        for cycle in 0..4 {
+            let handle = rig.begin().expect("the read starts");
+            rig.assert_held_read_blocked(&handle).await;
+            assert_eq!(
+                rig.key(KeyCode::Esc),
+                Some(RouteEffect::Action(InputAction::Consumed)),
+                "cycle {cycle}"
+            );
+            joined(handle).await;
+        }
+        assert_eq!(
+            probe.max.load(Ordering::SeqCst),
+            1,
+            "never more than one blocked projection"
+        );
+        assert_eq!(
+            probe.live.load(Ordering::SeqCst),
+            1,
+            "the one worker still waits on the lock after every wrapper ended"
+        );
+
+        drop(hold);
+        while probe.live.load(Ordering::SeqCst) != 0 {
+            tokio::time::timeout(Duration::from_secs(30), probe.ended.notified())
+                .await
+                .expect("the blocked worker ends once the lock is released");
+        }
+
+        // Admission is free again: the next open completes and applies.
+        let handle = rig.begin().expect("the read starts");
+        let done = rig.done().await;
+        joined(handle).await;
+        assert!(rig.applied(done));
+        assert_eq!(probe.live.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.max.load(Ordering::SeqCst), 1);
+    }
+
+    /// IR-5: a real history capped at slot 128 (written through `record_turn`) opens
+    /// `Partial` through `begin_current` with exactly the 127 retained turns.
+    #[tokio::test]
+    async fn visit_async_open_a_capped_attempt_opens_partial_with_exactly_the_retained_turns() {
+        let mut rig = Rig::seeded(128).await;
+        let handle = rig.begin().expect("the read starts");
+        let done = rig.done().await;
+        handle.await.unwrap();
+        assert!(rig.applied(done));
+        let visit = rig.state.session_visit.as_ref().expect("the Visit opens");
+        assert!(visit.title().ends_with("Partial"), "{}", visit.title());
+        let expected = (1..=127)
+            .map(|n| format!("Turn {n} · Tools: Read: ok\nt{n}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(matches!(
+            &visit.text.body,
+            ArtifactBody::Source(bytes) if bytes.as_slice() == expected.as_bytes()
+        ));
+        assert!(!expected.contains("Turn 128"), "the cap marker is no turn");
+    }
+
+    /// IR-6: a related open pending in a Visit is dropped, with its real completion rejected
+    /// silently, when the Visit's cursor changes, its filter editor opens or a frame covers it.
+    #[tokio::test]
+    async fn visit_async_open_related_pending_drops_on_cursor_filter_editor_and_covering_frame() {
+        let mut rig = Rig::new().await;
+        for case in ["cursor", "filter editor", "covering frame"] {
+            rig.reset();
+            let first = rig.begin().expect(case);
+            let opened = rig.done().await;
+            first.await.unwrap();
+            assert!(rig.applied(opened), "{case}: the Visit opens first");
+
+            let related = rig
+                .begin_related(rig.keys[2].clone())
+                .expect("the related read starts");
+            let done = rig.done().await;
+            related.await.unwrap();
+            assert!(rig.pending_generation().is_some(), "{case}: pending first");
+            match case {
+                "cursor" => {
+                    let moved = rig.keys[0].clone();
+                    rig.state.session_visit.as_mut().unwrap().cursor.key = moved;
+                }
+                "filter editor" => rig.state.session_visit.as_mut().unwrap().text.search.open(),
+                _ => {
+                    reducer::open(&mut rig.state, Surface::Help);
+                }
+            }
+            rig.state.needs_redraw = false;
+            rig.reconciled();
+            assert!(rig.pending_generation().is_none(), "{case}: dropped");
+            assert!(rig.state.needs_redraw, "{case}: repainted");
+
+            let notices = rig.state.notifications.len();
+            let frames = rig.state.modal_stack.len();
+            let cursor = session_visit::visit_cursor(&rig.state).map(|c| c.key.clone());
+            assert!(!rig.applied(done), "{case}: the completion is rejected");
+            assert_eq!(rig.state.notifications.len(), notices, "{case}: no notice");
+            assert_eq!(rig.state.modal_stack.len(), frames, "{case}: no frame");
+            assert_eq!(
+                session_visit::visit_cursor(&rig.state).map(|c| c.key.clone()),
+                cursor,
+                "{case}: the Visit is untouched"
+            );
+        }
     }
 }

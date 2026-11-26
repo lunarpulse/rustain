@@ -36,7 +36,10 @@ pub struct NodeJournal {
     lock_path: PathBuf,
     room_id: OrchestrationRoomId,
     /// In-process serialization; cross-process safety is the file `flock`.
-    append_guard: tokio::sync::Mutex<()>,
+    append_guard: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Test oracle for the Visit projection's blocking worker (see [`ProjectionProbe`]).
+    #[cfg(all(test, feature = "session-visit"))]
+    projection_probe: std::sync::Arc<ProjectionProbe>,
     #[cfg(feature = "session-visit")]
     visit_index: std::sync::Arc<tokio::sync::Mutex<Option<IndexedRevision>>>,
     /// Story 18.2 (AC2, P-2). The sole source of `JournalEntry::
@@ -48,6 +51,40 @@ pub struct NodeJournal {
     /// Story 18.2 structural ratchet — see [`NodeJournal::stamp_reads`].
     #[cfg(any(test, feature = "test-instrumentation"))]
     stamp_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Test oracle for the Visit projection's blocking worker: how many hold it now, the most that
+/// ever did, and a wakeup when one ends (its descriptors and admission are released with it).
+#[cfg(all(test, feature = "session-visit"))]
+#[derive(Default)]
+pub(crate) struct ProjectionProbe {
+    pub(crate) live: std::sync::atomic::AtomicUsize,
+    pub(crate) max: std::sync::atomic::AtomicUsize,
+    pub(crate) ended: tokio::sync::Notify,
+}
+
+#[cfg(all(test, feature = "session-visit"))]
+impl ProjectionProbe {
+    fn enter(probe: std::sync::Arc<Self>) -> ProjectionRunning {
+        use std::sync::atomic::Ordering;
+        let live = probe.live.fetch_add(1, Ordering::SeqCst) + 1;
+        probe.max.fetch_max(live, Ordering::SeqCst);
+        ProjectionRunning(probe)
+    }
+}
+
+/// Marks one blocking projection as live until it is dropped (after the worker's descriptors).
+#[cfg(all(test, feature = "session-visit"))]
+struct ProjectionRunning(std::sync::Arc<ProjectionProbe>);
+
+#[cfg(all(test, feature = "session-visit"))]
+impl Drop for ProjectionRunning {
+    fn drop(&mut self) {
+        self.0
+            .live
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.ended.notify_one();
+    }
 }
 
 impl NodeJournal {
@@ -103,7 +140,9 @@ impl NodeJournal {
             path,
             lock_path,
             room_id,
-            append_guard: tokio::sync::Mutex::new(()),
+            append_guard: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(all(test, feature = "session-visit"))]
+            projection_probe: Default::default(),
             #[cfg(feature = "session-visit")]
             visit_index: Default::default(),
             clock: std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
@@ -179,12 +218,23 @@ impl NodeJournal {
         file: std::fs::File,
         select: impl FnOnce(&Index) -> T + Send + 'static,
     ) -> Result<T, JournalError> {
-        let _guard = self.append_guard.lock().await;
-        // Lock order is always `append_guard` -> `visit_index`.
+        // The admission guard travels into the blocking step and is released only when that
+        // step really ends. A cancelled caller (dropped await) therefore leaves at most one
+        // blocked projection per journal: the next open waits for the guard, asynchronously
+        // and cancellably, instead of starting a second thread that blocks in `flock` too.
+        let admission = self.append_guard.clone().lock_owned().await;
+        // Lock order is always `append_guard` -> `visit_index`. Every reader holds the admission
+        // first, so the index lock is never contended while a blocked reader holds it.
         let mut index = std::sync::Arc::clone(&self.visit_index).lock_owned().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
+        #[cfg(all(test, feature = "session-visit"))]
+        let probe = self.projection_probe.clone();
         tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            #[cfg(all(test, feature = "session-visit"))]
+            let _running = ProjectionProbe::enter(probe);
+            let file = file;
             let _lock = FileLock::acquire_existing_shared(&lock_path)?;
             // `index` is the owned `visit_index` guard moved in above.
             let snapshot = IndexedRevision::rebuild_if_changed(&mut index, &file, &path)?;
@@ -192,6 +242,12 @@ impl NodeJournal {
         })
         .await
         .expect("Visit projection task panicked")
+    }
+
+    /// The Visit projection oracle of this journal.
+    #[cfg(all(test, feature = "session-visit"))]
+    pub(crate) fn projection_probe(&self) -> std::sync::Arc<ProjectionProbe> {
+        self.projection_probe.clone()
     }
 
     #[cfg(feature = "session-visit")]

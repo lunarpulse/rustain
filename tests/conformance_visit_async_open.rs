@@ -1,3 +1,4 @@
+#![cfg(feature = "session-visit")]
 //! Session Visit asynchronous open: production-front-door witnesses (story visit-async-open).
 //!
 //! The Stage, the Inspector, the route, the compositor and the runtime renderer are the

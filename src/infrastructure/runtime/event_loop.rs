@@ -360,6 +360,71 @@ fn reconcile_fold_toggle<F>(
 // Scroll-intent handler + dispatch_view_scroll helper extracted to
 // `crate::adapters::tui::handlers::scroll` per Story 8.0a Phase 4 Task 9 (scroll).
 
+/// The next terminal event: one already admitted and parked by the Visit arbitration first,
+/// otherwise the next one from the stream. Taking the parked event is synchronous, so a select
+/// that polls this future never loses it.
+async fn next_terminal_event(
+    events: &mut EventStream,
+    #[cfg(feature = "session-visit")] parked: &mut visit_open::Parked<
+        std::io::Result<crossterm::event::Event>,
+    >,
+) -> Option<std::io::Result<crossterm::event::Event>> {
+    #[cfg(feature = "session-visit")]
+    if let Some(event) = parked.take_input() {
+        return Some(event);
+    }
+    events.next().await
+}
+
+/// The loop's paint with the Visit steps in their production order: drop a pending open whose
+/// context changed, recheck an open Visit against the live conversation, then draw (the draw
+/// refreshes the Inspector, so the reconcile must not rely on what that refresh recomputes).
+#[cfg(feature = "session-visit")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_visit(
+    terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend<Error: Send + Sync + 'static>>,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    config_model: &str,
+    provider_id: &str,
+    security: &dyn SecurityPort,
+    tab_manager: &mut TabManager,
+    session_index: &SessionIndex,
+    context_window: u32,
+    history: Option<&crate::infrastructure::subagent::session_history::SessionHistory>,
+    session_cancel: &CancellationToken,
+) -> Result<()> {
+    let local_allowed = !tab_manager.active_tab().read_only && !session_cancel.is_cancelled();
+    visit_open::reconcile(
+        state,
+        visit_open::VisitOpenCtx {
+            conversation,
+            tab_id: tab_manager.active_tab_id(),
+            local_allowed,
+            session_cancel,
+            tab_count: tab_manager.tab_count(),
+        },
+    );
+    mission_bridge::reauthorize_with(state, history, conversation, local_allowed);
+    let (tab_count, active_tab_index) = (tab_manager.tab_count(), tab_manager.active_tab_index());
+    render(
+        terminal,
+        state,
+        conversation,
+        streaming,
+        config_model,
+        provider_id,
+        security,
+        tab_count,
+        active_tab_index,
+        Some(tab_manager),
+        session_index,
+        context_window,
+    )
+}
+
 /// Run the 4-branch tokio::select! event loop.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -717,6 +782,9 @@ pub async fn run(
     let mut visit_open_rx = Some(visit_rx);
     #[cfg(not(feature = "session-visit"))]
     let mut visit_open_rx: Option<mpsc::Receiver<std::convert::Infallible>> = None;
+    // A finished read waits here while input that is already ready is dispatched first.
+    #[cfg(feature = "session-visit")]
+    let mut parked = visit_open::Parked::<std::io::Result<crossterm::event::Event>>::default();
 
     // Story 12.2a — the turn-origination seam. `LocalTurnDriver` owns the
     // agent-side dependencies (provider/security/tools/scheduler/persona/context/
@@ -858,17 +926,29 @@ pub async fn run(
         };
     }
 
+    #[cfg(feature = "session-visit")]
     macro_rules! render_local {
         ($context_window:expr) => {{
-            #[cfg(feature = "session-visit")]
-            visit_open::reconcile(&mut state, visit_ctx!());
-            #[cfg(feature = "session-visit")]
-            mission_bridge::reauthorize_session_visit(
+            render_with_visit(
+                terminal,
                 &mut state,
-                &app_state.agent_core,
                 &conversation,
-                !tab_manager.active_tab().read_only && !app_state.session_cancel.is_cancelled(),
-            );
+                &streaming,
+                &config.model,
+                &router.active_delegate_id(),
+                security.as_ref(),
+                &mut tab_manager,
+                &session_index,
+                $context_window,
+                mission_bridge::session_history(&app_state.agent_core).as_deref(),
+                &app_state.session_cancel,
+            )
+        }};
+    }
+
+    #[cfg(not(feature = "session-visit"))]
+    macro_rules! render_local {
+        ($context_window:expr) => {{
             render(
                 terminal,
                 &mut state,
@@ -1077,9 +1157,42 @@ pub async fn run(
     loop {
         #[cfg(feature = "a2a")]
         synchronize_surface(&mut state, &app_state, &tab_manager, &conversation).await;
+        // A finished Visit read applies only when no admitted input is waiting: an already-ready
+        // `Esc` or context change is dispatched first and the completion is then judged by the
+        // pending open it left behind.
+        #[cfg(feature = "session-visit")]
+        if let Some(done) = parked.next_apply(|| terminal_events.next().now_or_never().flatten()) {
+            visit_open::apply(&mut state, done, visit_ctx!());
+            if state.needs_redraw {
+                let context_window = active_context_window(&app_state, &router, &state, config);
+                state.active_context_window = context_window;
+                match render_local!(context_window) {
+                    Ok(()) => state.needs_redraw = false,
+                    Err(error) => {
+                        handlers::render_error::handle_render_error(
+                            error,
+                            |streaming, state| {
+                                turn_lifecycle.interrupt_active(
+                                    &mut tab_manager,
+                                    &mut conversation,
+                                    streaming,
+                                    &mut state.pending_resolved_model,
+                                )
+                            },
+                            &mut streaming,
+                            &mut state,
+                            terminal,
+                        );
+                    }
+                }
+            }
+        }
         tokio::select! {
             // Branch 1: Terminal input (crossterm event stream)
-            Some(event_result) = terminal_events.next() => {
+            Some(event_result) = next_terminal_event(
+                &mut terminal_events,
+                #[cfg(feature = "session-visit")] &mut parked,
+            ) => {
                 match event_result {
                     Ok(event) => {
                         #[cfg(feature = "session-visit")]
@@ -6190,7 +6303,8 @@ pub async fn run(
                 }
             }
 
-            // Branch 6: a finished Visit read (private channel, never the event bus). With the
+            // Branch 6: a finished Visit read (private channel, never the event bus). It is
+            // parked and applied at the top of the loop, after any admitted input. With the
             // feature off the receiver is `None`, so this branch never fires.
             visit_done = async {
                 match &mut visit_open_rx {
@@ -6203,22 +6317,7 @@ pub async fn run(
                     continue;
                 };
                 #[cfg(feature = "session-visit")]
-                {
-                    visit_open::apply(&mut state, done, visit_ctx!());
-                    if state.needs_redraw {
-                        let context_window = active_context_window(&app_state, &router, &state, config);
-                        state.active_context_window = context_window;
-                        match render_local!(context_window) {
-                            Ok(()) => state.needs_redraw = false,
-                            Err(error) => {
-                                handlers::render_error::handle_render_error(error,
-                                    |streaming, state| turn_lifecycle.interrupt_active(
-                                        &mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model),
-                                    &mut streaming, &mut state, terminal);
-                            }
-                        }
-                    }
-                }
+                parked.park_done(done);
                 #[cfg(not(feature = "session-visit"))]
                 match done {}
             }

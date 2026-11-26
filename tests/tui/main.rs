@@ -202,8 +202,5 @@ mod conformance_21_13_block_viewer;
 #[path = "../conformance_21_9_stage_polish.rs"]
 mod conformance_21_9_stage_polish;
 
-// Needs `--features session-visit`; no CI lane builds that feature yet
-// (DF-VISIT-ASYNC-OPEN-NO-CI-FEATURE-LANE). Gated here, not by `#![cfg]` in the root.
-#[cfg(feature = "session-visit")]
 #[path = "../conformance_visit_async_open.rs"]
 mod conformance_visit_async_open;

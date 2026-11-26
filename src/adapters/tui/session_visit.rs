@@ -214,6 +214,8 @@ impl VisitWindowState {
         read: VisitRead,
         layout: Option<(Theme, u16)>,
     ) -> Self {
+        #[cfg(test)]
+        crate::infrastructure::runtime::visit_open::probe::prepared();
         let (status, mut body) = unpack(read);
         let text = reader(status, body.as_ref());
         let previous = relation(&key, body.as_mut().and_then(|b| b.previous.take()));

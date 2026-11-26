@@ -212,17 +212,31 @@ impl ToolInspectorState {
     }
 
     /// A pending open survives only while this frame still shows the exact result and tab
-    /// it was started on and no search is being edited.
+    /// it was started on and no search is being edited. With `source` (the paint-time check)
+    /// the committed result, its revision and its retention deadline are also re-read from
+    /// that live conversation, instead of trusting the cache `refresh` recomputes only during
+    /// the paint that follows the reconcile. Without it (a completion arriving) a changed
+    /// source is left to the reauthorize before the first paint, which shows `Changed`.
     #[cfg(feature = "session-visit")]
     pub(crate) fn opening_still_current(
         &self,
         opening: &crate::adapters::tui::session_visit::VisitOpening,
+        source: Option<&crate::domain::models::Conversation>,
     ) -> bool {
-        use crate::adapters::tui::session_visit::OpeningOrigin;
+        use crate::adapters::tui::session_visit::{OpeningOrigin, visit_revision_is_current};
         self.visit_current
+            && !self.missing
             && self.visit_key.as_ref() == Some(&opening.key)
             && !self.search.editor.editing
             && matches!(opening.origin, OpeningOrigin::Inspector { tab, .. } if tab == self.tab)
+            && source.is_none_or(|conversation| {
+                visit_revision_is_current(
+                    conversation,
+                    &self.target,
+                    &opening.key,
+                    self.visit_revision,
+                )
+            })
     }
 
     pub fn rows(&self) -> &[Line<'static>] {
