@@ -23,7 +23,8 @@
     "tests_tui/test_story_21_10_epic21_capture.py::test_j21_receipt_writer_controls",
     "tests_tui/test_story_21_6_decision_queue.py::test_e_proposal_predicate_whole_sheets_and_torn_frames",
     "tests_tui/test_story_21_6_decision_queue.py::test_e_queue_draft_and_dismissed_rows",
-    "tests_tui/test_story_21_7_mission_control.py::test_leg_e_history_window_at_80x24"
+    "tests_tui/test_story_21_7_mission_control.py::test_leg_e_history_window_at_80x24",
+    "tests_tui/test_story_visit_candidate_landing_smoke.py::test_visit_route_or_its_absence_at_80x24"
   ],
   "federation": [
     "tests_tui/test_story_18_10_topic_received.py::test_topic_share_leaves_a_durable_receiver_row",

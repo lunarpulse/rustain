@@ -1045,3 +1045,157 @@ mod tests {
         assert!(parse_byte_range("100-50").is_err());
     }
 }
+
+#[cfg(all(test, feature = "session-visit"))]
+mod visit_custody_tests {
+    use super::*;
+    use crate::adapters::artifact::FileSystemArtifactStore;
+    use crate::adapters::authority::InProcessAuthorityProvider;
+    use crate::domain::clock::SystemClock;
+    use crate::domain::errors::ProviderError;
+    use crate::domain::models::orchestration_room::HostBinding;
+    use crate::domain::models::{
+        AgentLaunchSpec, CapabilityTokenId, NodeState, ProvenanceTag, SubagentError, TaskHandle,
+    };
+    use crate::domain::ports::{ProviderInfoPort, StreamingProvider, SubagentRunner};
+    use crate::domain::services::authority_ledger::AuthorityLedger;
+    use crate::infrastructure::subagent::{NodeJournal, NodeTree, SubagentSpool};
+    use tokio::sync::{mpsc, oneshot};
+
+    /// Launches a worker that never reaches a terminal state, so the invocation stays pending.
+    struct ParkedRunner {
+        launched: tokio::sync::Mutex<Option<oneshot::Sender<AgentId>>>,
+        open_channels: tokio::sync::Mutex<Vec<mpsc::Sender<NodeState>>>,
+    }
+
+    #[async_trait]
+    impl SubagentRunner for ParkedRunner {
+        async fn launch(
+            &self,
+            _spec: AgentLaunchSpec,
+            cancel: CancellationToken,
+            _parent: Option<&TaskHandle>,
+            agent_id: AgentId,
+        ) -> Result<TaskHandle, SubagentError> {
+            let (status_tx, status_rx) = mpsc::channel(4);
+            // Keep the sender alive: a closed channel would end the invocation.
+            self.open_channels.lock().await.push(status_tx);
+            if let Some(launched) = self.launched.lock().await.take() {
+                let _ = launched.send(agent_id.clone());
+            }
+            Ok(TaskHandle {
+                agent_id,
+                status_rx,
+                command_tx: mpsc::channel(1).0,
+                cancel,
+                task_id: "parked".into(),
+                subagent_type: "parked".into(),
+                spawned_at: 0,
+                parent_disconnect: mpsc::unbounded_channel().0,
+                yield_rx: None,
+                isolation_diff_rx: None,
+                effective_workspace: std::path::PathBuf::from("."),
+                isolated: false,
+                authority: CapabilityTokenId::root(),
+                authority_token: None,
+                patch_provenance: ProvenanceTag::UserOriginated,
+            })
+        }
+    }
+
+    struct NoProviders;
+
+    impl ProviderInfoPort for NoProviders {
+        fn active_delegate_id(&self) -> String {
+            String::new()
+        }
+        fn get_model(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Option<crate::domain::models::provider::ModelDescriptor> {
+            None
+        }
+        fn get_model_provider(&self, _: &str, _: Option<&str>) -> Option<String> {
+            None
+        }
+        fn list_providers(&self) -> Vec<crate::domain::models::provider::ProviderDescriptor> {
+            Vec::new()
+        }
+        fn list_models_by_provider(
+            &self,
+            _: &str,
+        ) -> Vec<crate::domain::models::provider::ModelDescriptor> {
+            Vec::new()
+        }
+        fn get_provider(&self, _: &str) -> Option<Arc<dyn StreamingProvider>> {
+            None
+        }
+        fn set_active_provider(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn now_unix(&self) -> i64 {
+            0
+        }
+        fn today_start_unix_ms(&self) -> i64 {
+            0
+        }
+    }
+
+    /// AC2 (b): the front door `invoke_interactive_task` grants a live Visit attempt at launch;
+    /// dropping the pending invocation (a cancelled turn) runs `LiveVisit::drop`, which must
+    /// revoke it before any result or offer exists.
+    #[tokio::test]
+    async fn dropping_an_interactive_task_before_its_result_revokes_the_live_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+        let store = Arc::new(FileSystemArtifactStore::new(dir.path()));
+        let history = Arc::new(SessionHistory::new(
+            journal,
+            store,
+            HostBinding::new("host", "workspace"),
+        ));
+        let (launched_tx, launched_rx) = oneshot::channel();
+        let runner = Arc::new(ParkedRunner {
+            launched: tokio::sync::Mutex::new(Some(launched_tx)),
+            open_channels: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let spool = Arc::new(SubagentSpool::new(dir.path().join("spool")).await.unwrap());
+        let provider = SubagentProvider::new(
+            runner,
+            Arc::new(NodeTree::new()),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::adapters::agent_registry::AgentRegistry::new(),
+            )),
+            Arc::new(NoProviders),
+            spool,
+        )
+        .with_session_history(history.clone());
+        let root_authority = CapabilityToken::r1_root(AgentId::root());
+        let ledger = Arc::new(AuthorityLedger::new(
+            root_authority.clone(),
+            Arc::new(SystemClock::default()),
+        ));
+        let authority = Arc::new(InProcessAuthorityProvider::new(ledger));
+        provider.set_authority(authority, root_authority).await;
+
+        let mut invocation = Box::pin(provider.invoke_interactive_task(
+            "root-a",
+            serde_json::json!({"description": "parked", "prompt": "never finishes"}),
+            CancellationToken::new(),
+        ));
+        let attempt = tokio::select! {
+            launched = launched_rx => launched.expect("the runner launched the worker"),
+            _ = &mut invocation => panic!("a parked worker must not produce a result"),
+        };
+        assert!(
+            history.admits(&attempt),
+            "the interactive launch holds a live grant"
+        );
+        drop(invocation);
+        assert!(
+            !history.admits(&attempt),
+            "dropping the invocation revokes the grant"
+        );
+    }
+}

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -262,7 +262,9 @@ pub struct SessionHistory {
     journal: Arc<NodeJournal>,
     artifacts: Arc<FileSystemArtifactStore>,
     host: HostBinding,
-    state: Mutex<State>,
+    // Custody is revoked from `Drop` (LiveVisit, TuiTurnLifecycle) and sync filters, where an
+    // async lock cannot be taken; a guard is never held across `.await` (ADR-VISIT-01).
+    state: std::sync::Mutex<State>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: visit-candidate-landing KNOWN_PERMANENT
     writes: tokio::sync::Mutex<()>,
 }
 
@@ -291,7 +293,7 @@ impl SessionHistory {
             journal,
             artifacts,
             host,
-            state: Mutex::new(State::default()),
+            state: std::sync::Mutex::new(State::default()), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: see the field
             writes: tokio::sync::Mutex::new(()),
         }
     }
@@ -815,7 +817,11 @@ impl SessionHistory {
         let Ok(file) = self.open_visit_journal(&mut backing) else {
             return;
         };
-        let Ok(links) = self.journal.visit_links(file, conversation.id.clone()).await else {
+        let Ok(links) = self
+            .journal
+            .visit_links(file, conversation.id.clone())
+            .await
+        else {
             return;
         };
         let mut key_counts = HashMap::new();
@@ -922,7 +928,11 @@ impl SessionHistory {
         let Ok(file) = self.open_visit_journal(&mut backing) else {
             return VisitRead::Missing;
         };
-        let rows = match self.journal.visit_rows(file, key.clone(), MAX_TURNS as usize).await {
+        let rows = match self
+            .journal
+            .visit_rows(file, key.clone(), MAX_TURNS as usize)
+            .await
+        {
             Ok(Some(rows)) => rows,
             Ok(None) => return VisitRead::Changed,
             Err(_) => return VisitRead::Missing,
@@ -930,10 +940,15 @@ impl SessionHistory {
         if let Some(failure) = Self::check_backing(&backing) {
             return failure;
         }
-        let links: Vec<_> = rows.links.iter()
+        let links: Vec<_> = rows
+            .links
+            .iter()
             .filter(|(row, _)| Self::exact(&row.key, active))
             .collect();
-        let mut selected = links.iter().enumerate().filter(|(_, (row, _))| &row.key == key);
+        let mut selected = links
+            .iter()
+            .enumerate()
+            .filter(|(_, (row, _))| &row.key == key);
         let Some((selected_index, (row, unique_attempt))) = selected.next() else {
             return VisitRead::Missing;
         };
@@ -1011,13 +1026,20 @@ impl SessionHistory {
             .into_iter()
             .enumerate()
         {
-            let Some((other, unique_attempt)) = index.and_then(|index| links.get(index)).copied() else {
+            let Some((other, unique_attempt)) = index.and_then(|index| links.get(index)).copied()
+            else {
                 continue;
             };
-            let (candidate, other_attempt, other_artifact) = (&other.key, &other.attempt, &other.artifact);
+            let (candidate, other_attempt, other_artifact) =
+                (&other.key, &other.attempt, &other.artifact);
             let deadline = Self::deadline(other.stamp_ms);
             if Self::check_expiry(deadline).is_some()
-                || links.iter().filter(|(row, _)| &row.key == candidate).take(2).count() != 1
+                || links
+                    .iter()
+                    .filter(|(row, _)| &row.key == candidate)
+                    .take(2)
+                    .count()
+                    != 1
                 || !unique_attempt
                 || !self.authentic_artifact(other_artifact, other_attempt)
             {
@@ -2334,12 +2356,23 @@ mod tests {
             attempts.push(attempt);
         }
         let behind_limit = attempt_at(MAX_LIVE);
-        assert!(matches!(history.begin("root-a", &behind_limit), Err(VisitError::Capacity)));
+        assert!(matches!(
+            history.begin("root-a", &behind_limit),
+            Err(VisitError::Capacity)
+        ));
 
         fn offer(history: &SessionHistory, attempt: &AgentId) -> Result<(), VisitError> {
-            history.offer("root-a", attempt, "original", VisitReport {
-                report: None, unstructured: true, attempt: Some(attempt.clone()), expires_at_ms: None,
-            })
+            history.offer(
+                "root-a",
+                attempt,
+                "original",
+                VisitReport {
+                    report: None,
+                    unstructured: true,
+                    attempt: Some(attempt.clone()),
+                    expires_at_ms: None,
+                },
+            )
         }
 
         for attempt in &attempts {
@@ -2347,7 +2380,10 @@ mod tests {
         }
         history.forget(&attempts[0]);
         history.begin("root-a", &behind_limit).unwrap();
-        assert!(matches!(offer(&history, &behind_limit), Err(VisitError::Capacity)));
+        assert!(matches!(
+            offer(&history, &behind_limit),
+            Err(VisitError::Capacity)
+        ));
         history.discard_offers("root-a");
 
         for i in MAX_LIVE + 1..MAX_ATTEMPTS {
@@ -2355,9 +2391,88 @@ mod tests {
             history.begin("root-a", &attempt).unwrap();
             history.forget(&attempt);
         }
-        assert!(matches!(history.begin("root-a", &attempt_at(MAX_ATTEMPTS)), Err(VisitError::Capacity)));
+        assert!(matches!(
+            history.begin("root-a", &attempt_at(MAX_ATTEMPTS)),
+            Err(VisitError::Capacity)
+        ));
         assert!(journal.load().await.unwrap().is_empty());
-        let row = journal.append_alias(behind_limit, "ordinary".into()).await.unwrap();
+        let row = journal
+            .append_alias(behind_limit, "ordinary".into())
+            .await
+            .unwrap();
         assert_eq!(row.seq, 1);
+    }
+
+    /// AC2 (a): `visit_index` is a `tokio::sync::Mutex` taken after `append_guard`. Appends and
+    /// projection reads racing on worker threads must all finish, leaving a gapless `seq` run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_and_reads_finish_with_a_gapless_journal() {
+        const LATER_TURNS: u32 = 5;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+        let store = Arc::new(FileSystemArtifactStore::new(dir.path()));
+        let history = Arc::new(SessionHistory::new(
+            journal.clone(),
+            store,
+            HostBinding::new("host", "workspace"),
+        ));
+        let (active, key) = conversation();
+        let attempt = AgentId::new();
+        history.begin("root-a", &attempt).unwrap();
+        history
+            .record_turn(&attempt, &AgentId::root(), 1, &[], "first")
+            .await
+            .unwrap();
+        let report = VisitReport {
+            report: None,
+            unstructured: true,
+            attempt: Some(attempt.clone()),
+            expires_at_ms: None,
+        };
+        history
+            .offer("root-a", &attempt, "original", report)
+            .unwrap();
+        history
+            .commit_link(key.clone(), attempt.clone())
+            .await
+            .unwrap();
+
+        let active = Arc::new(active);
+        let mut writers = tokio::task::JoinSet::new();
+        let mut readers = tokio::task::JoinSet::new();
+        for ordinal in 2..2 + LATER_TURNS {
+            let (writer_history, attempt) = (history.clone(), attempt.clone());
+            writers.spawn(async move {
+                writer_history
+                    .record_turn(&attempt, &AgentId::root(), ordinal, &[], "later")
+                    .await
+            });
+            let (history, key, active) = (history.clone(), key.clone(), active.clone());
+            readers.spawn(async move { history.resolve(&key, &active, true).await });
+        }
+        // A structural join, bounded only so a lock-order deadlock fails instead of hanging.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while let Some(done) = writers.join_next().await {
+                done.unwrap().unwrap();
+            }
+            while let Some(done) = readers.join_next().await {
+                done.unwrap();
+            }
+        })
+        .await
+        .expect("concurrent Visit appends and reads deadlocked");
+
+        let seqs: Vec<u64> = journal
+            .load()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.seq)
+            .collect();
+        assert_eq!(seqs, (1..=2 + u64::from(LATER_TURNS)).collect::<Vec<_>>());
+        assert!(matches!(
+            history.resolve(&key, &active, true).await,
+            VisitRead::Available(_)
+        ));
     }
 }

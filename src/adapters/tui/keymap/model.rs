@@ -918,6 +918,10 @@ pub struct Binding {
     /// Plain-words description for the generated reference (`docs/keyboard.md`),
     /// used before the help text and the label (`""` = fall back to those).
     pub does: &'static str,
+    /// Cargo feature that compiles this row when it is not in `default` (`""` = the shipped
+    /// build). The generated reference and the portable fixture skip such rows, so both stay
+    /// the shipped build's bytes; the in-app help, rails, menu and palette stay registry-driven.
+    pub feature: &'static str,
 }
 
 impl std::fmt::Debug for Binding {
@@ -968,6 +972,7 @@ pub const fn bind(
         text_entry_ok: false,
         copy: false,
         witness: "",
+        feature: "",
     }
 }
 
@@ -1018,6 +1023,10 @@ impl Binding {
     }
     pub const fn witness(mut self, witness: &'static str) -> Self {
         self.witness = witness;
+        self
+    }
+    pub const fn feature(mut self, name: &'static str) -> Self {
+        self.feature = name;
         self
     }
 

@@ -45,7 +45,10 @@ fn shipped_table_passes_governance() {
 #[test]
 fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
-    assert_eq!(Context::ALL.len(), 61);
+    assert_eq!(
+        Context::ALL.len(),
+        61 + usize::from(cfg!(feature = "session-visit"))
+    );
     assert_eq!(Context::Permission.parents(), &[Context::Decision]);
     assert_eq!(Context::Consent.parents(), &[Context::Decision]);
     assert_eq!(Context::DecisionCompose.parents(), &[Context::CaretField]);
@@ -512,4 +515,95 @@ fn tool_inspector_cases_cover_both_contexts_once_and_only_the_shared_rows_reach_
             }
         }
     }
+}
+
+/// The Cargo features of `Cargo.toml` and the ones `default` enables (transitively).
+fn cargo_features() -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("read Cargo.toml");
+    let manifest: toml::Table = manifest.parse().expect("Cargo.toml parses");
+    let features = manifest["features"].as_table().expect("[features]");
+    let mut enabled = std::collections::BTreeSet::new();
+    let mut pending = vec!["default".to_owned()];
+    while let Some(name) = pending.pop() {
+        if !enabled.insert(name.clone()) {
+            continue;
+        }
+        for item in features
+            .get(&name)
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.as_str())
+        {
+            if !item.starts_with("dep:") && !item.contains('/') {
+                pending.push(item.to_owned());
+            }
+        }
+    }
+    (features.keys().cloned().collect(), enabled)
+}
+
+/// A row's `feature` marker must name a declared Cargo feature that the shipped build does not
+/// enable: the generated reference and the portable fixture skip such rows (spec D6).
+fn feature_defects(rows: &[Binding]) -> Vec<String> {
+    let (declared, shipped) = cargo_features();
+    rows.iter()
+        .filter(|row| !row.feature.is_empty())
+        .filter_map(|row| {
+            let (at, name) = (format!("{:?} {:?}", row.context, row.keys), row.feature);
+            if !declared.contains(name) {
+                Some(format!("{at}: `{name}` is not a Cargo feature"))
+            } else if shipped.contains(name) {
+                Some(format!("{at}: `{name}` is in the shipped build"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn feature_marked_rows_name_a_default_off_cargo_feature() {
+    assert_eq!(feature_defects(table()), Vec::<String>::new());
+    let marked = table().iter().filter(|row| !row.feature.is_empty()).count();
+    // The default build has no marked row; the feature build marks exactly the 7 Visit rows.
+    assert_eq!(
+        marked,
+        if cfg!(feature = "session-visit") {
+            7
+        } else {
+            0
+        }
+    );
+
+    // Positive control: in-memory rows carrying each defect are refused, a good one is not.
+    static KEYS: [Key; 1] = [Key::Char('z')];
+    let row_with = |name: &'static str| bind(Context::Global, &KEYS, quit(), "x").feature(name);
+    let defects = feature_defects(&[row_with("anthropic")]);
+    assert_eq!(defects.len(), 1, "{defects:?}");
+    assert!(defects[0].contains("shipped build"), "{defects:?}");
+    let defects = feature_defects(&[row_with("no-such-feature")]);
+    assert_eq!(defects.len(), 1, "{defects:?}");
+    assert!(defects[0].contains("not a Cargo feature"), "{defects:?}");
+    assert!(feature_defects(&[row_with("session-visit")]).is_empty());
+}
+
+/// With the feature, the Visit rows stay in the registry that drives the in-app surfaces (rails,
+/// menu, palette); only the generated reference and the portable fixture leave them out.
+#[cfg(feature = "session-visit")]
+#[test]
+fn the_feature_build_keeps_the_visit_rows_in_the_registry() {
+    use rustain::adapters::tui::keymap::render::rail;
+    use rustain::adapters::tui::keymap::table_tool::ToolCmd;
+    assert_eq!(rail(Context::ToolInspector, ToolCmd::VisitSource), "[o]");
+    let labels: Vec<&str> = table()
+        .iter()
+        .filter(|row| row.context == Context::SessionVisit)
+        .map(|row| row.label)
+        .collect();
+    assert_eq!(labels, ["Previous", "Next", "Copy", "Search", "Back", ""]);
 }

@@ -57,6 +57,7 @@
     "test_story_c12_init_channel.py": "core",
     "test_story_j7_loopback_harness.py": "core",
     "test_story_agents_thread_smoke.py": "native_nightly",
+    "test_story_visit_candidate_landing_smoke.py": "native_nightly",
     "test_terminal_screen.py": "core"
   },
   "tests": {

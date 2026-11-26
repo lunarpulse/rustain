@@ -38,7 +38,7 @@ pub struct NodeJournal {
     /// In-process serialization; cross-process safety is the file `flock`.
     append_guard: tokio::sync::Mutex<()>,
     #[cfg(feature = "session-visit")]
-    visit_index: std::sync::Arc<std::sync::Mutex<Option<IndexedRevision>>>,
+    visit_index: std::sync::Arc<tokio::sync::Mutex<Option<IndexedRevision>>>,
     /// Story 18.2 (AC2, P-2). The sole source of `JournalEntry::
     /// recorded_at_ms`. Each append reads the wall clock once inside the
     /// critical section, then clamps it to the last durable nonlegacy stamp.
@@ -146,9 +146,10 @@ impl NodeJournal {
         max_bytes: usize,
     ) -> Result<JournalEntry, JournalError> {
         let _guard = self.append_guard.lock().await;
+        // Lock order is always `append_guard` -> `visit_index`.
+        let mut index = std::sync::Arc::clone(&self.visit_index).lock_owned().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
-        let index = self.visit_index.clone();
         let clock = self.clock.clone();
         #[cfg(any(test, feature = "test-instrumentation"))]
         let stamp_reads = self.stamp_reads.clone();
@@ -162,7 +163,7 @@ impl NodeJournal {
                 options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
             }
             let file = options.open(&path)?;
-            let mut index = index.lock().expect("Visit index mutex poisoned");
+            // `index` is the owned `visit_index` guard moved in above.
             let snapshot = IndexedRevision::rebuild_if_changed(&mut index, &file, &path)?;
             #[cfg(any(test, feature = "test-instrumentation"))]
             stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -179,12 +180,13 @@ impl NodeJournal {
         select: impl FnOnce(&Index) -> T + Send + 'static,
     ) -> Result<T, JournalError> {
         let _guard = self.append_guard.lock().await;
+        // Lock order is always `append_guard` -> `visit_index`.
+        let mut index = std::sync::Arc::clone(&self.visit_index).lock_owned().await;
         let path = self.path.clone();
         let lock_path = self.lock_path.clone();
-        let index = self.visit_index.clone();
         tokio::task::spawn_blocking(move || {
             let _lock = FileLock::acquire_existing_shared(&lock_path)?;
-            let mut index = index.lock().expect("Visit index mutex poisoned");
+            // `index` is the owned `visit_index` guard moved in above.
             let snapshot = IndexedRevision::rebuild_if_changed(&mut index, &file, &path)?;
             Ok(select(snapshot.index()))
         })
@@ -492,7 +494,14 @@ impl NodeJournal {
             let recorded_at_ms = clamp_recorded_at_ms(&entries, clock.wall_now_ms());
             #[cfg(any(test, feature = "test-instrumentation"))]
             stamp_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            append_records_locked(&path, &entries, valid_len, file_len, records, recorded_at_ms)
+            append_records_locked(
+                &path,
+                &entries,
+                valid_len,
+                file_len,
+                records,
+                recorded_at_ms,
+            )
         })
         .await
         .expect("journal append task panicked")
@@ -1007,7 +1016,11 @@ impl FileLock {
     }
 
     fn acquire(path: &Path, exclusive: bool) -> Result<Self, JournalError> {
-        let file = Self::lock_options().create(true).truncate(false).write(true).open(path)?;
+        let file = Self::lock_options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
         Self::verify_file(path, &file)?;
         #[cfg(unix)]
         {
@@ -1031,7 +1044,9 @@ impl FileLock {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         options
     }
@@ -1039,7 +1054,8 @@ impl FileLock {
     fn verify_file(path: &Path, file: &std::fs::File) -> Result<(), JournalError> {
         let descriptor = file.metadata()?;
         let named = std::fs::symlink_metadata(path)?;
-        if !descriptor.is_file() || !named.is_file()
+        if !descriptor.is_file()
+            || !named.is_file()
             || JournalFileStamp::of(&descriptor) != JournalFileStamp::of(&named)
         {
             return Err(std::io::Error::other("not the canonical room lock file").into());
@@ -1560,18 +1576,141 @@ mod visit_append_tests {
         let workspace = tempfile::tempdir().unwrap();
         let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
         let attempt = AgentId::new();
-        journal.append_room_bounded(turn(attempt.clone(), 1), 65536).await.unwrap();
-        let mut external = std::fs::OpenOptions::new().append(true)
-            .open(journal.path()).unwrap();
+        journal
+            .append_room_bounded(turn(attempt.clone(), 1), 65536)
+            .await
+            .unwrap();
+        let mut external = std::fs::OpenOptions::new()
+            .append(true)
+            .open(journal.path())
+            .unwrap();
         external.write_all(b"{\"schema_version\":").unwrap();
         let file = || std::fs::File::open(journal.path()).unwrap();
         assert!(journal.visit_links(file(), "root".into()).await.is_err());
-        assert!(journal.append_room_bounded(turn(attempt.clone(), 2), 65536).await.is_err());
+        assert!(
+            journal
+                .append_room_bounded(turn(attempt.clone(), 2), 65536)
+                .await
+                .is_err()
+        );
 
         let other = NodeJournal::open_workspace(workspace.path()).await.unwrap();
-        assert_eq!(other.append_alias(attempt.clone(), "worker".into()).await.unwrap().seq, 2);
+        assert_eq!(
+            other
+                .append_alias(attempt.clone(), "worker".into())
+                .await
+                .unwrap()
+                .seq,
+            2
+        );
         assert!(journal.visit_links(file(), "root".into()).await.is_ok());
-        assert_eq!(journal.append_room_bounded(turn(attempt, 2), 65536).await.unwrap().seq, 3);
+        assert_eq!(
+            journal
+                .append_room_bounded(turn(attempt, 2), 65536)
+                .await
+                .unwrap()
+                .seq,
+            3
+        );
         assert_eq!(other.load().await.unwrap().len(), 3);
+    }
+}
+
+/// E3 (visit-candidate-landing): the room-journal lock sidecar is opened no-follow, created
+/// `0600`, never truncated and verified. Default-build tests: the hardening reaches every build.
+#[cfg(all(test, unix))]
+mod lock_sidecar_tests {
+    use super::*;
+    use crate::domain::ports::RoomJournalReader as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn event() -> RoomEvent {
+        RoomEvent::AdmissionDeferred {
+            coordinator: AgentId::root(),
+            spoke: "spoke".into(),
+            gate: "gate".into(),
+            principal: None,
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn journal_lines(journal: &NodeJournal) -> usize {
+        std::fs::read_to_string(journal.path())
+            .unwrap()
+            .lines()
+            .count()
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_append_refuses_a_symlinked_lock_and_leaves_its_target_unchanged() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        journal.append_room(event()).await.unwrap();
+        let target = workspace.path().join("outside-target");
+        std::fs::write(&target, b"keep me").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&journal.lock_path).unwrap();
+        std::os::unix::fs::symlink(&target, &journal.lock_path).unwrap();
+
+        assert!(journal.append_room(event()).await.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+        assert_eq!(mode(&target), 0o644);
+        assert!(
+            std::fs::symlink_metadata(&journal.lock_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(journal_lines(&journal), 1, "a refused lock appends nothing");
+    }
+
+    #[tokio::test]
+    async fn a_freshly_created_lock_is_mode_0600() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        assert!(!journal.lock_path.exists(), "control: open creates no lock");
+        journal.append_room(event()).await.unwrap();
+        assert_eq!(mode(&journal.lock_path), 0o600);
+    }
+
+    #[tokio::test]
+    async fn a_lock_written_by_an_older_build_is_accepted_and_never_truncated() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        std::fs::write(&journal.lock_path, b"older build").unwrap();
+        std::fs::set_permissions(&journal.lock_path, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        journal.append_room(event()).await.unwrap();
+        journal.append_room(event()).await.unwrap();
+        assert_eq!(journal.load().await.unwrap().len(), 2);
+        assert_eq!(std::fs::read(&journal.lock_path).unwrap(), b"older build");
+        assert_eq!(mode(&journal.lock_path), 0o644);
+    }
+
+    /// `O_NOFOLLOW` alone does not stop a non-regular lock path: an observer's read-only,
+    /// non-blocking open of a FIFO succeeds, so only `verify_file` refuses it.
+    #[tokio::test]
+    async fn an_observer_refuses_a_non_regular_lock_sidecar() {
+        use std::os::unix::ffi::OsStrExt;
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = NodeJournal::open_workspace(workspace.path()).await.unwrap();
+        journal.append_room(event()).await.unwrap();
+        let reader = WorkspaceJournalReader::open_workspace(workspace.path());
+        assert_eq!(
+            reader.load_entries().await.unwrap().len(),
+            1,
+            "control: the observer reads the ordinary lock"
+        );
+        std::fs::remove_file(&journal.lock_path).unwrap();
+        let fifo = std::ffi::CString::new(journal.lock_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        assert!(reader.load_entries().await.is_err());
+        assert_eq!(journal_lines(&journal), 1);
     }
 }

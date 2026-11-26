@@ -279,6 +279,26 @@ fn k3_features_and_not_built_lines_match_the_lane() {
     }
 }
 
+/// E1 (visit-candidate-landing): `session-visit` is always named on `--version`, on `features:`
+/// when built and on `not built:` otherwise, so the default build reports it as not built.
+#[test]
+fn session_visit_is_named_on_the_features_or_not_built_line() {
+    let text = binary_version_output();
+    let (built, not_built) = (name_set(&text, "features"), name_set(&text, "not built"));
+    let name = "session-visit".to_string();
+    if cfg!(feature = "session-visit") {
+        assert!(
+            built.contains(&name) && !not_built.contains(&name),
+            "{text}"
+        );
+    } else {
+        assert!(
+            not_built.contains(&name) && !built.contains(&name),
+            "{text}"
+        );
+    }
+}
+
 /// K4: the protocols line lists the four names in order; `agent-skills` carries no
 /// version; `acp` carries the constant `initialize` answers with; `mcp` and `a2a`
 /// carry their handshake constants iff the feature is built.

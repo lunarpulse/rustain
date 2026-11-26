@@ -83,7 +83,12 @@ The attached client starts in Input in both writer and read-only modes. Its shar
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.\n",
     );
     for context in Context::ALL {
-        let rows: Vec<&Binding> = table().iter().filter(|r| r.context == context).collect();
+        // Rows of a default-off Cargo feature are not the shipped build's keys: the committed
+        // reference stays the same bytes in every feature set (the rows stay in-app).
+        let rows: Vec<&Binding> = table()
+            .iter()
+            .filter(|r| r.context == context && r.feature.is_empty())
+            .collect();
         if rows.is_empty() {
             continue;
         }
@@ -120,7 +125,10 @@ fn json_str(text: &str) -> String {
 /// row that declares a smoke witness. One row per line.
 pub fn portable_rows_json() -> String {
     let mut lines = Vec::new();
-    for row in table().iter().filter(|r| r.reach == Reach::Portable) {
+    for row in table()
+        .iter()
+        .filter(|r| r.reach == Reach::Portable && r.feature.is_empty())
+    {
         let Some(bytes) = row.pty_bytes() else {
             continue;
         };

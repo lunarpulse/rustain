@@ -105,6 +105,7 @@ const fn visit(keys: &'static [Key], command: MissionCmd, label: &'static str) -
         label,
     )
     .local()
+    .feature("session-visit")
 }
 
 /// Both hosts: attached, the window shows the daemon's channel link (Story C-12 AC4).
@@ -180,7 +181,7 @@ pub const ROWS: &[Binding] = &[
     #[cfg(feature = "session-visit")]
     visit(&[Key::Char('c')], MissionCmd::CopySource, "Copy").copy().does("Copy only the currently authorized retained Visit text"),
     #[cfg(feature = "session-visit")]
-    bind(Context::SessionVisit, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").local().does("Filter the retained Visit text"),
+    bind(Context::SessionVisit, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").local().feature("session-visit").does("Filter the retained Visit text"),
     #[cfg(feature = "session-visit")]
     visit(&[Key::Esc], MissionCmd::Back, "Back").does("Clear a kept filter, else return to the original frame"),
     #[cfg(feature = "session-visit")]

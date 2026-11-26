@@ -330,3 +330,73 @@ impl Drop for TuiTurnLifecycle {
         }
     }
 }
+
+#[cfg(all(test, feature = "session-visit"))]
+mod visit_custody_tests {
+    use super::*;
+    use crate::adapters::artifact::FileSystemArtifactStore;
+    use crate::domain::models::AgentId;
+    use crate::domain::models::orchestration_room::{HostBinding, MainVisitKey, VisitReport};
+    use crate::domain::models::turn::{PartId, TurnId};
+    use crate::infrastructure::subagent::NodeJournal;
+    use crate::infrastructure::subagent::session_history::hash_body;
+    use std::sync::Arc;
+
+    fn key(root: &str) -> MainVisitKey {
+        MainVisitKey {
+            conversation_id: root.into(),
+            turn_id: TurnId("turn".into()),
+            invocation: PartId(1),
+            result: PartId(2),
+            revision: hash_body("original"),
+        }
+    }
+
+    fn offered(history: &SessionHistory, root: &str) -> AgentId {
+        let attempt = AgentId::new();
+        history.begin(root, &attempt).unwrap();
+        let report = VisitReport {
+            report: None,
+            unstructured: true,
+            attempt: Some(attempt.clone()),
+            expires_at_ms: None,
+        };
+        history.offer(root, &attempt, "original", report).unwrap();
+        attempt
+    }
+
+    /// AC2 (c): the lifecycle's `Drop` is a production revocation path that cannot `.await`, so
+    /// it must discard exactly the dropped producers' offers through the synchronous custody lock.
+    #[tokio::test]
+    async fn dropping_the_lifecycle_discards_only_its_producers_unconsumed_offers() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(dir.path()).await.unwrap());
+        let store = Arc::new(FileSystemArtifactStore::new(dir.path()));
+        let history = Arc::new(SessionHistory::new(
+            journal,
+            store,
+            HostBinding::new("host", "workspace"),
+        ));
+        let owned = offered(&history, "root-a");
+        let other = offered(&history, "root-b");
+
+        let mut lifecycle = TuiTurnLifecycle::default();
+        lifecycle.set_visit_history(Some(history.clone()));
+        let (events, _unused) = mpsc::unbounded_channel();
+        lifecycle.register(
+            "root-a".into(),
+            CancellationToken::new(),
+            "m".into(),
+            events,
+        );
+        drop(lifecycle);
+
+        assert!(
+            !history.admits(&owned),
+            "the dropped producer keeps no live grant"
+        );
+        assert!(history.commit_link(key("root-a"), owned).await.is_err());
+        assert!(history.admits(&other), "another root's grant is untouched");
+        assert!(history.commit_link(key("root-b"), other).await.is_ok());
+    }
+}

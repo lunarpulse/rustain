@@ -396,6 +396,66 @@ mod visit_authority_tests {
             assert!(visit.title().contains("Denied"));
         }
     }
+
+    /// A read-only tab (`local_allowed == false`) is denied at the same transition even though
+    /// the session token is live: the first test only ever varies the token.
+    #[test]
+    fn read_only_tab_at_transition_scrubs_the_reader_without_any_cancellation() {
+        let mut state = TuiState::new(60, 16);
+        let session_cancel = CancellationToken::new();
+        reducer::open_tool(
+            &mut state,
+            ToolTarget {
+                conversation_id: "main".into(),
+                tool_call_id: "selected".into(),
+            },
+            "Tool · task #1".into(),
+            8,
+        );
+        session_visit::open_visit(
+            &mut state,
+            MainVisitKey {
+                conversation_id: "main".into(),
+                turn_id: TurnId("turn".into()),
+                invocation: PartId(1),
+                result: PartId(2),
+                revision: hash_body("literal"),
+            },
+            VisitRead::Available(VisitBody {
+                attempt: AgentId::new(),
+                previous: None,
+                next: None,
+                report: None,
+                expires_at_ms: None,
+                backing: VisitBacking::default(),
+                turns: vec![VisitTurn {
+                    ordinal: 1,
+                    tool_names: Vec::new(),
+                    public_text: "retained secret".into(),
+                }],
+            }),
+        );
+        assert!(session_visit_access_allowed(
+            &mut state,
+            true,
+            &session_cancel
+        ));
+        assert!(state.session_visit.as_ref().unwrap().text.has_source());
+
+        assert!(!session_visit_access_allowed(
+            &mut state,
+            false,
+            &session_cancel
+        ));
+        assert!(
+            !session_cancel.is_cancelled(),
+            "control: only the read-only tab denied access"
+        );
+        let visit = state.session_visit.as_ref().unwrap();
+        assert!(matches!(&visit.text.body, ArtifactBody::Unavailable(label) if label == "Denied"));
+        assert!(visit.cursor.backing.is_none());
+        assert!(visit.title().contains("Denied"));
+    }
 }
 
 /// Replace the roster the surfaces read: kill confirmations whose agent left are moot, a tail

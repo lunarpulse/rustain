@@ -256,6 +256,8 @@ const TOOL: &[W<ToolRuntime>] = &[
     wp(&[Key::Char('N')], "Consumed | Output@19 \"row 019\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false", searchable),
     w(&[Key::Char('w')], "Consumed | wrap-off Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
     w(&[Key::Char('c')], "CopyToolSource | clipboard=Success \"Copied to clipboard\""),
+    #[cfg(feature = "session-visit")]
+    w(&[Key::Char('o')], "VisitCurrentSource | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
     w(&[Key::Esc], "Consumed | closed payloads=0"),
     w(&[Key::Ctrl('c')], "Consumed | closed payloads=0"),
     w(&[Key::Ctrl('x')], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=true"),
@@ -428,4 +430,30 @@ fn stage_and_draft_snapshots_have_observable_change_controls() {
         cache,
         "control: real Stage rendering changes its owning cache"
     );
+}
+
+/// AC3.4: a completed `task` result in the Tool Inspector offers no Visit in a build without
+/// the feature, and (with the feature) none without an exact retained session link either.
+#[test]
+fn a_completed_task_result_offers_no_visit_source_without_a_retained_session() {
+    let (mut f, _) = Fixture::single(
+        80,
+        24,
+        "task",
+        json!({"description": "check", "prompt": "Read the assigned file"}),
+        InvocationStatus::Success,
+        Some(("worker finished the check", WriteDiffState::NotAWrite)),
+    );
+    f.open();
+    f.compose();
+    let screen = f.h.screen_text();
+    assert!(
+        screen.contains("worker finished the check"),
+        "control: the Inspector paints the task result:\n{screen}"
+    );
+    assert!(
+        screen.contains("Back"),
+        "control: the rail paints:\n{screen}"
+    );
+    assert!(!screen.contains("Visit source"), "{screen}");
 }

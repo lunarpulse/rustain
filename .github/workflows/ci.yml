@@ -311,6 +311,43 @@ jobs:
         if: failure()
         run: python3 .github/scripts/annotate-test-failures.py test-output.log
 
+  session-visit:
+    name: Session Visit Feature (default-off)
+    runs-on: ubuntu-latest
+    steps:
+      # Full history, like the default `test` job: this lane runs the same whole suite, whose
+      # baseline-integrity tests (tests/conformance.rs) run `git show <SHA>:<path>`.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # This lane executes tests/conformance.rs, including its fail-closed metric.
+      - name: Install pinned source-metric parser
+        run: python3 -m pip install -r tools/ci/requirements-metrics.txt
+
+      # Default-off feature (visit-candidate-landing): clippy and the whole suite with the
+      # feature on, so the gated Visit code, keymap rows and ratchets never rot. The lib guard
+      # `every_integration_test_root_runs_in_a_ci_lane_with_its_features` counts this
+      # invocation for any root gated on `session-visit`. Two compile jobs for the same
+      # memory reason as the a2a lane.
+      - name: Clippy (session-visit)
+        run: cargo clippy --all-targets --features session-visit -j 2 -- -D warnings
+      - name: Test with session-visit feature (lib + whole suite)
+        run: |
+          set -o pipefail
+          cargo test --features session-visit --all-targets --no-run -j 2 2>&1 | tee test-output.log
+          cargo test --features session-visit --all-targets --no-fail-fast 2>&1 | tee -a test-output.log
+      - name: Annotate test failures
+        if: failure()
+        run: python3 .github/scripts/annotate-test-failures.py test-output.log
+
   macos-unit:
     name: macOS Unit Tests (daemon/ProcInspector)
     runs-on: macos-latest

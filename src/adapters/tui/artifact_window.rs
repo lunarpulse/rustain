@@ -297,7 +297,12 @@ impl ArtifactWindowState {
     }
 
     #[cfg(feature = "session-visit")]
-    fn visit_filter_rows<'a>(&'a self, theme: &Theme, width: u16, filter: &'a VisitFilter) -> Ref<'a, [Line<'static>]> {
+    fn visit_filter_rows<'a>(
+        &'a self,
+        theme: &Theme,
+        width: u16,
+        filter: &'a VisitFilter,
+    ) -> Ref<'a, [Line<'static>]> {
         use crate::adapters::tui::presentation::inspector_search::caseless_chars;
         let key = (width, BodyMode::Source, filter.query_generation);
         if filter.cache.borrow().key != Some(key) {
@@ -308,7 +313,9 @@ impl ArtifactWindowState {
                 std::str::from_utf8(bytes).expect("borrowed display source was UTF-8")
             });
             let query = caseless_chars(self.search.query.as_str()).collect::<String>();
-            let mut matching = text.lines().zip(filter.folded.lines())
+            let mut matching = text
+                .lines()
+                .zip(filter.folded.lines())
                 .filter_map(|(line, folded)| folded.contains(&query).then_some(line))
                 .peekable();
             let matches = matching.peek().is_some();
@@ -324,7 +331,13 @@ impl ArtifactWindowState {
     }
 
     #[cfg(feature = "session-visit")]
-    fn build_text_filter<'a>(&self, theme: &Theme, width: usize, matching: impl Iterator<Item = &'a str>, matches: bool) -> Vec<Line<'static>> {
+    fn build_text_filter<'a>(
+        &self,
+        theme: &Theme,
+        width: usize,
+        matching: impl Iterator<Item = &'a str>,
+        matches: bool,
+    ) -> Vec<Line<'static>> {
         use std::fmt::Write as _;
         let mut text = String::new();
         for line in self.header.lines() {

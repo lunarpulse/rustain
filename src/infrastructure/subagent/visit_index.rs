@@ -6,12 +6,11 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read as _, Write as _};
 use std::path::Path;
 
-use crate::domain::models::{AgentId, JournalEntry, JournalRecord, RoomEvent};
 use crate::domain::models::artifact::EvidenceArtifact;
 use crate::domain::models::orchestration_room::MainVisitKey;
+use crate::domain::models::{AgentId, JournalEntry, JournalRecord, RoomEvent};
 
 use super::{JournalError, JournalFileStamp, MAX_VISIT_JOURNAL_BYTES, parse_entry};
-
 
 #[derive(Clone)]
 pub(in crate::infrastructure::subagent) struct LinkRow {
@@ -99,7 +98,11 @@ impl IndexedRevision {
         if self.index.conflicts(&event) {
             return Err(io::Error::other("private Visit record already exists").into());
         }
-        let seq = self.index.head.checked_add(1).ok_or(JournalError::SequenceExhausted)?;
+        let seq = self
+            .index
+            .head
+            .checked_add(1)
+            .ok_or(JournalError::SequenceExhausted)?;
         if seq == u64::MAX {
             return Err(JournalError::SequenceExhausted);
         }
@@ -160,17 +163,39 @@ impl Index {
                     self.push_record(record, stamp_ms);
                 }
             }
-            JournalRecord::Room(RoomEvent::VisitLinked { key, attempt, artifact }) => {
+            JournalRecord::Room(RoomEvent::VisitLinked {
+                key,
+                attempt,
+                artifact,
+            }) => {
                 let count = self.link_counts.entry(attempt.clone()).or_default();
                 *count = (*count + 1).min(2);
-                self.links.entry(key.conversation_id.clone()).or_default().push(LinkRow {
-                    key, attempt, artifact, stamp_ms,
-                });
+                self.links
+                    .entry(key.conversation_id.clone())
+                    .or_default()
+                    .push(LinkRow {
+                        key,
+                        attempt,
+                        artifact,
+                        stamp_ms,
+                    });
             }
-            JournalRecord::Room(RoomEvent::VisitTurnRecorded { root, attempt, ordinal, artifact, partial }) => {
-                self.turns.entry(attempt).or_insert_with(|| Vec::with_capacity(1)).push(TurnRow {
-                    root, ordinal, artifact, partial,
-                });
+            JournalRecord::Room(RoomEvent::VisitTurnRecorded {
+                root,
+                attempt,
+                ordinal,
+                artifact,
+                partial,
+            }) => {
+                self.turns
+                    .entry(attempt)
+                    .or_insert_with(|| Vec::with_capacity(1))
+                    .push(TurnRow {
+                        root,
+                        ordinal,
+                        artifact,
+                        partial,
+                    });
             }
             _ => {}
         }
@@ -178,18 +203,33 @@ impl Index {
 
     fn conflicts(&self, event: &RoomEvent) -> bool {
         match event {
-            RoomEvent::VisitLinked { key, attempt, .. } => self.link_counts.contains_key(attempt)
-                || self.links.get(&key.conversation_id).is_some_and(|links| links.iter().any(|row| row.key == *key)),
-            RoomEvent::VisitTurnRecorded { root, attempt, ordinal, .. } => self.turns.get(attempt)
-                .is_some_and(|rows| rows.iter().any(|row| row.ordinal == *ordinal && row.root == *root)),
+            RoomEvent::VisitLinked { key, attempt, .. } => {
+                self.link_counts.contains_key(attempt)
+                    || self
+                        .links
+                        .get(&key.conversation_id)
+                        .is_some_and(|links| links.iter().any(|row| row.key == *key))
+            }
+            RoomEvent::VisitTurnRecorded {
+                root,
+                attempt,
+                ordinal,
+                ..
+            } => self.turns.get(attempt).is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.ordinal == *ordinal && row.root == *root)
+            }),
             _ => true,
         }
     }
 
     pub(super) fn links(&self, root: &str) -> Vec<(LinkRow, bool)> {
-        self.links.get(root).into_iter().flatten().map(|row| {
-            (row.clone(), self.link_counts.get(&row.attempt) == Some(&1))
-        }).collect()
+        self.links
+            .get(root)
+            .into_iter()
+            .flatten()
+            .map(|row| (row.clone(), self.link_counts.get(&row.attempt) == Some(&1)))
+            .collect()
     }
 
     pub(super) fn select(&self, key: &MainVisitKey, turn_cap: usize) -> Option<VisitRows> {
