@@ -1387,18 +1387,17 @@ impl HealthCheck for GitCheck {
 
     async fn run(&self) -> CheckResult {
         // Story 23.1 (review H3): the workspace `.git/config` is writable by
-        // sandboxed commands; `rev-parse` runs no filter, and the hardening
-        // turns off the fsmonitor and hooks it could name.
-        let output = tokio::process::Command::new("git")
-            .args(crate::adapters::isolation::HARDENED_GIT)
-            .args(["rev-parse", "--is-inside-work-tree"])
-            .output()
-            .await;
-
-        let message = match output {
-            Ok(o) if o.status.success() => "available, inside git repo".to_string(),
-            Ok(_) => "available, not inside git repo".to_string(),
-            Err(_) => "git not found on PATH".to_string(),
+        // sandboxed commands, so doctor runs no git at all: it looks for the
+        // binary on PATH and a `.git` entry at or above the working directory.
+        let on_path = std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join("git").is_file())
+        });
+        let message = if !on_path {
+            "git not found on PATH".to_string()
+        } else if std::env::current_dir().is_ok_and(|dir| inside_git_work_tree(&dir)) {
+            "available, inside git repo".to_string()
+        } else {
+            "available, not inside git repo".to_string()
         };
 
         CheckResult {
@@ -1411,6 +1410,11 @@ impl HealthCheck for GitCheck {
             tier: CheckTier::Info,
         }
     }
+}
+
+/// Whether `dir` or one of its ancestors holds a `.git` directory or file.
+fn inside_git_work_tree(dir: &std::path::Path) -> bool {
+    dir.ancestors().any(|d| d.join(".git").exists())
 }
 
 /// Check for local skill directories in workspace.
@@ -1943,6 +1947,16 @@ mod sandbox_check_tests {
         let r = run(Ok(SandboxSession::off())).await;
         assert_eq!(r.status, CheckStatus::Info);
         assert!(r.message.contains("Sandbox off"), "{}", r.message);
+    }
+
+    #[test]
+    fn the_git_check_finds_a_repo_without_running_git() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(!inside_git_work_tree(&nested));
+        std::fs::write(root.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        assert!(inside_git_work_tree(&nested));
     }
 }
 
