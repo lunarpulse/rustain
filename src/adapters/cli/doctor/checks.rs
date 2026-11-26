@@ -1074,6 +1074,95 @@ impl HealthCheck for SystemInfoCheck {
     }
 }
 
+/// Story 23.1 AC8 — the sandbox tuple (ADR-06-04 mitigation, ADR-23-1-01 §7):
+/// adapter, status, ABI, writable set, network, unprotected and missing paths.
+/// Informational: it never changes `doctor`'s exit code.
+pub struct SandboxCheck {
+    /// `[sandbox].adapter` as configured.
+    pub adapter: String,
+    /// The resolved session, or the startup error `[sandbox]` produces.
+    pub outcome: Result<crate::domain::models::SandboxSession, String>,
+}
+
+#[async_trait]
+impl HealthCheck for SandboxCheck {
+    fn name(&self) -> &str {
+        "Sandbox"
+    }
+
+    async fn run(&self) -> CheckResult {
+        use crate::domain::models::SandboxStatus;
+        let join = |paths: &[std::path::PathBuf]| {
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (status, message, fix) = match &self.outcome {
+            Err(error) => (
+                CheckStatus::Fail,
+                format!("adapter {}: {error}", self.adapter),
+                Some(
+                    "Use a Linux kernel with Landlock ABI 3 or later (6.2+), or set \
+                     [sandbox].adapter = \"auto\" or \"noop\"."
+                        .to_string(),
+                ),
+            ),
+            Ok(session) => match &session.status {
+                SandboxStatus::Enforced {
+                    abi,
+                    network_enforced,
+                    unprotected,
+                    missing_roots,
+                } => {
+                    let network = match (session.scope.network, network_enforced) {
+                        (true, _) => "on".to_string(),
+                        (false, true) => "off (TCP bind/connect blocked)".to_string(),
+                        (false, false) => format!("off requested, not enforced (ABI {abi} < 4)"),
+                    };
+                    let mut message = format!(
+                        "adapter {}: Landlock ABI {abi} enforced; writable: {}; network: {network}",
+                        self.adapter,
+                        join(&session.scope.writable_roots)
+                    );
+                    if !unprotected.is_empty() {
+                        message.push_str(&format!("; unprotected: {}", join(unprotected)));
+                    }
+                    if !missing_roots.is_empty() {
+                        message.push_str(&format!("; skipped (missing): {}", join(missing_roots)));
+                    }
+                    let status = if unprotected.is_empty() && *network_enforced {
+                        CheckStatus::Pass
+                    } else {
+                        CheckStatus::Warning
+                    };
+                    (status, message, None)
+                }
+                SandboxStatus::Unavailable { .. } => (
+                    CheckStatus::Warning,
+                    format!("adapter {}: {}", self.adapter, session.status.notice().text),
+                    None,
+                ),
+                SandboxStatus::Off | SandboxStatus::NotSupported { .. } => (
+                    CheckStatus::Info,
+                    format!("adapter {}: {}", self.adapter, session.status.notice().text),
+                    None,
+                ),
+            },
+        };
+        CheckResult {
+            name: self.name().to_string(),
+            category: "sandbox".to_string(),
+            status,
+            message,
+            fix,
+            latency: None,
+            tier: CheckTier::Info,
+        }
+    }
+}
+
 /// Resolve the active profile's Tools adapter name, or `None` if resolution fails.
 /// Doctor must never fail over an informational hint, so every error → `None`.
 fn resolve_active_tools_adapter(active: &str, config_dir: &std::path::Path) -> Option<String> {
@@ -1702,6 +1791,66 @@ impl HealthCheck for UpdateHealthCheck {
             latency: None,
             tier: CheckTier::Info,
         }
+    }
+}
+
+#[cfg(test)]
+mod sandbox_check_tests {
+    use super::*;
+    use crate::domain::models::{SandboxScope, SandboxSession, SandboxStatus};
+    use std::path::PathBuf;
+
+    async fn run(outcome: Result<SandboxSession, String>) -> CheckResult {
+        SandboxCheck {
+            adapter: "auto".into(),
+            outcome,
+        }
+        .run()
+        .await
+    }
+
+    #[tokio::test]
+    async fn enforced_prints_the_tuple() {
+        let r = run(Ok(SandboxSession {
+            scope: SandboxScope {
+                writable_roots: vec![PathBuf::from("/w"), PathBuf::from("/tmp")],
+                network: false,
+                off: false,
+            },
+            status: SandboxStatus::Enforced {
+                abi: 6,
+                network_enforced: true,
+                unprotected: vec![],
+                missing_roots: vec![PathBuf::from("/home/u/.npm")],
+            },
+        }))
+        .await;
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.tier, CheckTier::Info);
+        assert_eq!(
+            r.message,
+            "adapter auto: Landlock ABI 6 enforced; writable: /w, /tmp; network: off (TCP \
+             bind/connect blocked); skipped (missing): /home/u/.npm"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_warns_and_a_refusal_fails_with_a_fix() {
+        let r = run(Ok(SandboxSession {
+            scope: SandboxScope::off(),
+            status: SandboxStatus::Unavailable {
+                reason: "Landlock is not built into this kernel".into(),
+            },
+        }))
+        .await;
+        assert_eq!(r.status, CheckStatus::Warning);
+        assert!(r.message.contains("Sandbox unavailable"), "{}", r.message);
+        let r = run(Err("required".into())).await;
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.fix.is_some());
+        let r = run(Ok(SandboxSession::off())).await;
+        assert_eq!(r.status, CheckStatus::Info);
+        assert!(r.message.contains("Sandbox off"), "{}", r.message);
     }
 }
 

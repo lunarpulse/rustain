@@ -176,6 +176,7 @@ pub async fn run_doctor(
     )>,
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
     a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
+    sandbox: checks::SandboxCheck,
 ) -> Result<()> {
     if adapters {
         let ports = ADAPTERS_TABLE;
@@ -247,7 +248,7 @@ pub async fn run_doctor(
         return Ok(());
     }
 
-    let checks = build_check_list(
+    let mut checks = build_check_list(
         terminal_detail,
         &providers,
         mcp_servers,
@@ -256,6 +257,8 @@ pub async fn run_doctor(
             peers: a2a_peers,
         },
     );
+    // Story 23.1 AC8 — the sandbox tuple, resolved by the caller from `[sandbox]`.
+    checks.push(Box::new(sandbox));
     let mut results = Vec::with_capacity(checks.len());
     for check in &checks {
         results.push(check.run().await);

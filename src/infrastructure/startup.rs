@@ -888,6 +888,21 @@ pub async fn run() -> Result<()> {
                 .map(|profile| (profile.mcp_servers.clone(), profile.a2a_peers.clone()))
                 .unwrap_or_default()
         };
+        // Story 23.1 AC8 — the same resolver the session roots use.
+        let sandbox = {
+            let workspace = std::env::current_dir().unwrap_or_default();
+            crate::adapters::cli::doctor::SandboxCheck {
+                adapter: app_config.sandbox.adapter.clone(),
+                outcome: crate::infrastructure::sandbox::resolve_sandbox(
+                    &app_config,
+                    &workspace,
+                    PermissionMode::Normal,
+                    &crate::infrastructure::sandbox::SandboxProbe::detect(),
+                )
+                .map(|resolved| resolved.session)
+                .map_err(|e| e.to_string()),
+            }
+        };
         return crate::adapters::cli::doctor::run_doctor(
             terminal,
             adapters,
@@ -895,6 +910,7 @@ pub async fn run() -> Result<()> {
             provider_pairs,
             mcp_servers,
             a2a_peers,
+            sandbox,
         )
         .await
         .map_err(|e| {

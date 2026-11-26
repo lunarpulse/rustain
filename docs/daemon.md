@@ -625,6 +625,18 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
   reports it failed with the existing restart detail. Shutdown does not authorize
   or resume that task.
 
+### Sandbox (Story 23.1)
+
+The daemon reads `[sandbox]` like every other root (see the README "Sandbox"
+section). It resolves it once at boot for its permanently Normal mode and writes
+the status line to the daemon log before any turn (for example `Sandbox on
+(Landlock ABI 6): …` or `Sandbox unavailable: …`). On Linux with Landlock ABI 3+,
+every Bash command a daemon turn runs, and everything it starts, can write only
+inside the workspace, temp and cache directories and cannot read
+`~/.rustain/auth.json`. Without a usable Landlock and `adapter = "auto"`, commands
+run unconfined with that warning in the log; `adapter = "landlock"` then fails the
+daemon's composition. The daemon process itself is not confined.
+
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed

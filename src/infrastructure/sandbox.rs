@@ -614,4 +614,154 @@ mod tests {
             vec![home.join(".rustain/auth.json"), home.join(".ssh")]
         );
     }
+
+    fn unavailable_probe(root: &Path) -> SandboxProbe {
+        probe(
+            root,
+            LandlockProbe::Unavailable {
+                reason: "Landlock is not built into this kernel".into(),
+            },
+        )
+    }
+
+    /// K7 (AC7), `ask`: the YOLO composition refuses an unavailable sandbox
+    /// with the notice; with the sandbox configured off, YOLO composes.
+    #[test]
+    fn k7_ask_yolo_composition_is_refused_while_the_sandbox_is_unavailable() {
+        use crate::domain::errors::AdapterCompositionError;
+        use crate::infrastructure::composition::build_cli_core_with_sandbox;
+        let dir = tempfile::tempdir().unwrap();
+        let p = unavailable_probe(dir.path());
+        let persona = || Arc::new(crate::adapters::noop::NoOpPersona);
+        let refused = build_cli_core_with_sandbox(&config("auto"), dir.path(), true, persona(), &p);
+        match refused {
+            Err(AdapterCompositionError::Sandbox(text)) => assert_eq!(
+                text,
+                SandboxStatus::Unavailable {
+                    reason: "Landlock is not built into this kernel".into()
+                }
+                .notice()
+                .text
+            ),
+            Err(other) => panic!("expected the sandbox refusal, got {other}"),
+            Ok(_) => panic!("YOLO must be refused while the sandbox is unavailable"),
+        }
+        // Normal mode runs unconfined (fail-open exception), YOLO with noop composes.
+        assert!(
+            build_cli_core_with_sandbox(&config("auto"), dir.path(), false, persona(), &p).is_ok()
+        );
+        let (_, session) =
+            build_cli_core_with_sandbox(&config("noop"), dir.path(), true, persona(), &p)
+                .expect("noop YOLO composes");
+        assert_eq!(session.status, SandboxStatus::Off);
+    }
+
+    /// K7 (AC7), TUI: the `SetPermissionMode` arm's handler keeps the mode and
+    /// emits the notice; with the sandbox off, YOLO is applied.
+    #[tokio::test]
+    async fn k7_tui_mode_arm_keeps_the_mode_and_shows_the_notice() {
+        use crate::domain::ports::SecurityPort;
+        let dir = tempfile::tempdir().unwrap();
+        let p = unavailable_probe(dir.path());
+        let resolved =
+            resolve_sandbox(&config("auto"), dir.path(), PermissionMode::Normal, &p).unwrap();
+        let security = crate::adapters::security_adapter::SecurityAdapter::new(dir.path().into());
+        let (bus, mut rx) = crate::infrastructure::runtime::event_bus::EventBus::new(8);
+        let cell = resolved.policy_cell();
+        let applied = apply_permission_mode(
+            PermissionMode::Yolo,
+            &security,
+            &resolved.session,
+            &cell,
+            &bus,
+        )
+        .await;
+        assert!(!applied);
+        assert_eq!(security.current_mode(), PermissionMode::Normal);
+        assert_eq!(*cell.read().await, resolved.policy);
+        match rx.try_recv() {
+            Ok(crate::domain::events::AppEvent::SystemNotice { message, .. }) => {
+                assert_eq!(message, resolved.session.status.notice().text)
+            }
+            other => panic!("expected the sandbox notice, got {other:?}"),
+        }
+
+        let off = resolve_sandbox(&config("noop"), dir.path(), PermissionMode::Normal, &p).unwrap();
+        let applied =
+            apply_permission_mode(PermissionMode::Yolo, &security, &off.session, &cell, &bus).await;
+        assert!(applied);
+        assert_eq!(security.current_mode(), PermissionMode::Yolo);
+        assert!(rx.try_recv().is_err(), "no notice when YOLO is allowed");
+    }
+
+    /// K9 (AC6): tools composed from `daemon_compose_context` confine Bash.
+    #[cfg(all(target_os = "linux", feature = "sandbox"))]
+    #[tokio::test]
+    async fn k9_daemon_tools_confine_bash() {
+        use crate::adapters::sandbox::landlock::{MIN_ABI, require_landlock};
+        if !require_landlock("k9_daemon_tools_confine_bash", MIN_ABI) {
+            return;
+        }
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // W = the workspace and /dev/null only, so `outside` is not in it.
+        let p = SandboxProbe {
+            landlock: LandlockProbe::detect(),
+            host: HostPaths {
+                home: None,
+                temp_dirs: vec![],
+                device_files: vec![PathBuf::from("/dev/null")],
+                cache_dirs: vec![],
+                credential_files: vec![],
+            },
+            inject_not_enforced: false,
+        };
+        let resolved =
+            resolve_sandbox(&config("auto"), ws.path(), PermissionMode::Normal, &p).unwrap();
+        let out = std::fs::canonicalize(outside.path()).unwrap();
+        assert!(
+            !resolved
+                .session
+                .scope
+                .writable_roots
+                .iter()
+                .any(|r| out.starts_with(r)),
+            "precondition: the outside dir is not under W"
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = crate::infrastructure::composition::daemon_compose_context(
+            ws.path(),
+            ws.path(),
+            Arc::new(crate::adapters::noop::NoOpStorage),
+            tx,
+            "passthrough".into(),
+            None,
+            Arc::new(crate::adapters::rap::PeerTopicStore::new()),
+            Vec::new(),
+            true,
+            &resolved,
+        );
+        let tools =
+            crate::infrastructure::composition::build_tools("builtin-only", None, &ctx).unwrap();
+        let bash = |command: String| {
+            let tools = Arc::clone(&tools);
+            async move {
+                match tools
+                    .execute(
+                        "Bash",
+                        serde_json::json!({ "command": command }),
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(r) => !r.is_error,
+                    Err(_) => false,
+                }
+            }
+        };
+        assert!(!bash(format!("echo x > '{}/f'", out.display())).await);
+        assert!(!out.join("f").exists());
+        assert!(bash(format!("echo x > '{}/f'", ws.path().display())).await);
+        assert!(ws.path().join("f").exists());
+    }
 }

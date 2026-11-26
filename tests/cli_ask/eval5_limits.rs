@@ -716,3 +716,31 @@ async fn eval5_ask_daily_budget_fails_closed_on_ledger_path_error() {
         fixture.new_receipts(calls);
     }
 }
+
+/// Story 23.1 K8 (AC8): `rustain ask` prints the sandbox status as one stderr
+/// line before the first provider request: a provider that fails the turn
+/// still leaves the "Sandbox off" line, and stdout keeps the selected format.
+#[tokio::test]
+async fn k8_ask_prints_the_sandbox_status_before_the_first_provider_request() {
+    let fixture = Eval5Ask::ollama(false, None).await;
+    Mock::given(method("POST"))
+        .and(path(fixture.chat_path))
+        .respond_with(ResponseTemplate::new(500).set_body_string("fixture failure"))
+        .mount(&fixture.server)
+        .await;
+    let output = fixture
+        .run("stream-json", &["--sandbox-adapter", "noop"])
+        .await;
+    assert!(!output.status.success(), "a failed turn exits non-zero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "Sandbox off ([sandbox].adapter = \"noop\"): tool commands run without OS confinement."
+        ),
+        "{stderr}"
+    );
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        serde_json::from_str::<Value>(line)
+            .unwrap_or_else(|e| panic!("stdout stays stream-json ({e}): {line}"));
+    }
+}
