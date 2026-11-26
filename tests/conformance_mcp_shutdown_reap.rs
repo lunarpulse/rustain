@@ -100,7 +100,13 @@ async fn a_disconnect_past_the_bound_still_ends_with_the_child_stopped() {
         .shutdown_mcp_clients(Duration::from_millis(100))
         .await;
 
-    assert_eq!((closed, killed), (0, 1), "a forced stop counts as killed");
+    // Story 23.1: the disconnect now stops the server's group first, so it can
+    // finish inside the bound; either way exactly one child is gone.
+    assert_eq!(
+        closed + killed,
+        1,
+        "the child is stopped: ({closed}, {killed})"
+    );
     assert!(
         terminated(pid),
         "the child must have exited when shutdown returns"
@@ -166,32 +172,38 @@ async fn stopping_inside_tools_list_leaves_no_running_child() {
     assert!(reaped_within(pid, 5).await);
 }
 
-/// Pre-C-3 spawn shape is unchanged (Round 5): an MCP child stays in the parent's
-/// process group (no `process_group(0)`) and inherits the parent's stderr (no
-/// relay), for the daemon and the TUI alike (one shared spawn).
+/// Spawn shape, amended by Story 23.1 (AC9): an MCP child the client spawns
+/// leads its own process group (`process_group(0)`, so shutdown can stop its
+/// wrapper descendants) and still inherits the parent's stderr (no relay), for
+/// the daemon and the TUI alike (one shared spawn).
 #[tokio::test]
-async fn an_mcp_child_keeps_the_parents_process_group_and_stderr() {
-    use rustain::adapters::mcp::task_transport::TaskGuardTransport;
-    let mut cmd = tokio::process::Command::new("sleep");
-    cmd.arg("30").kill_on_drop(true);
-    let transport = TaskGuardTransport::spawn(&mut cmd).expect("spawn");
-    let pid = transport.child_id().expect("pid");
+async fn an_mcp_child_leads_its_own_process_group_and_inherits_stderr() {
+    let spec = spec("group", &[]);
+    let client = Arc::new(McpClientAdapter::new(spec.clone(), None));
+    client.connect().await.expect("fake server connects");
+    let pid = client
+        .live_child_pids()
+        .await
+        .first()
+        .copied()
+        .expect("child registered");
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
     let after_comm = stat.rsplit(')').next().expect("stat tail");
     // Fields after `)`: state ppid pgrp ...
-    let pgrp: i32 = after_comm
+    let pgrp: u32 = after_comm
         .split_whitespace()
         .nth(2)
         .expect("pgrp")
         .parse()
         .expect("int");
-    // SAFETY: getpgrp has no preconditions.
-    assert_eq!(pgrp, unsafe { libc::getpgrp() }, "no own process group");
+    assert_eq!(pgrp, pid, "the child leads its own process group");
     let child_err = std::fs::read_link(format!("/proc/{pid}/fd/2")).expect("child fd 2");
     let own_err = std::fs::read_link("/proc/self/fd/2").expect("own fd 2");
     assert_eq!(
         child_err, own_err,
         "stderr is inherited, not piped to a relay"
     );
-    drop(transport);
+    let _ = composite(&client, spec)
+        .shutdown_mcp_clients(Duration::from_secs(3))
+        .await;
 }

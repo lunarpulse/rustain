@@ -891,16 +891,21 @@ pub async fn run() -> Result<()> {
         // Story 23.1 AC8 — the same resolver the session roots use.
         let sandbox = {
             let workspace = std::env::current_dir().unwrap_or_default();
+            let resolved = crate::infrastructure::sandbox::resolve_sandbox(
+                &app_config,
+                &workspace,
+                PermissionMode::Normal,
+                &crate::infrastructure::sandbox::SandboxProbe::detect(),
+            );
             crate::adapters::cli::doctor::SandboxCheck {
                 adapter: app_config.sandbox.adapter.clone(),
-                outcome: crate::infrastructure::sandbox::resolve_sandbox(
-                    &app_config,
-                    &workspace,
-                    PermissionMode::Normal,
-                    &crate::infrastructure::sandbox::SandboxProbe::detect(),
-                )
-                .map(|resolved| resolved.session)
-                .map_err(|e| e.to_string()),
+                mcp: resolved
+                    .as_ref()
+                    .ok()
+                    .map(|r| (Arc::clone(&r.manager), r.session.scope.ceiling())),
+                outcome: resolved
+                    .map(|resolved| resolved.session)
+                    .map_err(|e| e.to_string()),
             }
         };
         return crate::adapters::cli::doctor::run_doctor(

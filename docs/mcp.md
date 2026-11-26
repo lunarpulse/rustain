@@ -104,7 +104,7 @@ Both `$VAR` and `${VAR}` are expanded from the rustain process environment at sp
 
 ## Security Considerations
 
-MCP child processes inherit rustain's working directory and environment. They can write to any file rustain can write to. Sandboxing (Landlock on Linux) lands in Story 9.5.
+MCP stdio servers inherit rustain's working directory and environment (minus rustain's own credentials, Q-6). On Linux with Landlock ABI 3+ (Story 23.1) each server, and everything it starts, runs under the session's sandbox ceiling: it can read what you can read except rustain's credential store and `[sandbox].deny_read`, write only inside the workspace, temp and cache directories and `[sandbox].writable_roots`, and keeps network access, in every permission mode. A server that cannot be confined fails to start. Each server leads its own process group; shutdown stops the group (wrapper descendants included) while the server is alive, so a terminal Ctrl+C no longer reaches servers directly. With `[sandbox].adapter = "noop"`, without Landlock, or on macOS and Windows, servers run unconfined.
 
 ## Adapter Status Panel
 
@@ -193,7 +193,8 @@ come from the profile and `<workspace>/.claude/mcp.json` as resolved when the da
 starts; there is **no reload** (restart the daemon) and **no mid-session reconnect**
 (a server that dies after connecting stays listed until restart). Children inherit the
 daemon's full environment plus the server's `env`, run as the daemon's user in the
-workspace with **no sandbox**, and write stderr to the daemon log. MCP tools follow the
+workspace under the sandbox ceiling (Linux: writes only inside the workspace, temp and
+cache directories; see the README "Sandbox" section), and write stderr to the daemon log. MCP tools follow the
 daemon's headless approval policy (an attached writer reviews each call; unattended,
 only tools whose server-declared `read_only` hint is set run; the hint is
 self-declared by the server). Peer-tier attachments receive no MCP connection status,

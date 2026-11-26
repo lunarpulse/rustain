@@ -957,6 +957,7 @@ async fn test_mcp_zero_servers_is_skipped() {
     let check = McpReachabilityCheck {
         servers: vec![],
         per_server_budget: MCP_PER_SERVER_BUDGET,
+        sandbox: None,
     };
     let result = check.run().await;
     assert!(
@@ -982,6 +983,7 @@ async fn test_mcp_broken_stdio_spawn_failed_is_fail_exit_affecting() {
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: std::time::Duration::from_millis(500),
+        sandbox: None,
     };
     let result = check.run().await;
     assert_eq!(
@@ -1010,6 +1012,7 @@ async fn test_mcp_exit_neutral_negative_control() {
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: MCP_PER_SERVER_BUDGET,
+        sandbox: None,
     };
     let result = check.run().await;
     // Must NOT be Fail or ExitAffecting.
@@ -1034,6 +1037,7 @@ async fn test_mcp_http_without_a_url_is_a_config_fail() {
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: MCP_PER_SERVER_BUDGET,
+        sandbox: None,
     };
     let result = check.run().await;
     assert_eq!(
@@ -1052,6 +1056,7 @@ async fn test_mcp_sse_transport_is_skipped() {
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: MCP_PER_SERVER_BUDGET,
+        sandbox: None,
     };
     let result = check.run().await;
     assert!(
@@ -1080,6 +1085,7 @@ async fn test_mcp_concurrent_bounded_wall_clock() {
     let check = McpReachabilityCheck {
         servers: specs,
         per_server_budget: budget,
+        sandbox: None,
     };
     let start = std::time::Instant::now();
     let _result = check.run().await;
@@ -1119,6 +1125,7 @@ async fn test_mcp_probe_timeout_is_warning_exit_neutral() {
     let check = McpReachabilityCheck {
         servers: vec![spec],
         per_server_budget: std::time::Duration::from_millis(200),
+        sandbox: None,
     };
     let result = check.run().await;
     assert_eq!(

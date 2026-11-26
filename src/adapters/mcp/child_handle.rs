@@ -1,13 +1,15 @@
-//! Story C-3 (C3-R2-01, R3-01, R5-02) — an identity-safe, LEADER-ONLY handle on one
-//! spawned MCP child.
+//! Story C-3 (C3-R2-01, R3-01, R5-02) — an identity-safe handle on one spawned
+//! MCP child, extended by Story 23.1 to the child's process group.
 //!
-//! # Scope (Round 5 reduction)
+//! # Scope
 //!
-//! This stops the **direct child** only. Descendants of a wrapper (`sh -c`, `npx`,
-//! a launcher that forks the real server) and processes that call `setsid` are NOT
-//! stopped: process containment belongs to the sandbox work (DF
-//! `DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED`, owner 23-1). Children are
-//! spawned exactly as before C-3 (no process group, inherited stderr).
+//! MCP stdio children are spawned in their own process group and confined by
+//! the sandbox (Story 23.1). [`ChildHandle::kill_group`] stops the group —
+//! wrapper descendants (`sh -c`, `npx`, a launcher that forks the real server)
+//! included — while the leader is alive, then the leader is stopped through its
+//! pidfd as before. Not stopped: processes that call `setsid` and descendants
+//! orphaned after the leader exited (`DF-23-1-MCP-SETSID-ESCAPEES-NOT-STOPPED`);
+//! they stay Landlock-confined. Stderr is inherited.
 //!
 //! # Mechanism
 //!
@@ -200,6 +202,25 @@ impl ChildHandle {
         self.exit_state() == ExitState::Exited
     }
 
+    /// Story 23.1 (ADR-23-1-01 §9) — SIGKILL the child's process group. MCP
+    /// stdio children are spawned as group leaders (`process_group(0)`), so the
+    /// group id is the leader's pid. Signalled ONLY while the leader's pidfd
+    /// shows it running: a live leader holds the group id, so the signal cannot
+    /// reach a recycled group. Returns whether `killpg` was sent successfully.
+    /// Not reached: `setsid` escapees and descendants orphaned after the leader
+    /// exited (DF-23-1-MCP-SETSID-ESCAPEES-NOT-STOPPED; they stay confined).
+    pub fn kill_group(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.fd.is_some() && self.exit_state() == ExitState::Running {
+            let Ok(pgid) = libc::pid_t::try_from(self.pid) else {
+                return false;
+            };
+            // SAFETY: killpg on a group whose leader is our live, unreaped child.
+            return unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0;
+        }
+        false
+    }
+
     /// SIGKILL the child through the pidfd and wait, bounded, for its exit.
     pub async fn force_stop(&self, bound: Duration) -> ForceStop {
         if !self.has_mechanism() {
@@ -213,8 +234,13 @@ impl ChildHandle {
             }
             ExitState::Running => {}
         }
+        // Story 23.1 — the wrapper's descendants share the leader's group;
+        // signal them while the leader still holds the group id.
+        let group_signalled = self.kill_group();
         match classify_signal(self.send_kill()) {
             SignalOutcome::Sent => {}
+            // The group signal already reached the leader and it was reaped.
+            SignalOutcome::NoSuchProcess if group_signalled => {}
             SignalOutcome::NoSuchProcess => return ForceStop::AlreadyExited,
             SignalOutcome::Failed(errno) => {
                 tracing::error!(pid = self.pid, errno, "pidfd_send_signal(SIGKILL) failed");

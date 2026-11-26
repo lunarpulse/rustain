@@ -167,8 +167,9 @@ impl DaemonCore {
     /// disconnected concurrently within `bound` (a healthy `disconnect` ends in
     /// the transport's bounded 2 s wait and kill; stdin close delivers no EOF,
     /// pre-existing); (4) every still-live spawn attempt of every client is then
-    /// SIGKILLed through its pidfd (Linux 5.3+, direct child only; wrapper
-    /// descendants are NOT stopped, DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED),
+    /// SIGKILLed through its pidfd (Linux 5.3+), its process group first while
+    /// the leader is alive (Story 23.1; `setsid` escapees are not stopped,
+    /// DF-23-1-MCP-SETSID-ESCAPEES-NOT-STOPPED),
     /// concurrently under ONE shared 1 s deadline, because dropping a `disconnect`
     /// future past its bound does not stop a child owned by the service task.
     /// Total worst case `bound` + 1 s. A child that cannot be stopped (no pidfd or

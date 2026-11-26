@@ -698,6 +698,12 @@ pub fn build_tools(
                     let client = crate::adapters::mcp::client::McpClientAdapter::new(
                         spec.clone(),
                         ctx.domain_tx.clone(),
+                    )
+                    // Story 23.1 (AC9): stdio servers run under the session
+                    // ceiling through the same manager as the Bash tool.
+                    .with_sandbox(
+                        Arc::clone(&ctx.sandbox_slot.load()),
+                        ctx.sandbox.scope.ceiling(),
                     );
                     let arc = Arc::new(client);
                     arc.set_self_weak(Arc::downgrade(&arc));
@@ -2095,6 +2101,10 @@ pub fn build_acp_core(
                         let client = crate::adapters::mcp::client::McpClientAdapter::new(
                             spec.clone(),
                             ctx.domain_tx.clone(),
+                        )
+                        .with_sandbox(
+                            Arc::clone(&ctx.sandbox_slot.load()),
+                            ctx.sandbox.scope.ceiling(),
                         );
                         let arc = Arc::new(client);
                         arc.set_self_weak(Arc::downgrade(&arc));

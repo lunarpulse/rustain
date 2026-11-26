@@ -194,6 +194,12 @@ pub struct McpClientAdapter {
     /// value gates the D2 notice and travels into both adapter and doctor
     /// timeout errors.
     http_local: Option<bool>,
+    /// Story 23.1 — the sandbox manager and ceiling policy applied at every
+    /// stdio spawn (see [`Self::with_sandbox`]).
+    sandbox: Option<(
+        Arc<dyn crate::domain::ports::SandboxManager>,
+        crate::domain::models::SandboxPolicy,
+    )>,
 }
 
 impl McpClientAdapter {
@@ -224,7 +230,21 @@ impl McpClientAdapter {
             next_generation: AtomicU64::new(0),
             running_generation: AtomicU64::new(0),
             http_local,
+            sandbox: None,
         }
+    }
+
+    /// Story 23.1 (AC9) — confine every stdio spawn of this server with
+    /// `manager` under the session ceiling `policy` (`WorkspaceWrite{W,
+    /// network: true}`; `Permissive` when the sandbox is off). Without it the
+    /// server spawns unconfined (tests and contexts that bind no sandbox).
+    pub fn with_sandbox(
+        mut self,
+        manager: Arc<dyn crate::domain::ports::SandboxManager>,
+        policy: crate::domain::models::SandboxPolicy,
+    ) -> Self {
+        self.sandbox = Some((manager, policy));
+        self
     }
 
     fn attempts(&self) -> MutexGuard<'_, Vec<(u64, Arc<ChildHandle>)>> {
@@ -566,6 +586,22 @@ impl McpClientAdapter {
                     cmd.env(k, v);
                 }
                 cmd.kill_on_drop(true);
+                // Story 23.1 (AC9): the server leads its own process group, so
+                // shutdown can stop wrapper descendants with the leader
+                // (`ChildHandle::kill_group`), and runs under the session
+                // ceiling policy; everything it starts inherits the domain. A
+                // confinement failure fails the start: never spawned unconfined.
+                #[cfg(unix)]
+                cmd.process_group(0);
+                if let Some((manager, policy)) = &self.sandbox
+                    && let Err(e) = manager.apply(&mut cmd, policy).await
+                {
+                    let reason =
+                        format!("MCP server '{}' could not be sandboxed: {e}", self.spec.id);
+                    self.record_failure_class(FailureClass::Generic);
+                    self.handle_connection_failure(&reason);
+                    return Err(McpError::SpawnFailed(reason));
+                }
 
                 // 17.5a (ADR-17-5-01 D1 amendment): the byte-level transport shim.
                 // rmcp's untagged `ServerResult` decode would silently parse
@@ -777,12 +813,26 @@ impl McpClientAdapter {
         {
             let mut running_guard = self.running.lock().await;
             if let Some(mut running) = running_guard.take() {
+                // Story 23.1 (AC9): stop the server's process group while its
+                // leader is alive and holds the group id; after the close the
+                // leader is gone and its wrapper descendants could no longer be
+                // reached safely.
+                let generation = self.running_generation.load(Ordering::SeqCst);
+                let leader = self
+                    .attempts()
+                    .iter()
+                    .find(|(existing, _)| *existing == generation)
+                    .map(|(_, handle)| Arc::clone(handle));
+                if let Some(leader) = leader {
+                    leader.kill_group();
+                }
                 let _ = running.close().await;
                 // The transport's close waited for (and if need be killed) THIS
                 // service's direct child; stdin close delivers no EOF
                 // (DF-C-3-MCP-STDIN-SHUTDOWN-NO-EOF). Confirm the child is gone
                 // through its pidfd and forget the attempt only then. Descendants
-                // of a wrapper are NOT stopped (DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED).
+                // that left the group (`setsid`) are not stopped
+                // (DF-23-1-MCP-SETSID-ESCAPEES-NOT-STOPPED).
                 // A newer attempt's child (a retry spawned after this service was
                 // stored) stays registered (C3-R2-02).
                 let closed = self.running_generation.swap(0, Ordering::SeqCst);

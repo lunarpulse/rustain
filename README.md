@@ -472,7 +472,9 @@ removes prompts, not the bound):
   6.7+);
 - not gain privileges: `sudo` and other setuid programs fail.
 
-Plan mode runs commands read-only with TCP blocked.
+Plan mode runs commands read-only with TCP blocked. MCP stdio servers run under
+the session ceiling (the writable set, network on) whatever the mode, each in its
+own process group, which shutdown stops while the server is alive.
 
 ```toml
 [sandbox]
@@ -568,7 +570,8 @@ Layer  3: A2A            Agent-to-agent delegation (localhost/LAN/internet)
   Claude Code, Codex, Gemini CLI, or Cursor works in Rustain without
   modification. Discovery paths: `.agents/skills/`, `.rustain/skills/`,
   `.claude/skills/`, `~/.agents/skills/`.
-- **MCP** extends the tool set via sandboxed server processes and remote
+- **MCP** extends the tool set via server processes (confined by the
+  [sandbox](#sandbox) on Linux) and remote
   servers. Supports **stdio** and **Streamable HTTP**; legacy SSE is rejected
   per ADR-06-08 (the MCP spec deprecated it on 2025-03-26) — use a proxy such as
   `mcp-proxy`, or a server that speaks Streamable HTTP.

@@ -31,6 +31,9 @@ mod conformance_mcp_profile_swap;
 #[path = "../conformance_mcp_shutdown_reap.rs"]
 mod conformance_mcp_shutdown_reap;
 
+#[path = "../conformance_23_1_mcp_sandbox.rs"]
+mod conformance_23_1_mcp_sandbox;
+
 #[path = "../conformance_mcp_status_panel.rs"]
 mod conformance_mcp_status_panel;
 

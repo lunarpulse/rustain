@@ -1082,6 +1082,12 @@ pub struct SandboxCheck {
     pub adapter: String,
     /// The resolved session, or the startup error `[sandbox]` produces.
     pub outcome: Result<crate::domain::models::SandboxSession, String>,
+    /// The resolved manager and MCP ceiling policy, so `doctor`'s MCP probe
+    /// spawns servers as a session does (`None`: unresolved).
+    pub mcp: Option<(
+        std::sync::Arc<dyn crate::domain::ports::SandboxManager>,
+        crate::domain::models::SandboxPolicy,
+    )>,
 }
 
 #[async_trait]
@@ -1562,6 +1568,12 @@ mod mcp_check {
     pub struct McpReachabilityCheck {
         pub servers: Vec<McpServerSpec>,
         pub per_server_budget: std::time::Duration,
+        /// Story 23.1 (AC9): the probe spawns servers like a session does,
+        /// under the session ceiling (`None`: unconfined).
+        pub sandbox: Option<(
+            std::sync::Arc<dyn crate::domain::ports::SandboxManager>,
+            crate::domain::models::SandboxPolicy,
+        )>,
     }
 
     #[async_trait]
@@ -1597,13 +1609,17 @@ mod mcp_check {
                 let per_budget = budget;
                 let server_id = spec.id.clone();
                 let limit = concurrency_limit.clone();
+                let sandbox = self.sandbox.clone();
                 join_set.spawn(async move {
                     let _permit = limit.acquire().await.expect("semaphore never closed");
                     // Doctor path: adapter is NOT Arc-wrapped; self_weak is None.
                     // This means ClientHandler callbacks get a dangling weak ref.
                     // Acceptable for doctor (no callbacks needed), but fragile.
                     // P4: If callbacks become needed, wrap in Arc + call set_self_weak.
-                    let adapter = McpClientAdapter::new(spec, None);
+                    let mut adapter = McpClientAdapter::new(spec, None);
+                    if let Some((manager, policy)) = sandbox {
+                        adapter = adapter.with_sandbox(manager, policy);
+                    }
                     let res = tokio::time::timeout(per_budget, adapter.connect()).await;
                     let (connect_result, tool_count) = match res {
                         Ok(inner) => {
@@ -1804,6 +1820,7 @@ mod sandbox_check_tests {
         SandboxCheck {
             adapter: "auto".into(),
             outcome,
+            mcp: None,
         }
         .run()
         .await

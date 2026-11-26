@@ -569,10 +569,12 @@ admission, then disconnects every client concurrently within 3 s (the transport
 close waits up to 2 s, then kills the direct child; closing stdin delivers no EOF,
 a known pre-existing limitation). Every still-live child is then SIGKILLed through
 its pidfd (Linux 5.3+; never a bare pid) and observed to exit, concurrently under
-one shared ≤ 1 s deadline. Round 5 reduced the shutdown scope: **descendants are
-NOT stopped**. Only the direct child is targeted; descendants of wrapper launchers
-(`sh -c`, `npx`) and processes that call `setsid` remain outside the guarantee
-(`DF-C-3-MCP-WRAPPER-DESCENDANTS-NOT-STOPPED`, owner 23-1).
+one shared ≤ 1 s deadline. Since Story 23.1 each server leads its own process group
+and runs under the sandbox ceiling (see "Sandbox" below): the group, wrapper
+descendants (`sh -c`, `npx`) included, is SIGKILLed first while the server is still
+alive. Processes that call `setsid`, and descendants orphaned after the server
+exited, are not stopped; they stay confined
+(`DF-23-1-MCP-SETSID-ESCAPEES-NOT-STOPPED`, trigger 23-10).
 A child that cannot be stopped (no pidfd, a failed syscall, other platforms) is
 logged (`could NOT be stopped`), stays tracked, and PID-file removal proceeds
 best-effort; what then happens to it is only what its owner does (`kill_on_drop`

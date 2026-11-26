@@ -91,6 +91,11 @@ fn build_check_list(
     )],
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
     policy: PolicyCheckContext,
+    // Story 23.1 (AC9): manager and ceiling for the MCP probe's spawns.
+    mcp_sandbox: Option<(
+        std::sync::Arc<dyn crate::domain::ports::SandboxManager>,
+        crate::domain::models::SandboxPolicy,
+    )>,
 ) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = vec![
         Box::new(ApiKeyCheck {
@@ -136,7 +141,10 @@ fn build_check_list(
     checks.push(Box::new(McpReachabilityCheck {
         servers: mcp_servers,
         per_server_budget: checks::MCP_PER_SERVER_BUDGET,
+        sandbox: mcp_sandbox,
     }));
+    #[cfg(not(feature = "mcp"))]
+    let _ = mcp_sandbox;
     #[cfg(feature = "self-update")]
     checks.push(Box::new(checks::UpdateHealthCheck));
     // Story 18.3b (AC6 / NFR66) — the interaction-policy explainer. Appended, not
@@ -256,6 +264,7 @@ pub async fn run_doctor(
             workspace: None,
             peers: a2a_peers,
         },
+        sandbox.mcp.clone(),
     );
     // Story 23.1 AC8 — the sandbox tuple, resolved by the caller from `[sandbox]`.
     checks.push(Box::new(sandbox));
@@ -730,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_build_check_list_default() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
         assert!(checks.len() >= 8, "Should have at least 8 checks");
         // Verify names
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
@@ -751,8 +760,9 @@ mod tests {
 
     #[test]
     fn test_build_check_list_with_terminal_detail() {
-        let checks_without = build_check_list(false, &[], vec![], PolicyCheckContext::default());
-        let checks_with = build_check_list(true, &[], vec![], PolicyCheckContext::default());
+        let checks_without =
+            build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
+        let checks_with = build_check_list(true, &[], vec![], PolicyCheckContext::default(), None);
         assert_eq!(
             checks_with.len(),
             checks_without.len() + 1,
@@ -766,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_mcp_check_present_in_build_check_list() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             names.contains(&"MCP server reachability"),
@@ -778,7 +788,7 @@ mod tests {
     #[cfg(feature = "self-update")]
     #[tokio::test]
     async fn test_update_health_is_info_tier_and_present() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             names.contains(&"Update health"),
@@ -805,7 +815,7 @@ mod tests {
     #[cfg(not(feature = "self-update"))]
     #[test]
     fn test_no_update_health_without_feature() {
-        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default());
+        let checks = build_check_list(false, &[], vec![], PolicyCheckContext::default(), None);
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
             !names
@@ -952,6 +962,7 @@ mod tests {
                 workspace: Some(workspace),
                 peers: Vec::new(),
             },
+            None,
         );
         let index = checks
             .iter()
@@ -1071,7 +1082,7 @@ mod tests {
     /// changed nothing about them (the framework's extensibility promise).
     #[tokio::test]
     async fn ac6_only_the_policy_check_publishes_machine_detail() {
-        let checks = build_check_list(false, &[], Vec::new(), PolicyCheckContext::default());
+        let checks = build_check_list(false, &[], Vec::new(), PolicyCheckContext::default(), None);
         for check in &checks {
             if check.name() == "Interaction policy" {
                 continue;
