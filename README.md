@@ -470,11 +470,20 @@ removes prompts, not the bound):
   `.package-cache` directories, `~/.npm`) and `[sandbox].writable_roots`;
 - open TCP connections, unless `[sandbox].network = false` (Landlock ABI 4+, Linux
   6.7+);
-- not gain privileges: `sudo` and other setuid programs fail.
+- not gain privileges: `sudo` and other setuid programs fail;
+- not reach the terminal: each command runs in its own session with no
+  controlling terminal, and from Landlock ABI 5 (Linux 6.10) device ioctls on files
+  it opens are denied;
+- not signal processes outside the sandbox, nor connect to abstract Unix sockets
+  (Landlock ABI 6, Linux 6.12; the notice says when the kernel is older).
 
-Plan mode runs commands read-only with TCP blocked. MCP stdio servers run under
+Plan mode runs commands read-only, and from Landlock ABI 4 with TCP blocked; on
+ABI 3 the notice says commands keep network access. MCP stdio servers run under
 the session ceiling (the writable set, network on) whatever the mode, each in its
-own process group, which shutdown stops while the server is alive.
+own session and process group, which shutdown stops while the server is alive.
+rustain's own `git` runs on trees a command could write (subagent scratch copies,
+merge-back into the workspace) are confined the same way and never run hooks or
+fsmonitor commands.
 
 ```toml
 [sandbox]
@@ -486,16 +495,27 @@ deny_read = ["~/.aws"]    # paths commands cannot read
 
 `--sandbox-adapter auto|landlock|noop` overrides `adapter` for one run.
 
+**Where `[sandbox]` may be set.** The built-in default, your user config
+(`~/.config/rustain/config.toml`), `RUSTAIN_SANDBOX__*` variables, the command line
+and `-c` decide it. A checkout's own files (`.rustain/config.toml`,
+`.claude/rustain-settings.json`) and the active profile can only tighten it — a
+stronger `adapter`, `network = false`, extra `deny_read`. Anything weaker they set
+(`adapter = "noop"`, `network = true`, `writable_roots`) is ignored, and the notice
+names the file and key at warning level: a sandboxed command can write the
+workspace, so it must not be able to switch the next session's sandbox off.
+
 **Notices.** The sandbox status reaches you before the first tool call: a notice
 in the TUI, one stderr line for `rustain ask`, a stderr line for `rustain acp`, a
-daemon log line, and a `Sandbox` row in `rustain doctor`. The YOLO status reads
-"commands confined to the workspace" or "NO SANDBOX".
+daemon log line, and a `Sandbox` row in `rustain doctor`. It lists the extra
+writable roots, which layer chose the adapter, and any ignored setting. The YOLO
+status reads "YOLO confined to the workspace" or "YOLO NO SANDBOX".
 
 | Situation | Normal, AutoEdit, Plan | YOLO |
 |---|---|---|
 | Linux, Landlock ABI 3+ | confined | confined |
+| A writable root is `/`, your home directory or a parent of it (for example, rustain started in `~`) | confined, with a warning that writes are not bounded | refused |
 | Linux, `auto`, no usable Landlock | runs unconfined, with a warning | refused: `/mode yolo` keeps the current mode, `ask --yolo` exits non-zero |
-| `adapter = "landlock"`, no usable Landlock | startup error | startup error |
+| `adapter = "landlock"`, no usable Landlock | startup error (`rustain doctor` starts no MCP server) | startup error |
 | `adapter = "noop"` | unconfined, with a notice | allowed, "NO SANDBOX" |
 | macOS, Windows | unconfined, with a notice | allowed, with the notice |
 
@@ -508,11 +528,14 @@ install`, `npm -g`, `pip install --user`) fail until you add a root or switch th
 sandbox off.
 
 **Residual risks.** Reads outside the deny set (`~/.ssh`, `~/.aws`, …) are allowed
-and, with the network on, can leave the machine. Inside the workspace everything is
-in reach, including `.git` (hooks run later, unconfined) and build scripts: the
-workspace is the blast radius. Network control covers TCP only (not UDP or Unix
-sockets). A denied path inside a writable root cannot be protected; the notice
-lists it.
+and, with the network on, can leave the machine. Services reachable over Unix
+socket files — the session D-Bus (`systemd-run --user`), `tmux`, X11, `docker.sock`,
+the rustain daemon socket — act outside the sandbox on a command's behalf. Inside
+the workspace everything is in reach, including `.git` (hooks run later, when you
+run git yourself) and build scripts: the workspace is the blast radius. Network
+control covers TCP only (not UDP). A denied path inside a writable root, or a
+writable root inside a denied directory, stays readable; the notice lists it, and
+warns when rustain's credential store is one of them.
 
 ## Profile system
 
