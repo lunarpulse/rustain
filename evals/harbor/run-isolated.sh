@@ -4,6 +4,7 @@
 # task images and the task containers live in that container and go with it.
 #
 # usage: run-isolated.sh <static-rustain-binary> <jobs-dir> <run-id>
+#            [--accept-unknown-spend <run-id>/<slot-key>,...]
 #
 # Needs Docker and the provider keys the run plan's treatments name
 # (`key_env` in eval4/run-plan.json; DEEPSEEK_API_KEY for both treatments).
@@ -11,14 +12,21 @@
 # Docker daemon cannot run otherwise.
 set -uo pipefail
 
-usage="usage: run-isolated.sh <static-rustain-binary> <jobs-dir> <run-id>"
-[ "$#" -eq 3 ] || { echo "$usage" >&2; exit 2; }
+usage="usage: run-isolated.sh <static-rustain-binary> <jobs-dir> <run-id> [--accept-unknown-spend <run-id>/<slot-key>,...]"
+case "$#" in
+    3) ;;
+    5) [ "$4" = --accept-unknown-spend ] || { echo "$usage" >&2; exit 2; } ;;
+    *) echo "$usage" >&2; exit 2 ;;
+esac
 binary="$1"
 jobs_dir="$2"
 run_id="$3"
+override=("${@:4}")
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-image="docker:29.9.3-dind"
+# By digest: the tag's OCI index digest, read from Docker Hub's registry
+# (HEAD /v2/library/docker/manifests/29.9.3-dind) and tag API on 2026-11-26.
+image="docker:29.9.3-dind@sha256:7bf70dcb85c822e3fa6f2d332143e474b99147b9d7b39102b0cfe8b04a7dd61b"
 name="rustain-harbor-eval-$$"
 mapfile -t key_vars < <(
     sed -n 's/.*"key_env": *"\([A-Z0-9_]*\)".*/\1/p' "$here/eval4/run-plan.json" | sort -u
@@ -69,4 +77,5 @@ docker run --rm --privileged --init --name "$name" \
     --volume "$binary:$binary:ro" \
     --volume "$jobs_dir:$jobs_dir" \
     --entrypoint sh \
-    "$image" "$here/dind-entry.sh" "$binary" "$jobs_dir" "$run_id"
+    "$image" "$here/dind-entry.sh" "$binary" "$jobs_dir" "$run_id" \
+    ${override[@]+"${override[@]}"}

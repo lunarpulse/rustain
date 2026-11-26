@@ -61,6 +61,31 @@ class RunSummary:
     limit_reason: str | None = None
     error: str | None = None
     by_model: dict[str, Usage] = field(default_factory=dict)
+    # A `turn_complete` event was written: the turn ended, it was not cut off.
+    turn_completed: bool = False
+    # An `error` event was written, with or without a message.
+    errored: bool = False
+
+    @property
+    def cost_incomplete_reason(self) -> str | None:
+        """Why the calls in the stream may not be every call the turn paid
+        for, or None when they are.
+
+        The stream shows usage for display; it does not prove that a call
+        without a `call_usage` line cost nothing. Only a turn that reached
+        `turn_complete` without an error, and either finished normally or
+        stopped at a settled call boundary (`max_cost`, `max_turns`,
+        `daily_budget`), has all its calls in the stream. `max_duration`
+        cancels an in-flight call, `accounting_error` means a call's usage
+        could not be proved, and any other reason is not known to be complete.
+        """
+        if not self.turn_completed:
+            return "the turn did not complete (no turn_complete event)"
+        if self.errored:
+            return "the turn ended with an error"
+        if self.limit_reason not in (None, "max_cost", "max_turns", "daily_budget"):
+            return f"the turn stopped on {self.limit_reason}"
+        return None
 
     @property
     def total(self) -> Usage:
@@ -129,6 +154,8 @@ def summarize(lines: Iterable[str]) -> RunSummary:
     deny_count: int | None = None
     limit_reason: str | None = None
     error: str | None = None
+    turn_completed = False
+    errored = False
 
     for line in lines:
         try:
@@ -147,10 +174,12 @@ def summarize(lines: Iterable[str]) -> RunSummary:
         elif kind == "tool_use":
             tool_calls += 1
         elif kind == "turn_complete":
+            turn_completed = True
             stop_reason = event.get("stop_reason")
             deny_count = event.get("deny_count")
             limit_reason = event.get("limit_reason")
         elif kind == "error":
+            errored = True
             error = (event.get("error") or {}).get("message")
 
     return RunSummary(
@@ -162,6 +191,8 @@ def summarize(lines: Iterable[str]) -> RunSummary:
         limit_reason=limit_reason,
         error=error,
         by_model=by_model,
+        turn_completed=turn_completed,
+        errored=errored,
     )
 
 

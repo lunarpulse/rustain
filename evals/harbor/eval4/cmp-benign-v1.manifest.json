@@ -13,6 +13,7 @@
     "seed": "7771288275531422576",
     "frozen": "owner approval 3, 2026-11-26 (docs/decisions.md D-39(g))"
   },
+  "license_label": "task licences undeclared",
   "license_note": "task licences undeclared in the package and the registry; scores are published without redistributing task content",
   "verifier_files_sha256_recipe": "SHA-256 over the sorted lines `path\\0sha256(file)\\n` of the package's tests/ files",
   "tasks": [

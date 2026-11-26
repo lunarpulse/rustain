@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from rustain_harbor import prices
+from rustain_harbor.spend import ledger_name
 
 HARNESS = Path(__file__).resolve().parents[1]
 PLAN = HARNESS / "eval4" / "run-plan.json"
@@ -199,6 +200,18 @@ def build_header(
     ]
     keys = "".join(f"{slot.key}\n" for slot in slots)
     jobs_dir = jobs_dir.resolve()
+    images = {}
+    for task in manifest["tasks"]:
+        repository, _, tag = task["docker_image"].rpartition(":")
+        if not repository or "/" in tag or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", task["image_digest"]
+        ):
+            raise PlanError(f"{task['name']}: image must be <repo>:<tag> with a sha256 digest")
+        images[task["name"]] = {
+            "tag": task["docker_image"],
+            "digest": task["image_digest"],
+            "pinned": f"{repository}@{task['image_digest']}",
+        }
 
     return {
         "schema": HEADER_SCHEMA,
@@ -214,6 +227,8 @@ def build_header(
             "dataset": manifest["dataset"],
             "dataset_revision": manifest["dataset_revision"],
             "receipt_sha256": manifest["receipt"]["selected_tsv_sha256"],
+            "license_label": manifest["license_label"],
+            "license_note": manifest["license_note"],
         },
         "treatments": treatments,
         "treatment_kind": plan["treatment_kind"],
@@ -222,6 +237,11 @@ def build_header(
         "slots": [slot.__dict__ for slot in slots],
         "slot_keys_sha256": hashlib.sha256(keys.encode()).hexdigest(),
         "concurrency": 1,
+        # Pulled by digest and tagged before the first slot; the tag's image
+        # id is checked before and after every slot (Harbor runs the task's
+        # tag and pulls it only when missing).
+        "task_images": images,
+        "docker": "docker",
         "task_timeouts_sec": {
             task["name"]: {
                 "agent": task["agent_timeout_sec"],
@@ -244,13 +264,17 @@ def build_header(
             "sha256": table.sha256,
         },
         "spend": {
+            "plan_id": plan["id"],
+            "ledger_file": ledger_name(plan["id"]),
             "cap_usd": spend["cap_usd"],
             "per_slot_max_cost_usd": spend["per_slot_max_cost_usd"],
             "guard": (
-                "before each slot: stop when the known cost of the finished slots "
-                "reaches the cap or any finished slot's cost is unknown; the slot "
-                "gets --max-cost min(cap - known cost, per-slot ceiling), floored "
-                "to 0.0001 USD"
+                "one cap for the run plan across every run id, from the spend "
+                "ledger: before each slot, stop when the plan's known cost plus "
+                "accepted unknown debits reaches the cap, or when any started slot "
+                "of the plan has no known cost and was not accepted with "
+                "--accept-unknown-spend; the slot gets --max-cost min(cap - spent, "
+                "per-slot ceiling), floored to 0.0001 USD"
             ),
         },
         "limits": plan["limits"],

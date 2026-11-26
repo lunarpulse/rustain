@@ -337,7 +337,11 @@ def test_schema_1_3_streams_are_disjoint_for_every_provider(tmp_path):
         trial.mkdir()
         agent = make_agent(trial)
         write_stream(
-            agent, [call_usage(input_tokens, 3959, cache_read=2176, schema=schema)]
+            agent,
+            [
+                call_usage(input_tokens, 3959, cache_read=2176, schema=schema),
+                {"schema_version": schema, "type": "turn_complete", "stop_reason": "end_turn"},
+            ],
         )
         context = AgentContext()
 
@@ -347,3 +351,61 @@ def test_schema_1_3_streams_are_disjoint_for_every_provider(tmp_path):
         assert context.metadata["first_call_input_tokens"] == 3465, schema
     assert costs["1.3"] == pytest.approx(0.005150556, abs=1e-12)
     assert costs["1.2"] == pytest.approx(0.005150556, abs=1e-12)
+
+
+def test_unproved_usage_leaves_the_cost_unknown_and_keeps_the_observed_subtotal(tmp_path):
+    # rustain stops with accounting_error when a call's usage cannot be
+    # proved; the stream still shows the earlier call. That call's price is
+    # not the turn's cost.
+    agent = make_agent(tmp_path)
+    write_stream(
+        agent,
+        [
+            call_usage(1000, 10, schema="1.4"),
+            {
+                "schema_version": "1.4",
+                "type": "turn_complete",
+                "stop_reason": "cancelled",
+                "limit_reason": "accounting_error",
+            },
+        ],
+    )
+    context = AgentContext()
+
+    agent.populate_context_post_run(context)
+
+    assert context.cost_usd is None
+    assert context.metadata["cost_complete"] is False
+    assert context.metadata["cost_incomplete_reason"] == "the turn stopped on accounting_error"
+    assert context.metadata["observed_cost_usd"] == pytest.approx(1000 * 0.30e-6 + 10 * 1.20e-6)
+    assert context.model_usage["deepseek-v4-flash"].cost_usd is None
+    assert context.n_input_tokens == 1000
+
+
+def test_a_turn_cut_off_after_priced_calls_has_no_known_cost(tmp_path):
+    # A Harbor timeout kills rustain mid-call: no turn_complete, and the
+    # in-flight call's usage is in no line.
+    agent = make_agent(tmp_path)
+    write_stream(agent, [call_usage(1000, 10, schema="1.3"), call_usage(2000, 20, schema="1.3")])
+    context = AgentContext()
+
+    agent.populate_context_post_run(context)
+
+    assert context.cost_usd is None
+    assert context.metadata["cost_complete"] is False
+    assert "did not complete" in context.metadata["cost_incomplete_reason"]
+
+
+@pytest.mark.parametrize("ending", [
+    {"type": "error", "error": {"message": "turn failed: rate limit"}},
+    {"type": "turn_complete", "stop_reason": "cancelled", "limit_reason": "max_duration"},
+])
+def test_errors_and_duration_stops_leave_the_cost_unknown(tmp_path, ending):
+    agent = make_agent(tmp_path)
+    write_stream(agent, [call_usage(1000, 10, schema="1.4"), {"schema_version": "1.4", **ending}])
+    context = AgentContext()
+
+    agent.populate_context_post_run(context)
+
+    assert context.cost_usd is None
+    assert context.metadata["cost_complete"] is False

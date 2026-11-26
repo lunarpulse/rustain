@@ -214,3 +214,90 @@ def test_a_recorded_argv_the_header_does_not_give_is_refused(harness):
 
     assert result.returncode == 1
     assert f"argv: {first['slot']} recorded an argv the header does not give" in result.stderr
+
+
+def test_printed_results_carry_the_publication_labels_and_binary_identity(harness):
+    assert harness.run().returncode == 0
+
+    result = harness.aggregate()
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(harness.plan_path.read_text())
+    lines = result.stdout.splitlines()
+    for label in (
+        "task licences: task licences undeclared",
+        "sandbox: sandbox off; container-isolated",
+        f"binary: {plan['product']['binary']}; sha256 {plan['product']['binary_sha256']}; "
+        f"rustain 0.6.0 commit {plan['product']['commit']}",
+    ):
+        # At the head and the foot of the printed table.
+        assert lines.count(label) == 2, label
+    results = harness.results()
+    assert "task licences: task licences undeclared" in results["labels"]
+    assert results["comparison_set"]["license_label"] == "task licences undeclared"
+    assert results["comparison_set"]["license_note"].startswith("task licences undeclared")
+
+
+@pytest.mark.parametrize("spec", [{"ref": None}, {"no_task_id": True}])
+def test_a_result_without_its_package_digest_is_refused(harness, spec):
+    harness.spec(jobs={job_suffix("build-pmars", "v4-flash", 2): spec})
+
+    result = harness.run()
+
+    assert result.returncode == 1
+    assert f"unidentifiable: {SET}/build-pmars/v4-flash/2 names no package digest" in (
+        result.stderr
+    )
+    assert not (harness.run_dir() / "results.json").exists()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"agent_result": [1]},
+        {"agent_result": {"metadata": [1]}},
+        {"verifier_result": {"rewards": [1]}},
+        {"agent_result": {"cost_usd": "0.05"}},
+        {"exception_info": "boom"},
+    ],
+)
+def test_malformed_result_after_a_good_aggregation_leaves_no_stale_results(harness, raw):
+    assert harness.run().returncode == 0
+    assert (harness.run_dir() / "results.json").is_file()
+    path = trial_result_path(harness, "circuit-fibsqrt", "v4-pro", 2)
+    result = json.loads(path.read_text())
+    result.update(raw)
+    path.write_text(json.dumps(result))
+
+    refused = harness.aggregate()
+
+    assert refused.returncode == 1
+    assert f"unidentifiable: {SET}/circuit-fibsqrt/v4-pro/2" in refused.stderr
+    assert "Traceback" not in refused.stderr
+    assert not (harness.run_dir() / "results.json").exists()
+
+
+def test_malformed_ledger_event_after_a_good_aggregation_leaves_no_stale_results(harness):
+    assert harness.run().returncode == 0
+    ledger = harness.run_dir() / "ledger.jsonl"
+    ledger.write_text(ledger.read_text() + "[1]\n")
+
+    refused = harness.aggregate()
+
+    assert refused.returncode == 1
+    assert "is not a ledger event" in refused.stderr
+    assert "Traceback" not in refused.stderr
+    assert not (harness.run_dir() / "results.json").exists()
+
+
+def test_a_header_that_is_json_but_not_an_object_is_refused(harness):
+    assert harness.run().returncode == 0
+    header = harness.run_dir() / "header.json"
+    header.chmod(0o644)
+    header.write_text("[]\n")
+
+    refused = harness.aggregate()
+
+    assert refused.returncode == 1
+    assert "Traceback" not in refused.stderr
+    assert not (harness.run_dir() / "results.json").exists()

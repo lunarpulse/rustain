@@ -82,6 +82,8 @@ for index in range(spec.get("results", 1)):
                 "first_call_input_tokens": 7000,
                 "limit_reason": spec.get("limit_reason"),
                 "unpriced_models": spec.get("unpriced", []),
+                "cost_complete": spec.get("cost_complete", True),
+                "observed_cost_usd": spec.get("observed", spec.get("cost", 0.05)),
             },
         },
         "agent_execution": {
@@ -89,8 +91,51 @@ for index in range(spec.get("results", 1)):
             "finished_at": "2026-11-27T10:01:30+00:00",
         },
     }
+    if spec.get("no_task_id"):
+        del result["task_id"]
+    result.update(spec.get("raw", {}))
     (trial / "result.json").write_text(json.dumps(result))
+if spec.get("move_tag"):
+    # Something re-pulls the task's tag to other content during the job.
+    state_path = Path(os.environ["DOCKER_DOUBLE_STATE"])
+    state = json.loads(state_path.read_text())
+    state["refs"][f"alexgshaw/{short}:20251031"] = "sha256:moved-image"
+    state_path.write_text(json.dumps(state))
 sys.exit(spec.get("exit", 0))
+'''
+
+# `docker pull/tag/image inspect` over a JSON image store; never a daemon.
+DOCKER_DOUBLE = r'''
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with open(os.environ["DOCKER_DOUBLE_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+state_path = Path(os.environ["DOCKER_DOUBLE_STATE"])
+state = json.loads(state_path.read_text()) if state_path.exists() else {"refs": {}, "digests": {}}
+if args[0] == "pull":
+    ref = args[1]
+    if ref in os.environ.get("DOCKER_DOUBLE_FAIL", "").split(","):
+        print("pull access denied", file=sys.stderr)
+        sys.exit(1)
+    image = "sha256:img-" + ref.rpartition("@sha256:")[2][:12]
+    state["refs"][ref] = image
+    state["digests"].setdefault(image, []).append(ref)
+elif args[0] == "tag":
+    if args[1] not in state["refs"]:
+        sys.exit(1)
+    state["refs"][args[2]] = state["refs"][args[1]]
+elif args[:2] == ["image", "inspect"]:
+    fmt, ref = args[3], args[4]
+    image = state["refs"].get(ref)
+    if image is None:
+        print(f"No such image: {ref}", file=sys.stderr)
+        sys.exit(1)
+    print(image if fmt == "{{.Id}}" else json.dumps(state["digests"].get(image, [])))
+else:
+    sys.exit(2)
+state_path.write_text(json.dumps(state))
 '''
 
 SITECUSTOMIZE = r'''
@@ -125,6 +170,9 @@ class Harness:
         self.harbor_log = self.doubles / "harbor-argv"
         self.provider_log = self.doubles / "provider.log"
         self.uv_log = self.doubles / "uv.argv"
+        self.docker_log = self.doubles / "docker.log"
+        self.docker_state = self.doubles / "docker-state.json"
+        self.docker_fail = ""
 
     @property
     def plan_path(self) -> Path:
@@ -145,6 +193,9 @@ class Harness:
             "HARBOR_DOUBLE_LOG": str(self.harbor_log),
             "HARBOR_DOUBLE_SPEC": str(self.spec_file),
             "PROVIDER_DOUBLE_LOG": str(self.provider_log),
+            "DOCKER_DOUBLE_LOG": str(self.docker_log),
+            "DOCKER_DOUBLE_STATE": str(self.docker_state),
+            "DOCKER_DOUBLE_FAIL": self.docker_fail,
         }
         if key is not None:
             env["DEEPSEEK_API_KEY"] = key
@@ -159,8 +210,17 @@ class Harness:
             timeout=600,
         )
 
-    def run(self, run_id: str = "run-0001", **kwargs) -> subprocess.CompletedProcess:
-        return self.launcher("run", str(self.binary), str(self.jobs), run_id, **kwargs)
+    def run(self, run_id: str = "run-0001", *extra: str, **kwargs) -> subprocess.CompletedProcess:
+        return self.launcher("run", str(self.binary), str(self.jobs), run_id, *extra, **kwargs)
+
+    def spend_ledger(self) -> list[dict]:
+        path = self.jobs / "eval4-spend-eval-4-cmp-benign-v1.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def docker_calls(self) -> list[list[str]]:
+        if not self.docker_log.exists():
+            return []
+        return [json.loads(line) for line in self.docker_log.read_text().splitlines()]
 
     def aggregate(self, run_id: str = "run-0001") -> subprocess.CompletedProcess:
         return self.launcher("aggregate", str(self.jobs), run_id)
@@ -211,6 +271,10 @@ def harness(tmp_path) -> Harness:
     site.mkdir()
     (site / "sitecustomize.py").write_text(SITECUSTOMIZE)
     (h.doubles / "harbor.py").write_text(HARBOR_DOUBLE)
+    (h.doubles / "docker.py").write_text(DOCKER_DOUBLE)
+    _write_executable(
+        bin_dir / "docker", f'#!/bin/sh\nexec "{sys.executable}" "{h.doubles / "docker.py"}" "$@"\n'
+    )
     os.symlink(sys.executable, bin_dir / "python3")
     _write_executable(
         bin_dir / "uv",

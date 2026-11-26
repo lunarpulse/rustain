@@ -1,10 +1,13 @@
 """The eval-4 launcher through its front door, `run-baseline.sh`, with
-process-boundary doubles for uv, Harbor and the provider (conftest.py)."""
+process-boundary doubles for uv, Harbor, Docker and the provider (conftest.py)."""
 
+import fcntl
 import json
 import subprocess
 import sys
 import tomllib
+
+import pytest
 
 from conftest import HARNESS, sha256
 
@@ -175,7 +178,8 @@ def test_spend_guard_stops_after_a_slot_whose_cost_is_unknown(harness):
     result = harness.run()
 
     assert result.returncode == 3
-    assert f"{expected_keys()[1]} cost is usage_unknown" in result.stderr
+    assert f"run-0001/{expected_keys()[1]} has no known cost" in result.stderr
+    assert harness.spend_ledger()[-1]["cost_status"] == "usage_unknown"
     assert len(harness.harbor_calls()) == 2
 
 
@@ -186,8 +190,172 @@ def test_spend_guard_stops_after_a_slot_without_a_result(harness):
     result = harness.run()
 
     assert result.returncode == 3
-    assert f"{expected_keys()[0]} cost is missing" in result.stderr
+    assert f"run-0001/{expected_keys()[0]} has no known cost" in result.stderr
     assert len(harness.harbor_calls()) == 1
+
+
+def first_job(attempt: int = 1, index: int = 0) -> str:
+    _, task, treatment, _ = expected_keys()[index].split("/")
+    return f"--{SET}--{task}--{treatment}--a{attempt}"
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # One priced call, then a call rustain could not prove: accounting_error.
+        {
+            "cost": 0.05,
+            "cost_complete": False,
+            "limit_reason": "accounting_error",
+            "exception": "NonZeroAgentExitCodeError",
+        },
+        # A Harbor timeout after calls that reported usage.
+        {"cost": None, "observed": 0.03, "cost_complete": False, "exception": "AgentTimeoutError"},
+        # A result from an adapter that does not say its cost is complete.
+        {"cost": 0.05, "cost_complete": None},
+    ],
+)
+def test_partial_or_unproved_usage_is_never_a_known_cost(harness, spec):
+    harness.spec(jobs={first_job(): spec})
+
+    result = harness.run()
+
+    assert result.returncode == 3
+    assert f"run-0001/{expected_keys()[0]} has no known cost" in result.stderr
+    assert len(harness.harbor_calls()) == 1
+    finished = [e for e in harness.spend_ledger() if e["event"] == "slot_finished"]
+    assert finished[0]["cost_status"] == "incomplete" and finished[0]["cost_usd"] is None
+
+
+def test_task_images_are_pulled_by_digest_and_checked_around_every_slot(harness):
+    manifest = json.loads((HARNESS / "eval4" / "cmp-benign-v1.manifest.json").read_text())
+
+    assert harness.run().returncode == 0
+    calls = harness.docker_calls()
+    pulls = [call[1] for call in calls if call[0] == "pull"]
+    assert pulls == [
+        f"{task['docker_image'].rpartition(':')[0]}@{task['image_digest']}"
+        for task in manifest["tasks"]
+    ]
+    tags = [call[1:] for call in calls if call[0] == "tag"]
+    assert [tag[1] for tag in tags] == [task["docker_image"] for task in manifest["tasks"]]
+    header = harness.header()
+    assert header["task_images"]["build-pmars"]["pinned"] == (
+        "alexgshaw/build-pmars@" + manifest["tasks"][4]["image_digest"]
+    )
+    pinned = next(e for e in harness.ledger() if e["event"] == "images_pinned")["image_ids"]
+    for event in harness.ledger():
+        if event["event"] == "slot_started":
+            task = event["slot"].split("/")[1]
+            assert event["image_id_before"] == pinned[task]
+        if event["event"] == "slot_finished":
+            task = event["slot"].split("/")[1]
+            assert event["image_id_after"] == pinned[task]
+
+
+def test_a_task_tag_that_moves_during_a_slot_stops_the_run_and_blocks_totals(harness):
+    harness.spec(jobs={first_job(): {"move_tag": True}})
+
+    result = harness.run()
+
+    assert result.returncode == 1
+    assert "became image sha256:moved-image" in result.stderr
+    assert len(harness.harbor_calls()) == 1
+    assert f"unexpected: {expected_keys()[0]} holds image 'sha256:moved-image' after" in (
+        result.stderr
+    )
+
+
+def test_an_image_that_cannot_be_pulled_by_digest_stops_before_any_slot(harness):
+    harness.docker_fail = (
+        "alexgshaw/mteb-retrieve@sha256:"
+        "99dd676a21fd3124b7b8164cd93e8f0c51f1fdab2f84a831c61049eff78d063d"
+    )
+
+    result = harness.run()
+
+    assert result.returncode == 1
+    assert "mteb-retrieve: docker pull" in result.stderr
+    assert harness.harbor_calls() == {}
+
+
+def test_the_dind_image_is_pinned_by_digest():
+    script = (HARNESS / "run-isolated.sh").read_text()
+
+    assert (
+        'image="docker:29.9.3-dind@sha256:'
+        '7bf70dcb85c822e3fa6f2d332143e474b99147b9d7b39102b0cfe8b04a7dd61b"'
+    ) in script
+
+
+def test_the_cap_holds_across_run_ids(harness):
+    harness.edit_plan(lambda plan: plan["spend"].update(cap_usd=1.0))
+    harness.spec(default={"cost": 0.4})
+    assert harness.run().returncode == 3
+
+    second = harness.run("run-0002")
+
+    assert second.returncode == 1
+    assert "has spent 1.2000 USD of its 1.0 USD cap" in second.stderr
+    assert not harness.run_dir("run-0002").exists()
+    assert len(harness.harbor_calls()) == 3
+
+
+def test_a_new_run_id_sees_prior_spend_and_gets_the_remaining_allowance(harness):
+    harness.edit_plan(lambda plan: plan["spend"].update(cap_usd=1.6))
+    assert harness.run().returncode == 0  # 30 x 0.05 = 1.5 USD
+
+    second = harness.run("run-0002")
+
+    assert second.returncode == 3
+    state = harness.header("run-0002")["spend"]["state"]
+    assert state["prior_known_usd"] == pytest.approx(1.5)
+    assert started(harness, "run-0002")[0]["max_cost_usd"] == 0.1
+    assert [e["max_cost_usd"] for e in started(harness, "run-0002")] == [0.1, 0.05]
+
+
+def test_unknown_cost_blocks_every_run_id_until_the_owner_accepts_it(harness):
+    harness.spec(jobs={first_job(): {"cost": None, "unpriced": []}})
+    assert harness.run().returncode == 3
+    harness.spec()
+    entry = f"run-0001/{expected_keys()[0]}"
+
+    blocked = harness.run("run-0002")
+
+    assert blocked.returncode == 1
+    assert f"have no known cost: {entry}" in blocked.stderr
+    assert f"--accept-unknown-spend {entry}" in blocked.stderr
+    assert not harness.run_dir("run-0002").exists()
+
+    wrong = harness.run("run-0002", "--accept-unknown-spend", "run-0001/not-a-slot")
+    assert wrong.returncode == 1 and "does not hold" in wrong.stderr
+
+    accepted = harness.run("run-0002", "--accept-unknown-spend", entry)
+
+    assert accepted.returncode == 0, accepted.stderr
+    state = harness.header("run-0002")["spend"]["state"]
+    assert state["override"] == f"--accept-unknown-spend {entry}"
+    assert state["accepted_unknown_usd"] == {entry: 0.46}
+    assert [e for e in harness.spend_ledger() if e["event"] == "accepted_unknown"][0][
+        "entries"
+    ] == [entry]
+    # Later runs keep the acceptance and its debit without the flag.
+    later = harness.launcher("check", str(harness.binary), str(harness.jobs), "run-0003")
+    assert later.returncode == 0, later.stderr
+    assert '"previously_accepted_unknown_usd": {' in later.stdout
+
+
+def test_a_second_launcher_of_the_plan_is_refused(harness):
+    harness.jobs.mkdir()
+    lock = harness.jobs / ".eval4-launcher-eval-4-cmp-benign-v1.lock"
+    with lock.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        result = harness.run()
+
+    assert result.returncode == 1
+    assert "one launcher at a time" in result.stderr
+    assert not harness.run_dir().exists()
+    assert harness.harbor_calls() == {}
 
 
 def test_rejected_key_stops_before_any_harbor_job(harness):

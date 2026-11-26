@@ -5,11 +5,13 @@
 # container.
 #
 # usage: dind-entry.sh <static-rustain-binary> <jobs-dir> <run-id>
+#            [--accept-unknown-spend <run-id>/<slot-key>,...]
 set -u
 
 binary="$1"
 jobs_dir="$2"
 run_id="$3"
+shift 3
 here="$(cd "$(dirname "$0")" && pwd)"
 daemon_log="$jobs_dir/dind-dockerd.log"
 
@@ -39,4 +41,4 @@ docker info --format 'nested Docker {{.ServerVersion}}, storage driver {{.Driver
 
 # coreutils: uv's entry scripts call `realpath --`, which BusyBox rejects.
 apk add --no-cache --quiet bash coreutils python3 uv || exit 1
-"$here/run-baseline.sh" run "$binary" "$jobs_dir" "$run_id"
+"$here/run-baseline.sh" run "$binary" "$jobs_dir" "$run_id" "$@"

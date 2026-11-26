@@ -309,6 +309,10 @@ class RustainAgent(BaseInstalledAgent):
             "deny_count": summary.deny_count,
             "limit_reason": summary.limit_reason,
             "error": summary.error,
+            # The launcher's spend guard counts a trial's cost only when this
+            # is True: every call the turn paid for is in the stream.
+            "cost_complete": False,
+            "cost_incomplete_reason": summary.cost_incomplete_reason,
         }
         if not summary.has_per_call_usage:
             # A pre-1.2 binary reports the last provider call only; a partial
@@ -331,29 +335,34 @@ class RustainAgent(BaseInstalledAgent):
         context.n_cache_tokens = total.cache_read_tokens
         context.n_output_tokens = total.output_tokens
 
+        incomplete = summary.cost_incomplete_reason
         model_usage: dict[str, ModelUsage] = {}
         unpriced: list[str] = []
+        observed: dict[str, float] = {}
         for model, usage in summary.by_model.items():
             rates = lookup_prices(provider_id, model)
-            cost = (
-                None
-                if rates is None
-                else calls_cost_usd(
+            if rates is None:
+                unpriced.append(model)
+            else:
+                observed[model] = calls_cost_usd(
                     summary.calls_of(model), rates, input_includes_cache=includes_cache
                 )
-            )
-            if cost is None:
-                unpriced.append(model)
             model_usage[model] = ModelUsage(
                 n_input_tokens=total_input_tokens(
                     usage, input_includes_cache=includes_cache
                 ),
                 n_cache_tokens=usage.cache_read_tokens,
                 n_output_tokens=usage.output_tokens,
-                cost_usd=cost,
+                # A cost is the model's whole cost or nothing.
+                cost_usd=observed.get(model) if incomplete is None else None,
             )
         context.model_usage = model_usage
         context.metadata["price_source"] = PRICE_TABLE.label()
         context.metadata["unpriced_models"] = unpriced
-        if not unpriced:
-            context.cost_usd = sum(m.cost_usd or 0.0 for m in model_usage.values())
+        # What the calls in the stream cost: a lower bound when incomplete.
+        context.metadata["observed_cost_usd"] = (
+            sum(observed.values()) if not unpriced else None
+        )
+        if not unpriced and incomplete is None:
+            context.metadata["cost_complete"] = True
+            context.cost_usd = sum(observed.values())
