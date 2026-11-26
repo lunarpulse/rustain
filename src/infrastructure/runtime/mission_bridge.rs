@@ -320,26 +320,29 @@ mod visit_authority_tests {
         );
         session_visit::open_visit(
             &mut state,
-            MainVisitKey {
-                conversation_id: "main".into(),
-                turn_id: TurnId("turn".into()),
-                invocation: PartId(1),
-                result: PartId(2),
-                revision: hash_body("literal"),
-            },
-            VisitRead::Available(VisitBody {
-                attempt: AgentId::new(),
-                previous: None,
-                next: None,
-                report: None,
-                expires_at_ms: None,
-                backing: VisitBacking::default(),
-                turns: vec![VisitTurn {
-                    ordinal: 1,
-                    tool_names: Vec::new(),
-                    public_text: "retained secret".into(),
-                }],
-            }),
+            VisitWindowState::prepare(
+                MainVisitKey {
+                    conversation_id: "main".into(),
+                    turn_id: TurnId("turn".into()),
+                    invocation: PartId(1),
+                    result: PartId(2),
+                    revision: hash_body("literal"),
+                },
+                VisitRead::Available(VisitBody {
+                    attempt: AgentId::new(),
+                    previous: None,
+                    next: None,
+                    report: None,
+                    expires_at_ms: None,
+                    backing: VisitBacking::default(),
+                    turns: vec![VisitTurn {
+                        ordinal: 1,
+                        tool_names: Vec::new(),
+                        public_text: "retained secret".into(),
+                    }],
+                }),
+                None,
+            ),
         );
         assert!(session_visit_access_allowed(
             &mut state,

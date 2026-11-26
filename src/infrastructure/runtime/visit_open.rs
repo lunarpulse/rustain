@@ -27,7 +27,7 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::tool_inspector::{self, ToolFrameKey};
 use crate::domain::models::turn::TurnId;
-use crate::domain::models::{Conversation, TabId, Turn, TurnPart};
+use crate::domain::models::{Conversation, TabId, TabManager, Turn, TurnPart};
 use crate::infrastructure::subagent::session_history::{MainVisitKey, SessionHistory, VisitRead};
 
 /// What the loop knows when it begins, reconciles or applies an open.
@@ -39,6 +39,23 @@ pub struct VisitOpenCtx<'a> {
     pub local_allowed: bool,
     pub session_cancel: &'a CancellationToken,
     pub tab_count: usize,
+}
+
+impl<'a> VisitOpenCtx<'a> {
+    /// The context the loop builds for the active tab of `tabs`.
+    pub fn of(
+        conversation: &'a Conversation,
+        tabs: &TabManager,
+        session_cancel: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            conversation,
+            tab_id: tabs.active_tab_id(),
+            local_allowed: !tabs.active_tab().read_only && !session_cancel.is_cancelled(),
+            session_cancel,
+            tab_count: tabs.tab_count(),
+        }
+    }
 }
 
 /// A finished read. It carries the generation and frame it was started for; [`apply`] drops
@@ -511,6 +528,44 @@ impl<T> Parked<T> {
     }
 }
 
+/// The loop's paint with the Visit steps in their production order: drop a pending open whose
+/// context changed, recheck an open Visit against the live conversation, then draw (the draw
+/// refreshes the Inspector, so the reconcile must not rely on what that refresh recomputes).
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_visit(
+    terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend<Error: Send + Sync + 'static>>,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    streaming: &crate::domain::models::StreamingState,
+    config_model: &str,
+    provider_id: &str,
+    security: &dyn crate::domain::ports::SecurityPort,
+    tab_manager: &mut TabManager,
+    session_index: &crate::domain::services::session_index::SessionIndex,
+    context_window: u32,
+    history: Option<&SessionHistory>,
+    session_cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    let ctx = VisitOpenCtx::of(conversation, tab_manager, session_cancel);
+    reconcile(state, ctx);
+    mission_bridge::reauthorize_with(state, history, conversation, ctx.local_allowed);
+    let (tab_count, active_tab_index) = (tab_manager.tab_count(), tab_manager.active_tab_index());
+    super::event_loop::render(
+        terminal,
+        state,
+        conversation,
+        streaming,
+        config_model,
+        provider_id,
+        security,
+        tab_count,
+        active_tab_index,
+        Some(tab_manager),
+        session_index,
+        context_window,
+    )
+}
+
 /// Test oracle: which thread builds a reader. `prepare` reports itself here, but only while a
 /// read task runs it under [`probe::in_read`], so moving the build to another thread leaves
 /// the reader-thread count short.
@@ -567,7 +622,7 @@ mod tests {
     use crate::domain::events::DomainInputEvent;
     use crate::domain::models::orchestration_room::{HostBinding, VisitReport};
     use crate::domain::models::{
-        AgentId, InvocationStatus, MessageRole, TabManager, ToolOutput, WriteDiffState,
+        AgentId, InvocationStatus, MessageRole, ToolOutput, WriteDiffState,
     };
     use crate::infrastructure::subagent::NodeJournal;
     use crate::infrastructure::subagent::session_history::hash_body;
@@ -918,7 +973,7 @@ mod tests {
         fn paint(&mut self) -> String {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-            crate::infrastructure::runtime::event_loop::render_with_visit(
+            render_with_visit(
                 &mut terminal,
                 &mut self.state,
                 &self.conversation,
