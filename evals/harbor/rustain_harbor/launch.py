@@ -79,18 +79,24 @@ def _spend_state(header: dict, jobs_dir: Path, accepting: frozenset[str]) -> dic
     path = spend.ledger_path(jobs_dir, header["spend"]["plan_id"])
     with spend.Ledger(path).open() as ledger:
         balance = ledger.balance(accepting)
+    if header["run_id"] in balance.run_ids:
+        raise SpendError(
+            f"run id {header['run_id']} is already in the spend ledger {path}; a run id "
+            "is used once, also after clean-host.sh removed its directory: use a new one"
+        )
     unknown = sorted(accepting - set(balance.accepted))
     if unknown:
         raise SpendError(
             f"{ACCEPT_FLAG} names {', '.join(unknown)}, which the spend ledger "
-            "does not hold as an unresolved slot"
+            "does not hold as a started slot without a known cost"
         )
     if balance.unresolved:
         raise SpendError(
             f"{len(balance.unresolved)} started slot(s) of {header['spend']['plan_id']} "
-            f"have no known cost: {', '.join(balance.unresolved)}. Inspect them; to "
-            f"charge each its recorded --max-cost and go on, pass {ACCEPT_FLAG} "
-            f"{','.join(balance.unresolved)}"
+            f"have no known cost: {', '.join(balance.unresolved)}. They are charged "
+            f"their --max-cost ({sum(balance.unresolved.values()):.4f} USD); the plan "
+            f"has spent {balance.spent_usd:.4f} USD of {header['spend']['cap_usd']} USD. "
+            f"Inspect them; to go on, pass {ACCEPT_FLAG} {','.join(balance.unresolved)}"
         )
     remaining = header["spend"]["cap_usd"] - balance.spent_usd
     if runplan.slot_max_cost(header, balance.spent_usd) <= 0:
@@ -98,17 +104,16 @@ def _spend_state(header: dict, jobs_dir: Path, accepting: frozenset[str]) -> dic
             f"the plan has spent {balance.spent_usd:.4f} USD of its "
             f"{header['spend']['cap_usd']} USD cap; nothing remains"
         )
+    newly = sorted(accepting - balance.accepted_before)
     return {
         "ledger": str(path),
         "prior_entries": balance.entries,
         "prior_known_usd": balance.known_usd,
-        "accepted_unknown_usd": {
-            entry: debit for entry, debit in balance.accepted.items() if entry in accepting
-        },
+        "accepted_unknown_usd": {entry: balance.accepted[entry] for entry in newly},
         "previously_accepted_unknown_usd": {
             entry: debit
             for entry, debit in balance.accepted.items()
-            if entry not in accepting
+            if entry in balance.accepted_before
         },
         "override": f"{ACCEPT_FLAG} {','.join(sorted(accepting))}" if accepting else None,
         "spent_usd": balance.spent_usd,
@@ -236,13 +241,15 @@ def run(binary: Path, jobs_dir: Path, run_id: str, accepting: frozenset[str]) ->
         header["spend"]["state"] = _spend_state(header, jobs_dir, accepting)
         target, digest = _create_header(header, jobs_dir)
         spend_ledger = spend.Ledger(spend.ledger_path(jobs_dir, plan_id))
-        if accepting:
-            with spend_ledger.open() as book:
+        with spend_ledger.open() as book:
+            book.append("run_started", run_id=run_id, header_sha256=digest)
+            newly = sorted(header["spend"]["state"]["accepted_unknown_usd"])
+            if newly:
                 book.append(
                     "accepted_unknown",
                     run_id=run_id,
                     header_sha256=digest,
-                    entries=sorted(accepting),
+                    entries=newly,
                     debits_usd=header["spend"]["state"]["accepted_unknown_usd"],
                 )
         return _run_slots(header, target, digest, spend_ledger)

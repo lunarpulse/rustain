@@ -66,7 +66,7 @@ evals/harbor/clean-host.sh --apply --jobs-dir <dir> --results  # and the recorde
 
 - Containers are found by the label `run-isolated.sh` gives them. One that is still running is left alone.
 - The `docker:dind` image is removed only when `<dir>/.rustain-harbor/pulled-image` shows that a run pulled it and could not remove it.
-- `--results` removes the run directories listed in `<dir>/.rustain-harbor/jobs`, the nested daemon's log and the record (including the Harbor environment under it). Anything else in `<dir>` stays.
+- `--results` removes the run directories listed in `<dir>/.rustain-harbor/jobs`, the nested daemon's log and the record (including the Harbor environment under it). Anything else in `<dir>` stays, including the eval-4 spend ledger and launcher lock. A cleaned run id cannot be reused; use a new one.
 - Harbor's own task images and `~/.cache/harbor`, which `run-baseline.sh` leaves outside the container, are reported and not removed: they may serve other Harbor work. `harbor cache clean` removes them.
 
 The uv and pip caches are shared with other projects and are not touched.

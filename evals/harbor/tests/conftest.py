@@ -127,7 +127,7 @@ elif args[0] == "tag":
         sys.exit(1)
     state["refs"][args[2]] = state["refs"][args[1]]
 elif args[:2] == ["image", "inspect"]:
-    fmt, ref = args[3], args[4]
+    fmt, ref = (args[3], args[4]) if len(args) == 5 else (None, args[2])
     image = state["refs"].get(ref)
     if image is None:
         print(f"No such image: {ref}", file=sys.stderr)
@@ -224,6 +224,15 @@ class Harness:
 
     def aggregate(self, run_id: str = "run-0001") -> subprocess.CompletedProcess:
         return self.launcher("aggregate", str(self.jobs), run_id)
+
+    def clean_host(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(self.dir / "clean-host.sh"), *args],
+            env=self.env(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
 
     def run_dir(self, run_id: str = "run-0001") -> Path:
         return self.jobs / run_id

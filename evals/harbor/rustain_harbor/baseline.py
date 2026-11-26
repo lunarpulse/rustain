@@ -32,6 +32,7 @@ import json
 import os
 import statistics
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -486,9 +487,21 @@ def render(rows: list[dict], report: dict) -> str:
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text)
-    os.replace(temporary, path)
+    """Replace `path` with `text` in one step. Each writer has its own
+    temporary file, so concurrent aggregations never interleave bytes."""
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

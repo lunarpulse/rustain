@@ -10,6 +10,10 @@
 #     in <dir>, the nested daemon's log and the record itself (with the Harbor
 #     environment run-baseline.sh installed under it)
 #
+# It never touches the eval-4 spend ledger (<dir>/eval4-spend-*.jsonl) or the
+# launcher lock: the plan's spend and every run id it saw outlive a cleanup.
+# A cleaned run id cannot be reused; the launcher refuses it. Use a new one.
+#
 # Harbor's own task images and cache, which run-baseline.sh leaves when it runs
 # outside the container, belong to Harbor and may be shared with other Harbor
 # work. They are reported, with the Harbor command that removes them.
@@ -26,6 +30,7 @@ while [ $# -gt 0 ]; do
         --apply) apply=1 ;;
         --results) results=1 ;;
         --jobs-dir) jobs_dir="${2:?$usage}"; shift ;;
+        -h | --help) sed -n '2,/^# usage:/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "$usage" >&2; exit 2 ;;
     esac
     shift
@@ -71,7 +76,9 @@ if command -v docker >/dev/null 2>&1; then
 
     pulled=""
     [ -n "$record" ] && [ -f "$record/pulled-image" ] && pulled="$(head -n 1 "$record/pulled-image")"
-    if [[ "$pulled" =~ ^docker:[0-9][0-9.]*-dind$ ]]; then
+    # The record holds the image as run-isolated.sh names it: tag, and since
+    # the dind image is pinned, tag@digest.
+    if [[ "$pulled" =~ ^docker:[0-9][0-9.]*-dind(@sha256:[0-9a-f]{64})?$ ]]; then
         if docker image inspect "$pulled" >/dev/null 2>&1; then
             # Without --force an image that a container still uses stays.
             remove "image $pulled (pulled by an interrupted run)" remove_pulled_image "$pulled"
@@ -103,7 +110,8 @@ if [ "$results" = 1 ]; then
     else
         while IFS= read -r job; do
             # A job name is one path component; anything else is not ours to remove.
-            case "$job" in '' | . | .. | */*) continue ;; esac
+            # The spend ledger and the launcher lock are never results.
+            case "$job" in '' | . | .. | */* | eval4-spend-* | .eval4-launcher-*) continue ;; esac
             [ -d "$jobs_dir/$job" ] && remove "directory $jobs_dir/$job (results)" rm -rf -- "$jobs_dir/$job"
         done < <(sort -u "$record/jobs")
         [ -f "$jobs_dir/dind-dockerd.log" ] && remove "file $jobs_dir/dind-dockerd.log" rm -f -- "$jobs_dir/dind-dockerd.log"
