@@ -137,9 +137,6 @@ const ALLOWLIST: &[Allow] = &[
     ("src/domain/models/tool_descriptor.rs", &["ToolDescriptor.to_search_hit produced name", "ToolDescriptor.to_search_hit produced name"], OWNER, "a `debug_assert!` message and the `tracing::warn!` text beside it"),
     ("src/domain/services/team_policy.rs", &["DF-18-3b-CONSENT-PROJECTION"], OWNER, "code marker naming the deferral that owns the consent projection; never painted"),
     ("src/adapters/toolset_adapter.rs", &["Propose a structured multi-step plan"], OWNER, "model-facing tool description of `propose_plan`"),
-    ("src/infrastructure/runtime/event_loop.rs", &["Sandbox policy updated on permission mode change (Story 9.5"], OWNER, "`tracing::info!` text"),
-    ("src/infrastructure/composition/mod.rs", &["(ADR-06-04"], OWNER, "`tracing::warn!` text of the sandbox fallback"),
-    ("src/infrastructure/startup.rs", &["ADR-06-04 §Negative — documented as known limitation"], OWNER, "`tracing::warn!` text of the sandbox restriction"),
     ("src/adapters/tui/keymap/table.rs", &["Ctrl+X, I"], OWNER, "the key label of the `I` leader key, not first person"),
 ];
 

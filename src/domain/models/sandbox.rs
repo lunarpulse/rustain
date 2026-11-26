@@ -133,9 +133,10 @@ impl SandboxStatus {
                     "Sandbox on (Landlock ABI {abi}): tool commands can write only inside the \
                      workspace, temp and cache directories."
                 );
+                // Enforced is info level (ADR-23-1-01 §7); unprotected paths
+                // are listed, and only an unenforced network request warns.
                 let mut level = NoticeLevel::Info;
                 if !unprotected.is_empty() {
-                    level = NoticeLevel::Advisory;
                     text.push_str(&format!(
                         " Not protected from reads (inside a writable root): {}.",
                         join_paths(unprotected)
@@ -356,6 +357,17 @@ mod tests {
         }
         .notice();
         assert_eq!(notice.level, NoticeLevel::Advisory);
+        // Enforced is info level (ADR-23-1-01 §7); only the unenforced network
+        // request (ABI < 4) is a warning. Unprotected paths are listed.
+        let listed = SandboxStatus::Enforced {
+            abi: 6,
+            network_enforced: true,
+            unprotected: vec![PathBuf::from("/w/secret")],
+            missing_roots: vec![],
+        }
+        .notice();
+        assert_eq!(listed.level, NoticeLevel::Info);
+        assert!(listed.text.contains("/w/secret"), "{}", listed.text);
         assert!(
             notice
                 .text
