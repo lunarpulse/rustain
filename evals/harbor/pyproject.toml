@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Harbor agent adapter that runs `rustain ask` inside task containers"
 requires-python = ">=3.12"
 dependencies = [
-    "harbor>=0.25,<0.26",
+    "harbor==0.25.0",
 ]
 
 [project.optional-dependencies]

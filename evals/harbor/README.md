@@ -4,10 +4,10 @@ Runs `rustain ask` as a [Harbor](https://www.harborframework.com/) agent, so rus
 
 ## What it does
 
-`rustain_harbor:RustainAgent` uploads a prebuilt rustain binary into the task container and runs one turn:
+`rustain_harbor.agent:RustainAgent` uploads a prebuilt rustain binary into the task container and runs one turn:
 
 ```sh
-rustain ask --yolo --output-format stream-json "<task instruction>"
+rustain ask --yolo --sandbox-adapter noop --output-format stream-json [--max-cost <usd>] "<task instruction>"
 ```
 
 - The provider key is read from the host environment and uploaded as a private file. The runner reads it into rustain's environment and deletes the file. The key is not passed through `env` or the command of a Harbor exec call, because Harbor's Docker backend puts those on a `docker compose exec` command line.
@@ -15,48 +15,41 @@ rustain ask --yolo --output-format stream-json "<task instruction>"
 - rustain's config and data live under `/installed-agent/rustain-state`. The sessions a run saves in `./.claude/sessions` are moved to the trial logs, so the verifier sees only what the agent did to the workspace. Sessions that were there before stay. A session that cannot be copied stays too, and the run then exits 3.
 - Token usage comes from the `call_usage` lines of the stream (schema 1.2+, see `docs/output-schema.md`). A trial that fails or times out still reports the calls that reported usage. A stream without such a line leaves the token and cost fields empty and sets `usage_observed` to false: unknown is not zero.
 - From schema 1.3 every provider's counts are disjoint (`input_tokens` excludes cache reads, `output_tokens` includes reasoning), and the adapter prices them that way. A 1.2 stream keeps the per-provider table in `agent.py`: providers on the Chat transport counted cache hits inside `input_tokens`. That table marks `openrouter` as inclusive, but OpenRouter's default transport is Responses, whose 1.2 counts were already disjoint, and a 1.2 stream does not say which transport served it. For such a run the adapter subtracts the cache hits a second time, so cached rows are **under-priced** and the first-call prompt size is understated; do not trust the cost of a 1.2 OpenRouter run. 1.3 streams are not affected.
-- Cost uses LiteLLM's list price for `<provider>/<model>`, call by call. A model without a price reports tokens and no cost. So does a model with a call whose prompt is larger than the flat list price covers; the dearer rates above that size are not modelled.
+- Cost comes from the dated price table `rustain_harbor/prices-2026-11-26.json`, call by call. The adapter reads the table from disk; Harbor's LiteLLM price map is not used. A model missing from the table reports tokens and no cost, and is listed in `unpriced_models`. The adapter also renders the table's rates as a `[pricing]` entry in rustain's config, so `--max-cost` (agent option `max_cost_usd`) prices calls the way the harness does.
+- A bounded stop (schema 1.4) is recorded as `limit_reason` in the trial metadata.
 
 Each trial records, besides Harbor's own token and cost fields, `provider_calls` and `first_call_input_tokens`: the prompt size of the first provider call, which is the system prompt, the tool definitions and the task instruction.
 
 ## Binary
 
-Task images range from Debian 11 to Ubuntu 24.04, so the binary must be static:
+Task images range from Debian 11 to Ubuntu 24.04, so the binary must be static. The x86_64 Linux release asset is a glibc build whose version needs include GLIBC_2.39, which Debian 12 images (glibc 2.36) lack. `build-musl.sh` builds a static musl binary of a given commit, with the features its `release.yml` ships, and refuses a result that is not statically linked:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 uv tool install cargo-zigbuild
-cargo zigbuild --locked --target x86_64-unknown-linux-musl
+CARGO_TARGET_DIR=<target-dir> evals/harbor/build-musl.sh <clean-checkout> <commit> <output-binary>
 ```
 
 A binary older than schema 1.2 reports the last provider call only; the adapter then leaves the token and cost fields empty. A binary older than schema 1.3 counts cache hits inside `input_tokens` for requests sent over the Chat Completions transport only (see `docs/output-schema.md`, v1.3); the adapter's per-provider table approximates that by provider name.
 
 ## Run
 
-Task containers need Docker, which the devcontainer does not have, so the run happens on a machine with Docker.
-
-`run-isolated.sh` keeps that machine clean. It starts one disposable Docker-in-Docker container and runs everything inside it: Harbor, its caches, the task images and the task containers. Only the jobs directory survives; the stock `docker:dind` image is removed afterwards unless it was already present. The container is privileged, which a nested Docker daemon requires.
+Task containers need Docker, and the devcontainer has none, so the run happens on a machine with Docker. The eval-4 run, with its plan, owner commands and outputs, is described in [README-eval4.md](README-eval4.md). In short:
 
 ```sh
+evals/harbor/run-baseline.sh check <static-rustain-binary> <jobs-dir> <run-id>   # offline
 export DEEPSEEK_API_KEY=...
-evals/harbor/run-isolated.sh <static-rustain-binary> <jobs-dir>
+evals/harbor/run-isolated.sh <static-rustain-binary> <jobs-dir> <run-id>
+evals/harbor/run-baseline.sh aggregate <jobs-dir> <run-id>                       # offline
 ```
 
-The run covers five fixed Terminal-Bench 2 tasks, once each, on `deepseek/deepseek-v4-flash` (override with `RUSTAIN_EVAL_MODEL=<provider>/<model>`) and prints the cost table. Extra arguments go to `harbor run`, for example `--n-concurrent 1`.
+`run-isolated.sh` keeps that machine clean. It starts one disposable Docker-in-Docker container and runs everything inside it: Harbor, its caches, the task images and the task containers. Only the jobs directory survives. The stock `docker:dind` image is removed afterwards unless it was already present. The container is privileged, which a nested Docker daemon requires. Only the key variables that the run plan's treatments name enter the container.
 
-- The key is checked before any task image is pulled. DeepSeek keys are verified against the API; for other providers only the variable being set is checked.
+- The keys are checked before any task image is pulled. DeepSeek keys are verified against the API; for other providers, the check only confirms the variable is set.
 - The nested daemon's log is written to `<jobs-dir>/dind-dockerd.log`.
 - Results are handed back to the owner of the jobs directory when the run ends or is interrupted. If the container is killed instead, they may be left owned by root.
 
-`run-baseline.sh` is the same run without the isolation, for an environment that already has Docker and uv and may be written to. It leaves uv's cache, Harbor's task cache in `~/.cache/harbor` and the pulled task images behind. It exits with Harbor's status, or with the aggregator's when Harbor succeeded and the table could not be produced.
-
-The table gives a job total only when every trial has the figure; `trials_with_cost` says how many do.
-
-To aggregate an existing job again:
-
-```sh
-python -m rustain_harbor.baseline <jobs-dir>/<job-name>
-```
+`run-baseline.sh run` is the same run without the isolation, for an environment that already has Docker and uv and may be written to. It installs Harbor from `uv.lock` into `<jobs-dir>/.rustain-harbor/venv`, and it leaves Harbor's task cache in `~/.cache/harbor` and the pulled task images behind. It takes no other argument: every setting comes from the run plan.
 
 Supported providers are rustain's built-in keyed ones: `anthropic`, `openai`, `openrouter`, `google`, `deepseek`, `moonshot`. Only `deepseek` has been exercised.
 
@@ -73,7 +66,7 @@ evals/harbor/clean-host.sh --apply --jobs-dir <dir> --results  # and the recorde
 
 - Containers are found by the label `run-isolated.sh` gives them. One that is still running is left alone.
 - The `docker:dind` image is removed only when `<dir>/.rustain-harbor/pulled-image` shows that a run pulled it and could not remove it.
-- `--results` removes the job directories listed in `<dir>/.rustain-harbor/jobs`, the nested daemon's log and the record. Anything else in `<dir>` stays.
+- `--results` removes the run directories listed in `<dir>/.rustain-harbor/jobs`, the nested daemon's log and the record (including the Harbor environment under it). Anything else in `<dir>` stays.
 - Harbor's own task images and `~/.cache/harbor`, which `run-baseline.sh` leaves outside the container, are reported and not removed: they may serve other Harbor work. `harbor cache clean` removes them.
 
 The uv and pip caches are shared with other projects and are not touched.
@@ -82,6 +75,8 @@ The uv and pip caches are shared with other projects and are not touched.
 
 ```sh
 cd evals/harbor
-uv venv .venv && uv pip install --python .venv/bin/python -e '.[dev]'
+uv sync --locked --extra dev
 .venv/bin/python -m pytest -q
 ```
+
+The launcher tests run `run-baseline.sh` as a process, with doubles for uv, Harbor and the provider on `PATH`. They need no network and no Docker.

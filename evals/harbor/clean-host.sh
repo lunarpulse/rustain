@@ -6,8 +6,9 @@
 #   - stopped containers that run-isolated.sh labelled
 #   - with --jobs-dir <dir>: the docker:dind image, when a run recorded pulling
 #     it there and was killed before it could remove it
-#   - with --results as well: the job directories that run-baseline.sh recorded
-#     in <dir>, the nested daemon's log and the record itself
+#   - with --results as well: the run directories that run-baseline.sh recorded
+#     in <dir>, the nested daemon's log and the record itself (with the Harbor
+#     environment run-baseline.sh installed under it)
 #
 # Harbor's own task images and cache, which run-baseline.sh leaves when it runs
 # outside the container, belong to Harbor and may be shared with other Harbor

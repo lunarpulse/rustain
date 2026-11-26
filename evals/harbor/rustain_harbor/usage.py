@@ -47,9 +47,6 @@ class Prices:
     output: float
     cache_read: float
     cache_creation: float
-    # Largest prompt, in tokens, that these rates cover. LiteLLM lists dearer
-    # rates above it for some models; those are not modelled.
-    flat_up_to: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +57,8 @@ class RunSummary:
     tool_calls: int = 0
     stop_reason: str | None = None
     deny_count: int | None = None
+    # Schema 1.4: why a bounded `ask` stopped (`max_cost`, `max_turns`, ...).
+    limit_reason: str | None = None
     error: str | None = None
     by_model: dict[str, Usage] = field(default_factory=dict)
 
@@ -128,6 +127,7 @@ def summarize(lines: Iterable[str]) -> RunSummary:
     tool_calls = 0
     stop_reason: str | None = None
     deny_count: int | None = None
+    limit_reason: str | None = None
     error: str | None = None
 
     for line in lines:
@@ -149,6 +149,7 @@ def summarize(lines: Iterable[str]) -> RunSummary:
         elif kind == "turn_complete":
             stop_reason = event.get("stop_reason")
             deny_count = event.get("deny_count")
+            limit_reason = event.get("limit_reason")
         elif kind == "error":
             error = (event.get("error") or {}).get("message")
 
@@ -158,6 +159,7 @@ def summarize(lines: Iterable[str]) -> RunSummary:
         tool_calls=tool_calls,
         stop_reason=stop_reason,
         deny_count=deny_count,
+        limit_reason=limit_reason,
         error=error,
         by_model=by_model,
     )
@@ -181,17 +183,8 @@ def total_input_tokens(usage: Usage, *, input_includes_cache: bool) -> int:
     return usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
 
 
-def cost_usd(
-    usage: Usage, prices: Prices, *, input_includes_cache: bool
-) -> float | None:
-    """List-price cost of one provider call, or None when its prompt is larger
-    than the flat rates cover."""
-    if (
-        prices.flat_up_to is not None
-        and total_input_tokens(usage, input_includes_cache=input_includes_cache)
-        > prices.flat_up_to
-    ):
-        return None
+def cost_usd(usage: Usage, prices: Prices, *, input_includes_cache: bool) -> float:
+    """List-price cost of one provider call."""
     return (
         uncached_input_tokens(usage, input_includes_cache=input_includes_cache)
         * prices.input
@@ -203,12 +196,9 @@ def cost_usd(
 
 def calls_cost_usd(
     calls: Iterable[Usage], prices: Prices, *, input_includes_cache: bool
-) -> float | None:
-    """Sum of the per-call costs, or None as soon as one call has no price."""
-    total = 0.0
-    for usage in calls:
-        cost = cost_usd(usage, prices, input_includes_cache=input_includes_cache)
-        if cost is None:
-            return None
-        total += cost
-    return total
+) -> float:
+    """Sum of the per-call costs."""
+    return sum(
+        cost_usd(usage, prices, input_includes_cache=input_includes_cache)
+        for usage in calls
+    )

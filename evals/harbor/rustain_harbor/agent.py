@@ -1,13 +1,15 @@
 """Harbor agent that runs `rustain ask` inside the task container.
 
     harbor run -d <dataset> \
-        --agent-import-path rustain_harbor:RustainAgent \
+        --agent rustain_harbor.agent:RustainAgent \
         --model deepseek/deepseek-v4-flash \
         --ak binary_path=/path/to/static/rustain
 
 The binary is uploaded as built; it must run in the task image (a static musl
 build does). The provider key is read from the host environment and passed to
-the container for the run only.
+the container for the run only. Cost comes from the package's price table
+(`prices.PRICE_TABLE`), which is read from disk; importing this module makes no
+network request.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import override
 
-import litellm
 from pydantic import Field
 
 from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
@@ -27,6 +28,7 @@ from harbor.agents.options import InstalledAgentOptions
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext, ModelUsage
 
+from rustain_harbor import prices
 from rustain_harbor.usage import (
     DISJOINT_SCHEMA,
     Prices,
@@ -40,6 +42,7 @@ _STATE_DIR = f"{_REMOTE_DIR}/rustain-state"
 _KEY_FILE = f"{_STATE_DIR}/api-key"
 _RUNNER = Path(__file__).with_name("run-ask.sh")
 STREAM_LOG = "rustain.stream.jsonl"
+PRICE_TABLE = prices.load()
 
 
 @dataclass(frozen=True)
@@ -73,7 +76,9 @@ def render_config(provider_id: str, model: str) -> str:
     """rustain user config that makes `provider_id` the active provider.
 
     rustain activates the first configured provider that builds; the provider
-    kind equals its id for every built-in listed in `PROVIDERS`.
+    kind equals its id for every built-in listed in `PROVIDERS`. A model in
+    the price table gets the same rates as a `[pricing]` entry, so rustain's
+    own `--max-cost` prices calls as the harness does.
     """
     lines = [f'model = "{model}"']
     if PROVIDERS[provider_id].needs_config_entry:
@@ -86,36 +91,23 @@ def render_config(provider_id: str, model: str) -> str:
             f'api_key_env = "{PROVIDERS[provider_id].api_key_env}"',
             "enabled = true",
         ]
+    rates = PRICE_TABLE.per_million.get(f"{provider_id}/{model}")
+    if rates is not None:
+        # rustain looks prices up by the model id the provider reports.
+        lines += [
+            "",
+            f'[pricing."{model}"]',
+            f"input_per_million = {rates['input']!r}",
+            f"output_per_million = {rates['output']!r}",
+            f"cache_read_per_million = {rates['cache_read']!r}",
+            f"cache_creation_per_million = {rates['cache_creation']!r}",
+        ]
     return "\n".join(lines) + "\n"
 
 
 def lookup_prices(provider_id: str, model: str) -> Prices | None:
-    """List price from LiteLLM's table, or None when the model is not in it."""
-    entry = litellm.model_cost.get(f"{provider_id}/{model}") or litellm.model_cost.get(
-        model
-    )
-    if not entry:
-        return None
-    input_rate = entry.get("input_cost_per_token")
-    output_rate = entry.get("output_cost_per_token")
-    if input_rate is None or output_rate is None:
-        return None
-    cache_read = entry.get("cache_read_input_token_cost")
-    cache_creation = entry.get("cache_creation_input_token_cost")
-    # Keys such as `input_cost_per_token_above_200k_tokens` give dearer rates
-    # for larger prompts. The base rates hold up to the lowest such threshold.
-    thresholds = [
-        int(match.group(1)) * 1000
-        for key in entry
-        if (match := re.search(r"_above_(\d+)k_tokens$", key))
-    ]
-    return Prices(
-        input=input_rate,
-        output=output_rate,
-        cache_read=input_rate if cache_read is None else cache_read,
-        cache_creation=input_rate if cache_creation is None else cache_creation,
-        flat_up_to=min(thresholds) if thresholds else None,
-    )
+    """List price from the price table, or None when the model is not in it."""
+    return PRICE_TABLE.prices(provider_id, model)
 
 
 class RustainOptions(InstalledAgentOptions):
@@ -123,6 +115,11 @@ class RustainOptions(InstalledAgentOptions):
         default=None,
         description="Host path of the rustain binary to upload. "
         "Falls back to the RUSTAIN_BINARY environment variable.",
+    )
+    max_cost_usd: float | None = Field(
+        default=None,
+        gt=0,
+        description="Passed to `rustain ask --max-cost`. Omit for no cost limit.",
     )
 
 
@@ -227,16 +224,19 @@ class RustainAgent(BaseInstalledAgent):
             filename="api-key",
         )
         logs = self.environment_logs_dir
+        env = {
+            "RUSTAIN_HARBOR_KEY_ENV": api_key_env,
+            "RUSTAIN_HARBOR_KEY_FILE": _KEY_FILE,
+            "RUSTAIN_CONFIG_DIR": f"{_STATE_DIR}/config",
+            "RUSTAIN_DATA_DIR": f"{_STATE_DIR}/data",
+            "RUSTAIN_LOG_PATH": f"{logs}/rustain.log",
+        }
+        if self.options.max_cost_usd is not None:
+            env["RUSTAIN_HARBOR_MAX_COST"] = repr(self.options.max_cost_usd)
         await self.exec_as_agent(
             environment,
             command=f"{_REMOTE_DIR}/run-ask.sh {logs} {_STATE_DIR}/instruction.txt",
-            env={
-                "RUSTAIN_HARBOR_KEY_ENV": api_key_env,
-                "RUSTAIN_HARBOR_KEY_FILE": _KEY_FILE,
-                "RUSTAIN_CONFIG_DIR": f"{_STATE_DIR}/config",
-                "RUSTAIN_DATA_DIR": f"{_STATE_DIR}/data",
-                "RUSTAIN_LOG_PATH": f"{logs}/rustain.log",
-            },
+            env=env,
         )
 
     def _redact_api_key(self) -> None:
@@ -307,6 +307,7 @@ class RustainAgent(BaseInstalledAgent):
             "tool_calls": summary.tool_calls,
             "stop_reason": summary.stop_reason,
             "deny_count": summary.deny_count,
+            "limit_reason": summary.limit_reason,
             "error": summary.error,
         }
         if not summary.has_per_call_usage:
@@ -333,13 +334,12 @@ class RustainAgent(BaseInstalledAgent):
         model_usage: dict[str, ModelUsage] = {}
         unpriced: list[str] = []
         for model, usage in summary.by_model.items():
-            prices = lookup_prices(provider_id, model)
-            # Priced call by call: a list price can depend on the prompt size.
+            rates = lookup_prices(provider_id, model)
             cost = (
                 None
-                if prices is None
+                if rates is None
                 else calls_cost_usd(
-                    summary.calls_of(model), prices, input_includes_cache=includes_cache
+                    summary.calls_of(model), rates, input_includes_cache=includes_cache
                 )
             )
             if cost is None:
@@ -353,7 +353,7 @@ class RustainAgent(BaseInstalledAgent):
                 cost_usd=cost,
             )
         context.model_usage = model_usage
-        context.metadata["price_source"] = "litellm.model_cost (list price)"
+        context.metadata["price_source"] = PRICE_TABLE.label()
         context.metadata["unpriced_models"] = unpriced
         if not unpriced:
             context.cost_usd = sum(m.cost_usd or 0.0 for m in model_usage.values())

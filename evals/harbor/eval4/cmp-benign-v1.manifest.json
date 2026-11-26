@@ -1,0 +1,90 @@
+{
+  "schema": "rustain-harbor-manifest/1",
+  "id": "cmp-benign-v1",
+  "label": "cmp-benign-v1",
+  "kind": "comparison set (benign public tasks); not the own-failure set",
+  "dataset": "terminal-bench/terminal-bench-2",
+  "dataset_revision": "sha256:c6fc2e2382c1dbae99b2d5ecd2f4f4a60c3c01e0d84642d69b4afd92e99d078b",
+  "receipt": {
+    "selected_tsv_sha256": "62072286d8eb5df5a98ccdf20b62c2429ed94257a67c9e48c532afc3131ba0af",
+    "listing_sha256": "30c0ddfb055a65fd002e4289eb56ffdd7c7e61f65819d35f0017a61839e1f86e",
+    "pool_sha256": "b73c37e54c508b2da9d47378d830e873502e40c76955110154cf06def8fbec55",
+    "eligibility_sha256": "f6d294b921a0d42405144852208ab38854cea0b95510f6ca7c861426458e2e8f",
+    "seed": "7771288275531422576",
+    "frozen": "owner approval 3, 2026-11-26 (docs/decisions.md D-39(g))"
+  },
+  "license_note": "task licences undeclared in the package and the registry; scores are published without redistributing task content",
+  "verifier_files_sha256_recipe": "SHA-256 over the sorted lines `path\\0sha256(file)\\n` of the package's tests/ files",
+  "tasks": [
+    {
+      "name": "merge-diff-arc-agi-task",
+      "package": "terminal-bench/merge-diff-arc-agi-task",
+      "package_digest": "sha256:da91e751106b20ec871117222f6ade094dc4c23e554f01534c7b205982b133f8",
+      "docker_image": "alexgshaw/merge-diff-arc-agi-task:20251031",
+      "image_digest": "sha256:bfc2a235f2ceea64ffb1ffc5529c2acebf570bff61f3668f0e5669ef570c17d4",
+      "agent_timeout_sec": 900.0,
+      "verifier_timeout_sec": 900.0,
+      "verifier_files": 3,
+      "verifier_files_sha256": "c1bc189648fd32882c4da3330b1c87034db7113eafba7e5fbebeec3fe593218f",
+      "category": "debugging",
+      "base_image": "ubuntu:24.04",
+      "license": "undeclared"
+    },
+    {
+      "name": "schemelike-metacircular-eval",
+      "package": "terminal-bench/schemelike-metacircular-eval",
+      "package_digest": "sha256:3c76b3e2e072f47e2657a8471232bb003657e6ceacedf4b72650ec45daafa072",
+      "docker_image": "alexgshaw/schemelike-metacircular-eval:20251031",
+      "image_digest": "sha256:b485be38bf80d56c1a4cd9da95bbf7ec129dc03f6786b86c0525518a96f6d1db",
+      "agent_timeout_sec": 2400.0,
+      "verifier_timeout_sec": 2400.0,
+      "verifier_files": 67,
+      "verifier_files_sha256": "941ae023ae04e7089522cc995d98dd4ea97261b5b7e8f00d430e8c4f78db6d4d",
+      "category": "software-engineering",
+      "base_image": "python:3.13-slim-bookworm",
+      "license": "undeclared"
+    },
+    {
+      "name": "mteb-retrieve",
+      "package": "terminal-bench/mteb-retrieve",
+      "package_digest": "sha256:5eed6e5ab80a4e7042f77a6cec8c01dd833a2c9c03a8c7ebdbd0b70f447750a5",
+      "docker_image": "alexgshaw/mteb-retrieve:20251031",
+      "image_digest": "sha256:99dd676a21fd3124b7b8164cd93e8f0c51f1fdab2f84a831c61049eff78d063d",
+      "agent_timeout_sec": 1800.0,
+      "verifier_timeout_sec": 1800.0,
+      "verifier_files": 2,
+      "verifier_files_sha256": "030f8eba141fd9db1669141ab783763850f43d383099b2edff8cbee774274d6b",
+      "category": "data-science",
+      "base_image": "python:3.10-slim-bookworm",
+      "license": "undeclared"
+    },
+    {
+      "name": "circuit-fibsqrt",
+      "package": "terminal-bench/circuit-fibsqrt",
+      "package_digest": "sha256:fe25ab474ba626c4f45f57e757e86f2ad292de80b505e5b7ba0ba76c30d7fcc8",
+      "docker_image": "alexgshaw/circuit-fibsqrt:20251031",
+      "image_digest": "sha256:29783439f529eaed2145592f15af7a2281161528860392a382c825489030ae3a",
+      "agent_timeout_sec": 3600.0,
+      "verifier_timeout_sec": 3600.0,
+      "verifier_files": 3,
+      "verifier_files_sha256": "8e88ff93265962044617f300f8069f1cd466606f108654f8cc77ad2a8b0b72be",
+      "category": "software-engineering",
+      "base_image": "python:3.13-slim-bookworm",
+      "license": "undeclared"
+    },
+    {
+      "name": "build-pmars",
+      "package": "terminal-bench/build-pmars",
+      "package_digest": "sha256:796773c1d8b991b9b936b3513308b1a4d2ea1772ae9d9b29103f58748d6e2c17",
+      "docker_image": "alexgshaw/build-pmars:20251031",
+      "image_digest": "sha256:57a82706f7491e0b2d1ff7e927e97ae5339892dd09c47ac43290b4ba1f5abc6f",
+      "agent_timeout_sec": 900.0,
+      "verifier_timeout_sec": 900.0,
+      "verifier_files": 2,
+      "verifier_files_sha256": "bc7e60e41f94393d583cec1015fbce8d3968f7a2b39c4226be64429d4d2deff3",
+      "category": "software-engineering",
+      "base_image": "debian:13.0-slim",
+      "license": "undeclared"
+    }
+  ]
+}

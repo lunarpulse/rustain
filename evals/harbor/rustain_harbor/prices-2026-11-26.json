@@ -1,0 +1,23 @@
+{
+  "schema": "rustain-harbor-prices/1",
+  "id": "deepseek-2026-11-26",
+  "date": "2026-11-26",
+  "currency": "USD",
+  "unit": "per million tokens",
+  "source": "LiteLLM list prices: litellm 1.111.0 (the version evals/harbor/uv.lock pins), file litellm/model_prices_and_context_window_backup.json, keys deepseek/deepseek-v4-flash and deepseek/deepseek-v4-pro; the flash rates equal the eval-2 record (0.30 / 1.20 / 0.006)",
+  "source_sha256": "3b5829b9df6a8d32f5ad44f8ec09001b0c31ac8553734a160d0fb0ba95573889",
+  "models": {
+    "deepseek/deepseek-v4-flash": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_creation": 0.0
+    },
+    "deepseek/deepseek-v4-pro": {
+      "input": 1.32,
+      "output": 3.96,
+      "cache_read": 0.044,
+      "cache_creation": 0.0
+    }
+  }
+}

@@ -96,6 +96,26 @@ def test_pre_1_2_stream_is_flagged_incomplete():
 PRICES = Prices(input=1e-6, output=2e-6, cache_read=1e-7, cache_creation=1.25e-6)
 
 
+def test_bounded_turn_reports_its_limit_reason():
+    summary = summarize(
+        [
+            call_usage("flash", 7000, 50, schema="1.4"),
+            json.dumps(
+                {
+                    "schema_version": "1.4",
+                    "type": "turn_complete",
+                    "stop_reason": "cancelled",
+                    "limit_reason": "max_cost",
+                }
+            ),
+        ]
+    )
+
+    assert summary.limit_reason == "max_cost"
+    assert summary.usage_observed
+    assert summarize([event("turn_complete", stop_reason="end_turn")]).limit_reason is None
+
+
 def test_openai_style_usage_bills_cache_hits_once():
     usage = Usage(input_tokens=1000, output_tokens=100, cache_read_tokens=400)
 
@@ -126,14 +146,9 @@ def test_stream_without_a_usage_line_leaves_usage_unknown():
     assert not summary.usage_observed
 
 
-def test_cost_stops_at_the_first_call_above_the_flat_rates():
-    tiered = Prices(
-        input=1e-6, output=2e-6, cache_read=1e-7, cache_creation=1e-6, flat_up_to=200_000
-    )
-    at_threshold = Usage(input_tokens=200_000, output_tokens=10)
-    above = Usage(input_tokens=200_001, output_tokens=10)
+def test_calls_are_priced_one_by_one_and_summed():
+    calls = [Usage(input_tokens=200_000, output_tokens=10), Usage(input_tokens=5, output_tokens=1)]
 
-    assert calls_cost_usd([at_threshold], tiered, input_includes_cache=True) == (
-        pytest.approx(200_000 * 1e-6 + 10 * 2e-6)
+    assert calls_cost_usd(calls, PRICES, input_includes_cache=True) == pytest.approx(
+        200_005 * 1e-6 + 11 * 2e-6
     )
-    assert calls_cost_usd([at_threshold, above], tiered, input_includes_cache=True) is None

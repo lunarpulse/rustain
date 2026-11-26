@@ -1,0 +1,33 @@
+{
+  "schema": "rustain-harbor-run-plan/1",
+  "id": "eval-4-cmp-benign-v1",
+  "manifest": "cmp-benign-v1.manifest.json",
+  "product": {
+    "version": "0.6.0",
+    "commit": "512509c43f9609f334405a4fb9408869b4d7ea33",
+    "binary": "musl build of v0.6.0 (commit 512509c4), not the signed release asset; same source and features (self-update,relay-server,a2a,p2p,telegram,cron,slack); built by evals/harbor/build-musl.sh",
+    "binary_target": "x86_64-unknown-linux-musl",
+    "binary_sha256": "3e804be30fc5dbfcfc6facc412e3b27e3fdad8013e60a91c2149642aed9432ed"
+  },
+  "harbor_version": "0.25.0",
+  "treatments": [
+    {"label": "v4-flash", "model": "deepseek/deepseek-v4-flash", "key_env": "DEEPSEEK_API_KEY"},
+    {"label": "v4-pro", "model": "deepseek/deepseek-v4-pro", "key_env": "DEEPSEEK_API_KEY"}
+  ],
+  "treatment_kind": "isolated model: provider fixed (deepseek), model varies",
+  "attempts": 3,
+  "spend": {
+    "cap_usd": 14.0,
+    "per_slot_max_cost_usd": 0.46
+  },
+  "limits": {
+    "max_cost": "per slot: min(cap - known cost of finished slots, 0.46 USD), floored to 0.0001 USD; priced by rustain from the [pricing] entry the adapter renders from the same price table",
+    "max_turns": "none",
+    "max_duration": "none",
+    "task_timeouts": "each task's declared Harbor agent and verifier timeouts, timeout multiplier 1.0 (Harbor default, not overridden)"
+  },
+  "sandbox": {
+    "ask_flags": ["--yolo", "--sandbox-adapter", "noop"],
+    "label": "sandbox off; container-isolated"
+  }
+}

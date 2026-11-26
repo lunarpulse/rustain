@@ -1,32 +1,40 @@
 #!/usr/bin/env bash
-# Runs run-baseline.sh inside one disposable Docker-in-Docker container, so the
-# machine keeps nothing but the jobs directory: Harbor, its caches, the task
-# images and the task containers live in that container and go with it.
+# Runs `run-baseline.sh run` inside one disposable Docker-in-Docker container,
+# so the machine keeps nothing but the jobs directory: Harbor, its caches, the
+# task images and the task containers live in that container and go with it.
 #
-# usage: run-isolated.sh <static-rustain-binary> <jobs-dir> [extra `harbor run` options]
+# usage: run-isolated.sh <static-rustain-binary> <jobs-dir> <run-id>
 #
-# Needs Docker and the provider key in the environment (DEEPSEEK_API_KEY for
-# the default model). The container is privileged: a nested Docker daemon
-# cannot run otherwise.
+# Needs Docker and the provider keys the run plan's treatments name
+# (`key_env` in eval4/run-plan.json; DEEPSEEK_API_KEY for both treatments).
+# Only those keys enter the container. The container is privileged: a nested
+# Docker daemon cannot run otherwise.
 set -uo pipefail
 
-usage="usage: run-isolated.sh <static-rustain-binary> <jobs-dir> [harbor options]"
-binary="${1:?$usage}"
-jobs_dir="${2:?$usage}"
-shift 2
+usage="usage: run-isolated.sh <static-rustain-binary> <jobs-dir> <run-id>"
+[ "$#" -eq 3 ] || { echo "$usage" >&2; exit 2; }
+binary="$1"
+jobs_dir="$2"
+run_id="$3"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 image="docker:29.9.3-dind"
 name="rustain-harbor-eval-$$"
-# Same default as run-baseline.sh; only this provider's key enters the container.
-model="${RUSTAIN_EVAL_MODEL:-deepseek/deepseek-v4-flash}"
-provider="${model%%/*}"
-key_var="${provider^^}_API_KEY"
-
-if [ -z "${!key_var:-}" ]; then
-    echo "run-isolated.sh: $key_var is not set" >&2
+mapfile -t key_vars < <(
+    sed -n 's/.*"key_env": *"\([A-Z0-9_]*\)".*/\1/p' "$here/eval4/run-plan.json" | sort -u
+)
+if [ "${#key_vars[@]}" -eq 0 ]; then
+    echo "run-isolated.sh: eval4/run-plan.json names no key_env" >&2
     exit 1
 fi
+run_args=()
+for key_var in "${key_vars[@]}"; do
+    if [ -z "${!key_var:-}" ]; then
+        echo "run-isolated.sh: $key_var is not set" >&2
+        exit 1
+    fi
+    run_args+=(--env "$key_var")
+done
 binary="$(realpath -e "$binary")" || exit 1
 mkdir -p "$jobs_dir" || exit 1
 jobs_dir="$(cd "$jobs_dir" && pwd)"
@@ -48,8 +56,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_args=(--env "$key_var" --env "RUSTAIN_EVAL_MODEL=$model")
-[ -n "${HARBOR_JOB_NAME:-}" ] && run_args+=(--env HARBOR_JOB_NAME)
 # On a terminal, Ctrl-C reaches the run through the container's TTY.
 [ -t 0 ] && [ -t 1 ] && run_args+=(--interactive --tty)
 
@@ -63,4 +69,4 @@ docker run --rm --privileged --init --name "$name" \
     --volume "$binary:$binary:ro" \
     --volume "$jobs_dir:$jobs_dir" \
     --entrypoint sh \
-    "$image" "$here/dind-entry.sh" "$binary" "$jobs_dir" "$@"
+    "$image" "$here/dind-entry.sh" "$binary" "$jobs_dir" "$run_id"

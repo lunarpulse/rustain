@@ -11,6 +11,7 @@ SECRET = "sk-test-0123456789abcdef"
 # A `rustain` that leaks its key the way an agent's `env` call does: into the
 # stream, the saved session and stderr.
 STUB_RUSTAIN = r"""#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/argv"
 printf '{"type":"tool_result","content":"HOME=/root DEEPSEEK_API_KEY=%s PATH=/bin"}\n' "$DEEPSEEK_API_KEY"
 mkdir -p .claude/sessions/s1
 printf '{"content":"DEEPSEEK_API_KEY=%s"}\n' "$DEEPSEEK_API_KEY" > .claude/sessions/s1/conversation.json
@@ -33,7 +34,7 @@ def run(tmp_path):
     key_file = tmp_path / "api-key"
     key_file.write_text(SECRET)
 
-    def invoke():
+    def invoke(**extra_env):
         return subprocess.run(
             ["bash", str(RUNNER), str(logs), str(instruction)],
             cwd=workspace,
@@ -41,13 +42,35 @@ def run(tmp_path):
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "RUSTAIN_HARBOR_KEY_ENV": "DEEPSEEK_API_KEY",
                 "RUSTAIN_HARBOR_KEY_FILE": str(key_file),
+                **extra_env,
             },
             capture_output=True,
             text=True,
         )
 
     invoke.workspace, invoke.logs, invoke.key_file = workspace, logs, key_file
+    invoke.argv = bin_dir / "argv"
     return invoke
+
+
+def test_ask_runs_without_rustain_sandbox_and_without_a_cost_limit_by_default(run):
+    assert run().returncode == 0
+    assert run.argv.read_text().splitlines() == [
+        "ask",
+        "--yolo",
+        "--sandbox-adapter",
+        "noop",
+        "--output-format",
+        "stream-json",
+        "fix the build",
+    ]
+
+
+def test_max_cost_reaches_ask(run):
+    assert run(RUSTAIN_HARBOR_MAX_COST="0.46").returncode == 0
+    argv = run.argv.read_text().splitlines()
+    assert argv[argv.index("--max-cost") + 1] == "0.46"
+    assert argv[-1] == "fix the build"
 
 
 def test_provider_key_never_reaches_the_collected_logs(run):

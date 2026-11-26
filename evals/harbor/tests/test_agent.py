@@ -9,7 +9,7 @@ import pytest
 from harbor.models.agent.context import AgentContext
 
 from rustain_harbor import agent as agent_module
-from rustain_harbor.agent import STREAM_LOG, RustainAgent, lookup_prices, render_config
+from rustain_harbor.agent import STREAM_LOG, RustainAgent, render_config
 from rustain_harbor.usage import Prices
 
 SECRET = "sk-test-not-a-real-key"
@@ -44,7 +44,7 @@ def call_usage(input_tokens, output_tokens, cache_read=0, schema="1.2"):
     }
 
 
-def test_config_activates_the_requested_provider():
+def test_config_activates_the_requested_provider_and_prices_it_from_the_table():
     config = tomllib.loads(render_config("deepseek", "deepseek-v4-flash"))
 
     assert config["model"] == "deepseek-v4-flash"
@@ -55,6 +55,28 @@ def test_config_activates_the_requested_provider():
         "api_key_env": "DEEPSEEK_API_KEY",
         "enabled": True,
     }
+    # rustain's `--max-cost` prices calls with the harness's rates.
+    assert config["pricing"] == {
+        "deepseek-v4-flash": {
+            "input_per_million": 0.3,
+            "output_per_million": 1.2,
+            "cache_read_per_million": 0.006,
+            "cache_creation_per_million": 0.0,
+        }
+    }
+
+
+def test_price_table_covers_both_treatments():
+    table = agent_module.PRICE_TABLE
+
+    assert table.date == "2026-11-26"
+    assert table.prices("deepseek", "deepseek-v4-flash") == Prices(
+        input=0.30e-6, output=1.20e-6, cache_read=0.006e-6, cache_creation=0.0
+    )
+    assert table.prices("deepseek", "deepseek-v4-pro") == Prices(
+        input=1.32e-6, output=3.96e-6, cache_read=0.044e-6, cache_creation=0.0
+    )
+    assert table.prices("deepseek", "deepseek-chat") is None
 
 
 def test_anthropic_uses_the_default_route():
@@ -184,6 +206,22 @@ def test_api_key_travels_as_a_file_and_never_as_an_exec_argument(tmp_path):
     assert run_env["RUSTAIN_HARBOR_KEY_ENV"] == "DEEPSEEK_API_KEY"
     assert environment.uploads[run_env["RUSTAIN_HARBOR_KEY_FILE"]] == SECRET
     assert "fix the build" in environment.uploads.values()
+    assert "RUSTAIN_HARBOR_MAX_COST" not in run_env
+
+
+def test_max_cost_option_reaches_the_runner(tmp_path):
+    agent = make_agent(
+        tmp_path, extra_env={"DEEPSEEK_API_KEY": SECRET}, max_cost_usd=0.46
+    )
+    environment = RecordingEnvironment()
+
+    asyncio.run(agent.run("fix the build", environment, AgentContext()))
+
+    assert environment.envs[-1]["RUSTAIN_HARBOR_MAX_COST"] == "0.46"
+    config = next(
+        text for path, text in environment.uploads.items() if path.endswith("config.toml")
+    )
+    assert tomllib.loads(config)["pricing"]["deepseek-v4-flash"]["input_per_million"] == 0.3
 
 
 def test_missing_api_key_fails_before_touching_the_container(tmp_path, monkeypatch):
@@ -266,39 +304,33 @@ def test_first_call_prompt_size_counts_anthropic_cache_tokens(tmp_path):
     assert context.metadata["first_call_input_tokens"] == 6912
 
 
-def test_a_call_above_the_flat_rate_threshold_leaves_the_cost_unset(tmp_path, monkeypatch):
-    monkeypatch.setitem(
-        agent_module.litellm.model_cost,
-        "deepseek/deepseek-v4-flash",
-        {
-            "input_cost_per_token": 1e-6,
-            "output_cost_per_token": 2e-6,
-            "input_cost_per_token_above_200k_tokens": 2e-6,
-            "output_cost_per_token_above_200k_tokens": 3e-6,
-        },
-    )
-    assert lookup_prices("deepseek", "deepseek-v4-flash").flat_up_to == 200_000
+def test_a_bounded_stop_records_its_limit_reason(tmp_path):
     agent = make_agent(tmp_path)
-    write_stream(agent, [call_usage(1000, 10), call_usage(200_001, 10)])
+    write_stream(
+        agent,
+        [
+            call_usage(1000, 10, schema="1.4"),
+            {
+                "schema_version": "1.4",
+                "type": "turn_complete",
+                "stop_reason": "cancelled",
+                "limit_reason": "max_cost",
+            },
+        ],
+    )
     context = AgentContext()
 
     agent.populate_context_post_run(context)
 
-    assert context.n_input_tokens == 201_001
-    assert context.cost_usd is None
-    assert context.metadata["unpriced_models"] == ["deepseek-v4-flash"]
+    assert context.metadata["limit_reason"] == "max_cost"
+    assert context.cost_usd == pytest.approx(1000 * 0.30e-6 + 10 * 1.20e-6)
+    assert context.metadata["price_source"].startswith("deepseek-2026-11-26 (2026-11-26)")
 
 
-def test_schema_1_3_streams_are_disjoint_for_every_provider(tmp_path, monkeypatch):
+def test_schema_1_3_streams_are_disjoint_for_every_provider(tmp_path):
     # The same DeepSeek call: a 1.2 binary reported the prompt with its 2176
-    # cache hits inside `input_tokens`; a 1.3 binary reports them apart.
-    monkeypatch.setattr(
-        agent_module,
-        "lookup_prices",
-        lambda provider, model: Prices(
-            input=0.30e-6, output=1.20e-6, cache_read=0.006e-6, cache_creation=0.30e-6
-        ),
-    )
+    # cache hits inside `input_tokens`; a 1.3 binary reports them apart. Priced
+    # with the shipped table, which holds the eval-2 DeepSeek list prices.
     costs = {}
     for schema, input_tokens in (("1.3", 1289), ("1.2", 3465)):
         trial = tmp_path / schema

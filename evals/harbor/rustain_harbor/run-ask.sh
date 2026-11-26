@@ -5,6 +5,8 @@
 #
 # The provider key arrives as a private file named by RUSTAIN_HARBOR_KEY_FILE;
 # RUSTAIN_HARBOR_KEY_ENV names the variable rustain reads it from.
+# RUSTAIN_HARBOR_MAX_COST, when set, becomes `--max-cost`. The run uses no
+# rustain sandbox (`--sandbox-adapter noop`): the task container isolates it.
 #
 # stdout of rustain (stream-json) goes to <logs-dir>/rustain.stream.jsonl and
 # stderr to <logs-dir>/rustain.stderr.txt. The sessions this run saves under
@@ -27,7 +29,9 @@ had_sessions=0
 [ -e .claude/sessions ] && had_sessions=1
 sessions_before="$(ls -A .claude/sessions 2>/dev/null)"
 
-rustain ask --yolo --output-format stream-json "$(cat "$instruction_file")" \
+ask=(rustain ask --yolo --sandbox-adapter noop --output-format stream-json)
+[ -n "${RUSTAIN_HARBOR_MAX_COST:-}" ] && ask+=(--max-cost "$RUSTAIN_HARBOR_MAX_COST")
+"${ask[@]}" "$(cat "$instruction_file")" \
     >"$logs/rustain.stream.jsonl" 2>"$logs/rustain.stderr.txt"
 status=$?
 

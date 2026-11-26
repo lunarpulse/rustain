@@ -1,14 +1,15 @@
 #!/bin/sh
 # Entry point inside the docker:dind container that run-isolated.sh starts:
 # brings up the nested Docker daemon, installs what run-baseline.sh needs and
-# runs it. Everything it installs or pulls stays in that container.
+# runs `run-baseline.sh run`. Everything it installs or pulls stays in that
+# container.
 #
-# usage: dind-entry.sh <static-rustain-binary> <jobs-dir> [harbor options]
+# usage: dind-entry.sh <static-rustain-binary> <jobs-dir> <run-id>
 set -u
 
 binary="$1"
 jobs_dir="$2"
-shift 2
+run_id="$3"
 here="$(cd "$(dirname "$0")" && pwd)"
 daemon_log="$jobs_dir/dind-dockerd.log"
 
@@ -38,4 +39,4 @@ docker info --format 'nested Docker {{.ServerVersion}}, storage driver {{.Driver
 
 # coreutils: uv's entry scripts call `realpath --`, which BusyBox rejects.
 apk add --no-cache --quiet bash coreutils python3 uv || exit 1
-"$here/run-baseline.sh" "$binary" "$jobs_dir" "$@"
+"$here/run-baseline.sh" run "$binary" "$jobs_dir" "$run_id"
