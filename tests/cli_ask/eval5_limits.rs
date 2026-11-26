@@ -718,27 +718,36 @@ async fn eval5_ask_daily_budget_fails_closed_on_ledger_path_error() {
 }
 
 /// Story 23.1 K8 (AC8): `rustain ask` prints the sandbox status as one stderr
-/// line before the first provider request: a provider that fails the turn
-/// still leaves the "Sandbox off" line, and stdout keeps the selected format.
+/// line before the first provider request: when the provider fails the turn,
+/// the "Sandbox off" line is the FIRST stderr line, ahead of the turn's own
+/// failure text, and stdout keeps the selected format.
 #[tokio::test]
 async fn k8_ask_prints_the_sandbox_status_before_the_first_provider_request() {
+    const NOTICE: &str =
+        "Sandbox off ([sandbox].adapter = \"noop\"): tool commands run without OS confinement.";
     let fixture = Eval5Ask::ollama(false, None).await;
     Mock::given(method("POST"))
         .and(path(fixture.chat_path))
         .respond_with(ResponseTemplate::new(500).set_body_string("fixture failure"))
         .mount(&fixture.server)
         .await;
+
+    let output = fixture.run("text", &["--sandbox-adapter", "noop"]).await;
+    assert!(!output.status.success(), "a failed turn exits non-zero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lines = stderr.lines();
+    assert_eq!(lines.next(), Some(NOTICE), "{stderr}");
+    assert!(
+        lines.any(|line| !line.trim().is_empty()),
+        "the turn's failure follows the notice: {stderr}"
+    );
+
     let output = fixture
         .run("stream-json", &["--sandbox-adapter", "noop"])
         .await;
     assert!(!output.status.success(), "a failed turn exits non-zero");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "Sandbox off ([sandbox].adapter = \"noop\"): tool commands run without OS confinement."
-        ),
-        "{stderr}"
-    );
+    assert_eq!(stderr.lines().next(), Some(NOTICE), "{stderr}");
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         serde_json::from_str::<Value>(line)
             .unwrap_or_else(|e| panic!("stdout stays stream-json ({e}): {line}"));

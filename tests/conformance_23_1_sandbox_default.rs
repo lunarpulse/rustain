@@ -165,13 +165,19 @@ async fn k3_outside_files_cannot_be_truncated() {
     std::fs::write(&existing, "keep").unwrap();
     std::fs::write(ws.join("inside"), "drop").unwrap();
     let tools = yolo_tools(&AppConfig::default(), &ws, &out, false);
+    // `truncate(1)` and `: >` open the file for writing (WRITE_FILE); a path
+    // `truncate(2)` needs only TRUNCATE, which ABI 3 handles.
     let (ok, _) = bash(&tools, &format!("truncate -s0 {}", q(&existing))).await;
-    assert!(!ok, "truncate(2) outside must fail");
+    assert!(!ok, "truncate(1) outside must fail");
     let (ok, _) = bash(&tools, &format!(": > {}", q(&existing))).await;
     assert!(!ok, "O_TRUNC outside must fail");
+    let path_truncate =
+        |path: &Path| format!("perl -e 'truncate($ARGV[0], 0) or exit 1' {}", q(path));
+    let (ok, _) = bash(&tools, &path_truncate(&existing)).await;
+    assert!(!ok, "truncate(2) by path outside must fail");
     assert_eq!(std::fs::read_to_string(&existing).unwrap(), "keep");
-    let (ok, msg) = bash(&tools, &format!("truncate -s0 {}", q(&ws.join("inside")))).await;
-    assert!(ok, "truncate inside works: {msg}");
+    let (ok, msg) = bash(&tools, &path_truncate(&ws.join("inside"))).await;
+    assert!(ok, "truncate(2) inside works: {msg}");
     assert_eq!(std::fs::read_to_string(ws.join("inside")).unwrap(), "");
 }
 
