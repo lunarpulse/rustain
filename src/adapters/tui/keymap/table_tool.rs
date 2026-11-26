@@ -42,7 +42,7 @@ pub const ROWS: &[Binding] = &[
     t(&[Key::Char('w')], ToolCmd::Wrap, "Wrap").hint().does("Toggle soft wrapping, keeping the logical line at the top"),
     t(&[Key::Char('c')], ToolCmd::Copy, "Copy").copy().hint().does("Copy the active tool tab's original source"),
     #[cfg(feature = "session-visit")]
-    t(&[Key::Char('o')], ToolCmd::VisitSource, "Visit source").hint().feature("session-visit").does("Visit this exact retained task session"),
+    t(&[Key::Char('o')], ToolCmd::VisitSource, "Visit source").hint().feature("session-visit").help(super::model::HelpCat::Navigation, "o (Inspector)", "Visit this exact retained task session (read-only)").does("Visit this exact retained task session"),
     t(&[Key::Esc], ToolCmd::Back, "Back").hint().does("Back from the tool inspector"),
     t(&[Key::Ctrl('c')], ToolCmd::Back, "").does("Back from the tool inspector without cancelling work"),
     bind(Context::ToolInspector, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").local().does("Open the Ctrl+X menu without closing the tool inspector"),

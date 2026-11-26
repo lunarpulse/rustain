@@ -607,3 +607,58 @@ fn the_feature_build_keeps_the_visit_rows_in_the_registry() {
         .collect();
     assert_eq!(labels, ["Previous", "Next", "Copy", "Search", "Back", ""]);
 }
+
+/// The help overlay is built from `help_groups()`: the Visit rows are listed in their groups with
+/// the feature, and no help row mentions Visit without it (the shipped overlay is unchanged).
+#[test]
+fn the_help_overlay_lists_the_visit_rows_only_with_the_feature() {
+    let groups = help_groups();
+    let visit_rows: Vec<(&str, &str)> = groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .rows
+                .iter()
+                .filter(|row| row.key.contains("(Visit)") || row.key == "o (Inspector)")
+                .map(move |row| (group.name, row.key.as_str()))
+        })
+        .collect();
+    if !cfg!(feature = "session-visit") {
+        assert!(visit_rows.is_empty(), "{visit_rows:?}");
+        let mentions = |text: &str| text.contains("Visit");
+        assert!(
+            groups
+                .iter()
+                .flat_map(|group| &group.rows)
+                .all(|row| !mentions(&row.key) && !mentions(&row.description))
+        );
+        return;
+    }
+    for expected in [
+        ("NAVIGATION", "← (Visit)"),
+        ("NAVIGATION", "→ (Visit)"),
+        ("NAVIGATION", "Esc (Visit)"),
+        ("NAVIGATION", "^C (Visit)"),
+        ("NAVIGATION", "o (Inspector)"),
+        ("CLIPBOARD & IMAGES", "c (Visit)"),
+        ("Search, Bookmarks & Export", "/ (Visit)"),
+    ] {
+        assert!(
+            visit_rows.contains(&expected),
+            "{expected:?} in {visit_rows:?}"
+        );
+    }
+    assert_eq!(visit_rows.len(), 7, "{visit_rows:?}");
+    let described = |key: &str| {
+        groups
+            .iter()
+            .flat_map(|group| &group.rows)
+            .find(|row| row.key == key)
+            .map(|row| row.description.clone())
+    };
+    assert_eq!(
+        described("o (Inspector)").as_deref(),
+        Some("Visit this exact retained task session (read-only)")
+    );
+    assert!(described("← (Visit)").is_some_and(|text| text.starts_with("Session Visit:")));
+}

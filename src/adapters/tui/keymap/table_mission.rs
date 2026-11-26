@@ -175,17 +175,17 @@ pub const ROWS: &[Binding] = &[
     bind(Context::AgentWindow, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "Quit").local().does("Ask to quit without closing the agent window"),
     // Visit inherits only read-only body scrolling, never agent lifecycle controls.
     #[cfg(feature = "session-visit")]
-    visit(&[Key::Left], MissionCmd::PreviousVisit, "Previous").does("Visit the previous linked and readable source in the same conversation"),
+    visit(&[Key::Left], MissionCmd::PreviousVisit, "Previous").help(HelpCat::Navigation, "← (Visit)", "Session Visit: previous linked, readable source").does("Visit the previous linked and readable source in the same conversation"),
     #[cfg(feature = "session-visit")]
-    visit(&[Key::Right], MissionCmd::NextVisit, "Next").does("Visit the next linked and readable source in the same conversation"),
+    visit(&[Key::Right], MissionCmd::NextVisit, "Next").help(HelpCat::Navigation, "→ (Visit)", "Session Visit: next linked, readable source").does("Visit the next linked and readable source in the same conversation"),
     #[cfg(feature = "session-visit")]
-    visit(&[Key::Char('c')], MissionCmd::CopySource, "Copy").copy().does("Copy only the currently authorized retained Visit text"),
+    visit(&[Key::Char('c')], MissionCmd::CopySource, "Copy").copy().help(HelpCat::Clipboard, "c (Visit)", "Session Visit: copy the authorized retained text").does("Copy only the currently authorized retained Visit text"),
     #[cfg(feature = "session-visit")]
-    bind(Context::SessionVisit, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").local().feature("session-visit").does("Filter the retained Visit text"),
+    bind(Context::SessionVisit, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").local().feature("session-visit").help(HelpCat::Search, "/ (Visit)", "Session Visit: filter the retained text").does("Filter the retained Visit text"),
     #[cfg(feature = "session-visit")]
-    visit(&[Key::Esc], MissionCmd::Back, "Back").does("Clear a kept filter, else return to the original frame"),
+    visit(&[Key::Esc], MissionCmd::Back, "Back").help(HelpCat::Navigation, "Esc (Visit)", "Session Visit: clear a kept filter, else back to the original frame").does("Clear a kept filter, else return to the original frame"),
     #[cfg(feature = "session-visit")]
-    visit(&[Key::Ctrl('c')], MissionCmd::Back, "").does("Back without cancelling work"),
+    visit(&[Key::Ctrl('c')], MissionCmd::Back, "").help(HelpCat::Navigation, "^C (Visit)", "Session Visit: back without cancelling work").does("Back without cancelling work"),
     // ── the task window (local) ──
     t(&[Key::Char('p')], MissionCmd::Pause, "Pause/Resume").does("Pause the task, or resume it when paused"),
     t(&[Key::Char('s')], MissionCmd::Skip, "Skip").does("Skip the task; a decision confirms it when other tasks depend on it"),

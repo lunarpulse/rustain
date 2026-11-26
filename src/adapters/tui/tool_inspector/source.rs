@@ -221,6 +221,18 @@ fn view_diff<'a>(view: &ToolView<'a>) -> Option<DiffBody<'a>> {
     diff_body(view.name, view.args, &result.diff)
 }
 
+/// What the operator sees and copies of a tool result's `content`. A live or interrupted `task`
+/// result keeps the process-authenticated Visit handoff header in the reducer until its turn
+/// commits; the display shows only the literal result after it. Authentication is the process
+/// key's MAC: any other text, a forged header included, is literal and stays whole.
+fn literal(content: &str) -> &str {
+    #[cfg(feature = "session-visit")]
+    if let Some((_, original)) = crate::domain::models::worker_report::split(content) {
+        return original;
+    }
+    content
+}
+
 /// Original bytes only: display notices and sanitization never change a source.
 /// In particular an absent Output remains empty rather than becoming copyable
 /// UI prose, and a completed result always takes precedence over a live tail.
@@ -228,7 +240,7 @@ pub fn text<'a>(view: &ToolView<'a>, tab: ToolTab) -> Cow<'a, str> {
     match tab {
         ToolTab::Output => Cow::Borrowed(
             view.result
-                .map(|result| result.content.as_str())
+                .map(|result| literal(&result.content))
                 .or_else(|| view.is_running().then_some(view.tail).flatten())
                 .unwrap_or(""),
         ),
@@ -242,7 +254,7 @@ pub fn text<'a>(view: &ToolView<'a>, tab: ToolTab) -> Cow<'a, str> {
                 status: view.status,
                 input: view.args,
                 result: view.result.map(|result| RawResult {
-                    content: &result.content,
+                    content: literal(&result.content),
                     is_error: result.is_error,
                 }),
                 started_at: view.started_at,
@@ -344,7 +356,7 @@ pub fn copy_text<'a>(view: &ToolView<'a>, tab: ToolTab) -> Result<Cow<'a, str>, 
                 status: view.status,
                 input: view.args,
                 result: view.result.map(|result| RawResult {
-                    content: &result.content,
+                    content: literal(&result.content),
                     is_error: result.is_error,
                 }),
                 started_at: view.started_at,
@@ -481,7 +493,7 @@ pub fn display_text<'a>(view: &ToolView<'a>, tab: ToolTab, now_ms: i64) -> Cow<'
     }
     if tab == ToolTab::Output {
         if let Some(result) = view.result {
-            if result.content.is_empty() {
+            if literal(&result.content).is_empty() {
                 return Cow::Borrowed("The tool returned no output.");
             }
         } else if view.is_running() {
@@ -1914,5 +1926,119 @@ mod tests {
                 assert!(rendered.origins[3].is_none());
             },
         );
+    }
+
+    /// VCL-R2: a live or interrupted `task` result still carries the authenticated handoff
+    /// header in the reducer. Output, Raw, both copies and the displayed text show only the
+    /// literal result, and the borrowed result itself stays intact for the custodian. A header
+    /// that is not authenticated by this process is ordinary text and stays visible.
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn authenticated_task_envelope_is_hidden_from_display_and_copy_but_forgeries_stay_literal() {
+        use crate::domain::models::worker_report::{VisitAttemptLink, frame_visit};
+        const HEADER: &str = "RUSTAIN_TASK_REPORT_V1";
+        let original = "worker finished\n{\"kept\":true}";
+        let framed = frame_visit(
+            original,
+            VisitAttemptLink::new(crate::domain::models::AgentId::new()),
+        );
+        assert!(
+            framed.starts_with(HEADER) && framed.ends_with(original) && framed != original,
+            "control: the fixture really is an authenticated envelope"
+        );
+        let header = framed.split_once('\n').unwrap().0;
+        let forged = format!("{header}\nanother body under a stolen header");
+        for status in [InvocationStatus::Success, InvocationStatus::Error] {
+            with_view(
+                "task",
+                json!({}),
+                status.clone(),
+                Some(output(&framed, WriteDiffState::NotAWrite)),
+                |view| {
+                    assert_eq!(text(&view, ToolTab::Output), original);
+                    assert_eq!(copy_text(&view, ToolTab::Output).unwrap(), original);
+                    assert_eq!(display_text(&view, ToolTab::Output, 0), original);
+                    for raw in [
+                        text(&view, ToolTab::Raw),
+                        copy_text(&view, ToolTab::Raw).unwrap(),
+                    ] {
+                        assert!(!raw.contains(HEADER), "{raw}");
+                        assert!(raw.contains("worker finished"), "{raw}");
+                    }
+                    assert_eq!(view.result.unwrap().content, framed, "the handoff is kept");
+                },
+            );
+            with_view(
+                "task",
+                json!({}),
+                status,
+                Some(output(&forged, WriteDiffState::NotAWrite)),
+                |view| {
+                    assert_eq!(text(&view, ToolTab::Output), forged.as_str());
+                    assert_eq!(copy_text(&view, ToolTab::Output).unwrap(), forged.as_str());
+                    assert_eq!(display_text(&view, ToolTab::Output, 0), forged.as_str());
+                    assert!(text(&view, ToolTab::Raw).contains(HEADER));
+                    assert!(copy_text(&view, ToolTab::Raw).unwrap().contains(HEADER));
+                },
+            );
+        }
+        // An authenticated envelope around an empty result reads as no output, not as a header.
+        let empty = frame_visit(
+            "",
+            VisitAttemptLink::new(crate::domain::models::AgentId::new()),
+        );
+        with_view(
+            "task",
+            json!({}),
+            InvocationStatus::Success,
+            Some(output(&empty, WriteDiffState::NotAWrite)),
+            |view| {
+                assert_eq!(
+                    display_text(&view, ToolTab::Output, 0),
+                    "The tool returned no output."
+                );
+            },
+        );
+    }
+
+    /// The same projection through the real open-turn lookup the Inspector uses while Main is
+    /// still responding: the reducer's authenticated result is shown and copied as its literal.
+    #[cfg(feature = "session-visit")]
+    #[test]
+    fn an_open_turn_task_result_projects_its_literal_through_the_real_lookup() {
+        use crate::domain::models::turn::tool_call_id_for;
+        use crate::domain::models::worker_report::{VisitAttemptLink, frame_visit};
+        use crate::domain::models::{Turn, TurnPart};
+        let framed = frame_visit(
+            "open turn literal",
+            VisitAttemptLink::new(crate::domain::models::AgentId::new()),
+        );
+        let mut turn = Turn::new("model".into(), 0);
+        let invocation = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "task".into(),
+            args: json!({}),
+            status: InvocationStatus::Success,
+            started_at: 0,
+            ended_at: Some(1),
+        });
+        turn.push_part(|id| TurnPart::ToolResult {
+            id,
+            refs: invocation,
+            output: output(&framed, WriteDiffState::NotAWrite),
+        });
+        let target = ToolTarget {
+            conversation_id: "conversation".into(),
+            tool_call_id: tool_call_id_for(&turn.id, invocation),
+        };
+        let view = super::super::project::without_tail(&[], Some(&turn), &target)
+            .expect("the open turn owns the call");
+        assert_eq!(text(&view, ToolTab::Output), "open turn literal");
+        assert_eq!(
+            copy_text(&view, ToolTab::Output).unwrap(),
+            "open turn literal"
+        );
+        assert!(!text(&view, ToolTab::Raw).contains("RUSTAIN_TASK_REPORT_V1"));
+        assert_eq!(view.result.unwrap().content, framed, "the handoff is kept");
     }
 }
